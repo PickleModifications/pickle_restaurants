@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 222 30% 8%;
+  --foreground: 210 40% 98%;
+  --card: 222 28% 11%;
+  --card-foreground: 210 40% 98%;
+  --primary: 24 95% 53%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 217 19% 20%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 217 19% 18%;
+  --muted-foreground: 215 20% 65%;
+  --accent: 217 19% 24%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 217 19% 24%;
+  --input: 217 19% 24%;
+  --ring: 24 95% 53%;
+  --radius: 0.65rem;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  width: 100%;
+  background: transparent !important;
+  overflow: hidden;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: hsl(var(--foreground));
+  user-select: none;
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 8px; }
+::-webkit-scrollbar-track { background: transparent; }

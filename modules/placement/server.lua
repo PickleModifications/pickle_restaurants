@@ -1,0 +1,66 @@
+-- =============================================
+--  modules/placement | server.lua
+--  Persists placed station props / counter points; broadcasts spawns.
+-- =============================================
+
+local PLACEABLE_MODELS = {
+    soda_machine = "pickle_soda_fountain_01",
+    fryer        = "pickle_fryer_01",
+    stovetop     = "pickle_stovetop_01",
+    kitchen_prep = "pickle_kitchen_prep_01",
+}
+
+lib.callback.register("pickle_restaurants:placement:saveProp", function(src, d)
+    local id = tonumber(d.restaurant_id)
+    if not GetRestaurant(id) then return { ok = false, error = "No such restaurant" } end
+    if not HasPerm(id, src, "manage_props") then return { ok = false, error = "No permission" } end
+    if PLACEABLE_MODELS[d.prop_type] ~= d.model then return { ok = false, error = "Invalid station" } end
+
+    local propId = MySQL.insert.await(
+        "INSERT INTO pickle_restaurant_props (restaurant_id, prop_type, model, x, y, z, heading) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        { id, d.prop_type, d.model, d.x + 0.0, d.y + 0.0, d.z + 0.0, (d.heading or 0.0) + 0.0 })
+    if not propId then return { ok = false } end
+
+    local prop = {
+        id = propId, restaurant_id = id, prop_type = d.prop_type, model = d.model,
+        x = d.x + 0.0, y = d.y + 0.0, z = d.z + 0.0, heading = (d.heading or 0.0) + 0.0, metadata = {},
+    }
+    PropCache[propId] = prop
+    TriggerClientEvent("pickle_restaurants:propPlaced", -1, prop)
+    return { ok = true, id = propId }
+end)
+
+lib.callback.register("pickle_restaurants:placement:saveCounter", function(src, d)
+    local id = tonumber(d.restaurant_id)
+    if not GetRestaurant(id) then return { ok = false, error = "No such restaurant" } end
+    if not HasPerm(id, src, "manage_props") then return { ok = false, error = "No permission" } end
+
+    local counter = { x = d.x + 0.0, y = d.y + 0.0, z = d.z + 0.0, heading = (d.heading or 0.0) + 0.0 }
+    MySQL.update.await("UPDATE pickle_restaurants SET counter = ? WHERE id = ?", { json.encode(counter), id })
+    RestaurantCache[id].counter = counter
+    SyncToClient(-1) -- rebuild counter interaction + blip everywhere
+    return { ok = true }
+end)
+
+lib.callback.register("pickle_restaurants:placement:removeProp", function(src, d)
+    local propId = tonumber(d.id)
+    local prop = PropCache[propId]
+    if not prop then return { ok = false } end
+    if not HasPerm(prop.restaurant_id, src, "manage_props") then return { ok = false, error = "No permission" } end
+    MySQL.update.await("DELETE FROM pickle_restaurant_props WHERE id = ?", { propId })
+    PropCache[propId] = nil
+    TriggerClientEvent("pickle_restaurants:propRemoved", -1, propId)
+    return { ok = true }
+end)
+
+lib.callback.register("pickle_restaurants:getProps", function(src, d)
+    local id = tonumber(d.id)
+    if not HasPerm(id, src, "manage_props") then return {} end
+    local list = {}
+    for _, p in pairs(PropCache) do
+        if p.restaurant_id == id then
+            list[#list + 1] = { id = p.id, prop_type = p.prop_type, model = p.model }
+        end
+    end
+    return list
+end)
