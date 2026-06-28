@@ -24,6 +24,7 @@ function CreateNPC(modelHash, ...)
 end
 
 function CreateProp(modelHash, ...)
+    print("LOADING", modelHash)
     RequestModel(modelHash)
     local timeout = 0
     while not HasModelLoaded(modelHash) and timeout < 500 do
