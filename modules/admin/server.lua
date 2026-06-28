@@ -5,20 +5,31 @@
 -- =============================================
 
 local function buildAdminData()
-    local data = { restaurants = {}, settings = SettingsCache, recipes = RecipeCache, players = {} }
+    local data = {
+        restaurants = {},
+        settings    = SettingsCache,
+        recipes     = AnnotateRecipes(),   -- each row flagged valid/missing
+        drinks      = AnnotateDrinks(),
+        assembly    = AnnotateAssembly(),
+        items       = BuildItemList(),     -- catalogue for item-pickers
+        players     = {},
+    }
     for _, r in pairs(RestaurantCache) do
+        local props = {}
+        for _, p in pairs(PropCache) do
+            if p.restaurant_id == r.id then
+                props[#props + 1] = { id = p.id, prop_type = p.prop_type, model = p.model }
+            end
+        end
         data.restaurants[#data.restaurants + 1] = {
-            id        = r.id,
-            name      = r.name,
-            label     = r.label,
-            owner     = r.owner_identifier,
-            balance   = r.balance,
+            id         = r.id,
+            name       = r.name,
+            label      = r.label,
+            owner      = r.owner_identifier,
+            balance    = r.balance,
             hasCounter = r.counter ~= nil,
-            propCount = (function()
-                local n = 0
-                for _, p in pairs(PropCache) do if p.restaurant_id == r.id then n = n + 1 end end
-                return n
-            end)(),
+            props      = props,
+            propCount  = #props,
         }
     end
     for _, src in ipairs(GetPlayers()) do

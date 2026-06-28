@@ -9,7 +9,9 @@ export default function InteractText() {
   if (!text) return null;
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-24 flex justify-center">
-      <div className="animate-fade-in whitespace-pre-line rounded-lg border border-border bg-card/90 px-4 py-2 text-center text-sm font-medium text-foreground shadow-xl backdrop-blur">
+      {/* No backdrop-filter: on a transparent NUI page CEF composites it as an
+          opaque black rectangle. Use a solid card colour instead. */}
+      <div className="animate-fade-in whitespace-pre-line rounded-lg border border-border bg-card px-4 py-2 text-center text-sm font-medium text-foreground shadow-xl">
         {text}
       </div>
     </div>

@@ -298,6 +298,94 @@ end
 
 function GetRestaurant(id) return RestaurantCache[tonumber(id)] end
 
+-- ─── item catalogue / validation ─────────────────────────────────────────────
+-- The framework bridge populates Inventory.Items (name -> { label }). The NUI
+-- needs that catalogue so configs are built by *picking* real items instead of
+-- typing raw codenames, and any config that references a missing item is shown
+-- with an error and hidden in-game until it's fixed.
+
+function ItemExists(name)
+    if not name or name == "" then return false end
+    local items = Inventory and Inventory.Items
+    -- If the catalogue hasn't loaded yet we can't validate; don't penalise.
+    if not items or next(items) == nil then return true end
+    return items[name] ~= nil or items[toupper(name)] ~= nil
+end
+
+-- Sorted array of every known item: { { name, label }, ... }
+function BuildItemList()
+    local list = {}
+    local items = (Inventory and Inventory.Items) or {}
+    for name, data in pairs(items) do
+        list[#list + 1] = { name = name, label = (type(data) == "table" and data.label) or name }
+    end
+    table.sort(list, function(a, b) return (a.label or a.name):lower() < (b.label or b.name):lower() end)
+    return list
+end
+
+-- Items a recipe references that don't exist in the catalogue.
+function RecipeMissingItems(r)
+    local missing = {}
+    for _, it in ipairs({ r.input_item, r.output_cooked_item, r.output_burnt_item }) do
+        if not ItemExists(it) then missing[#missing + 1] = it end
+    end
+    return missing
+end
+
+function IsRecipeValid(r) return #RecipeMissingItems(r) == 0 end
+
+-- Drinks / assembly entries reference items too; same validity rules apply.
+local function drinkMissing(d)
+    local missing = {}
+    if not ItemExists(d.input) then missing[#missing + 1] = d.input end
+    if not ItemExists(d.output) then missing[#missing + 1] = d.output end
+    return missing
+end
+
+local function assemblyMissing(a)
+    local missing = {}
+    if not ItemExists(a.output) then missing[#missing + 1] = a.output end
+    for _, comp in ipairs(a.components or {}) do
+        if not ItemExists(comp) then missing[#missing + 1] = comp end
+    end
+    return missing
+end
+
+-- Annotate a list with valid/missing without mutating the cached source rows.
+function AnnotateRecipes()
+    local out = {}
+    for _, r in ipairs(RecipeCache) do
+        local missing = RecipeMissingItems(r)
+        local copy = {}
+        for k, v in pairs(r) do copy[k] = v end
+        copy.valid, copy.missing = #missing == 0, missing
+        out[#out + 1] = copy
+    end
+    return out
+end
+
+function AnnotateDrinks()
+    local out = {}
+    for _, d in ipairs(GetSetting("drinks", {})) do
+        local missing = drinkMissing(d)
+        local copy = {}; for k, v in pairs(d) do copy[k] = v end
+        copy.valid, copy.missing = #missing == 0, missing
+        out[#out + 1] = copy
+    end
+    return out
+end
+
+function AnnotateAssembly()
+    local out = {}
+    for _, a in ipairs(GetSetting("assembly", {})) do
+        local missing = assemblyMissing(a)
+        local copy = {}; for k, v in pairs(a) do copy[k] = v end
+        copy.valid, copy.missing = #missing == 0, missing
+        out[#out + 1] = copy
+    end
+    return out
+end
+
 -- ─── permissions ─────────────────────────────────────────────────────────────
 
 -- Returns: permsTable, isOwnerOrAdmin, employeeRow
@@ -384,9 +472,27 @@ local function BuildClientRestaurant(r)
 end
 
 function BuildSyncPayload()
-    local payload = { restaurants = {}, props = {}, recipes = RecipeCache, settings = {
-        drinks   = GetSetting("drinks", {}),
-        assembly = GetSetting("assembly", {}),
+    -- Only valid configs are shipped to the game world. A recipe / drink /
+    -- assembly that references a missing item is hidden until an admin fixes it
+    -- (it still shows in the admin panel, flagged, so it *can* be fixed).
+    local recipes = {}
+    for _, r in ipairs(RecipeCache) do
+        if IsRecipeValid(r) then recipes[#recipes + 1] = r end
+    end
+    local drinks = {}
+    for _, d in ipairs(GetSetting("drinks", {})) do
+        if ItemExists(d.input) and ItemExists(d.output) then drinks[#drinks + 1] = d end
+    end
+    local assembly = {}
+    for _, a in ipairs(GetSetting("assembly", {})) do
+        local ok = ItemExists(a.output)
+        for _, comp in ipairs(a.components or {}) do if not ItemExists(comp) then ok = false end end
+        if ok then assembly[#assembly + 1] = a end
+    end
+
+    local payload = { restaurants = {}, props = {}, recipes = recipes, settings = {
+        drinks   = drinks,
+        assembly = assembly,
     } }
     for _, r in pairs(RestaurantCache) do payload.restaurants[#payload.restaurants + 1] = BuildClientRestaurant(r) end
     for _, p in pairs(PropCache) do payload.props[#payload.props + 1] = p end

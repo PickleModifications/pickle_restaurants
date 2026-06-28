@@ -6,18 +6,21 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Field, TextField, NumberField } from "@/components/form";
+import ItemPicker, { type Item } from "@/components/ItemPicker";
 import { money } from "@/lib/utils";
-import { UserPlus, Trash2, Plus, MapPin, Banknote } from "lucide-react";
+import { UserPlus, Trash2, Plus, MapPin, Banknote, TriangleAlert } from "lucide-react";
 
 export default function Management({ data, onClose }: { data: any; onClose: () => void }) {
   const id = data?.restaurantId;
   const perms = data?.perms || {};
   const roles: any[] = data?.roles || [];
+  const items: Item[] = data?.items || [];
 
   return (
     <Panel title={data?.restaurant?.label || "Management"} subtitle={`Balance ${money(data?.restaurant?.balance)}`} onClose={onClose} width="max-w-4xl">
-      <Tabs defaultValue="employees">
-        <TabsList>
+      <Tabs defaultValue={firstTab(perms)} className="flex min-h-0 flex-1 flex-col">
+        <TabsList className="shrink-0">
           {perms.manage_employees && <TabsTrigger value="employees">Employees</TabsTrigger>}
           {perms.manage_menu && <TabsTrigger value="menu">Menu</TabsTrigger>}
           {perms.view_finances && <TabsTrigger value="finances">Finances</TabsTrigger>}
@@ -25,28 +28,35 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         </TabsList>
 
         {perms.manage_employees && (
-          <TabsContent value="employees">
+          <TabsContent value="employees" className="min-h-0 flex-1 overflow-y-auto pr-1">
             <Employees id={id} roles={roles} employees={data?.employees || []} nearby={data?.nearby || []} />
           </TabsContent>
         )}
         {perms.manage_menu && (
-          <TabsContent value="menu">
-            <Menu id={id} menu={data?.menu || []} />
+          <TabsContent value="menu" className="min-h-0 flex-1 overflow-y-auto pr-1">
+            <Menu id={id} menu={data?.menu || []} items={items} />
           </TabsContent>
         )}
         {perms.view_finances && (
-          <TabsContent value="finances">
+          <TabsContent value="finances" className="min-h-0 flex-1 overflow-y-auto pr-1">
             <Finances id={id} balance={data?.restaurant?.balance} ledger={data?.ledger || []} canManage={!!perms.manage_balance} />
           </TabsContent>
         )}
         {perms.manage_props && (
-          <TabsContent value="stations">
+          <TabsContent value="stations" className="min-h-0 flex-1 overflow-y-auto pr-1">
             <Stations id={id} props={data?.props || []} stock={data?.stock || []} />
           </TabsContent>
         )}
       </Tabs>
     </Panel>
   );
+}
+
+function firstTab(perms: any) {
+  if (perms.manage_employees) return "employees";
+  if (perms.manage_menu) return "menu";
+  if (perms.view_finances) return "finances";
+  return "stations";
 }
 
 function Employees({ id, roles, employees, nearby }: any) {
@@ -106,34 +116,41 @@ function Employees({ id, roles, employees, nearby }: any) {
           </CardContent>
         </Card>
       ))}
+      {employees.length === 0 && <div className="py-4 text-center text-sm text-muted-foreground">No employees yet.</div>}
     </div>
   );
 }
 
-function Menu({ id, menu }: any) {
+function Menu({ id, menu, items }: { id: number; menu: any[]; items: Item[] }) {
   const blank = { item: "", label: "", price: 0, category: "food", enabled: true };
   const [form, setForm] = useState<any>(blank);
   const set = (k: string, v: any) => setForm((f: any) => ({ ...f, [k]: v }));
+  const known = (name: string) => !name || items.some((i) => i.name === name);
   return (
     <div className="space-y-3">
-      <Card>
-        <CardContent className="grid grid-cols-5 items-end gap-2 pt-4">
-          <div><label className="mb-1 block text-[11px] text-muted-foreground">Item</label><Input value={form.item} onChange={(e) => set("item", e.target.value)} /></div>
-          <div><label className="mb-1 block text-[11px] text-muted-foreground">Label</label><Input value={form.label} onChange={(e) => set("label", e.target.value)} /></div>
-          <div><label className="mb-1 block text-[11px] text-muted-foreground">Price</label><Input type="number" value={form.price} onChange={(e) => set("price", Number(e.target.value))} /></div>
-          <div><label className="mb-1 block text-[11px] text-muted-foreground">Category</label><Input value={form.category} onChange={(e) => set("category", e.target.value)} /></div>
-          <Button onClick={() => { if (form.item) { fetchNui("management:saveMenuItem", { id, ...form, enabled: true }); setForm(blank); } }}>
+      <div className="rounded-lg border border-border p-3">
+        <div className="grid grid-cols-5 items-end gap-2">
+          <Field label="Item" className="col-span-2">
+            <ItemPicker items={items} value={form.item} onChange={(v) => set("item", v)} />
+          </Field>
+          <TextField label="Label" value={form.label} onChange={(v) => set("label", v)} />
+          <NumberField label="Price" value={form.price} min={0} onChange={(v) => set("price", v)} />
+          <Button onClick={() => { if (form.item) { fetchNui("management:saveMenuItem", { id, ...form, label: form.label || form.item, enabled: true }); setForm(blank); } }}>
             <Plus className="h-4 w-4" /> Save
           </Button>
-        </CardContent>
-      </Card>
+        </div>
+        <p className="mt-2 text-[11px] text-muted-foreground">Pick the item players receive when they buy this menu entry.</p>
+      </div>
 
       {menu.map((m: any) => (
         <Card key={m.item}>
           <CardContent className="flex items-center justify-between pt-4 text-sm">
-            <div>
-              <span className="font-medium">{m.label}</span> <Badge variant="secondary">{m.item}</Badge>{" "}
-              <span className="text-muted-foreground">{money(m.price)} · {m.category}</span>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="truncate font-medium">{m.label}</span>
+                {!known(m.item) && <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> unknown item</Badge>}
+              </div>
+              <span className="text-xs text-muted-foreground">{m.item} · {money(m.price)} · {m.category}</span>
             </div>
             <div className="flex items-center gap-2">
               <Button size="sm" variant="outline" onClick={() => fetchNui("management:saveMenuItem", { id, ...m, enabled: m.enabled ? 0 : 1 })}>
@@ -146,6 +163,7 @@ function Menu({ id, menu }: any) {
           </CardContent>
         </Card>
       ))}
+      {menu.length === 0 && <div className="py-4 text-center text-sm text-muted-foreground">No menu items yet.</div>}
     </div>
   );
 }

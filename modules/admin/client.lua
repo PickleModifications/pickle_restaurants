@@ -24,6 +24,13 @@ RegisterNUICallback("admin:saveSetting",  relay("pickle_restaurants:admin:saveSe
 RegisterNUICallback("admin:saveRecipe",   relay("pickle_restaurants:admin:saveRecipe"))
 RegisterNUICallback("admin:deleteRecipe", relay("pickle_restaurants:admin:deleteRecipe"))
 
+-- Admins resolve to full permissions, so the placement remove callback accepts
+-- them; this keeps the panel open and lets the React side refresh in place.
+RegisterNUICallback("admin:removeProp", function(d, cb)
+    local res = lib.callback.await("pickle_restaurants:placement:removeProp", false, { id = d.propId })
+    cb(res or {})
+end)
+
 -- These close the NUI and hand off to the gizmo placement flow.
 RegisterNUICallback("admin:placeProp", function(d, cb)
     CloseNUI()

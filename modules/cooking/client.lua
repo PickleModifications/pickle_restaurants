@@ -64,6 +64,7 @@ end
 local function StopCooking()
     cookingOpen = false
     currentCookProp = nil
+    StopStationCamera()
     CloseNUI()
     SendNUIMessage({ action = "cookingItems", items = {} })
 end
@@ -72,6 +73,7 @@ function OpenCookingStation(prop)
     if cookingOpen then return end
     currentCookProp = prop
     cookingOpen = true
+    StartStationCamera(prop)
     local ing = lib.callback.await("pickle_restaurants:cooking:getIngredients", false, { prop_id = prop.id })
     OpenNUI("cooking", { station = prop.prop_type, ingredients = ing })
 

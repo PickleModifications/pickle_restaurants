@@ -101,7 +101,7 @@ export default function Cooking({ data }: { data: any }) {
           }
           dragPayload = null;
         }}
-        className="fixed inset-x-0 bottom-0 animate-fade-in border-t border-border bg-card/95 px-4 py-3 shadow-2xl backdrop-blur"
+        className="fixed inset-x-0 bottom-0 animate-fade-in border-t border-border bg-card px-4 py-3 shadow-2xl"
       >
         <div className="mb-2 flex items-center justify-between">
           <div className="flex items-center gap-2 text-sm font-semibold">
