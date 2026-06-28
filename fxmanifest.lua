@@ -31,10 +31,10 @@ ui_page 'nui/index.html'
 files {
     'nui/index.html',
     'nui/**/*',
-    'data/pickle_restaurants.ytyp',
+    'stream/pickle_restaurants.ytyp',
 }
 
-data_file 'DLC_ITYP_REQUEST' 'data/pickle_restaurants.ytyp'
+data_file 'DLC_ITYP_REQUEST' 'stream/pickle_restaurants.ytyp'
 
 dependencies {
     'ox_lib',
