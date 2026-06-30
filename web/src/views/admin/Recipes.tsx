@@ -1,18 +1,44 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { fetchNui } from "@/lib/nui";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Field, TextField, NumberField, Select } from "@/components/form";
+import { Field, TextField, NumberField, Select, Toggle } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
-import { Plus, Trash2, Pencil, X, TriangleAlert, EyeOff } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Plus, Trash2, Pencil, X, TriangleAlert, EyeOff, ImageOff, Boxes } from "lucide-react";
 
 type Recipe = {
   input_item: string; station: string;
   raw_model: string; cooked_model: string; burnt_model: string;
   output_cooked_item: string; output_burnt_item: string;
   cook_ms: number; burn_ms: number;
+  dual_sided?: boolean | number;
   valid?: boolean; missing?: string[];
+  invalid_models?: string[];
 };
+
+// Inventory thumbnail for an item, with a graceful fallback when the image is
+// missing or fails to load (different inventories store images differently).
+function ItemImage({ items, name, className }: { items: Item[]; name: string; className?: string }) {
+  const img = items.find((i) => i.name === name)?.image;
+  const [broken, setBroken] = useState(false);
+  useEffect(() => setBroken(false), [img]); // a different item gets a fresh try
+  if (!name || !img || broken) {
+    return (
+      <div className={cn("flex items-center justify-center rounded bg-muted/60 text-muted-foreground", className)}>
+        <ImageOff className="h-1/2 w-1/2" />
+      </div>
+    );
+  }
+  return (
+    <img
+      src={img}
+      alt={name}
+      onError={() => setBroken(true)}
+      className={cn("rounded bg-muted/40 object-contain", className)}
+    />
+  );
+}
 
 const BLANK: Recipe = {
   input_item: "", station: "fryer", raw_model: "", cooked_model: "", burnt_model: "",
@@ -57,26 +83,41 @@ export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]
 
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
         {recipes.length === 0 && <div className="py-6 text-center text-sm text-muted-foreground">No recipes yet.</div>}
-        {recipes.map((r) => (
-          <div key={r.input_item} className={`rounded-lg border p-3 ${r.valid === false ? "border-destructive/50 bg-destructive/5" : "border-border"}`}>
+        {recipes.map((r) => {
+          const badModels = r.invalid_models || [];
+          return (
+          <div key={r.input_item} className={cn("rounded-lg border p-3", r.valid === false ? "border-destructive/50 bg-destructive/5" : "border-border")}>
             <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="truncate font-medium">{labelOf(items, r.input_item)}</span>
-                  <Badge variant="secondary">{r.station}</Badge>
-                  {r.valid === false ? (
-                    <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> needs fixing</Badge>
-                  ) : null}
-                </div>
-                <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                  → {labelOf(items, r.output_cooked_item)} / {labelOf(items, r.output_burnt_item)} · {r.cook_ms}/{r.burn_ms}ms
-                </div>
-                {r.valid === false && (
-                  <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-destructive">
-                    <EyeOff className="h-3 w-3" /> hidden in-game — missing items:
-                    {(r.missing || []).map((m) => <span key={m} className="font-mono">{m}</span>)}
+              <div className="flex min-w-0 items-center gap-3">
+                {/* the cooked output stands in as the recipe's image */}
+                <ItemImage items={items} name={r.output_cooked_item} className="h-11 w-11 shrink-0" />
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-medium">{labelOf(items, r.output_cooked_item || r.input_item)}</span>
+                    <Badge variant="secondary">{r.station}</Badge>
+                    {r.valid === false ? (
+                      <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> needs fixing</Badge>
+                    ) : null}
+                    {badModels.length > 0 ? (
+                      <Badge variant="outline" className="gap-1 border-amber-500/60 text-amber-500"><TriangleAlert className="h-3 w-3" /> invalid model</Badge>
+                    ) : null}
                   </div>
-                )}
+                  <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                    from {labelOf(items, r.input_item)} · burns to {labelOf(items, r.output_burnt_item)} · {r.cook_ms}/{r.burn_ms}ms
+                  </div>
+                  {r.valid === false && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-destructive">
+                      <EyeOff className="h-3 w-3" /> hidden in-game — missing items:
+                      {(r.missing || []).map((m) => <span key={m} className="font-mono">{m}</span>)}
+                    </div>
+                  )}
+                  {badModels.length > 0 && (
+                    <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-amber-500">
+                      <Boxes className="h-3 w-3" /> model(s) not found in-game:
+                      {badModels.map((m) => <span key={m} className="font-mono">{m}</span>)}
+                    </div>
+                  )}
+                </div>
               </div>
               <div className="flex shrink-0 gap-2">
                 <Button size="sm" variant="outline" onClick={() => setForm({ ...BLANK, ...r })}><Pencil className="h-4 w-4" /></Button>
@@ -86,7 +127,8 @@ export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]
               </div>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -94,20 +136,56 @@ export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]
 
 function RecipeForm({ form, setForm, items }: { form: Recipe; setForm: (r: Recipe) => void; items: Item[] }) {
   const set = (k: keyof Recipe, v: any) => setForm({ ...form, [k]: v });
+  const badModels = new Set(form.invalid_models || []);
+
+  // Render-functions (not nested components) so the inputs keep focus/state
+  // across re-renders instead of remounting on every keystroke.
+  const itemField = (label: string, k: keyof Recipe) => (
+    <Field label={label}>
+      <div className="flex items-center gap-2">
+        <ItemImage items={items} name={(form[k] as string) || ""} className="h-9 w-9 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <ItemPicker items={items} value={(form[k] as string) || ""} onChange={(v) => set(k, v)} />
+        </div>
+      </div>
+    </Field>
+  );
+
+  const modelField = (label: string, k: keyof Recipe) => {
+    const val = (form[k] as string) || "";
+    const invalid = !!val && badModels.has(val);
+    return (
+      <div>
+        <TextField label={label} value={val} onChange={(v) => set(k, v)} />
+        {invalid && (
+          <div className="mt-1 flex items-center gap-1 text-[11px] text-amber-500">
+            <TriangleAlert className="h-3 w-3" /> not found in-game
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="grid grid-cols-3 gap-3">
-      <Field label="Input item"><ItemPicker items={items} value={form.input_item} onChange={(v) => set("input_item", v)} /></Field>
+      {itemField("Input item", "input_item")}
       <Select label="Station" value={form.station} onChange={(v) => set("station", v)}
         options={[{ value: "fryer", label: "Fryer" }, { value: "stovetop", label: "Stovetop" }]} />
       <div />
-      <Field label="Cooked output"><ItemPicker items={items} value={form.output_cooked_item} onChange={(v) => set("output_cooked_item", v)} /></Field>
-      <Field label="Burnt output"><ItemPicker items={items} value={form.output_burnt_item} onChange={(v) => set("output_burnt_item", v)} /></Field>
+      {itemField("Cooked output", "output_cooked_item")}
+      {itemField("Burnt output", "output_burnt_item")}
       <div />
-      <TextField label="Raw model (_01)" value={form.raw_model} onChange={(v) => set("raw_model", v)} />
-      <TextField label="Cooked model (_02)" value={form.cooked_model} onChange={(v) => set("cooked_model", v)} />
-      <TextField label="Burnt model (_03)" value={form.burnt_model} onChange={(v) => set("burnt_model", v)} />
+      {modelField("Raw model (_01)", "raw_model")}
+      {modelField("Cooked model (_02)", "cooked_model")}
+      {modelField("Burnt model (_03)", "burnt_model")}
       <NumberField label="Cook time (ms)" value={form.cook_ms} min={0} step={1000} onChange={(v) => set("cook_ms", v)} />
       <NumberField label="Burn time (ms)" value={form.burn_ms} min={0} step={1000} onChange={(v) => set("burn_ms", v)} />
+      {form.station === "stovetop" && (
+        <div className="col-span-3">
+          <Toggle checked={!!form.dual_sided} onChange={(v) => set("dual_sided", v)}
+            label="Dual-sided (two cookable faces — click to flip; each side cooks independently)" />
+        </div>
+      )}
     </div>
   );
 }

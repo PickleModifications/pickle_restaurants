@@ -311,16 +311,36 @@ CreateThread(function()
     RegisterCallback("pickle_restaurants:getInventory", function(source, cb)
         cb(Inventory.GetInventory(source))
     end)
-    
-    if GetResourceState("ox_inventory") == "started" then 
-        for item, data in pairs(exports.ox_inventory:Items()) do
-            Inventory.Items[item] = {label = data.label}
+
+    -- Rebuild the catalogue from whichever live registry is in use (ox/qs), so a
+    -- newly-registered item is picked up without a restart. The raw-SQL ESX path
+    -- below stays a one-time load (no cheap live registry to re-read).
+    Inventory.RefreshItems = function()
+        local base = InventoryImageBase()
+        if GetResourceState("ox_inventory") == "started" then
+            local items = {}
+            for item, data in pairs(exports.ox_inventory:Items() or {}) do
+                items[item] = { label = data.label, image = InvImageUrl(base, item, data.image) }
+            end
+            Inventory.Items = items
+        elseif GetResourceState("qs-inventory") == "started" then
+            local items = {}
+            for item, data in pairs(exports['qs-inventory']:GetItemList() or {}) do
+                items[item] = { label = data.label, image = InvImageUrl(base, item, data.image) }
+            end
+            Inventory.Items = items
         end
-        Inventory.Ready = true
-    elseif GetResourceState("qs-inventory") == "started" then 
-        for item, data in pairs(exports['qs-inventory']:GetItemList()) do
-            Inventory.Items[item] = {label = data.label}
-        end
+    end
+
+    -- Live existence check straight from ox when present (no stale snapshot).
+    Inventory.ItemExists = function(name)
+        if not name or name == "" then return false end
+        if GetResourceState("ox_inventory") == "started" then return exports.ox_inventory:Items(name) ~= nil end
+        return Inventory.Items[name] ~= nil
+    end
+
+    if GetResourceState("ox_inventory") == "started" or GetResourceState("qs-inventory") == "started" then
+        Inventory.RefreshItems()
         Inventory.Ready = true
     else
         MySQL.ready(function() 

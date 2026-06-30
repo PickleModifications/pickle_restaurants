@@ -63,6 +63,40 @@ function debugPrint(...)
     end
 end
 
+-- Detect the active inventory's nui image base path. Ordered by specificity;
+-- the first started resource wins. Covers the inventories people actually run;
+-- an unknown one returns nil so the UI shows its placeholder instead of a broken
+-- image. Add a row here to support another inventory.
+local INVENTORY_IMAGE_BASES = {
+    { res = "ox_inventory",     base = "nui://ox_inventory/web/images/" },
+    { res = "qs-inventory",     base = "nui://qs-inventory/html/images/" },
+    { res = "ps-inventory",     base = "nui://ps-inventory/html/images/" },
+    { res = "qb-inventory",     base = "nui://qb-inventory/html/images/" },
+    { res = "lj-inventory",     base = "nui://lj-inventory/html/images/" },
+    { res = "origen_inventory", base = "nui://origen_inventory/html/images/" },
+    { res = "codem-inventory",  base = "nui://codem-inventory/html/itemimages/" },
+    { res = "core_inventory",   base = "nui://core_inventory/html/img/" },
+    { res = "tgiann-inventory", base = "nui://tgiann-inventory/html/images/" },
+}
+
+function InventoryImageBase()
+    for _, e in ipairs(INVENTORY_IMAGE_BASES) do
+        if GetResourceState(e.res) == "started" then return e.base end
+    end
+    return nil
+end
+
+-- Build an inventory image nui:// url. `base` is the inventory's web image path
+-- (nil => no image, returns nil), `name` the item id, `file` the item's
+-- configured image (may be nil/extension-less). Falls back to "<name>.png" — the
+-- convention our generated items use.
+function InvImageUrl(base, name, file)
+    if not base then return nil end
+    local f = (type(file) == "string" and file ~= "") and file or (tostring(name) .. ".png")
+    if not f:find("%.") then f = f .. ".png" end
+    return base .. f
+end
+
 function NumberWithCommas(x, noCurrency)
     local left, num = string.match(tostring(x), '^([^%d]*%d)(%d*)')
     if not left then return (not noCurrency and "$" or "") .. tostring(x) end

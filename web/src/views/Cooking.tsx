@@ -4,8 +4,10 @@ import { Badge } from "@/components/ui/badge";
 import { X, Flame, CupSoda, Sandwich, UtensilsCrossed } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-type Ingredient = { kind: string; item: string; label: string; count?: number; canMake?: boolean };
-type ChipItem = { uid: number; state: string; onScreen: boolean; x: number; y: number };
+type Ingredient = { kind: string; item: string; label: string; image?: string; count?: number; canMake?: boolean };
+type ChipItem = { uid: number; state: string; onScreen: boolean; x: number; y: number; dual?: boolean; sides?: string[] };
+
+type Drag = { mode: "place" } | { mode: "chip"; uid: number };
 
 const STOVE_VIEWS = [
   { key: "stovetop", label: "Stovetop" },
@@ -28,15 +30,25 @@ const STATE_STYLE: Record<string, { label: string; cls: string }> = {
   burnt: { label: "Burnt", cls: "bg-zinc-800/90 border-zinc-500" },
 };
 
-// shared across drag handlers without re-rendering
-let dragPayload: { type: "ingredient"; ing: Ingredient } | { type: "chip"; uid: number } | null = null;
+// Item thumbnail that quietly disappears if the inventory has no image for it.
+function ItemThumb({ src, alt, className }: { src?: string; alt: string; className?: string }) {
+  const [broken, setBroken] = useState(false);
+  useEffect(() => setBroken(false), [src]);
+  if (!src || broken) return null;
+  return <img src={src} alt={alt} draggable={false} onError={() => setBroken(true)} className={className} />;
+}
+
+const inRect = (x: number, y: number, r: DOMRect) =>
+  x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
 
 export default function Cooking({ data }: { data: any }) {
   const [station, setStation] = useState<string>(data?.station || "fryer");
   const [ingredients, setIngredients] = useState<Ingredient[]>(data?.ingredients || []);
   const [chips, setChips] = useState<ChipItem[]>([]);
   const [view, setView] = useState<string>("stovetop");
+  const [ghost, setGhost] = useState<{ x: number; y: number; label: string; image?: string } | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<Drag | null>(null);
 
   useEffect(() => {
     setStation(data?.station || "fryer");
@@ -53,6 +65,51 @@ export default function Cooking({ data }: { data: any }) {
     fetchNui("cooking:setView", { view: key });
   };
 
+  // ── pointer drag (HTML5 DnD is unreliable in CEF) ──────────────────────────
+  // Ingredients use live in-world placement: the real prop spawns and tracks the
+  // cursor in 3D, so there's no 2D ghost. Only world chips use the ghost.
+  const startPlace = (e: React.PointerEvent, ing: Ingredient) => {
+    e.preventDefault();
+    dragRef.current = { mode: "place" };
+    fetchNui("cooking:beginPlace", { kind: ing.kind, item: ing.item });
+  };
+  // Chips drag the *real* placed prop live in 3D (no 2D ghost), the same way a
+  // fresh ingredient places.
+  const startChip = (e: React.PointerEvent, uid: number) => {
+    e.preventDefault();
+    dragRef.current = { mode: "chip", uid };
+    fetchNui("cooking:beginMove", { uid });
+  };
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      if (!dragRef.current) return;
+      setGhost((g) => (g ? { ...g, x: e.clientX, y: e.clientY } : g));
+    };
+    const onUp = (e: PointerEvent) => {
+      const drag = dragRef.current;
+      dragRef.current = null;
+      setGhost(null);
+      if (!drag) return;
+      const overBar = !!barRef.current && inRect(e.clientX, e.clientY, barRef.current.getBoundingClientRect());
+      if (drag.mode === "place") {
+        // commit the live placement, or cancel if released back over the bar
+        fetchNui("cooking:endPlace", { cancel: overBar });
+      } else {
+        // a world chip: onto the bar collects it, out in the world commits the
+        // live drag at its final spot
+        if (overBar) fetchNui("cooking:collect", { uid: drag.uid });
+        else fetchNui("cooking:endMove", { cancel: false });
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") fetchNui("cooking:close");
@@ -68,23 +125,8 @@ export default function Cooking({ data }: { data: any }) {
 
   return (
     <>
-      {/* world drop zone — drop ingredients to place, drop chips to move, and
-          (stovetop) click to toggle whichever oven door the cursor is over */}
-      <div
-        className="fixed inset-0"
-        onClick={() => isStove && fetchNui("cooking:worldClick")}
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={(e) => {
-          e.preventDefault();
-          if (!dragPayload) return;
-          if (dragPayload.type === "ingredient") {
-            fetchNui("cooking:dropItem", { kind: dragPayload.ing.kind, item: dragPayload.ing.item });
-          } else {
-            fetchNui("cooking:move", { uid: dragPayload.uid });
-          }
-          dragPayload = null;
-        }}
-      />
+      {/* world layer — click toggles the oven door under the cursor (stovetop) */}
+      <div className="fixed inset-0" onClick={() => isStove && fetchNui("cooking:worldClick")} />
 
       {/* stovetop view switcher — re-frames the scripted camera onto a part */}
       {isStove && (
@@ -104,17 +146,31 @@ export default function Cooking({ data }: { data: any }) {
         </div>
       )}
 
-      {/* on-screen chips over each world food prop */}
+      {/* on-screen chips over each world food prop. Dual patties show both
+          faces; click the patty in the world to flip it. */}
       {chips.map((c) => {
         const st = STATE_STYLE[c.state] || STATE_STYLE.raw;
+        if (c.dual && c.sides) {
+          const [a, b] = c.sides.map((s) => STATE_STYLE[s] || STATE_STYLE.raw);
+          return (
+            <div
+              key={c.uid}
+              onPointerDown={(e) => startChip(e, c.uid)}
+              style={{ left: `${c.x * 100}%`, top: `${c.y * 100}%` }}
+              className="fixed flex -translate-x-1/2 -translate-y-1/2 cursor-grab touch-none select-none overflow-hidden rounded-full border border-white/30 text-[11px] font-semibold text-white shadow-lg active:cursor-grabbing"
+            >
+              <span className={cn("px-2 py-0.5", a.cls)}>{a.label}</span>
+              <span className={cn("px-2 py-0.5", b.cls)}>{b.label}</span>
+            </div>
+          );
+        }
         return (
           <div
             key={c.uid}
-            draggable
-            onDragStart={() => (dragPayload = { type: "chip", uid: c.uid })}
+            onPointerDown={(e) => startChip(e, c.uid)}
             style={{ left: `${c.x * 100}%`, top: `${c.y * 100}%` }}
             className={cn(
-              "fixed -translate-x-1/2 -translate-y-1/2 cursor-grab rounded-full border px-2 py-0.5 text-[11px] font-semibold text-white shadow-lg active:cursor-grabbing",
+              "fixed -translate-x-1/2 -translate-y-1/2 cursor-grab touch-none select-none rounded-full border px-2 py-0.5 text-[11px] font-semibold text-white shadow-lg active:cursor-grabbing",
               st.cls
             )}
           >
@@ -123,18 +179,20 @@ export default function Cooking({ data }: { data: any }) {
         );
       })}
 
+      {/* the floating drag preview that follows the cursor */}
+      {ghost && (
+        <div
+          style={{ left: ghost.x, top: ghost.y }}
+          className="pointer-events-none fixed z-50 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1.5 rounded-lg border border-primary/60 bg-card/95 px-2 py-1 text-xs font-semibold shadow-2xl"
+        >
+          <ItemThumb src={ghost.image} alt={ghost.label} className="h-6 w-6 object-contain" />
+          {ghost.label}
+        </div>
+      )}
+
       {/* full-width bottom bar */}
       <div
         ref={barRef}
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (dragPayload?.type === "chip") {
-            fetchNui("cooking:collect", { uid: dragPayload.uid });
-          }
-          dragPayload = null;
-        }}
         className="fixed inset-x-0 bottom-0 animate-fade-in border-t border-border bg-card px-4 py-3 shadow-2xl"
       >
         <div className="mb-2 flex items-center justify-between">
@@ -146,10 +204,7 @@ export default function Cooking({ data }: { data: any }) {
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <UtensilsCrossed className="h-3.5 w-3.5" />
             Drag a cooked item here to collect it
-            <button
-              onClick={() => fetchNui("cooking:close")}
-              className="ml-2 rounded-md p-1 hover:bg-accent"
-            >
+            <button onClick={() => fetchNui("cooking:close")} className="ml-2 rounded-md p-1 hover:bg-accent">
               <X className="h-4 w-4" />
             </button>
           </div>
@@ -164,23 +219,23 @@ export default function Cooking({ data }: { data: any }) {
             return (
               <div
                 key={ing.item + i}
-                draggable={can}
-                onDragStart={() => can && (dragPayload = { type: "ingredient", ing })}
+                onPointerDown={(e) => can && startPlace(e, ing)}
                 className={cn(
-                  "relative flex h-20 w-28 shrink-0 select-none flex-col items-center justify-center rounded-lg border text-center text-xs font-medium",
+                  "relative flex h-24 w-28 shrink-0 touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border text-center text-xs font-medium",
                   can
                     ? "cursor-grab border-border bg-secondary hover:border-primary/60 active:cursor-grabbing"
                     : "cursor-not-allowed border-dashed border-border/60 bg-muted/40 opacity-60"
                 )}
               >
-                <span className="px-1">{ing.label}</span>
+                <ItemThumb src={ing.image} alt={ing.label} className="h-10 w-10 object-contain" />
+                <span className="px-1 leading-tight">{ing.label}</span>
                 {ing.kind !== "assembly" && (
                   <Badge variant="secondary" className="absolute right-1 top-1">
                     {ing.count ?? 0}
                   </Badge>
                 )}
                 {ing.kind === "assembly" && !ing.canMake && (
-                  <span className="mt-1 text-[10px] text-muted-foreground">missing parts</span>
+                  <span className="text-[10px] text-muted-foreground">missing parts</span>
                 )}
               </div>
             );

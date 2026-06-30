@@ -3,9 +3,13 @@
 --  Authoritative state for food being cooked on stations. Clients render the
 --  3D props; the server owns placement, the raw->cooked->burnt timeline, and
 --  hand-back into the player's inventory.
+--
+--  Beef patties (recipes flagged dual_sided) cook per-face: only the down side
+--  advances, and the player flips them to cook the other side. State is tracked
+--  per side and never shared.
 -- =============================================
 
-local CookingItems = {} -- [uid] = { uid, rid, prop_id, station, kind, recipe, drink, output, state, model, x, y, z }
+local CookingItems = {} -- [uid] = { uid, rid, prop_id, station, kind, recipe, drink, output, state, model, x, y, z, dual, sides, flipped, down, elapsed, timerToken, phaseStart }
 local cookUid = 0
 
 local function findDrink(item)
@@ -24,6 +28,65 @@ local function broadcastSpawn(it)
     TriggerClientEvent("pickle_restaurants:cooking:spawn", -1, it.uid, it.model, it.x, it.y, it.z, it.state)
 end
 
+-- ─── dual-sided patties ──────────────────────────────────────────────────────
+
+local function broadcastDual(it)
+    TriggerClientEvent("pickle_restaurants:cooking:dual", -1, it.uid, it.recipe.input_item,
+        it.x, it.y, it.z, it.sides[1], it.sides[2], it.flipped)
+end
+
+-- The single item a dual patty hands back: burnt dominates, then raw, else
+-- cooked. (raw/cooked -> raw, cooked/burnt -> burnt, raw/burnt -> burnt.)
+local function combineDualState(sides)
+    if sides[1] == "burnt" or sides[2] == "burnt" then return "burnt" end
+    if sides[1] == "raw" or sides[2] == "raw" then return "raw" end
+    return "cooked"
+end
+
+-- Banking the down face's accrued cook time and cancelling its pending timeout,
+-- so a flip can resume the other face from where it left off.
+local function clearSideTimer(it)
+    if it.phaseStart then
+        local s = it.down
+        it.elapsed[s] = (it.elapsed[s] or 0) + (GetGameTimer() - it.phaseStart)
+        it.phaseStart = nil
+    end
+    it.timerToken = (it.timerToken or 0) + 1
+end
+
+-- Run the cook timeline for whichever face is currently down. A per-item token
+-- invalidates any timeout left over from a previous side/phase.
+local function armSideTimer(it)
+    local s = it.down
+    local st = it.sides[s]
+    if st == "burnt" then return end -- this face is done; nothing left to advance
+    local total = (st == "raw") and it.recipe.cook_ms or it.recipe.burn_ms
+    local remain = math.max(0, (total or 15000) - (it.elapsed[s] or 0))
+    it.timerToken = (it.timerToken or 0) + 1
+    local token = it.timerToken
+    it.phaseStart = GetGameTimer()
+    local uid = it.uid
+    SetTimeout(remain, function()
+        local cur = CookingItems[uid]
+        if not cur or cur.timerToken ~= token then return end
+        local ds = cur.down
+        cur.sides[ds] = (cur.sides[ds] == "raw") and "cooked" or "burnt"
+        cur.elapsed[ds] = 0
+        cur.phaseStart = nil
+        broadcastDual(cur)
+        armSideTimer(cur) -- continue cooked -> burnt on the same face
+    end)
+end
+
+-- one sync entry for a (re)connecting / station-opening client
+local function activeEntry(it)
+    if it.dual then
+        return { uid = it.uid, dual = true, input = it.recipe.input_item,
+                 x = it.x, y = it.y, z = it.z, s1 = it.sides[1], s2 = it.sides[2], flipped = it.flipped }
+    end
+    return { uid = it.uid, model = it.model, x = it.x, y = it.y, z = it.z, state = it.state }
+end
+
 -- ─── ingredient list for the bottom bar ──────────────────────────────────────
 
 lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src, d)
@@ -38,7 +101,8 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
             if recipe.station == station and IsRecipeValid(recipe) then
                 local count = Inventory.GetItemCount(src, recipe.input_item)
                 if count and count > 0 then
-                    out[#out + 1] = { kind = "cook", item = recipe.input_item, label = GetItemLabel(recipe.input_item), count = count }
+                    out[#out + 1] = { kind = "cook", item = recipe.input_item, label = GetItemLabel(recipe.input_item),
+                                      image = GetItemImage(recipe.input_item), count = count }
                 end
             end
         end
@@ -46,7 +110,8 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         for _, drink in ipairs(GetSetting("drinks", {})) do
             if ItemExists(drink.input) and ItemExists(drink.output) then
                 local count = Inventory.GetItemCount(src, drink.input) or 0
-                out[#out + 1] = { kind = "drink", item = drink.input, label = drink.label or GetItemLabel(drink.input), count = count }
+                out[#out + 1] = { kind = "drink", item = drink.input, label = drink.label or GetItemLabel(drink.input),
+                                  image = GetItemImage(drink.input), count = count }
             end
         end
     elseif station == "kitchen_prep" then
@@ -58,7 +123,7 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
                     if (Inventory.GetItemCount(src, comp) or 0) < 1 then canMake = false break end
                 end
                 out[#out + 1] = { kind = "assembly", item = asm.output, label = asm.label or asm.output, canMake = canMake,
-                                  components = asm.components }
+                                  image = GetItemImage(asm.output), components = asm.components }
             end
         end
     end
@@ -69,7 +134,7 @@ end)
 lib.callback.register("pickle_restaurants:cooking:getActive", function(_, _)
     local list = {}
     for _, it in pairs(CookingItems) do
-        list[#list + 1] = { uid = it.uid, model = it.model, x = it.x, y = it.y, z = it.z, state = it.state }
+        list[#list + 1] = activeEntry(it)
     end
     return list
 end)
@@ -93,7 +158,25 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         if not recipe or recipe.station ~= station then return { ok = false, error = "Can't cook that here." } end
         if (Inventory.GetItemCount(src, d.item) or 0) < 1 then return { ok = false, error = "Missing ingredient." } end
         Inventory.RemoveItem(src, d.item, 1)
-        it.kind, it.recipe, it.state, it.model = "cook", recipe, "raw", recipe.raw_model
+        it.kind, it.recipe = "cook", recipe
+
+        -- oxmysql maps TINYINT(1) to a Lua boolean, so accept true or 1.
+        local isDual = recipe.dual_sided == true or tonumber(recipe.dual_sided) == 1
+
+        -- Dual-sided: render two faces, cook only the down one, flip to swap.
+        if isDual then
+            it.dual    = true
+            it.sides   = { "raw", "raw" }
+            it.elapsed = { 0, 0 }
+            it.flipped = false
+            it.down    = 1
+            CookingItems[uid] = it
+            broadcastDual(it)
+            armSideTimer(it)
+            return { ok = true }
+        end
+
+        it.state, it.model = "raw", recipe.raw_model
         CookingItems[uid] = it
         broadcastSpawn(it)
         SetTimeout(recipe.cook_ms, function()
@@ -139,6 +222,20 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
     return { ok = false, error = "Invalid action." }
 end)
 
+-- ─── flip (dual-sided patties) ───────────────────────────────────────────────
+
+lib.callback.register("pickle_restaurants:cooking:flip", function(src, d)
+    local it = CookingItems[tonumber(d.uid)]
+    if not it or not it.dual then return { ok = false } end
+    if not HasPerm(it.rid, src, "cook") then return { ok = false } end
+    clearSideTimer(it)
+    it.flipped = not it.flipped
+    it.down = it.flipped and 2 or 1
+    broadcastDual(it)
+    armSideTimer(it)
+    return { ok = true }
+end)
+
 -- ─── move (drag within world) ────────────────────────────────────────────────
 
 lib.callback.register("pickle_restaurants:cooking:move", function(src, d)
@@ -159,8 +256,9 @@ lib.callback.register("pickle_restaurants:cooking:collect", function(src, d)
 
     local giveItem
     if it.kind == "cook" then
-        if it.state == "raw" then giveItem = it.recipe.input_item
-        elseif it.state == "cooked" then giveItem = it.recipe.output_cooked_item
+        local state = it.dual and combineDualState(it.sides) or it.state
+        if state == "raw" then giveItem = it.recipe.input_item
+        elseif state == "cooked" then giveItem = it.recipe.output_cooked_item
         else giveItem = it.recipe.output_burnt_item end
     elseif it.kind == "drink" then
         giveItem = (it.state == "done") and it.output or it.drink.input
@@ -178,7 +276,7 @@ end)
 RegisterNetEvent("pickle_restaurants:requestSync", function()
     local list = {}
     for _, it in pairs(CookingItems) do
-        list[#list + 1] = { uid = it.uid, model = it.model, x = it.x, y = it.y, z = it.z, state = it.state }
+        list[#list + 1] = activeEntry(it)
     end
     TriggerClientEvent("pickle_restaurants:cooking:bulk", source, list)
 end)

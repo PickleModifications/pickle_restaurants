@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Check, ChevronsUpDown, Search, TriangleAlert } from "lucide-react";
 
-export type Item = { name: string; label: string };
+export type Item = { name: string; label: string; image?: string };
 
 /**
  * Searchable item selector. Instead of typing a raw codename, the user picks

@@ -290,8 +290,30 @@ CreateThread(function()
         cb(Inventory.GetInventory(source))
     end)
 
-    for item, data in pairs(QBCore.Shared.Items) do
-        Inventory.Items[item] = {label = data.label}
+    -- When ox_inventory is in use its registry is the source of truth (item
+    -- defs may live in ox's own data and never reach QBCore.Shared.Items), so
+    -- prefer it and fall back to qb-core only when ox isn't running.
+    local function usingOx() return GetResourceState("ox_inventory") == "started" end
+
+    Inventory.RefreshItems = function()
+        Inventory.Items = {}
+        local base = InventoryImageBase()
+        if usingOx() then
+            for item, data in pairs(exports.ox_inventory:Items() or {}) do
+                Inventory.Items[item] = { label = data.label, image = InvImageUrl(base, item, data.image) }
+            end
+        else
+            for item, data in pairs(QBCore.Shared.Items) do
+                Inventory.Items[item] = { label = data.label, image = InvImageUrl(base, item, data.image) }
+            end
+        end
     end
+    -- Live lookup so a newly-added item is recognised without a restart.
+    Inventory.ItemExists = function(name)
+        if not name or name == "" then return false end
+        if usingOx() then return exports.ox_inventory:Items(name) ~= nil end
+        return QBCore.Shared.Items[name:lower()] ~= nil
+    end
+    Inventory.RefreshItems()
     Inventory.Ready = true
 end)

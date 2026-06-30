@@ -148,10 +148,26 @@ CreateThread(function()
     Inventory.AddWeapon = function(source, name, count, metadata) Inventory.AddItem(source, name, count, metadata) end
     Inventory.RemoveWeapon = function(source, name, count) Inventory.RemoveItem(source, name, count) end
 
-    if hasOx then
+    -- Rebuild the catalogue from the live ox registry. Called on boot and again
+    -- whenever items may have changed (see core's requestSync refresh), so we
+    -- never serve a stale startup snapshot.
+    Inventory.RefreshItems = function()
+        if not hasOx then return end
+        local items = {}
         for item, data in pairs(exports.ox_inventory:Items() or {}) do
-            Inventory.Items[item] = { label = data.label }
+            items[item] = { label = data.label, image = InvImageUrl(InventoryImageBase(), item, data.image) }
         end
+        Inventory.Items = items
     end
+
+    -- Live existence check straight from ox, so an item registered after this
+    -- resource started is still recognised.
+    Inventory.ItemExists = function(name)
+        if not name or name == "" then return false end
+        if hasOx then return exports.ox_inventory:Items(name) ~= nil end
+        return Inventory.Items[name] ~= nil
+    end
+
+    Inventory.RefreshItems()
     Inventory.Ready = true
 end)

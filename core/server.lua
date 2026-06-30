@@ -105,7 +105,8 @@ local DEFAULT_RECIPES = {
       out_cooked = "cooked_nuggets", out_burnt = "burnt_nuggets", cook_ms = 12000, burn_ms = 12000 },
     { input = "raw_beef_patty", station = "stovetop",
       raw = "pickle_patty_beef_01", cooked = "pickle_patty_beef_02", burnt = "pickle_patty_beef_03",
-      out_cooked = "cooked_beef_patty", out_burnt = "burnt_beef_patty", cook_ms = 18000, burn_ms = 15000 },
+      out_cooked = "cooked_beef_patty", out_burnt = "burnt_beef_patty", cook_ms = 18000, burn_ms = 15000,
+      dual_sided = 1 },
     { input = "raw_chicken_patty", station = "stovetop",
       raw = "pickle_patty_friedchicken_01", cooked = "pickle_patty_friedchicken_02", burnt = "pickle_patty_friedchicken_03",
       out_cooked = "cooked_chicken_patty", out_burnt = "burnt_chicken_patty", cook_ms = 18000, burn_ms = 15000 },
@@ -193,6 +194,7 @@ local function CreateTables()
             `output_burnt_item`  VARCHAR(60)  NOT NULL,
             `cook_ms`            INT          NOT NULL DEFAULT 15000,
             `burn_ms`            INT          NOT NULL DEFAULT 15000,
+            `dual_sided`         TINYINT(1)   NOT NULL DEFAULT 0,
             PRIMARY KEY (`id`),
             UNIQUE KEY `uniq_input` (`input_item`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -246,6 +248,22 @@ local function CreateTables()
             PRIMARY KEY (`setting_key`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
+
+    -- Migrations for tables that already exist from an earlier version. When the
+    -- dual_sided column is first added, turn it on for the default dual recipes
+    -- (e.g. beef patties) so existing servers get the feature without an admin
+    -- having to tick the box. Runs once — only while the column is missing.
+    local cols = MySQL.query.await("SHOW COLUMNS FROM `pickle_restaurant_recipes` LIKE 'dual_sided'")
+    if not cols or #cols == 0 then
+        MySQL.query.await(
+            "ALTER TABLE `pickle_restaurant_recipes` ADD COLUMN `dual_sided` TINYINT(1) NOT NULL DEFAULT 0")
+        for _, r in ipairs(DEFAULT_RECIPES) do
+            if r.dual_sided == 1 then
+                MySQL.update.await(
+                    "UPDATE `pickle_restaurant_recipes` SET `dual_sided` = 1 WHERE `input_item` = ?", { r.input })
+            end
+        end
+    end
 end
 
 -- ─── loaders ─────────────────────────────────────────────────────────────────
@@ -286,10 +304,26 @@ local function SeedRecipes()
     for _, r in ipairs(DEFAULT_RECIPES) do
         MySQL.insert.await([[
             INSERT INTO pickle_restaurant_recipes
-                (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE input_item = input_item
-        ]], { r.input, r.station, r.raw, r.cooked, r.burnt, r.out_cooked, r.out_burnt, r.cook_ms, r.burn_ms })
+        ]], { r.input, r.station, r.raw, r.cooked, r.burnt, r.out_cooked, r.out_burnt, r.cook_ms, r.burn_ms, r.dual_sided or 0 })
+    end
+
+    -- One-time: turn dual_sided on for the default dual recipes (e.g. beef
+    -- patties) on servers that predate the feature. Gated by a settings flag so
+    -- it runs exactly once even if the column already existed (and so it never
+    -- clobbers a later admin choice). The ON DUPLICATE above never updates
+    -- dual_sided on rows that already exist, so this is the only thing that sets
+    -- it for pre-existing recipes.
+    if not GetSetting("dual_sided_seeded", false) then
+        for _, r in ipairs(DEFAULT_RECIPES) do
+            if r.dual_sided == 1 then
+                MySQL.update.await(
+                    "UPDATE pickle_restaurant_recipes SET dual_sided = 1 WHERE input_item = ?", { r.input })
+            end
+        end
+        SetSetting("dual_sided_seeded", true)
     end
 end
 
@@ -351,6 +385,10 @@ function GetRestaurant(id) return RestaurantCache[tonumber(id)] end
 
 function ItemExists(name)
     if not name or name == "" then return false end
+    -- Prefer the bridge's live lookup so we never validate against a stale
+    -- startup snapshot of the inventory catalogue (an item registered after this
+    -- resource booted must still be recognised).
+    if Inventory and Inventory.ItemExists then return Inventory.ItemExists(name) end
     local items = Inventory and Inventory.Items
     -- If the catalogue hasn't loaded yet we can't validate; don't penalise.
     if not items or next(items) == nil then return true end
@@ -362,10 +400,21 @@ function BuildItemList()
     local list = {}
     local items = (Inventory and Inventory.Items) or {}
     for name, data in pairs(items) do
-        list[#list + 1] = { name = name, label = (type(data) == "table" and data.label) or name }
+        list[#list + 1] = {
+            name  = name,
+            label = (type(data) == "table" and data.label) or name,
+            image = (type(data) == "table" and data.image) or nil,
+        }
     end
     table.sort(list, function(a, b) return (a.label or a.name):lower() < (b.label or b.name):lower() end)
     return list
+end
+
+-- The inventory image url for an item (nil when unknown / no catalogue yet).
+function GetItemImage(name)
+    local items = Inventory and Inventory.Items
+    local data = items and (items[name] or items[toupper(name)])
+    return (type(data) == "table" and data.image) or nil
 end
 
 -- Items a recipe references that don't exist in the catalogue.
@@ -549,6 +598,9 @@ function SyncToClient(target)
 end
 
 RegisterNetEvent("pickle_restaurants:requestSync", function()
+    -- Rebuild the catalogue from the live inventory first, so newly-registered
+    -- items reach the client picker (and validation) without a resource restart.
+    if Inventory and Inventory.RefreshItems then Inventory.RefreshItems() end
     -- Hand the framework bridge's item list to the client so GetItemLabel works
     -- and the client-side Inventory mirror flips to Ready.
     if Inventory and Inventory.Items then

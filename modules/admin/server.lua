@@ -135,16 +135,18 @@ lib.callback.register("pickle_restaurants:admin:saveRecipe", function(src, r)
     if not r.input_item or r.input_item == "" then return { ok = false, error = "input_item required" } end
     MySQL.update.await([[
         INSERT INTO pickle_restaurant_recipes
-            (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
             station = VALUES(station), raw_model = VALUES(raw_model), cooked_model = VALUES(cooked_model),
             burnt_model = VALUES(burnt_model), output_cooked_item = VALUES(output_cooked_item),
-            output_burnt_item = VALUES(output_burnt_item), cook_ms = VALUES(cook_ms), burn_ms = VALUES(burn_ms)
+            output_burnt_item = VALUES(output_burnt_item), cook_ms = VALUES(cook_ms), burn_ms = VALUES(burn_ms),
+            dual_sided = VALUES(dual_sided)
     ]], {
         r.input_item, r.station or "fryer", r.raw_model or "", r.cooked_model or "", r.burnt_model or "",
         r.output_cooked_item or "", r.output_burnt_item or "",
         tonumber(r.cook_ms) or 15000, tonumber(r.burn_ms) or 15000,
+        (r.dual_sided == true or r.dual_sided == 1) and 1 or 0,
     })
     LoadRecipes()
     SyncToClient(-1)
