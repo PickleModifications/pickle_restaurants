@@ -39,9 +39,17 @@ CreateThread(function()
 end)
 
 -- Raycast from the live NUI cursor position into the world. Reuses the gizmo's
--- ScreenToWorld helper (defined in modules/gizmo/client.lua).
+-- ScreenToWorld helper (defined in modules/gizmo/client.lua). When the station
+-- camera is active we raycast from *that* camera so drag-to-place lines up with
+-- what the player actually sees.
 function CursorToWorld()
-    local camPos = GetGameplayCamCoord()
-    local camRot = GetGameplayCamRot(2)
+    local camPos, camRot
+    if StationCam and DoesCamExist(StationCam) then
+        camPos = GetCamCoord(StationCam)
+        camRot = GetCamRot(StationCam, 2)
+    else
+        camPos = GetGameplayCamCoord()
+        camRot = GetGameplayCamRot(2)
+    end
     return GetCursorRaycast(camPos, camRot)
 end

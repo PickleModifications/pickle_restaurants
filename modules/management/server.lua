@@ -86,6 +86,7 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
         menu      = menu,
         stock     = stock,
         props     = props,
+        items     = BuildItemList(),  -- catalogue for the menu item-picker
         nearby    = effective.manage_employees and nearbyPlayers(src) or {},
     }
 end)

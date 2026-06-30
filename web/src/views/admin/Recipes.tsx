@@ -1,0 +1,118 @@
+import { useState } from "react";
+import { fetchNui } from "@/lib/nui";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Field, TextField, NumberField, Select } from "@/components/form";
+import ItemPicker, { type Item } from "@/components/ItemPicker";
+import { Plus, Trash2, Pencil, X, TriangleAlert, EyeOff } from "lucide-react";
+
+type Recipe = {
+  input_item: string; station: string;
+  raw_model: string; cooked_model: string; burnt_model: string;
+  output_cooked_item: string; output_burnt_item: string;
+  cook_ms: number; burn_ms: number;
+  valid?: boolean; missing?: string[];
+};
+
+const BLANK: Recipe = {
+  input_item: "", station: "fryer", raw_model: "", cooked_model: "", burnt_model: "",
+  output_cooked_item: "", output_burnt_item: "", cook_ms: 15000, burn_ms: 15000,
+};
+
+export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]; items: Item[]; onSaved: () => void }) {
+  const [form, setForm] = useState<Recipe | null>(null);
+  const editing = !!form;
+
+  const save = async () => {
+    if (!form) return;
+    await fetchNui("admin:saveRecipe", form);
+    setForm(null);
+    onSaved();
+  };
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex shrink-0 items-center justify-between">
+        <p className="text-xs text-muted-foreground">
+          Cookable recipes. Items are picked from the server catalogue — a recipe with a missing item is flagged and hidden in-game until fixed.
+        </p>
+        {!editing && (
+          <Button size="sm" onClick={() => setForm({ ...BLANK })}><Plus className="h-4 w-4" /> New recipe</Button>
+        )}
+      </div>
+
+      {editing && (
+        <div className="shrink-0 rounded-lg border border-primary/40 bg-primary/5 p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-sm font-semibold">{form!.input_item ? "Edit recipe" : "New recipe"}</span>
+            <Button size="icon" variant="ghost" onClick={() => setForm(null)}><X className="h-4 w-4" /></Button>
+          </div>
+          <RecipeForm form={form!} setForm={setForm} items={items} />
+          <div className="mt-3 flex justify-end gap-2">
+            <Button size="sm" variant="outline" onClick={() => setForm(null)}>Cancel</Button>
+            <Button size="sm" disabled={!form!.input_item} onClick={save}>Save recipe</Button>
+          </div>
+        </div>
+      )}
+
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+        {recipes.length === 0 && <div className="py-6 text-center text-sm text-muted-foreground">No recipes yet.</div>}
+        {recipes.map((r) => (
+          <div key={r.input_item} className={`rounded-lg border p-3 ${r.valid === false ? "border-destructive/50 bg-destructive/5" : "border-border"}`}>
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="truncate font-medium">{labelOf(items, r.input_item)}</span>
+                  <Badge variant="secondary">{r.station}</Badge>
+                  {r.valid === false ? (
+                    <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> needs fixing</Badge>
+                  ) : null}
+                </div>
+                <div className="mt-0.5 truncate text-xs text-muted-foreground">
+                  → {labelOf(items, r.output_cooked_item)} / {labelOf(items, r.output_burnt_item)} · {r.cook_ms}/{r.burn_ms}ms
+                </div>
+                {r.valid === false && (
+                  <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-destructive">
+                    <EyeOff className="h-3 w-3" /> hidden in-game — missing items:
+                    {(r.missing || []).map((m) => <span key={m} className="font-mono">{m}</span>)}
+                  </div>
+                )}
+              </div>
+              <div className="flex shrink-0 gap-2">
+                <Button size="sm" variant="outline" onClick={() => setForm({ ...BLANK, ...r })}><Pencil className="h-4 w-4" /></Button>
+                <Button size="sm" variant="destructive" onClick={async () => { await fetchNui("admin:deleteRecipe", { input_item: r.input_item }); onSaved(); }}>
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RecipeForm({ form, setForm, items }: { form: Recipe; setForm: (r: Recipe) => void; items: Item[] }) {
+  const set = (k: keyof Recipe, v: any) => setForm({ ...form, [k]: v });
+  return (
+    <div className="grid grid-cols-3 gap-3">
+      <Field label="Input item"><ItemPicker items={items} value={form.input_item} onChange={(v) => set("input_item", v)} /></Field>
+      <Select label="Station" value={form.station} onChange={(v) => set("station", v)}
+        options={[{ value: "fryer", label: "Fryer" }, { value: "stovetop", label: "Stovetop" }]} />
+      <div />
+      <Field label="Cooked output"><ItemPicker items={items} value={form.output_cooked_item} onChange={(v) => set("output_cooked_item", v)} /></Field>
+      <Field label="Burnt output"><ItemPicker items={items} value={form.output_burnt_item} onChange={(v) => set("output_burnt_item", v)} /></Field>
+      <div />
+      <TextField label="Raw model (_01)" value={form.raw_model} onChange={(v) => set("raw_model", v)} />
+      <TextField label="Cooked model (_02)" value={form.cooked_model} onChange={(v) => set("cooked_model", v)} />
+      <TextField label="Burnt model (_03)" value={form.burnt_model} onChange={(v) => set("burnt_model", v)} />
+      <NumberField label="Cook time (ms)" value={form.cook_ms} min={0} step={1000} onChange={(v) => set("cook_ms", v)} />
+      <NumberField label="Burn time (ms)" value={form.burn_ms} min={0} step={1000} onChange={(v) => set("burn_ms", v)} />
+    </div>
+  );
+}
+
+function labelOf(items: Item[], name: string) {
+  if (!name) return "—";
+  return items.find((i) => i.name === name)?.label ?? name;
+}

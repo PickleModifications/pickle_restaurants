@@ -34,7 +34,8 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
 
     if station == "fryer" or station == "stovetop" then
         for _, recipe in ipairs(RecipeCache) do
-            if recipe.station == station then
+            -- Recipes that reference a missing item are hidden until fixed.
+            if recipe.station == station and IsRecipeValid(recipe) then
                 local count = Inventory.GetItemCount(src, recipe.input_item)
                 if count and count > 0 then
                     out[#out + 1] = { kind = "cook", item = recipe.input_item, label = GetItemLabel(recipe.input_item), count = count }
@@ -43,17 +44,22 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         end
     elseif station == "soda_machine" then
         for _, drink in ipairs(GetSetting("drinks", {})) do
-            local count = Inventory.GetItemCount(src, drink.input) or 0
-            out[#out + 1] = { kind = "drink", item = drink.input, label = drink.label or GetItemLabel(drink.input), count = count }
+            if ItemExists(drink.input) and ItemExists(drink.output) then
+                local count = Inventory.GetItemCount(src, drink.input) or 0
+                out[#out + 1] = { kind = "drink", item = drink.input, label = drink.label or GetItemLabel(drink.input), count = count }
+            end
         end
     elseif station == "kitchen_prep" then
         for _, asm in ipairs(GetSetting("assembly", {})) do
-            local canMake = true
-            for _, comp in ipairs(asm.components or {}) do
-                if (Inventory.GetItemCount(src, comp) or 0) < 1 then canMake = false break end
+            -- Assembly recipes whose result item is missing are hidden until fixed.
+            if ItemExists(asm.output) then
+                local canMake = true
+                for _, comp in ipairs(asm.components or {}) do
+                    if (Inventory.GetItemCount(src, comp) or 0) < 1 then canMake = false break end
+                end
+                out[#out + 1] = { kind = "assembly", item = asm.output, label = asm.label or asm.output, canMake = canMake,
+                                  components = asm.components }
             end
-            out[#out + 1] = { kind = "assembly", item = asm.output, label = asm.label or asm.output, canMake = canMake,
-                              components = asm.components }
         end
     end
     return out

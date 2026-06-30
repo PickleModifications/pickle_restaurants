@@ -104,22 +104,28 @@ local interactCheck = false
 local interactText = nil
 
 function ShowInteractText(text)
-    local timer = GetGameTimer()
-    interactTick = timer
-    if interactText == nil or interactText ~= text then 
+    interactTick = GetGameTimer()
+    if interactText ~= text then
         interactText = text
         SendNUIMessage({ type = "setInteractText", text = text })
     end
     if interactCheck then return end
     interactCheck = true
     CreateThread(function()
-        Wait(150)
-        local timer = GetGameTimer()
-        interactCheck = false
-        if timer ~= interactTick then 
-            SendNUIMessage({ type = "setInteractText", text = nil })
-            interactText = nil
-            interactTick = 0
+        -- Stay open while ShowInteractText keeps being called each frame; only
+        -- hide once it has stopped ticking for >150ms. Comparing the *last call*
+        -- time (interactTick) against now — rather than re-reading the clock and
+        -- comparing it to itself — is what stops the open/close flicker during
+        -- continuous calls such as object placement.
+        while true do
+            Wait(150)
+            if GetGameTimer() - interactTick >= 150 then
+                interactCheck = false
+                interactText  = nil
+                interactTick  = 0
+                SendNUIMessage({ type = "setInteractText", text = nil })
+                return
+            end
         end
     end)
 end
