@@ -241,7 +241,10 @@ function GetCursorRaycast(camPos, camRot, flags, ignore)
     local from = camPos + (dir * 0.05)
     local to = camPos + (dir * 300)
 
-    local ray = StartShapeTestRay(from.x, from.y, from.z, to.x, to.y, to.z, -1, -1, 1)
+    -- Ignore the player's own ped by default, otherwise the cursor ray hits the
+    -- body standing between the camera and what we're aiming at (e.g. the oven
+    -- doors). Callers can still override the ignore entity / intersect flags.
+    local ray = StartShapeTestRay(from.x, from.y, from.z, to.x, to.y, to.z, flags or -1, ignore or PlayerPedId(), 1)
     local retval, hit, endCoords, surfaceNormal, entityHit = GetShapeTestResult(ray)
     return hit, endCoords, entityHit
 end

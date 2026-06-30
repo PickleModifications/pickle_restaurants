@@ -15,8 +15,18 @@ currentCookProp  = nil
 
 -- ─── world food props (synced for everyone) ──────────────────────────────────
 
+-- Food props are local, non-mission objects (CreateProp -> CreateObject(...,
+-- false, false, false)). DeleteEntity silently no-ops on those unless we first
+-- take ownership by flagging them as a mission entity, otherwise removed/
+-- collected food lingers in the world.
+local function SafeDeleteEntity(ent)
+    if not ent or not DoesEntityExist(ent) then return end
+    SetEntityAsMissionEntity(ent, true, true)
+    DeleteEntity(ent)
+end
+
 local function SpawnCookObject(uid, model, x, y, z, state)
-    if CookObjects[uid] and DoesEntityExist(CookObjects[uid]) then DeleteEntity(CookObjects[uid]) end
+    if CookObjects[uid] then SafeDeleteEntity(CookObjects[uid]) end
     print("C")
     local ent = CreateProp(model, x, y, z, false, false, false)
     if not ent or not DoesEntityExist(ent) then return end
@@ -43,7 +53,7 @@ RegisterNetEvent("pickle_restaurants:cooking:move", function(uid, x, y, z)
 end)
 
 RegisterNetEvent("pickle_restaurants:cooking:remove", function(uid)
-    if CookObjects[uid] and DoesEntityExist(CookObjects[uid]) then DeleteEntity(CookObjects[uid]) end
+    SafeDeleteEntity(CookObjects[uid])
     CookObjects[uid], CookState[uid], CookCoords[uid] = nil, nil, nil
 end)
 
@@ -64,6 +74,7 @@ end
 local function StopCooking()
     cookingOpen = false
     currentCookProp = nil
+    if HoverOvenDoor then HoverOvenDoor(nil, nil) end -- clear any door outline
     StopStationCamera()
     CloseNUI()
     SendNUIMessage({ action = "cookingItems", items = {} })
@@ -89,6 +100,19 @@ function OpenCookingStation(prop)
                 end
             end
             SendNUIMessage({ action = "cookingItems", items = items })
+
+            -- Stovetop: raycast the cursor at the oven doors and outline the one
+            -- under it, so it reads as clickable. The click comes back through
+            -- the cooking:worldClick NUI callback.
+            if currentCookProp and currentCookProp.prop_type == "stovetop" and HoverOvenDoor then
+                local hit, _, entity = CursorToWorld()
+                local door
+                if hit and entity and entity ~= 0 and GetOvenDoorIndexByEntity then
+                    door = GetOvenDoorIndexByEntity(currentCookProp.id, entity)
+                end
+                HoverOvenDoor(currentCookProp.id, door)
+            end
+
             if IsControlJustReleased(0, 322) then StopCooking() end -- ESC fallback
             Wait(50)
         end
@@ -130,6 +154,27 @@ RegisterNUICallback("cooking:move", function(d, cb)
     cb(res or { ok = false })
 end)
 
+-- switch the scripted camera between the cooktop and either oven door
+RegisterNUICallback("cooking:setView", function(d, cb)
+    if currentCookProp and SetStationView then SetStationView(currentCookProp, d.view) end
+    cb({ ok = true })
+end)
+
+-- click in the world -> if the cursor is over an oven door, toggle it (server
+-- validates + syncs to all). The hovered door is tracked per-frame above.
+RegisterNUICallback("cooking:worldClick", function(_, cb)
+    if currentCookProp and currentCookProp.prop_type == "stovetop" and GetHoveredOvenDoor then
+        local door = GetHoveredOvenDoor(currentCookProp.id)
+        if door then
+            local res = lib.callback.await("pickle_restaurants:doors:toggle", false, {
+                prop_id = currentCookProp.id, door = door,
+            })
+            if res and res.error then ShowNotification(res.error) end
+        end
+    end
+    cb({ ok = true })
+end)
+
 RegisterNUICallback("cooking:close", function(_, cb)
     StopCooking()
     cb({})
@@ -137,7 +182,7 @@ end)
 
 AddEventHandler("onResourceStop", function(res)
     if res ~= GetCurrentResourceName() then return end
-    for uid, ent in pairs(CookObjects) do
-        if DoesEntityExist(ent) then DeleteEntity(ent) end
+    for _, ent in pairs(CookObjects) do
+        SafeDeleteEntity(ent)
     end
 end)

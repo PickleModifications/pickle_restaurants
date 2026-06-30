@@ -31,9 +31,20 @@ local counterInteractions = {} -- [restaurantId] = interaction index
 
 -- ─── world cleanup ───────────────────────────────────────────────────────────
 
+-- Props are spawned as local, non-mission objects (CreateObject(..., false,
+-- false, false)). DeleteEntity silently no-ops on those unless we first take
+-- ownership by flagging them as a mission entity, which is why "removed in the
+-- menu" stations used to linger in the world.
+local function SafeDeleteEntity(ent)
+    if not ent or not DoesEntityExist(ent) then return end
+    SetEntityAsMissionEntity(ent, true, true)
+    DeleteEntity(ent)
+end
+
 local function ClearWorld()
     for id, ent in pairs(spawnedProps) do
-        if DoesEntityExist(ent) then DeleteEntity(ent) end
+        if DespawnOvenDoors then DespawnOvenDoors(id) end
+        SafeDeleteEntity(ent)
         spawnedProps[id] = nil
     end
     for id, idx in pairs(propInteractions) do
@@ -83,6 +94,9 @@ local function SpawnProp(prop)
     SetEntityCollision(ent, true, true)
     spawnedProps[prop.id] = ent
     debugPrint(("Spawned prop #%s '%s' at %.2f %.2f %.2f"):format(prop.id, prop.model, prop.x, prop.y, prop.z))
+
+    -- Stovetops carry two oven doors that render + sync independently.
+    if prop.prop_type == "stovetop" and SpawnOvenDoors then SpawnOvenDoors(prop, ent) end
 
     local label = STATION_LABELS[prop.prop_type] or "Station"
     propInteractions[prop.id] = CreateInteraction({
@@ -187,9 +201,8 @@ RegisterNetEvent("pickle_restaurants:propPlaced", function(prop)
 end)
 
 RegisterNetEvent("pickle_restaurants:propRemoved", function(propId)
-    if spawnedProps[propId] and DoesEntityExist(spawnedProps[propId]) then
-        DeleteEntity(spawnedProps[propId])
-    end
+    if DespawnOvenDoors then DespawnOvenDoors(propId) end
+    SafeDeleteEntity(spawnedProps[propId])
     spawnedProps[propId] = nil
     if propInteractions[propId] then DeleteInteraction(propInteractions[propId]); propInteractions[propId] = nil end
 end)

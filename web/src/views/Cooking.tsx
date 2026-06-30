@@ -7,6 +7,12 @@ import { cn } from "@/lib/utils";
 type Ingredient = { kind: string; item: string; label: string; count?: number; canMake?: boolean };
 type ChipItem = { uid: number; state: string; onScreen: boolean; x: number; y: number };
 
+const STOVE_VIEWS = [
+  { key: "stovetop", label: "Stovetop" },
+  { key: "door1", label: "Oven Door #1" },
+  { key: "door2", label: "Oven Door #2" },
+];
+
 const STATION_META: Record<string, { label: string; icon: any; hint: string }> = {
   fryer: { label: "Fryer", icon: Flame, hint: "Drag raw food into the fryer. It cooks, then burns if you wait too long." },
   stovetop: { label: "Stovetop", icon: Flame, hint: "Drag patties onto the stovetop to cook them." },
@@ -29,15 +35,23 @@ export default function Cooking({ data }: { data: any }) {
   const [station, setStation] = useState<string>(data?.station || "fryer");
   const [ingredients, setIngredients] = useState<Ingredient[]>(data?.ingredients || []);
   const [chips, setChips] = useState<ChipItem[]>([]);
+  const [view, setView] = useState<string>("stovetop");
   const barRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setStation(data?.station || "fryer");
     setIngredients(data?.ingredients || []);
+    setView("stovetop");
   }, [data]);
 
   useNuiEvent("cookingIngredients", (d) => setIngredients(d.ingredients || []));
   useNuiEvent("cookingItems", (d) => setChips((d.items || []).filter((i: ChipItem) => i.onScreen)));
+
+  const isStove = station === "stovetop";
+  const switchView = (key: string) => {
+    setView(key);
+    fetchNui("cooking:setView", { view: key });
+  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -54,9 +68,11 @@ export default function Cooking({ data }: { data: any }) {
 
   return (
     <>
-      {/* world drop zone — drop ingredients here to place, drop chips to move */}
+      {/* world drop zone — drop ingredients to place, drop chips to move, and
+          (stovetop) click to toggle whichever oven door the cursor is over */}
       <div
         className="fixed inset-0"
+        onClick={() => isStove && fetchNui("cooking:worldClick")}
         onDragOver={(e) => e.preventDefault()}
         onDrop={(e) => {
           e.preventDefault();
@@ -69,6 +85,24 @@ export default function Cooking({ data }: { data: any }) {
           dragPayload = null;
         }}
       />
+
+      {/* stovetop view switcher — re-frames the scripted camera onto a part */}
+      {isStove && (
+        <div className="fixed left-1/2 top-4 flex -translate-x-1/2 gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-xl">
+          {STOVE_VIEWS.map((v) => (
+            <button
+              key={v.key}
+              onClick={() => switchView(v.key)}
+              className={cn(
+                "rounded-md px-3 py-1.5 text-xs font-semibold transition",
+                view === v.key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"
+              )}
+            >
+              {v.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* on-screen chips over each world food prop */}
       {chips.map((c) => {

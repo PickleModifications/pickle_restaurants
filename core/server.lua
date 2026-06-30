@@ -77,6 +77,17 @@ local DEFAULT_SETTINGS = {
           components = { "bun", "cooked_beef_patty", "cheese" } },
         { output = "chicken_sandwich", label = "Chicken Sandwich", model = "pickle_bread_bun_01",
           components = { "bun", "cooked_chicken_patty" } },
+        -- Veg toppings are whole ingredients (lettuce topping = lettuce, etc.).
+        { output = "deluxe_burger", label = "Deluxe Burger", model = "pickle_bread_bun_01",
+          components = { "bun", "cooked_beef_patty", "cheese", "lettuce", "tomato", "pickle" } },
+        -- Pizza: top a dough at kitchen prep, then bake the raw pizza in the oven.
+        { output = "raw_pizza", label = "Pizza (uncooked)", model = "pickle_pizza_dough_01",
+          components = { "pizza_dough", "pizza_sauce", "pizza_cheese", "pepperoni" } },
+        -- Bakery decoration: finish a fried doughnut / baked cake with frosting + sprinkles.
+        { output = "frosted_doughnut", label = "Frosted Doughnut", model = "pickle_doughnut_topping_01",
+          components = { "cooked_doughnut", "frosting", "sprinkles" } },
+        { output = "decorated_cake", label = "Decorated Cake", model = "pickle_cake_04",
+          components = { "cooked_cake", "frosting", "sprinkles" } },
     },
 }
 
@@ -98,6 +109,21 @@ local DEFAULT_RECIPES = {
     { input = "raw_chicken_patty", station = "stovetop",
       raw = "pickle_patty_friedchicken_01", cooked = "pickle_patty_friedchicken_02", burnt = "pickle_patty_friedchicken_03",
       out_cooked = "cooked_chicken_patty", out_burnt = "burnt_chicken_patty", cook_ms = 18000, burn_ms = 15000 },
+    -- Doughnuts are fried.
+    { input = "raw_doughnut", station = "fryer",
+      raw = "pickle_doughnut_01", cooked = "pickle_doughnut_02", burnt = "pickle_doughnut_03",
+      out_cooked = "cooked_doughnut", out_burnt = "burnt_doughnut", cook_ms = 12000, burn_ms = 12000 },
+    -- Cookies + cake bake in the oven (the stovetop station doubles as the oven).
+    { input = "raw_cookie", station = "stovetop",
+      raw = "pickle_cookie_01", cooked = "pickle_cookie_02", burnt = "pickle_cookie_03",
+      out_cooked = "cooked_cookie", out_burnt = "burnt_cookie", cook_ms = 20000, burn_ms = 18000 },
+    { input = "raw_cake", station = "stovetop",
+      raw = "pickle_cake_01", cooked = "pickle_cake_02", burnt = "pickle_cake_03",
+      out_cooked = "cooked_cake", out_burnt = "burnt_cake", cook_ms = 30000, burn_ms = 25000 },
+    -- Pizza bakes in the oven; the raw (topped) pizza is assembled at kitchen prep first.
+    { input = "raw_pizza", station = "stovetop",
+      raw = "pickle_pizza_dough_01", cooked = "pickle_pizza_dough_02", burnt = "pickle_pizza_dough_03",
+      out_cooked = "cooked_pizza", out_burnt = "burnt_pizza", cook_ms = 25000, burn_ms = 20000 },
 }
 
 -- ─── DB bootstrap ────────────────────────────────────────────────────────────
@@ -234,16 +260,35 @@ local function LoadSettings()
     for key, value in pairs(DEFAULT_SETTINGS) do
         if SettingsCache[key] == nil then SetSetting(key, value) end
     end
+
+    -- Merge in any newly-added default assembly/drink entries (matched by their
+    -- output/input) so fresh defaults appear on restart without clobbering ones
+    -- an admin customised — mirrors how SeedRecipes upserts missing recipes.
+    local function mergeListDefaults(key, idField)
+        local list = SettingsCache[key]
+        if type(list) ~= "table" then return end
+        local seen = {}
+        for _, entry in ipairs(list) do seen[entry[idField]] = true end
+        local changed = false
+        for _, def in ipairs(DEFAULT_SETTINGS[key] or {}) do
+            if not seen[def[idField]] then list[#list + 1] = def; changed = true end
+        end
+        if changed then SetSetting(key, list) end
+    end
+    mergeListDefaults("assembly", "output")
+    mergeListDefaults("drinks", "output")
 end
 
 local function SeedRecipes()
-    local count = MySQL.scalar.await("SELECT COUNT(*) FROM pickle_restaurant_recipes") or 0
-    if count > 0 then return end
+    -- Insert any default recipe that isn't present yet (keyed by the unique
+    -- input_item). This means newly-added defaults show up on the next restart
+    -- without wiping the table or overwriting recipes an admin has customised.
     for _, r in ipairs(DEFAULT_RECIPES) do
         MySQL.insert.await([[
             INSERT INTO pickle_restaurant_recipes
                 (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE input_item = input_item
         ]], { r.input, r.station, r.raw, r.cooked, r.burnt, r.out_cooked, r.out_burnt, r.cook_ms, r.burn_ms })
     end
 end

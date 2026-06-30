@@ -1,12 +1,11 @@
 # Generated restaurant items
 
-These files were generated from the **default** recipes, drinks, assembly recipes
-and restaurant menus shipped with pickle_restaurants. They contain every inventory
-item the restaurant system references on a fresh install. Re-run `/restaurants_items`
-in-game (as an admin) after editing your configuration to regenerate them from your
-**live** data.
+These files were generated from the **current** recipes, drinks, assembly recipes
+and restaurant menus configured in-game. They contain every inventory item the
+restaurant system references. Re-run `/restaurants_items` after editing your
+configuration to regenerate them.
 
-22 items were exported.
+46 items were exported.
 
 ## Install (pick the one matching your inventory)
 
