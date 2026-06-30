@@ -30,17 +30,52 @@ end
 
 -- ─── dual-sided patties ──────────────────────────────────────────────────────
 
-local function broadcastDual(it)
-    TriggerClientEvent("pickle_restaurants:cooking:dual", -1, it.uid, it.recipe.input_item,
-        it.x, it.y, it.z, it.sides[1], it.sides[2], it.flipped)
-end
-
 -- The single item a dual patty hands back: burnt dominates, then raw, else
 -- cooked. (raw/cooked -> raw, cooked/burnt -> burnt, raw/burnt -> burnt.)
 local function combineDualState(sides)
     if sides[1] == "burnt" or sides[2] == "burnt" then return "burnt" end
     if sides[1] == "raw" or sides[2] == "raw" then return "raw" end
     return "cooked"
+end
+
+-- The item handed back at the current combined state — also what the hover panel
+-- previews as "what you'd collect right now".
+local function dualGiveItem(it)
+    local state = combineDualState(it.sides)
+    if state == "raw" then return it.recipe.input_item
+    elseif state == "cooked" then return it.recipe.output_cooked_item
+    else return it.recipe.output_burnt_item end
+end
+
+-- Per-face cook progress. Only the grill side has a running timer, so the other
+-- side's elapsed is frozen at whatever it had banked.
+local function sideProgress(it, s)
+    local phase = it.sides[s]                          -- raw|cooked = cooking toward next; burnt = done
+    local total = (phase == "raw") and it.recipe.cook_ms
+               or (phase == "cooked") and it.recipe.burn_ms or 0
+    local elapsed = it.elapsed[s] or 0
+    if s == it.down and it.phaseStart then
+        elapsed = elapsed + (GetGameTimer() - it.phaseStart)
+    end
+    return { state = phase, total = total or 0, elapsed = elapsed }
+end
+
+-- Everything a client needs to render a dual patty and its live status panel:
+-- per-face state + cook progress, and which face is on the grill.
+local function dualPayload(it)
+    local give = dualGiveItem(it)
+    return {
+        uid = it.uid, dual = true, input = it.recipe.input_item,
+        x = it.x, y = it.y, z = it.z,
+        sides = { sideProgress(it, 1), sideProgress(it, 2) },
+        cooking = it.down, flipped = it.flipped, cheese = it.cheese or "none",
+        give = give, giveLabel = give and GetItemLabel(give) or nil,
+        giveImage = give and GetItemImage(give) or nil,
+    }
+end
+
+local function broadcastDual(it)
+    TriggerClientEvent("pickle_restaurants:cooking:dual", -1, dualPayload(it))
 end
 
 -- Banking the down face's accrued cook time and cancelling its pending timeout,
@@ -80,11 +115,40 @@ end
 
 -- one sync entry for a (re)connecting / station-opening client
 local function activeEntry(it)
-    if it.dual then
-        return { uid = it.uid, dual = true, input = it.recipe.input_item,
-                 x = it.x, y = it.y, z = it.z, s1 = it.sides[1], s2 = it.sides[2], flipped = it.flipped }
-    end
+    if it.dual then return dualPayload(it) end
     return { uid = it.uid, model = it.model, x = it.x, y = it.y, z = it.z, state = it.state }
+end
+
+-- Models for raw components that have no cook recipe (extend / tune as needed).
+local PREP_MODELS = {
+    bun    = "pickle_bread_bun_01",
+    cheese = "pickle_cheese_applied_02",
+}
+
+-- A world model for an item: cook recipe outputs/inputs, assembly outputs, drink
+-- outputs, else a raw-component model (may be nil = no prop). Used so the prep
+-- station can spawn a live 3D preview while you drag an item onto the table.
+function itemModel(item)
+    for _, r in ipairs(RecipeCache) do
+        if r.output_cooked_item == item then return r.cooked_model end
+        if r.output_burnt_item == item then return r.burnt_model end
+        if r.input_item == item then return r.raw_model end
+    end
+    for _, a in ipairs(GetSetting("assembly", {})) do if a.output == item then return a.model end end
+    for _, dd in ipairs(GetSetting("drinks", {})) do if dd.output == item then return dd.model end end
+    return PREP_MODELS[item]
+end
+
+-- The dual-sided recipe an item belongs to (matched by raw input or cooked/burnt
+-- output), or nil. Used so a cooked patty pulled from the tray renders as the
+-- full two-faced patty (+ cheese) while dragging, not a single half.
+local function dualRecipeForItem(item)
+    for _, r in ipairs(RecipeCache) do
+        if (r.dual_sided == true or tonumber(r.dual_sided) == 1)
+            and (r.output_cooked_item == item or r.output_burnt_item == item or r.input_item == item) then
+            return r
+        end
+    end
 end
 
 -- ─── ingredient list for the bottom bar ──────────────────────────────────────
@@ -106,6 +170,15 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
                 end
             end
         end
+        -- Cheese is a topping you drag onto a cooked patty (stovetop only). It
+        -- renders the real fresh-slice prop in 3D as you drag (no 2D pill).
+        if station == "stovetop" and ItemExists("cheese") then
+            local count = Inventory.GetItemCount(src, "cheese") or 0
+            if count > 0 then
+                out[#out + 1] = { kind = "topping", item = "cheese", label = GetItemLabel("cheese"),
+                                  image = GetItemImage("cheese"), count = count, model = "pickle_cheese_applied_01" }
+            end
+        end
     elseif station == "soda_machine" then
         for _, drink in ipairs(GetSetting("drinks", {})) do
             if ItemExists(drink.input) and ItemExists(drink.output) then
@@ -115,15 +188,19 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
             end
         end
     elseif station == "kitchen_prep" then
+        -- Interactive build: the bar lists the raw components (held in inventory)
+        -- used across assembly recipes; cooked components come from the tray.
+        local seen = {}
         for _, asm in ipairs(GetSetting("assembly", {})) do
-            -- Assembly recipes whose result item is missing are hidden until fixed.
-            if ItemExists(asm.output) then
-                local canMake = true
-                for _, comp in ipairs(asm.components or {}) do
-                    if (Inventory.GetItemCount(src, comp) or 0) < 1 then canMake = false break end
+            for _, comp in ipairs(asm.components or {}) do
+                if not seen[comp] and ItemExists(comp) then
+                    seen[comp] = true
+                    local count = Inventory.GetItemCount(src, comp) or 0
+                    if count > 0 then
+                        out[#out + 1] = { kind = "component", item = comp, label = GetItemLabel(comp),
+                                          image = GetItemImage(comp), count = count, model = itemModel(comp) }
+                    end
                 end
-                out[#out + 1] = { kind = "assembly", item = asm.output, label = asm.label or asm.output, canMake = canMake,
-                                  image = GetItemImage(asm.output), components = asm.components }
             end
         end
     end
@@ -170,6 +247,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
             it.elapsed = { 0, 0 }
             it.flipped = false
             it.down    = 1
+            it.cheese  = "none"
             CookingItems[uid] = it
             broadcastDual(it)
             armSideTimer(it)
@@ -236,6 +314,33 @@ lib.callback.register("pickle_restaurants:cooking:flip", function(src, d)
     return { ok = true }
 end)
 
+-- ─── cheese (dual-sided patties) ─────────────────────────────────────────────
+
+-- Drop a cheese slice on the up (visible) face — only once it's cooked. It melts
+-- after a delay.
+lib.callback.register("pickle_restaurants:cooking:applyCheese", function(src, d)
+    local it = CookingItems[tonumber(d.uid)]
+    if not it or not it.dual then return { ok = false } end
+    if not HasPerm(it.rid, src, "cook") then return { ok = false } end
+    if (it.cheese or "none") ~= "none" then return { ok = false, error = "Already has cheese." } end
+
+    local up = (it.down == 1) and 2 or 1
+    if it.sides[up] ~= "cooked" then return { ok = false, error = "Cook this side first." } end
+    if (Inventory.GetItemCount(src, "cheese") or 0) < 1 then return { ok = false, error = "No cheese." } end
+    Inventory.RemoveItem(src, "cheese", 1)
+
+    it.cheese = "applied"
+    broadcastDual(it)
+    local uid = it.uid
+    SetTimeout(GetSetting("cheese_melt_ms", 8000), function()
+        local cur = CookingItems[uid]
+        if not cur or cur.cheese ~= "applied" then return end
+        cur.cheese = "melted"
+        broadcastDual(cur)
+    end)
+    return { ok = true }
+end)
+
 -- ─── move (drag within world) ────────────────────────────────────────────────
 
 lib.callback.register("pickle_restaurants:cooking:move", function(src, d)
@@ -256,9 +361,10 @@ lib.callback.register("pickle_restaurants:cooking:collect", function(src, d)
 
     local giveItem
     if it.kind == "cook" then
-        local state = it.dual and combineDualState(it.sides) or it.state
-        if state == "raw" then giveItem = it.recipe.input_item
-        elseif state == "cooked" then giveItem = it.recipe.output_cooked_item
+        if it.dual then
+            giveItem = dualGiveItem(it)
+        elseif it.state == "raw" then giveItem = it.recipe.input_item
+        elseif it.state == "cooked" then giveItem = it.recipe.output_cooked_item
         else giveItem = it.recipe.output_burnt_item end
     elseif it.kind == "drink" then
         giveItem = (it.state == "done") and it.output or it.drink.input
@@ -266,11 +372,210 @@ lib.callback.register("pickle_restaurants:cooking:collect", function(src, d)
         giveItem = it.output
     end
 
-    if giveItem then Inventory.AddItem(src, giveItem, 1) end
+    -- Cooked products go into the per-player "Cooked Items" tray (a state store),
+    -- not the inventory — they're carried between stations and built at prep.
+    local cheese = (it.cheese and it.cheese ~= "none") and 1 or 0
+    if giveItem then AddTray(it.rid, GetIdentifier(src), giveItem, cheese, 1) end
     CookingItems[it.uid] = nil
     TriggerClientEvent("pickle_restaurants:cooking:remove", -1, it.uid)
-    return { ok = true, item = giveItem, label = giveItem and GetItemLabel(giveItem) or nil }
+    return { ok = true, item = giveItem, cheese = cheese, label = giveItem and GetItemLabel(giveItem) or nil }
 end)
+
+-- ─── cooked-items tray ───────────────────────────────────────────────────────
+
+lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
+    local prop = PropCache[tonumber(d.prop_id)]
+    if not prop then return {} end
+    if not HasPerm(prop.restaurant_id, src, "cook") then return {} end
+    local list = GetTray(prop.restaurant_id, GetIdentifier(src))
+    for _, e in ipairs(list) do
+        e.model = itemModel(e.item)
+        -- a dual patty renders as two faces; cheese rides the visible face (melted)
+        if dualRecipeForItem(e.item) then e.dual = true end
+        if e.cheese == 1 then e.cheeseModel = "pickle_cheese_applied_02" end
+    end
+    return list
+end)
+
+-- cash a tray item out into the real inventory (so it can be stocked/sold)
+lib.callback.register("pickle_restaurants:cooking:trayToInventory", function(src, d)
+    local prop = PropCache[tonumber(d.prop_id)]
+    if not prop then return { ok = false } end
+    local rid = prop.restaurant_id
+    if not HasPerm(rid, src, "cook") then return { ok = false } end
+    local id = GetIdentifier(src)
+    local item   = d.item
+    local cheese = (d.cheese == 1 or d.cheese == true) and 1 or 0
+    local count  = tonumber(d.count) or 1
+    if not item or not RemoveTray(rid, id, item, cheese, count) then return { ok = false, error = "Not enough." } end
+    Inventory.AddItem(src, item, count)
+    return { ok = true, item = item, count = count, label = GetItemLabel(item) }
+end)
+
+-- ─── interactive prep build (kitchen_prep) ───────────────────────────────────
+
+local PrepBuilds = {} -- [src] = { prop_id, rid, seq, layers = { {id, source, item, cheese, half} … } }
+
+-- A bun is one inventory item rendered as two stackable halves (top/bottom), so
+-- each half only counts as half a bun — one or two halves = one bun.
+local function layerUnits(l)
+    if l.item == "bun" and l.half then return 0.5 end
+    return 1.0
+end
+
+-- The multiset of items a build provides (a cheesed patty also provides "cheese";
+-- bun halves round up so a lone bottom bun still satisfies a "1 bun" recipe).
+local function buildProvides(layers)
+    local units = {}
+    for _, l in ipairs(layers) do
+        units[l.item] = (units[l.item] or 0) + layerUnits(l)
+        if l.cheese == 1 then units.cheese = (units.cheese or 0) + 1 end
+    end
+    local p = {}
+    for k, v in pairs(units) do p[k] = math.ceil(v) end
+    return p
+end
+
+-- The assembly recipe whose components exactly match the build, or nil.
+local function matchAssembly(layers)
+    if #layers == 0 then return nil end
+    local provides = buildProvides(layers)
+    for _, asm in ipairs(GetSetting("assembly", {})) do
+        local need = {}
+        for _, c in ipairs(asm.components or {}) do need[c] = (need[c] or 0) + 1 end
+        local ok = true
+        for k, v in pairs(need) do if (provides[k] or 0) ~= v then ok = false break end end
+        if ok then for k, v in pairs(provides) do if (need[k] or 0) ~= v then ok = false break end end end
+        if ok then return asm end
+    end
+    return nil
+end
+
+local function layerLabel(l)
+    local lbl = GetItemLabel(l.item)
+    if l.item == "bun" and l.half then lbl = lbl .. " (" .. l.half .. ")" end
+    return lbl
+end
+
+local function buildPayload(b)
+    local layers = {}
+    for i, l in ipairs(b.layers) do
+        layers[i] = { id = l.id, item = l.item, cheese = l.cheese, half = l.half, label = layerLabel(l) }
+    end
+    local m = matchAssembly(b.layers)
+    return { layers = layers, match = m and { output = m.output, label = m.label or m.output } or nil }
+end
+
+-- Units of (source,item,cheese) this build already reserved — layers only
+-- reserve; nothing is pulled from the tray/inventory until Make, so this guards
+-- against reserving more than the player actually holds.
+local function reservedUnits(b, source, item, cheese)
+    local n = 0
+    for _, l in ipairs(b.layers) do
+        if l.source == source and l.item == item and (l.cheese or 0) == (cheese or 0) then n = n + layerUnits(l) end
+    end
+    return n
+end
+
+lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
+    local prop = PropCache[tonumber(d.prop_id)]
+    if not prop or prop.prop_type ~= "kitchen_prep" then return { ok = false } end
+    local rid = prop.restaurant_id
+    if not HasPerm(rid, src, "cook") then return { ok = false } end
+    local item = d.item
+    if not item then return { ok = false } end
+    local cheese = (d.cheese == 1 or d.cheese == true) and 1 or 0
+    local half = (item == "bun" and (d.half == "top" or d.half == "bottom")) and d.half or nil
+
+    -- starting/continuing a build at this prop; a build at another prop is dropped
+    -- (nothing was consumed, so there's nothing to return).
+    local b = PrepBuilds[src]
+    if b and b.prop_id ~= prop.id then b = nil end
+    if not b then b = { prop_id = prop.id, rid = rid, seq = 0, layers = {} }; PrepBuilds[src] = b end
+
+    -- Reserve only — DON'T remove from the tray/inventory yet (that happens on
+    -- Make). Validate against what's left after this build's existing reservations.
+    local addUnits = (half and 0.5) or 1.0
+    if d.source == "tray" then
+        local needed = math.ceil(reservedUnits(b, "tray", item, cheese) + addUnits)
+        if GetTrayCount(rid, GetIdentifier(src), item, cheese) < needed then
+            return { ok = false, error = "Not enough in tray." }
+        end
+    else
+        cheese = 0
+        local needed = math.ceil(reservedUnits(b, "inv", item, 0) + addUnits)
+        if (Inventory.GetItemCount(src, item) or 0) < needed then
+            return { ok = false, error = "Missing item." }
+        end
+    end
+
+    b.seq = (b.seq or 0) + 1
+    b.layers[#b.layers + 1] = { id = b.seq, source = d.source, item = item, cheese = cheese, half = half }
+    return { ok = true, id = b.seq, build = buildPayload(b) }
+end)
+
+-- pull one placed part back out of the build (drag-to-bar removal); nothing was
+-- consumed, so this just drops the reservation.
+lib.callback.register("pickle_restaurants:cooking:prepRemove", function(src, d)
+    local b = PrepBuilds[src]; if not b then return { ok = true, build = { layers = {} } } end
+    local id = tonumber(d.id)
+    for i, l in ipairs(b.layers) do
+        if l.id == id then table.remove(b.layers, i); break end
+    end
+    if #b.layers == 0 then PrepBuilds[src] = nil; return { ok = true, build = { layers = {} } } end
+    return { ok = true, build = buildPayload(b) }
+end)
+
+lib.callback.register("pickle_restaurants:cooking:prepClear", function(src, _)
+    PrepBuilds[src] = nil -- nothing was consumed; just discard the reservation
+    return { ok = true, build = { layers = {} } }
+end)
+
+lib.callback.register("pickle_restaurants:cooking:prepFinish", function(src, _)
+    local b = PrepBuilds[src]; if not b then return { ok = false } end
+    if not HasPerm(b.rid, src, "cook") then return { ok = false } end
+    local asm = matchAssembly(b.layers)
+    if not asm then return { ok = false, error = "Doesn't match a recipe." } end
+    local id = GetIdentifier(src)
+
+    -- Now consume the reserved items — tally per source (bun halves round up to
+    -- whole buns), verify everything is still present, then remove it all (so a
+    -- build never partially destroys items).
+    local trayUnits, invUnits = {}, {}
+    for _, l in ipairs(b.layers) do
+        if l.source == "tray" then
+            local k = l.item .. "|" .. (l.cheese or 0)
+            trayUnits[k] = trayUnits[k] or { item = l.item, cheese = l.cheese or 0, u = 0 }
+            trayUnits[k].u = trayUnits[k].u + layerUnits(l)
+        else
+            invUnits[l.item] = (invUnits[l.item] or 0) + layerUnits(l)
+        end
+    end
+    local needTray, needInv = {}, {}
+    for k, t in pairs(trayUnits) do needTray[k] = { item = t.item, cheese = t.cheese, n = math.ceil(t.u) } end
+    for item, u in pairs(invUnits) do needInv[item] = math.ceil(u) end
+
+    for _, t in pairs(needTray) do
+        if GetTrayCount(b.rid, id, t.item, t.cheese) < t.n then
+            return { ok = false, error = "Cooked items changed — rebuild." }
+        end
+    end
+    for item, n in pairs(needInv) do
+        if (Inventory.GetItemCount(src, item) or 0) < n then
+            return { ok = false, error = "Missing components." }
+        end
+    end
+    for _, t in pairs(needTray) do RemoveTray(b.rid, id, t.item, t.cheese, t.n) end
+    for item, n in pairs(needInv) do Inventory.RemoveItem(src, item, n) end
+
+    AddTray(b.rid, id, asm.output, 0, 1)
+    PrepBuilds[src] = nil
+    return { ok = true, output = asm.output, label = asm.label or asm.output, build = { layers = {} } }
+end)
+
+-- closing the station / dropping just discards the reservation (nothing consumed)
+RegisterNetEvent("pickle_restaurants:cooking:prepClose", function() PrepBuilds[source] = nil end)
+AddEventHandler("playerDropped", function() PrepBuilds[source] = nil end)
 
 -- send active items to clients that (re)sync
 RegisterNetEvent("pickle_restaurants:requestSync", function()

@@ -13,6 +13,7 @@ RecipeCache     = {}    -- array of recipe rows
 RecipeByInput   = {}    -- [input_item]    = recipe
 EmployeeCache   = {}    -- [restaurantId][identifier] = employee row
 StockCache      = {}    -- [restaurantId][item] = count
+TrayCache       = {}    -- [restaurantId][identifier][item.."|"..cheese] = { item, cheese, count }
 SettingsCache   = {}    -- [key]           = decoded value
 
 PERMISSIONS = { "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance" }
@@ -49,6 +50,7 @@ local DEFAULT_SETTINGS = {
     currency        = "money",
     starting_balance = 0,
     default_commission = 10,
+    cheese_melt_ms  = 8000, -- how long applied cheese takes to melt on a patty
     blip            = { sprite = 93, color = 1, scale = 0.8, enabled = true },
     default_roles   = {
         ["0"] = { label = "Trainee", commission = 5,  permissions = { cook = true } },
@@ -227,6 +229,22 @@ local function CreateTables()
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
 
+    -- Per-player, per-restaurant "Cooked Items" tray: cooked products held as a
+    -- state (with a cheese flag) between the grill and the prep station.
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `pickle_restaurant_cooked_items` (
+            `id`            INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `restaurant_id` INT UNSIGNED NOT NULL,
+            `identifier`    VARCHAR(80)  NOT NULL,
+            `item`          VARCHAR(60)  NOT NULL,
+            `cheese`        TINYINT(1)   NOT NULL DEFAULT 0,
+            `count`         INT          NOT NULL DEFAULT 0,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uniq_tray` (`restaurant_id`, `identifier`, `item`, `cheese`),
+            KEY `idx_rest_id` (`restaurant_id`, `identifier`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
+
     MySQL.query.await([[
         CREATE TABLE IF NOT EXISTS `pickle_restaurant_ledger` (
             `id`            INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -351,6 +369,20 @@ local function LoadStock()
     for _, row in ipairs(rows) do
         StockCache[row.restaurant_id] = StockCache[row.restaurant_id] or {}
         StockCache[row.restaurant_id][row.item] = row.count
+    end
+end
+
+local function LoadCookedItems()
+    TrayCache = {}
+    local rows = MySQL.query.await("SELECT * FROM pickle_restaurant_cooked_items") or {}
+    for _, row in ipairs(rows) do
+        if (row.count or 0) > 0 then
+            local cheese = (row.cheese == 1 or row.cheese == true) and 1 or 0
+            TrayCache[row.restaurant_id] = TrayCache[row.restaurant_id] or {}
+            TrayCache[row.restaurant_id][row.identifier] = TrayCache[row.restaurant_id][row.identifier] or {}
+            TrayCache[row.restaurant_id][row.identifier][row.item .. "|" .. cheese] =
+                { item = row.item, cheese = cheese, count = row.count }
+        end
     end
 end
 
@@ -536,6 +568,65 @@ function RemoveStock(restaurantId, item, count)
     return true
 end
 
+-- ─── cooked-items tray (per-player, per-restaurant) ──────────────────────────
+
+local function trayKey(item, cheese) return item .. "|" .. (cheese == 1 and 1 or 0) end
+
+function GetTrayCount(rid, identifier, item, cheese)
+    local e = TrayCache[rid] and TrayCache[rid][identifier] and TrayCache[rid][identifier][trayKey(item, cheese)]
+    return (e and e.count) or 0
+end
+
+function AddTray(rid, identifier, item, cheese, count)
+    if not rid or not identifier or not item then return end
+    cheese = (cheese == 1 or cheese == true) and 1 or 0
+    count = count or 1
+    TrayCache[rid] = TrayCache[rid] or {}
+    TrayCache[rid][identifier] = TrayCache[rid][identifier] or {}
+    local key = trayKey(item, cheese)
+    local e = TrayCache[rid][identifier][key]
+    if e then e.count = e.count + count else
+        TrayCache[rid][identifier][key] = { item = item, cheese = cheese, count = count }
+    end
+    MySQL.update("INSERT INTO pickle_restaurant_cooked_items (restaurant_id, identifier, item, cheese, count) "
+        .. "VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE count = count + VALUES(count)",
+        { rid, identifier, item, cheese, count })
+end
+
+function RemoveTray(rid, identifier, item, cheese, count)
+    cheese = (cheese == 1 or cheese == true) and 1 or 0
+    count = count or 1
+    if GetTrayCount(rid, identifier, item, cheese) < count then return false end
+    local key = trayKey(item, cheese)
+    local e = TrayCache[rid][identifier][key]
+    e.count = e.count - count
+    if e.count <= 0 then
+        TrayCache[rid][identifier][key] = nil
+        MySQL.update("DELETE FROM pickle_restaurant_cooked_items WHERE restaurant_id = ? AND identifier = ? AND item = ? AND cheese = ?",
+            { rid, identifier, item, cheese })
+    else
+        MySQL.update("UPDATE pickle_restaurant_cooked_items SET count = count - ? WHERE restaurant_id = ? AND identifier = ? AND item = ? AND cheese = ?",
+            { count, rid, identifier, item, cheese })
+    end
+    return true
+end
+
+-- A display list for the NUI: resolves label/image and a cheese flag.
+function GetTray(rid, identifier)
+    local out = {}
+    local byKey = TrayCache[rid] and TrayCache[rid][identifier]
+    if not byKey then return out end
+    for _, e in pairs(byKey) do
+        if e.count > 0 then
+            out[#out + 1] = {
+                item = e.item, cheese = e.cheese, count = e.count,
+                label = GetItemLabel(e.item), image = GetItemImage(e.item),
+            }
+        end
+    end
+    return out
+end
+
 -- ─── employee cache mutators (used by management module) ──────────────────────
 
 function CacheEmployee(restaurantId, row)
@@ -621,6 +712,7 @@ CreateThread(function()
         LoadProps()
         LoadEmployees()
         LoadStock()
+        LoadCookedItems()
         RestaurantsReady = true
         debugPrint(("Booted: %d restaurants, %d props, %d recipes."):format(
             #BuildSyncPayload().restaurants, #BuildSyncPayload().props, #RecipeCache))
