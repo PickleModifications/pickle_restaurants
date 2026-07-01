@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { Badge } from "@/components/ui/badge";
 import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat } from "lucide-react";
@@ -7,8 +7,13 @@ import { cn } from "@/lib/utils";
 type Ingredient = { kind: string; item: string; label: string; image?: string; count?: number; canMake?: boolean; model?: string; dual?: boolean };
 type SideInfo = { state: string; percent: number; cooking?: boolean };
 type TrayEntry = { item: string; cheese?: number; count: number; label?: string; image?: string; model?: string; dual?: boolean; cheeseModel?: string };
-type BuildLayer = { id?: number; item: string; cheese?: number; half?: string; label?: string };
-type BuildState = { layers: BuildLayer[]; match?: { output: string; label: string } };
+// A buildable recipe (kitchen prep) with its output + components resolved for the tooltip.
+type RecipeComp = { item: string; label: string; image?: string };
+type RecipeCat = { output: string; label: string; image?: string; components: RecipeComp[] };
+// The hovered stack's live snapshot: where it is on screen + what it provides.
+type PrepTip = { sid: number; onScreen: boolean; x: number; y: number; provides: Record<string, number> };
+// A recipe scored against a stack: how many components are satisfied + what's short.
+type Ranked = { rec: RecipeCat; matched: number; ready: boolean; missing: { item: string; label: string; image?: string; short: number }[] };
 type ChipItem = {
   uid: number; onScreen: boolean; x: number; y: number;
   state?: string;                         // single items
@@ -28,7 +33,7 @@ const STATION_META: Record<string, { label: string; icon: any; hint: string }> =
   fryer: { label: "Fryer", icon: Flame, hint: "Drag raw food into the fryer. It cooks, then burns if you wait too long." },
   stovetop: { label: "Stovetop", icon: Flame, hint: "Drag patties onto the grill. Hover a patty for its status, click it to flip." },
   soda_machine: { label: "Soda Machine", icon: CupSoda, hint: "Drag a cup out to fill a drink." },
-  kitchen_prep: { label: "Kitchen Prep", icon: Sandwich, hint: "Drag a recipe out to assemble it from your components." },
+  kitchen_prep: { label: "Kitchen Prep", icon: Sandwich, hint: "Stack ingredients on the table, then hover a stack to pick a recipe and make it." },
 };
 
 const STATE_STYLE: Record<string, { label: string; cls: string }> = {
@@ -122,43 +127,128 @@ function StatusPanel({ c }: { c: ChipItem }) {
   );
 }
 
-function PrepBuildPanel({ build }: { build: BuildState | null }) {
-  const layers = build?.layers || [];
-  const match = build?.match;
+// Rank recipes for a stack, Minecraft-style: the ones it most relates to first.
+// Score by components already satisfied (desc), then ready recipes, then fewest
+// missing. Only the required components matter — extras on the stack (an alteration,
+// e.g. a donut on a burger) never disqualify a recipe. Top 3 are shown.
+function rankRecipes(recipes: RecipeCat[], provides: Record<string, number>): Ranked[] {
+  const scored = recipes.map((rec) => {
+    const need: Record<string, number> = {};
+    const meta: Record<string, { label: string; image?: string }> = {};
+    rec.components.forEach((c) => {
+      need[c.item] = (need[c.item] || 0) + 1;
+      meta[c.item] = { label: c.label, image: c.image };
+    });
+    let matched = 0;
+    const missing: Ranked["missing"] = [];
+    for (const item in need) {
+      const have = provides[item] || 0;
+      matched += Math.min(have, need[item]);
+      if (have < need[item]) missing.push({ item, label: meta[item].label, image: meta[item].image, short: need[item] - have });
+    }
+    return { rec, matched, ready: missing.length === 0, missing };
+  });
+  return scored
+    // only recipes the stack actually relates to (shares at least one component)
+    .filter((s) => s.matched > 0)
+    .sort(
+      (a, b) =>
+        b.matched - a.matched ||
+        Number(b.ready) - Number(a.ready) ||
+        a.missing.length - b.missing.length ||
+        a.rec.label.localeCompare(b.rec.label)
+    )
+    .slice(0, 3);
+}
+
+// Floating recipe guide over the hovered stack. Shows the 3 most-related recipes as
+// clickable thumbnails (first selected by default); the selected one lists what's
+// still missing, and reveals a Make button once the stack satisfies it.
+function BuildTooltip({
+  ranked, selected, onSelect, onMake, onPin,
+}: {
+  ranked: Ranked[];
+  selected: Ranked | null;
+  onSelect: (output: string) => void;
+  onMake: () => void;
+  onPin: (pinned: boolean) => void;
+}) {
   return (
-    <div className="mt-2 flex items-center gap-3 rounded-lg border border-border bg-background/40 px-3 py-2">
-      <span className="shrink-0 text-xs font-semibold text-muted-foreground">Build</span>
-      {layers.length === 0 ? (
-        <span className="text-xs text-muted-foreground">Drag cooked items &amp; ingredients onto the table to build.</span>
+    <div
+      onPointerEnter={() => onPin(true)}
+      onPointerLeave={() => onPin(false)}
+      className="w-64 rounded-xl border border-border bg-card p-3 shadow-2xl"
+    >
+      {ranked.length === 0 ? (
+        <div className="text-xs text-muted-foreground">No matching recipes.</div>
       ) : (
-        <div className="flex flex-wrap gap-1">
-          {layers.map((l, i) => (
-            <span key={i} className="rounded bg-secondary px-1.5 py-0.5 text-[11px]">
-              {l.label || l.item}{l.cheese ? " 🧀" : ""}
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="ml-auto flex shrink-0 items-center gap-2">
-        {match && <span className="text-xs font-semibold text-primary">→ {match.label}</span>}
-        <button
-          disabled={!match}
-          onClick={() => fetchNui("cooking:prepFinish")}
-          className={cn(
-            "rounded-md px-3 py-1 text-xs font-semibold",
-            match ? "bg-primary text-primary-foreground" : "cursor-not-allowed bg-muted text-muted-foreground"
+        <>
+          <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            Recipes — click to compare
+          </div>
+          <div className="flex gap-2">
+            {ranked.map((r) => {
+              const active = selected?.rec.output === r.rec.output;
+              return (
+                <button
+                  key={r.rec.output}
+                  onClick={() => onSelect(r.rec.output)}
+                  title={r.rec.label}
+                  className={cn(
+                    "relative flex h-14 w-14 shrink-0 items-center justify-center rounded-lg border bg-muted/40 transition",
+                    active ? "border-primary ring-2 ring-primary/50" : "border-border hover:border-primary/60"
+                  )}
+                >
+                  <ItemThumb src={r.rec.image} alt={r.rec.label} className="h-10 w-10 object-contain" />
+                  {r.ready && (
+                    <span className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-[9px] font-bold text-white">
+                      ✓
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {selected && (
+            <div className="mt-3">
+              <div className="truncate text-sm font-semibold">{selected.rec.label}</div>
+              {selected.ready ? (
+                <div className="mt-1 text-[11px] font-medium text-emerald-400">Ready to make</div>
+              ) : (
+                <>
+                  <div className="mt-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                    Still needs
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {selected.missing.map((m) => (
+                      <span
+                        key={m.item}
+                        className="flex items-center gap-1 rounded bg-secondary px-1.5 py-0.5 text-[11px]"
+                      >
+                        <ItemThumb src={m.image} alt={m.label} className="h-4 w-4 object-contain" />
+                        {m.label}{m.short > 1 ? ` ×${m.short}` : ""}
+                      </span>
+                    ))}
+                  </div>
+                </>
+              )}
+              <button
+                disabled={!selected.ready}
+                onClick={onMake}
+                className={cn(
+                  "mt-3 w-full rounded-md px-3 py-1.5 text-xs font-semibold transition",
+                  selected.ready
+                    ? "bg-primary text-primary-foreground hover:opacity-90"
+                    : "cursor-not-allowed bg-muted text-muted-foreground"
+                )}
+              >
+                Make
+              </button>
+            </div>
           )}
-        >
-          Make
-        </button>
-        <button
-          disabled={layers.length === 0}
-          onClick={() => fetchNui("cooking:prepClear")}
-          className="rounded-md bg-secondary px-3 py-1 text-xs font-semibold hover:bg-accent disabled:opacity-50"
-        >
-          Clear
-        </button>
-      </div>
+        </>
+      )}
     </div>
   );
 }
@@ -171,7 +261,11 @@ export default function Cooking({ data }: { data: any }) {
   const [view, setView] = useState<string>("stovetop");
   const [tray, setTray] = useState<TrayEntry[]>([]);
   const [tab, setTab] = useState<"ingredients" | "cooked">("ingredients");
-  const [build, setBuild] = useState<BuildState | null>(null);
+  // kitchen-prep recipe catalogue + the hovered stack's live tooltip snapshot
+  const [recipes, setRecipes] = useState<RecipeCat[]>([]);
+  const [tip, setTip] = useState<PrepTip | null>(null);
+  const [tipShow, setTipShow] = useState(false);
+  const [selectedOutput, setSelectedOutput] = useState<string | null>(null);
   // last hovered uid — keeps the tooltip's (live) content during fade-out
   const [lastUid, setLastUid] = useState<number | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -181,6 +275,8 @@ export default function Cooking({ data }: { data: any }) {
   const [ghost, setGhost] = useState<{ x: number; y: number; label: string; image?: string } | null>(null);
 
   const barRef = useRef<HTMLDivElement>(null);
+  const tipPinnedRef = useRef(false);           // cursor is over the build tooltip
+  const tipHideTimer = useRef<number | null>(null);
   const itemsRef = useRef<ChipItem[]>([]);
   const hoveredRef = useRef<number | null>(null);
   const placingRef = useRef(false);          // dragging an ingredient out of the bar
@@ -195,12 +291,13 @@ export default function Cooking({ data }: { data: any }) {
     setIngredients(data?.ingredients || []);
     setView("stovetop");
     setTab("ingredients");
-    setBuild(null);
+    setTip(null);
+    setTipShow(false);
   }, [data]);
 
   useNuiEvent("cookingIngredients", (d) => setIngredients(d.ingredients || []));
   useNuiEvent("cookingTray", (d) => setTray(d.tray || []));
-  useNuiEvent("cookingBuild", (d) => setBuild(d.build || null));
+  useNuiEvent("cookingRecipes", (d) => setRecipes(d.recipes || []));
   useNuiEvent("cookingItems", (d) => {
     const its: ChipItem[] = d.items || [];
     itemsRef.current = its;
@@ -208,6 +305,22 @@ export default function Cooking({ data }: { data: any }) {
     prepHoveredRef.current = d.prepHovered ?? null;
     setItems(its);
     setHovered(d.hovered ?? null);
+
+    // Prep tooltip: the client sends the hovered stack (or nothing). While a stack
+    // is hovered, keep the tooltip live and shown; when the cursor leaves, hold it
+    // briefly so the player can travel onto it to click — and keep it up as long as
+    // the cursor is actually over it (pinned).
+    const pt: PrepTip | null = d.prepTip ?? null;
+    if (pt) {
+      if (tipHideTimer.current) { clearTimeout(tipHideTimer.current); tipHideTimer.current = null; }
+      setTip(pt);
+      setTipShow(true);
+    } else if (!tipPinnedRef.current && tipShow && !tipHideTimer.current) {
+      tipHideTimer.current = window.setTimeout(() => {
+        tipHideTimer.current = null;
+        if (!tipPinnedRef.current) setTipShow(false);
+      }, 220);
+    }
   });
 
   const isStove = station === "stovetop";
@@ -227,6 +340,39 @@ export default function Cooking({ data }: { data: any }) {
   const activeUid = hovered ?? lastUid;
   const shownChip = activeUid != null ? items.find((c) => c.uid === activeUid) : undefined;
   const panelVisible = hovered != null && !!shownChip && !!shownChip.onScreen && !dragging;
+
+  // ── prep recipe tooltip: rank recipes for the hovered stack, keep a selection ──
+  const ranked = useMemo(
+    () => (tip ? rankRecipes(recipes, tip.provides || {}) : []),
+    [recipes, tip]
+  );
+  // Default the selection to the most-related recipe; keep the player's pick while
+  // it stays in the top 3, otherwise fall back to the first.
+  const selected = ranked.find((r) => r.rec.output === selectedOutput) || ranked[0] || null;
+  useEffect(() => {
+    if (ranked.length && !ranked.some((r) => r.rec.output === selectedOutput)) {
+      setSelectedOutput(ranked[0].rec.output);
+    }
+  }, [ranked, selectedOutput]);
+  // A fresh stack resets the pick to its top recipe.
+  useEffect(() => { setSelectedOutput(null); }, [tip?.sid]);
+
+  const tipVisible = isPrep && tipShow && !!tip && !!tip.onScreen && !dragging && ranked.length > 0;
+  const onTipPin = (pinned: boolean) => {
+    tipPinnedRef.current = pinned;
+    if (pinned) {
+      if (tipHideTimer.current) { clearTimeout(tipHideTimer.current); tipHideTimer.current = null; }
+    } else {
+      setTipShow(false); // left the tooltip and the stack — dismiss
+    }
+  };
+  const onTipMake = () => {
+    if (!tip || !selected?.ready) return;
+    fetchNui("cooking:prepMakeStack", { sid: tip.sid, output: selected.rec.output });
+    setTipShow(false);
+    setTip(null);
+    tipPinnedRef.current = false;
+  };
 
   // ── drag ingredients out of the bar (live in-world placement) ───────────────
   const startPlace = (e: React.PointerEvent, ing: Ingredient) => {
@@ -254,19 +400,15 @@ export default function Cooking({ data }: { data: any }) {
     entry: { item: string; cheese?: number; model?: string; label?: string; image?: string; dual?: boolean; cheeseModel?: string }
   ) => {
     e.preventDefault();
-    // a bun is one item placed as two halves — alternate bottom/top as you stack
-    let half: string | undefined;
-    if (entry.item === "bun") {
-      const placed = (build?.layers || []).filter((l) => l.item === "bun").length;
-      half = placed % 2 === 0 ? "bottom" : "top";
-    }
+    // A bun is one item spawned as a bottom+top pair (handled client-side), so no
+    // half hint is needed here.
     prepDragRef.current = { source, item: entry.item, cheese: entry.cheese || 0, model: entry.model || null };
     setTab(source === "tray" ? "cooked" : "ingredients");
     setDragging(true);
     setDragHint("Drop on the prep table — or onto another item to stack");
     if (entry.model) {
       fetchNui("cooking:beginPrepPlace", {
-        item: entry.item, model: entry.model, half,
+        item: entry.item, model: entry.model,
         dual: entry.dual ? 1 : 0, cheese: entry.cheese || 0, cheeseModel: entry.cheeseModel,
       });
     } else {
@@ -439,6 +581,21 @@ export default function Cooking({ data }: { data: any }) {
         </div>
       </div>
 
+      {/* prep recipe tooltip — floats over the hovered stack; interactive (unlike the
+          status panel) so recipes can be picked and the stack built from here */}
+      <div
+        className={cn(
+          "fixed z-40 -translate-x-1/2 -translate-y-[120%] transition-all duration-200 ease-out",
+          tipVisible ? "opacity-100 scale-100" : "pointer-events-none opacity-0 scale-95"
+        )}
+        style={{ left: `${(tip?.x ?? 0.5) * 100}%`, top: `${(tip?.y ?? 0.5) * 100}%` }}
+      >
+        <div className="relative">
+          <BuildTooltip ranked={ranked} selected={selected} onSelect={setSelectedOutput} onMake={onTipMake} onPin={onTipPin} />
+          <div className="absolute left-1/2 top-full h-0 w-0 -translate-x-1/2 border-x-[6px] border-t-[6px] border-x-transparent border-t-card" />
+        </div>
+      </div>
+
       {/* floating ghost while dragging a topping (cheese) onto a patty */}
       {ghost && (
         <div
@@ -556,8 +713,6 @@ export default function Cooking({ data }: { data: any }) {
             ))}
           </div>
         )}
-
-        {isPrep && <PrepBuildPanel build={build} />}
       </div>
     </>
   );

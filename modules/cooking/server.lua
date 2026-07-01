@@ -12,6 +12,14 @@
 local CookingItems = {} -- [uid] = { uid, rid, prop_id, station, kind, recipe, drink, output, state, model, x, y, z, dual, sides, flipped, down, elapsed, timerToken, phaseStart }
 local cookUid = 0
 
+-- Interactive prep reservations live here. Declared up top (defined further down)
+-- so the ingredient/tray callbacks can subtract what a build has reserved from the
+-- counts they show — items aren't consumed until Make, but the bar reflects them
+-- as "spoken for" the moment they're placed on the table.
+local PrepBuilds = {} -- [src] = { prop_id, rid, seq, layers = { {id, source, item, cheese, half} … } }
+local layerUnits      -- fwd: units a single layer contributes (bun half = 0.5)
+local reservedUnits   -- fwd: units of (source,item,cheese) a build already reserved
+
 local function findDrink(item)
     for _, d in ipairs(GetSetting("drinks", {})) do
         if d.input == item then return d end
@@ -188,6 +196,7 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
     elseif station == "kitchen_prep" then
         -- Interactive build: the bar lists the raw components (held in inventory)
         -- used across assembly recipes; cooked components come from the tray.
+        local build = PrepBuilds[src]
         local seen = {}
         for _, asm in ipairs(GetSetting("assembly", {})) do
             for _, comp in ipairs(asm.components or {}) do
@@ -195,8 +204,13 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
                     seen[comp] = true
                     local count = Inventory.GetItemCount(src, comp) or 0
                     if count > 0 then
+                        -- Placed-but-not-yet-built parts are "spoken for": show what's
+                        -- left after this build's reservations so the player sees their
+                        -- remaining stock (inv layers always reserve at cheese 0).
+                        local reserved = build and math.ceil(reservedUnits(build, "inv", comp, 0)) or 0
                         local entry = { kind = "component", item = comp, label = GetItemLabel(comp),
-                                        image = GetItemImage(comp), count = count, model = itemModel(comp) }
+                                        image = GetItemImage(comp), count = math.max(0, count - reserved),
+                                        model = itemModel(comp) }
                         -- a beef/dual patty renders as the full two-faced patty, same
                         -- as one pulled from the tray (raw components carry no cheese)
                         if dualRecipeForItem(comp) then entry.dual = true end
@@ -392,18 +406,28 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
     if not prop then return {} end
     if not HasPerm(prop.restaurant_id, src, "cook") then return {} end
     local list = GetTray(prop.restaurant_id, GetIdentifier(src))
+    -- At the prep table, cooked items placed on a build are spoken for — subtract
+    -- the reservations so the tray shows what's still free to grab.
+    local build = (prop.prop_type == "kitchen_prep") and PrepBuilds[src] or nil
+    local out = {}
     for _, e in ipairs(list) do
-        e.model = itemModel(e.item)
-        -- a dual patty renders as two faces; its cheese rides the visible face at the
-        -- melt state it was collected in — melted (2) = _02, applied (1) = _01 — seated
-        -- by placeCheeseAt, identical to the stovetop. (A standalone cheese *component*
-        -- is a fresh _01 slice.)
-        if dualRecipeForItem(e.item) then e.dual = true end
-        if e.cheese and e.cheese >= 1 then
-            e.cheeseModel = (e.cheese == 2) and "pickle_cheese_applied_02" or "pickle_cheese_applied_01"
+        if build then
+            e.count = e.count - math.ceil(reservedUnits(build, "tray", e.item, e.cheese))
+        end
+        if e.count > 0 then
+            e.model = itemModel(e.item)
+            -- a dual patty renders as two faces; its cheese rides the visible face at the
+            -- melt state it was collected in — melted (2) = _02, applied (1) = _01 — seated
+            -- by placeCheeseAt, identical to the stovetop. (A standalone cheese *component*
+            -- is a fresh _01 slice.)
+            if dualRecipeForItem(e.item) then e.dual = true end
+            if e.cheese and e.cheese >= 1 then
+                e.cheeseModel = (e.cheese == 2) and "pickle_cheese_applied_02" or "pickle_cheese_applied_01"
+            end
+            out[#out + 1] = e
         end
     end
-    return list
+    return out
 end)
 
 -- cash a tray item out into the real inventory (so it can be stocked/sold)
@@ -423,11 +447,9 @@ end)
 
 -- ─── interactive prep build (kitchen_prep) ───────────────────────────────────
 
-local PrepBuilds = {} -- [src] = { prop_id, rid, seq, layers = { {id, source, item, cheese, half} … } }
-
 -- A bun is one inventory item rendered as two stackable halves (top/bottom), so
 -- each half only counts as half a bun — one or two halves = one bun.
-local function layerUnits(l)
+function layerUnits(l)
     if l.item == "bun" and l.half then return 0.5 end
     return 1.0
 end
@@ -446,40 +468,10 @@ local function buildProvides(layers)
     return p
 end
 
--- The assembly recipe whose components exactly match the build, or nil.
-local function matchAssembly(layers)
-    if #layers == 0 then return nil end
-    local provides = buildProvides(layers)
-    for _, asm in ipairs(GetSetting("assembly", {})) do
-        local need = {}
-        for _, c in ipairs(asm.components or {}) do need[c] = (need[c] or 0) + 1 end
-        local ok = true
-        for k, v in pairs(need) do if (provides[k] or 0) ~= v then ok = false break end end
-        if ok then for k, v in pairs(provides) do if (need[k] or 0) ~= v then ok = false break end end end
-        if ok then return asm end
-    end
-    return nil
-end
-
-local function layerLabel(l)
-    local lbl = GetItemLabel(l.item)
-    if l.item == "bun" and l.half then lbl = lbl .. " (" .. l.half .. ")" end
-    return lbl
-end
-
-local function buildPayload(b)
-    local layers = {}
-    for i, l in ipairs(b.layers) do
-        layers[i] = { id = l.id, item = l.item, cheese = l.cheese, half = l.half, label = layerLabel(l) }
-    end
-    local m = matchAssembly(b.layers)
-    return { layers = layers, match = m and { output = m.output, label = m.label or m.output } or nil }
-end
-
 -- Units of (source,item,cheese) this build already reserved — layers only
 -- reserve; nothing is pulled from the tray/inventory until Make, so this guards
 -- against reserving more than the player actually holds.
-local function reservedUnits(b, source, item, cheese)
+function reservedUnits(b, source, item, cheese)
     local n = 0
     for _, l in ipairs(b.layers) do
         if l.source == source and l.item == item and (l.cheese or 0) == (cheese or 0) then n = n + layerUnits(l) end
@@ -522,38 +514,83 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
 
     b.seq = (b.seq or 0) + 1
     b.layers[#b.layers + 1] = { id = b.seq, source = d.source, item = item, cheese = cheese, half = half }
-    return { ok = true, id = b.seq, build = buildPayload(b) }
+    return { ok = true, id = b.seq }
 end)
 
 -- pull one placed part back out of the build (drag-to-bar removal); nothing was
 -- consumed, so this just drops the reservation.
 lib.callback.register("pickle_restaurants:cooking:prepRemove", function(src, d)
-    local b = PrepBuilds[src]; if not b then return { ok = true, build = { layers = {} } } end
+    local b = PrepBuilds[src]; if not b then return { ok = true } end
     local id = tonumber(d.id)
     for i, l in ipairs(b.layers) do
         if l.id == id then table.remove(b.layers, i); break end
     end
-    if #b.layers == 0 then PrepBuilds[src] = nil; return { ok = true, build = { layers = {} } } end
-    return { ok = true, build = buildPayload(b) }
+    if #b.layers == 0 then PrepBuilds[src] = nil end
+    return { ok = true }
 end)
 
 lib.callback.register("pickle_restaurants:cooking:prepClear", function(src, _)
     PrepBuilds[src] = nil -- nothing was consumed; just discard the reservation
-    return { ok = true, build = { layers = {} } }
+    return { ok = true }
 end)
 
-lib.callback.register("pickle_restaurants:cooking:prepFinish", function(src, _)
+-- The recipe catalogue the prep tooltip ranks against: each buildable assembly
+-- with its output + component labels/images resolved (the NUI can't resolve item
+-- images itself). Recipes referencing a missing item are hidden until fixed.
+lib.callback.register("pickle_restaurants:cooking:getRecipes", function(src, d)
+    local prop = PropCache[tonumber(d and d.prop_id)]
+    if not prop or prop.prop_type ~= "kitchen_prep" then return {} end
+    if not HasPerm(prop.restaurant_id, src, "cook") then return {} end
+    local out = {}
+    for _, asm in ipairs(GetSetting("assembly", {})) do
+        local valid = ItemExists(asm.output)
+        local comps = {}
+        for _, c in ipairs(asm.components or {}) do
+            if not ItemExists(c) then valid = false end
+            comps[#comps + 1] = { item = c, label = GetItemLabel(c), image = GetItemImage(c) }
+        end
+        if valid then
+            out[#out + 1] = {
+                output = asm.output, label = asm.label or GetItemLabel(asm.output),
+                image = GetItemImage(asm.output), components = comps,
+            }
+        end
+    end
+    return out
+end)
+
+-- Build ONE stack into its recipe. The client sends the chosen output plus the
+-- reservation ids that make up that single stack; the server owns consumption.
+-- Alterations are allowed: the stack only needs to CONTAIN the recipe's required
+-- components (a burger with a donut on it still builds a burger). Because the pile
+-- IS the product, the whole stack is consumed — extras included.
+lib.callback.register("pickle_restaurants:cooking:prepMakeStack", function(src, d)
     local b = PrepBuilds[src]; if not b then return { ok = false } end
     if not HasPerm(b.rid, src, "cook") then return { ok = false } end
-    local asm = matchAssembly(b.layers)
-    if not asm then return { ok = false, error = "Doesn't match a recipe." } end
+    local asm = findAssembly(d and d.output)
+    if not asm then return { ok = false, error = "Unknown recipe." } end
     local id = GetIdentifier(src)
 
-    -- Now consume the reserved items — tally per source (bun halves round up to
-    -- whole buns), verify everything is still present, then remove it all (so a
-    -- build never partially destroys items).
+    -- The layers belonging to this stack (by reservation id).
+    local wanted = {}
+    for _, v in ipairs(d.ids or {}) do wanted[tonumber(v)] = true end
+    local layers = {}
+    for _, l in ipairs(b.layers) do if l.id and wanted[l.id] then layers[#layers + 1] = l end end
+    if #layers == 0 then return { ok = false, error = "Nothing to build." } end
+
+    -- Superset check: every required component must be present on the stack
+    -- (extras are fine — that's the alteration). Cheese on a patty counts as cheese.
+    local provides = buildProvides(layers)
+    local need = {}
+    for _, c in ipairs(asm.components or {}) do need[c] = (need[c] or 0) + 1 end
+    for k, v in pairs(need) do
+        if (provides[k] or 0) < v then return { ok = false, error = "Missing components." } end
+    end
+
+    -- Consume the whole stack — tally per source (bun halves round up to whole
+    -- buns), verify everything is still present, then remove it all at once.
     local trayUnits, invUnits = {}, {}
-    for _, l in ipairs(b.layers) do
+    for _, l in ipairs(layers) do
         if l.source == "tray" then
             local k = l.item .. "|" .. (l.cheese or 0)
             trayUnits[k] = trayUnits[k] or { item = l.item, cheese = l.cheese or 0, u = 0 }
@@ -579,9 +616,14 @@ lib.callback.register("pickle_restaurants:cooking:prepFinish", function(src, _)
     for _, t in pairs(needTray) do RemoveTray(b.rid, id, t.item, t.cheese, t.n) end
     for item, n in pairs(needInv) do Inventory.RemoveItem(src, item, n) end
 
+    -- Drop just this stack's reservations; other stacks keep building.
+    local keep = {}
+    for _, l in ipairs(b.layers) do if not (l.id and wanted[l.id]) then keep[#keep + 1] = l end end
+    b.layers = keep
+    if #b.layers == 0 then PrepBuilds[src] = nil end
+
     AddTray(b.rid, id, asm.output, 0, 1)
-    PrepBuilds[src] = nil
-    return { ok = true, output = asm.output, label = asm.label or asm.output, build = { layers = {} } }
+    return { ok = true, output = asm.output, label = asm.label or asm.output }
 end)
 
 -- closing the station / dropping just discards the reservation (nothing consumed)

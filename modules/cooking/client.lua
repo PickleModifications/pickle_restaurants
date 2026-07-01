@@ -545,6 +545,21 @@ local function stackTopZ(stack)
     return z
 end
 
+-- What a stack provides, as a component multiset (mirrors the server's
+-- buildProvides): bun halves count as half a bun (rounded up), and any cheese on a
+-- patty counts as one "cheese" component. The NUI ranks recipes against this.
+local function stackProvides(stack)
+    local units = {}
+    for _, p in ipairs(stack.parts) do
+        local u = (p.item == "bun" and p.half) and 0.5 or 1.0
+        units[p.item] = (units[p.item] or 0) + u
+        if (p.cheese or 0) >= 1 then units.cheese = (units.cheese or 0) + 1 end
+    end
+    local out = {}
+    for k, v in pairs(units) do out[k] = math.ceil(v) end
+    return out
+end
+
 -- The placed part under the cursor, by screen proximity to each part's rendered
 -- CENTRE (same projection the stovetop hover uses → lines up with the station
 -- cam). Returns sid, index, part. `exceptSid` skips one stack (rarely needed).
@@ -660,6 +675,13 @@ function OpenCookingStation(prop)
     OpenNUI("cooking", { station = prop.prop_type, ingredients = ing })
     RefreshTray()
 
+    -- The prep tooltip ranks the player's stacks against the full recipe
+    -- catalogue (output + component labels/images), fetched once on open.
+    if prop.prop_type == "kitchen_prep" then
+        local recipes = lib.callback.await("pickle_restaurants:cooking:getRecipes", false, { prop_id = prop.id })
+        SendNUIMessage({ action = "cookingRecipes", recipes = recipes or {} })
+    end
+
     -- per-frame projection of every world food prop -> NUI chip positions, the
     -- live cook-status for each, and which one the cursor is hovering (so the NUI
     -- can show its status panel and start a drag on it).
@@ -716,16 +738,25 @@ function OpenCookingStation(prop)
             local hoveredUid = (nearDist and nearDist <= HOVER_R * HOVER_R) and nearUid or nil
 
             -- Kitchen prep: find the placed part under the cursor (to grab + restack)
-            -- and outline its stack (amber). Suppressed while dragging.
+            -- and outline its stack (amber). Suppressed while dragging. The hovered
+            -- stack also drives the recipe tooltip: its provides multiset + a screen
+            -- anchor at the top of the pile.
             local prepHoverPid = nil
+            local prepTip = nil
             if currentCookProp and currentCookProp.prop_type == "kitchen_prep" and not prepDrag then
                 local sid, _, part = pickPart(nil)
                 if part then prepHoverPid = part.pid end
                 setOutline(sid, 255, 180, 40)
+                local stack = sid and PrepStacks[sid]
+                if stack then
+                    local on, sx, sy = GetScreenCoordFromWorldCoord(stack.x, stack.y, stackTopZ(stack))
+                    prepTip = { sid = sid, onScreen = on, x = sx, y = sy, provides = stackProvides(stack) }
+                end
             end
             prepHovered = prepHoverPid
 
-            SendNUIMessage({ action = "cookingItems", items = items, hovered = hoveredUid, prepHovered = prepHoverPid })
+            SendNUIMessage({ action = "cookingItems", items = items, hovered = hoveredUid,
+                             prepHovered = prepHoverPid, prepTip = prepTip })
 
             -- Stovetop: outline the hovered patty (click flips it); otherwise
             -- highlight the oven door under the cursor (click toggles it).
@@ -974,7 +1005,6 @@ RegisterNUICallback("cooking:endPrepPlace", function(d, cb)
         PrepStacks[prepSid] = stack
     end
     relayout(stack)
-    SendNUIMessage({ action = "cookingBuild", build = res.build })
     RefreshTray(); RefreshBar()
     cb(res or { ok = false })
 end)
@@ -1012,7 +1042,6 @@ RegisterNUICallback("cooking:prepDrop", function(d, cb)
             if p.id then res = lib.callback.await("pickle_restaurants:cooking:prepRemove", false, { id = p.id }) end
         end
         deleteParts(drag.parts)
-        SendNUIMessage({ action = "cookingBuild", build = (res and res.build) or { layers = {} } })
         RefreshTray(); RefreshBar()
         return cb(res or { ok = true })
     end
@@ -1036,14 +1065,14 @@ RegisterNUICallback("cooking:prepDrop", function(d, cb)
     cb({ ok = true })
 end)
 
--- No-model fallback: a component without a world model (e.g. lettuce) can't be
--- rendered or restacked, so it's just reserved and shown in the build panel.
+-- No-model fallback: a component without a world model can't be rendered or
+-- stacked, so it can't take part in the per-stack build — it's only reserved (which
+-- still updates the bar counts). Default configs give every component a model.
 RegisterNUICallback("cooking:prepAdd", function(d, cb)
     local res = lib.callback.await("pickle_restaurants:cooking:prepAdd", false, {
         prop_id = currentCookProp and currentCookProp.id, source = d.source, item = d.item, cheese = d.cheese,
     })
     if res and res.ok then
-        SendNUIMessage({ action = "cookingBuild", build = res.build })
         RefreshTray(); RefreshBar()
     elseif res and res.error then
         ShowNotification(res.error)
@@ -1054,18 +1083,24 @@ end)
 RegisterNUICallback("cooking:prepClear", function(_, cb)
     local res = lib.callback.await("pickle_restaurants:cooking:prepClear", false, {})
     clearPrepStacks()
-    SendNUIMessage({ action = "cookingBuild", build = (res and res.build) or { layers = {} } })
     RefreshTray(); RefreshBar()
     cb(res or { ok = true })
 end)
 
-RegisterNUICallback("cooking:prepFinish", function(_, cb)
-    local res = lib.callback.await("pickle_restaurants:cooking:prepFinish", false, {})
+-- Build a single stack into the chosen recipe. The stack's reserved part ids go up
+-- with the output; on success the server has consumed them, so we tear that stack
+-- down (other stacks stay) and refresh the bar/tray counts.
+RegisterNUICallback("cooking:prepMakeStack", function(d, cb)
+    local sid = tonumber(d and d.sid)
+    local stack = sid and PrepStacks[sid]
+    if not stack then return cb({ ok = false }) end
+    local ids = {}
+    for _, p in ipairs(stack.parts) do if p.id then ids[#ids + 1] = p.id end end
+    local res = lib.callback.await("pickle_restaurants:cooking:prepMakeStack", false, { output = d.output, ids = ids })
     if res and res.ok then
-        clearPrepStacks()
+        removePrepStack(sid)
         if res.label then ShowNotification("Made " .. res.label) end
-        SendNUIMessage({ action = "cookingBuild", build = { layers = {} } })
-        RefreshTray()
+        RefreshTray(); RefreshBar()
     elseif res and res.error then
         ShowNotification(res.error)
     end

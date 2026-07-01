@@ -253,7 +253,9 @@ local function CreateTables()
             `restaurant_id` INT UNSIGNED NOT NULL,
             `identifier`    VARCHAR(80)  NOT NULL,
             `item`          VARCHAR(60)  NOT NULL,
-            `cheese`        TINYINT(1)   NOT NULL DEFAULT 0,
+            -- NOT TINYINT(1): oxmysql boolean-casts TINYINT(1), which can't hold the
+            -- third cheese state (0=none, 1=applied, 2=melted) — 2 would read back wrong.
+            `cheese`        TINYINT UNSIGNED NOT NULL DEFAULT 0,
             `count`         INT          NOT NULL DEFAULT 0,
             PRIMARY KEY (`id`),
             UNIQUE KEY `uniq_tray` (`restaurant_id`, `identifier`, `item`, `cheese`),
@@ -297,6 +299,17 @@ local function CreateTables()
                     "UPDATE `pickle_restaurant_recipes` SET `dual_sided` = 1 WHERE `input_item` = ?", { r.input })
             end
         end
+    end
+
+    -- The cooked-items tray's `cheese` column was originally TINYINT(1). oxmysql
+    -- boolean-casts TINYINT(1) columns, which silently destroys the melted state
+    -- (cheese = 2) on read-back, so a melted patty came back with no cheese after a
+    -- restart. Widen it so all three states (0/1/2) round-trip. The stored 2s are
+    -- intact in the DB, so this recovers them. Runs only while the column is narrow.
+    local cheeseCol = MySQL.query.await("SHOW COLUMNS FROM `pickle_restaurant_cooked_items` LIKE 'cheese'")
+    if cheeseCol and cheeseCol[1] and tostring(cheeseCol[1].Type):find("tinyint%(1%)") then
+        MySQL.query.await(
+            "ALTER TABLE `pickle_restaurant_cooked_items` MODIFY COLUMN `cheese` TINYINT UNSIGNED NOT NULL DEFAULT 0")
     end
 end
 
