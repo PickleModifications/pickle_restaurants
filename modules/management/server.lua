@@ -78,7 +78,8 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
 
     return {
         ok        = true,
-        restaurant = { id = r.id, label = r.label, balance = r.balance, owner = r.owner_identifier },
+        restaurant = { id = r.id, label = r.label, balance = r.balance, owner = r.owner_identifier,
+                       brand_image = r.metadata and r.metadata.brand_image or nil },
         perms     = effective,
         roles     = rolesArray(roles),
         employees = buildEmployees(id, roles),
@@ -191,4 +192,21 @@ lib.callback.register("pickle_restaurants:management:withdraw", function(src, d)
     AddMoney(src, amount, "money")
     AddLedger(id, "withdraw", -amount, "Withdrawal", GetIdentifier(src))
     return { ok = true, balance = GetRestaurant(id).balance }
+end)
+
+-- ─── branding ────────────────────────────────────────────────────────────────
+
+-- The restaurant's brand image URL, stored in the metadata blob and synced to
+-- clients as `brand_image`. The client render-target module draws it onto the
+-- food-packaging props (pizza box, cup, tray paper, side container).
+lib.callback.register("pickle_restaurants:management:setBrandImage", function(src, d)
+    local id = tonumber(d.id)
+    if not HasPerm(id, src, "manage_props") then return { ok = false, error = "No permission." } end
+    local r = GetRestaurant(id); if not r then return { ok = false } end
+    local url = tostring(d.url or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    r.metadata = r.metadata or {}
+    r.metadata.brand_image = (url ~= "") and url or nil
+    MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), id })
+    SyncToClient(-1) -- push the new brand image to every client's render target
+    return { ok = true, url = r.metadata.brand_image }
 end)

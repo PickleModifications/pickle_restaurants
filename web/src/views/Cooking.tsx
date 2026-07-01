@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-type Ingredient = { kind: string; item: string; label: string; image?: string; count?: number; canMake?: boolean; model?: string };
+type Ingredient = { kind: string; item: string; label: string; image?: string; count?: number; canMake?: boolean; model?: string; dual?: boolean };
 type SideInfo = { state: string; percent: number; cooking?: boolean };
 type TrayEntry = { item: string; cheese?: number; count: number; label?: string; image?: string; model?: string; dual?: boolean; cheeseModel?: string };
 type BuildLayer = { id?: number; item: string; cheese?: number; half?: string; label?: string };
@@ -500,7 +500,7 @@ export default function Cooking({ data }: { data: any }) {
               const onDown = (e: React.PointerEvent) => {
                 if (!can) return;
                 if (ing.kind === "topping") startTopping(e, ing);
-                else if (isPrep) startPrepDrag(e, "inv", { item: ing.item, cheese: 0, model: ing.model, label: ing.label, image: ing.image });
+                else if (isPrep) startPrepDrag(e, "inv", { item: ing.item, cheese: 0, model: ing.model, label: ing.label, image: ing.image, dual: ing.dual });
                 else startPlace(e, ing);
               };
               return (

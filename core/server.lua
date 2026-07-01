@@ -71,6 +71,22 @@ local DEFAULT_SETTINGS = {
     drinks = {
         { input = "empty_cup", output = "soda", label = "Soda", model = "pickle_drink_container_01", fill_ms = 3000 },
     },
+    -- World prop for a prep component that isn't a cook/assembly/drink output (raw
+    -- veg, toppings, doughs…). Any item mapped here becomes a real 3D prop you can
+    -- drag out and stack on the kitchen-prep table; add a row for any new item.
+    prep_models = {
+        bun          = "pickle_bread_bun_01",
+        -- cheese is handled in itemModel (always the unmelted _01 slice), not here
+        lettuce      = "pickle_lettuce_applied_01",
+        tomato       = "pickle_tomato_applied_01",
+        pickle       = "pickle_pickle_applied_01",
+        pizza_dough  = "pickle_pizza_dough_01",
+        pizza_sauce  = "pickle_pizza_sauce_01",
+        pizza_cheese = "pickle_pizza_cheese_01",
+        pepperoni    = "pickle_pizza_pepperoni_01",
+        frosting     = "pickle_frosting_tube_01",
+        sprinkles    = "pickle_sprinkles_tube_01",
+    },
     -- Kitchen-prep assembly: combine components -> output item.
     assembly = {
         { output = "burger", label = "Burger", model = "pickle_bread_bun_01",
@@ -313,6 +329,19 @@ local function LoadSettings()
     end
     mergeListDefaults("assembly", "output")
     mergeListDefaults("drinks", "output")
+
+    -- Same idea for the item->model map: add any newly-defaulted entries without
+    -- overwriting models an admin remapped.
+    local function mergeMapDefaults(key)
+        local map = SettingsCache[key]
+        if type(map) ~= "table" then return end
+        local changed = false
+        for k, v in pairs(DEFAULT_SETTINGS[key] or {}) do
+            if map[k] == nil then map[k] = v; changed = true end
+        end
+        if changed then SetSetting(key, map) end
+    end
+    mergeMapDefaults("prep_models")
 end
 
 local function SeedRecipes()
@@ -372,12 +401,17 @@ local function LoadStock()
     end
 end
 
+-- Cheese state on a cooked item: 0 = none, 1 = applied (unmelted), 2 = melted. Kept
+-- distinct through the tray + DB so a collected burger renders at the melt state it
+-- was in; anything > 0 counts as "has cheese" for recipe matching.
+function CheeseVal(v) return tonumber(v) or (v == true and 1) or 0 end
+
 local function LoadCookedItems()
     TrayCache = {}
     local rows = MySQL.query.await("SELECT * FROM pickle_restaurant_cooked_items") or {}
     for _, row in ipairs(rows) do
         if (row.count or 0) > 0 then
-            local cheese = (row.cheese == 1 or row.cheese == true) and 1 or 0
+            local cheese = CheeseVal(row.cheese)
             TrayCache[row.restaurant_id] = TrayCache[row.restaurant_id] or {}
             TrayCache[row.restaurant_id][row.identifier] = TrayCache[row.restaurant_id][row.identifier] or {}
             TrayCache[row.restaurant_id][row.identifier][row.item .. "|" .. cheese] =
@@ -570,7 +604,7 @@ end
 
 -- ─── cooked-items tray (per-player, per-restaurant) ──────────────────────────
 
-local function trayKey(item, cheese) return item .. "|" .. (cheese == 1 and 1 or 0) end
+local function trayKey(item, cheese) return item .. "|" .. CheeseVal(cheese) end
 
 function GetTrayCount(rid, identifier, item, cheese)
     local e = TrayCache[rid] and TrayCache[rid][identifier] and TrayCache[rid][identifier][trayKey(item, cheese)]
@@ -579,7 +613,7 @@ end
 
 function AddTray(rid, identifier, item, cheese, count)
     if not rid or not identifier or not item then return end
-    cheese = (cheese == 1 or cheese == true) and 1 or 0
+    cheese = CheeseVal(cheese)
     count = count or 1
     TrayCache[rid] = TrayCache[rid] or {}
     TrayCache[rid][identifier] = TrayCache[rid][identifier] or {}
@@ -594,7 +628,7 @@ function AddTray(rid, identifier, item, cheese, count)
 end
 
 function RemoveTray(rid, identifier, item, cheese, count)
-    cheese = (cheese == 1 or cheese == true) and 1 or 0
+    cheese = CheeseVal(cheese)
     count = count or 1
     if GetTrayCount(rid, identifier, item, cheese) < count then return false end
     local key = trayKey(item, cheese)
@@ -653,6 +687,8 @@ local function BuildClientRestaurant(r)
         label   = r.label,
         blip    = r.blip,
         counter = r.counter,
+        -- brand image URL (drives the runtime texture replacement on packaging props)
+        brand_image = r.metadata and r.metadata.brand_image or nil,
     }
 end
 

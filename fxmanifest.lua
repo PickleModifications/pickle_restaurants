@@ -31,6 +31,7 @@ ui_page 'nui/index.html'
 files {
     'nui/index.html',
     'nui/**/*',
+    'html/brand.html', -- DUI page for the render-target brand texture
 }
 
 dependencies {

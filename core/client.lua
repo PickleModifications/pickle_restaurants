@@ -24,14 +24,15 @@ function CreateNPC(modelHash, ...)
 end
 
 function CreateProp(modelHash, ...)
-    print("LOADING", modelHash)
     RequestModel(modelHash)
     local timeout = 0
-    while not HasModelLoaded(modelHash) and timeout < 500 do
+    while not HasModelLoaded(modelHash) and timeout < 1000 do
         Wait(0)
         timeout = timeout + 1
     end
-    print("FAILED.")
+    -- If the intended model never streamed in, fall back to a visible placeholder
+    -- rather than an invisible/mismeasured entity. (Measurement elsewhere uses the
+    -- intended model hash directly, so this substitution can't distort stacking.)
     if not HasModelLoaded(modelHash) then
         return CreateProp(`ch_prop_fingerprint_scanner_error_01b`, ...)
     end
@@ -404,7 +405,18 @@ end)
 
 AddEventHandler('onResourceStop', function(resourceName)
     if (GetCurrentResourceName() ~= resourceName) then return end
-    for k,v in pairs(Interactions) do 
+    for k,v in pairs(Interactions) do
         DeleteInteraction(k)
+    end
+    -- Delete every prop/veh/ped this resource spawned. Local (non-mission)
+    -- objects won't honour DeleteEntity during shutdown unless we claim them as
+    -- a mission entity first, so flag then delete.
+    for _, category in pairs(ScriptEntities) do
+        for entity in pairs(category) do
+            if DoesEntityExist(entity) then
+                SetEntityAsMissionEntity(entity, true, true)
+                DeleteEntity(entity)
+            end
+        end
     end
 end)

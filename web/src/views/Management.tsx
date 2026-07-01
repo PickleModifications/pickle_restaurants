@@ -9,7 +9,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Field, TextField, NumberField } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
 import { money } from "@/lib/utils";
-import { UserPlus, Trash2, Plus, MapPin, Banknote, TriangleAlert } from "lucide-react";
+import { UserPlus, Trash2, Plus, MapPin, Banknote, TriangleAlert, Image } from "lucide-react";
 
 export default function Management({ data, onClose }: { data: any; onClose: () => void }) {
   const id = data?.restaurantId;
@@ -44,7 +44,7 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         )}
         {perms.manage_props && (
           <TabsContent value="stations" className="min-h-0 flex-1 overflow-y-auto pr-1">
-            <Stations id={id} props={data?.props || []} stock={data?.stock || []} />
+            <Stations id={id} props={data?.props || []} stock={data?.stock || []} brand={data?.restaurant?.brand_image || ""} />
           </TabsContent>
         )}
       </Tabs>
@@ -201,10 +201,25 @@ function Finances({ id, balance, ledger, canManage }: any) {
   );
 }
 
-function Stations({ id, props, stock }: any) {
+function Stations({ id, props, stock, brand }: any) {
   const STATIONS = ["soda_machine", "fryer", "stovetop", "kitchen_prep"];
   return (
     <div className="space-y-3">
+      <Card>
+        <CardContent className="pt-4">
+          <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold"><Image className="h-4 w-4" /> Branding</h3>
+          <Input
+            defaultValue={brand}
+            placeholder="https://…/logo.png — image shown on cups, boxes, trays"
+            className="h-9"
+            onBlur={(e) => fetchNui("management:setBrandImage", { id, url: e.target.value.trim() })}
+          />
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            Direct image URL. It replaces the brand texture on this restaurant's food packaging. Leave blank to reset.
+          </p>
+        </CardContent>
+      </Card>
+
       <Card>
         <CardContent className="flex flex-wrap items-center gap-2 pt-4">
           {STATIONS.map((s) => (

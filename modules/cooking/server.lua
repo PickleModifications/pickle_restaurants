@@ -119,15 +119,10 @@ local function activeEntry(it)
     return { uid = it.uid, model = it.model, x = it.x, y = it.y, z = it.z, state = it.state }
 end
 
--- Models for raw components that have no cook recipe (extend / tune as needed).
-local PREP_MODELS = {
-    bun    = "pickle_bread_bun_01",
-    cheese = "pickle_cheese_applied_02",
-}
-
 -- A world model for an item: cook recipe outputs/inputs, assembly outputs, drink
--- outputs, else a raw-component model (may be nil = no prop). Used so the prep
--- station can spawn a live 3D preview while you drag an item onto the table.
+-- outputs, else the configurable `prep_models` map (raw veg, toppings, doughs — any
+-- item an admin maps to a prop). nil = no prop, and the item falls back to a flat
+-- 2D chip. Used so the prep station can spawn a live 3D prop to drag out and stack.
 function itemModel(item)
     for _, r in ipairs(RecipeCache) do
         if r.output_cooked_item == item then return r.cooked_model end
@@ -136,7 +131,10 @@ function itemModel(item)
     end
     for _, a in ipairs(GetSetting("assembly", {})) do if a.output == item then return a.model end end
     for _, dd in ipairs(GetSetting("drinks", {})) do if dd.output == item then return dd.model end end
-    return PREP_MODELS[item]
+    -- The cheese slice is ALWAYS the unmelted slice (_01). _02 is the melted variant,
+    -- used only for the stovetop cook animation — never as a stackable/applied slice.
+    if item == "cheese" then return "pickle_cheese_applied_01" end
+    return GetSetting("prep_models", {})[item]
 end
 
 -- The dual-sided recipe an item belongs to (matched by raw input or cooked/burnt
@@ -197,8 +195,12 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
                     seen[comp] = true
                     local count = Inventory.GetItemCount(src, comp) or 0
                     if count > 0 then
-                        out[#out + 1] = { kind = "component", item = comp, label = GetItemLabel(comp),
-                                          image = GetItemImage(comp), count = count, model = itemModel(comp) }
+                        local entry = { kind = "component", item = comp, label = GetItemLabel(comp),
+                                        image = GetItemImage(comp), count = count, model = itemModel(comp) }
+                        -- a beef/dual patty renders as the full two-faced patty, same
+                        -- as one pulled from the tray (raw components carry no cheese)
+                        if dualRecipeForItem(comp) then entry.dual = true end
+                        out[#out + 1] = entry
                     end
                 end
             end
@@ -373,8 +375,10 @@ lib.callback.register("pickle_restaurants:cooking:collect", function(src, d)
     end
 
     -- Cooked products go into the per-player "Cooked Items" tray (a state store),
-    -- not the inventory — they're carried between stations and built at prep.
-    local cheese = (it.cheese and it.cheese ~= "none") and 1 or 0
+    -- not the inventory — they're carried between stations and built at prep. The
+    -- cheese's melt state is preserved (applied = 1, melted = 2) so the tray renders
+    -- it the way it was collected.
+    local cheese = (it.cheese == "melted") and 2 or (it.cheese == "applied") and 1 or 0
     if giveItem then AddTray(it.rid, GetIdentifier(src), giveItem, cheese, 1) end
     CookingItems[it.uid] = nil
     TriggerClientEvent("pickle_restaurants:cooking:remove", -1, it.uid)
@@ -390,9 +394,14 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
     local list = GetTray(prop.restaurant_id, GetIdentifier(src))
     for _, e in ipairs(list) do
         e.model = itemModel(e.item)
-        -- a dual patty renders as two faces; cheese rides the visible face (melted)
+        -- a dual patty renders as two faces; its cheese rides the visible face at the
+        -- melt state it was collected in — melted (2) = _02, applied (1) = _01 — seated
+        -- by placeCheeseAt, identical to the stovetop. (A standalone cheese *component*
+        -- is a fresh _01 slice.)
         if dualRecipeForItem(e.item) then e.dual = true end
-        if e.cheese == 1 then e.cheeseModel = "pickle_cheese_applied_02" end
+        if e.cheese and e.cheese >= 1 then
+            e.cheeseModel = (e.cheese == 2) and "pickle_cheese_applied_02" or "pickle_cheese_applied_01"
+        end
     end
     return list
 end)
@@ -405,7 +414,7 @@ lib.callback.register("pickle_restaurants:cooking:trayToInventory", function(src
     if not HasPerm(rid, src, "cook") then return { ok = false } end
     local id = GetIdentifier(src)
     local item   = d.item
-    local cheese = (d.cheese == 1 or d.cheese == true) and 1 or 0
+    local cheese = CheeseVal(d.cheese)
     local count  = tonumber(d.count) or 1
     if not item or not RemoveTray(rid, id, item, cheese, count) then return { ok = false, error = "Not enough." } end
     Inventory.AddItem(src, item, count)
@@ -429,7 +438,8 @@ local function buildProvides(layers)
     local units = {}
     for _, l in ipairs(layers) do
         units[l.item] = (units[l.item] or 0) + layerUnits(l)
-        if l.cheese == 1 then units.cheese = (units.cheese or 0) + 1 end
+        -- any cheese state (applied or melted) counts as one "cheese" component
+        if l.cheese and l.cheese >= 1 then units.cheese = (units.cheese or 0) + 1 end
     end
     local p = {}
     for k, v in pairs(units) do p[k] = math.ceil(v) end
@@ -484,7 +494,8 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     if not HasPerm(rid, src, "cook") then return { ok = false } end
     local item = d.item
     if not item then return { ok = false } end
-    local cheese = (d.cheese == 1 or d.cheese == true) and 1 or 0
+    -- preserve the melt state (1/2) so a tray reservation matches the exact entry
+    local cheese = CheeseVal(d.cheese)
     local half = (item == "bun" and (d.half == "top" or d.half == "bottom")) and d.half or nil
 
     -- starting/continuing a build at this prop; a build at another prop is dropped
