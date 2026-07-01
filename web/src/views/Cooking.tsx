@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { Badge } from "@/components/ui/badge";
-import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat } from "lucide-react";
+import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type Ingredient = { kind: string; item: string; label: string; image?: string; count?: number; canMake?: boolean; model?: string; dual?: boolean };
 type SideInfo = { state: string; percent: number; cooking?: boolean };
-type TrayEntry = { item: string; cheese?: number; count: number; label?: string; image?: string; model?: string; dual?: boolean; cheeseModel?: string };
+type TrayEntry = { item: string; cheese?: number; count: number; label?: string; image?: string; model?: string; dual?: boolean; cheeseModel?: string; decompose?: boolean; uncooked?: boolean; cookStation?: string };
 // A buildable recipe (kitchen prep) with its output + components resolved for the tooltip.
 type RecipeComp = { item: string; label: string; image?: string };
 type RecipeCat = { output: string; label: string; image?: string; components: RecipeComp[] };
@@ -18,6 +18,8 @@ type ChipItem = {
   uid: number; onScreen: boolean; x: number; y: number;
   state?: string;                         // single items
   dual?: boolean;                         // dual patties below
+  single?: boolean;                       // oven/fryer gated single item (progress below)
+  percent?: number; gate?: boolean; method?: string; burningSoon?: boolean;
   sides?: SideInfo[]; cooking?: number;   // per-face progress + which face is on the grill
   cheese?: string;                        // "none" | "applied" | "melted"
   give?: string; giveLabel?: string; giveImage?: string;
@@ -30,8 +32,8 @@ const STOVE_VIEWS = [
 ];
 
 const STATION_META: Record<string, { label: string; icon: any; hint: string }> = {
-  fryer: { label: "Fryer", icon: Flame, hint: "Drag raw food into the fryer. It cooks, then burns if you wait too long." },
-  stovetop: { label: "Stovetop", icon: Flame, hint: "Drag patties onto the grill. Hover a patty for its status, click it to flip." },
+  fryer: { label: "Fryer", icon: Flame, hint: "Drop food into the basket, then lower it into the oil to fry. Raise it to take food out." },
+  stovetop: { label: "Stovetop", icon: Flame, hint: "Grill patties on the cooktop (click to flip); open a door to bake cookies, cakes & pizzas inside." },
   soda_machine: { label: "Soda Machine", icon: CupSoda, hint: "Drag a cup out to fill a drink." },
   kitchen_prep: { label: "Kitchen Prep", icon: Sandwich, hint: "Stack ingredients on the table, then hover a stack to pick a recipe and make it." },
 };
@@ -92,6 +94,43 @@ function SideRow({ name, side }: { name: string; side?: SideInfo }) {
 
 function StatusPanel({ c }: { c: ChipItem }) {
   if (!c.dual) {
+    // oven / fryer item: live progress bar, collect-now, paused/burning hints
+    if (c.single) {
+      const st = stateMeta(c.state);
+      const pct = Math.round((c.percent ?? 0) * 100);
+      const done = c.state === "burnt";
+      const pausedHint = !c.gate
+        ? (c.method === "oven" ? "Close the door to bake" : "Lower the basket to fry")
+        : null;
+      return (
+        <div className="w-56 rounded-xl border border-border bg-card p-3 shadow-2xl">
+          <div className="flex items-center gap-2">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-muted/50">
+              <ItemThumb src={c.giveImage} alt={c.giveLabel || ""} className="h-9 w-9 object-contain" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Collect now</div>
+              <div className="truncate text-sm font-semibold">{c.giveLabel || "—"}</div>
+            </div>
+            <span className={cn("ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold text-white", st.cls)}>{st.label}</span>
+          </div>
+          <div className="mt-2.5 flex items-center gap-1.5">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+              <div
+                className={cn("h-full rounded-full transition-[width] duration-150 ease-linear",
+                  done ? "bg-zinc-500" : c.gate ? "bg-primary" : "bg-primary/40")}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+            <span className="shrink-0 text-[9px] tabular-nums text-muted-foreground">{done ? "Done" : `${pct}%`}</span>
+          </div>
+          {c.burningSoon && !done && (
+            <div className="mt-2 text-[11px] font-semibold text-amber-400">⚠ Burning soon!</div>
+          )}
+          {pausedHint && <div className="mt-2 text-[11px] text-muted-foreground">{pausedHint}</div>}
+        </div>
+      );
+    }
     const st = stateMeta(c.state);
     return (
       <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs font-semibold shadow-2xl">
@@ -260,7 +299,7 @@ export default function Cooking({ data }: { data: any }) {
   const [hovered, setHovered] = useState<number | null>(null);
   const [view, setView] = useState<string>("stovetop");
   const [tray, setTray] = useState<TrayEntry[]>([]);
-  const [tab, setTab] = useState<"ingredients" | "cooked">("ingredients");
+  const [tab, setTab] = useState<"ingredients" | "cooked" | "uncooked">("ingredients");
   // kitchen-prep recipe catalogue + the hovered stack's live tooltip snapshot
   const [recipes, setRecipes] = useState<RecipeCat[]>([]);
   const [tip, setTip] = useState<PrepTip | null>(null);
@@ -273,6 +312,8 @@ export default function Cooking({ data }: { data: any }) {
   const [dragHint, setDragHint] = useState<string | null>(null);
   // floating 2D ghost for a topping (cheese) drag onto a patty
   const [ghost, setGhost] = useState<{ x: number; y: number; label: string; image?: string } | null>(null);
+  // fryer basket lowered (frying) vs raised
+  const [basketDown, setBasketDown] = useState<boolean>(!!data?.basketDown);
 
   const barRef = useRef<HTMLDivElement>(null);
   const tipPinnedRef = useRef(false);           // cursor is over the build tooltip
@@ -281,7 +322,7 @@ export default function Cooking({ data }: { data: any }) {
   const hoveredRef = useRef<number | null>(null);
   const placingRef = useRef(false);          // dragging an ingredient out of the bar
   const toppingRef = useRef<string | null>(null); // dragging a topping (cheese) onto a patty
-  const prepDragRef = useRef<{ source: string; item: string; cheese: number; model?: string | null } | null>(null); // dragging a NEW part onto the prep table
+  const prepDragRef = useRef<{ source: string; item: string; cheese: number; model?: string | null; decompose?: boolean } | null>(null); // dragging a NEW part (or a product to take apart) onto the prep table
   const prepHoveredRef = useRef<number | null>(null); // placed prep part under the cursor (grab target)
   const prepMoveRef = useRef<{ puid: number } | null>(null); // re-dragging a placed prep part
   const worldRef = useRef<{ uid: number | null; startX: number; startY: number; dragging: boolean } | null>(null);
@@ -293,9 +334,11 @@ export default function Cooking({ data }: { data: any }) {
     setTab("ingredients");
     setTip(null);
     setTipShow(false);
+    setBasketDown(!!data?.basketDown);
   }, [data]);
 
   useNuiEvent("cookingIngredients", (d) => setIngredients(d.ingredients || []));
+  useNuiEvent("cookingFryer", (d) => setBasketDown(!!d.lowered));
   useNuiEvent("cookingTray", (d) => setTray(d.tray || []));
   useNuiEvent("cookingRecipes", (d) => setRecipes(d.recipes || []));
   useNuiEvent("cookingItems", (d) => {
@@ -325,7 +368,14 @@ export default function Cooking({ data }: { data: any }) {
 
   const isStove = station === "stovetop";
   const isPrep = station === "kitchen_prep";
-  const trayTotal = tray.reduce((n, e) => n + e.count, 0);
+  const isFryer = station === "fryer";
+  // the tray splits into ready "Cooked Items" and still-raw "Uncooked Items"
+  // (things like an uncooked pizza that still need the oven/fryer)
+  const cookedItems = tray.filter((e) => !e.uncooked);
+  const uncookedItems = tray.filter((e) => e.uncooked);
+  const cookedTotal = cookedItems.reduce((n, e) => n + e.count, 0);
+  const uncookedTotal = uncookedItems.reduce((n, e) => n + e.count, 0);
+  const trayList = tab === "uncooked" ? uncookedItems : cookedItems;
   const switchView = (key: string) => {
     setView(key);
     fetchNui("cooking:setView", { view: key });
@@ -382,6 +432,15 @@ export default function Cooking({ data }: { data: any }) {
     setDragging(true);
     fetchNui("cooking:beginPlace", { kind: ing.kind, item: ing.item });
   };
+  // an uncooked tray item (e.g. an uncooked pizza) can be dragged straight into its
+  // own station to cook — consumed from the tray rather than the inventory.
+  const canCookHere = (e: TrayEntry) => !isPrep && !!e.uncooked && e.cookStation === station;
+  const startTrayCook = (ev: React.PointerEvent, e: TrayEntry) => {
+    ev.preventDefault();
+    placingRef.current = true;
+    setDragging(true);
+    fetchNui("cooking:beginPlace", { kind: "cook", item: e.item, source: "tray", cheese: e.cheese || 0 });
+  };
   // toppings (cheese) aren't placed in the world — they're dragged onto a patty.
   // The real slice prop renders in 3D under the cursor (no 2D pill); releasing
   // over a cooked patty applies it.
@@ -397,16 +456,21 @@ export default function Cooking({ data }: { data: any }) {
   // stovetop); without one it falls back to a 2D ghost + auto-stack.
   const startPrepDrag = (
     e: React.PointerEvent, source: string,
-    entry: { item: string; cheese?: number; model?: string; label?: string; image?: string; dual?: boolean; cheeseModel?: string }
+    entry: { item: string; cheese?: number; model?: string; label?: string; image?: string; dual?: boolean; cheeseModel?: string; decompose?: boolean; uncooked?: boolean }
   ) => {
     e.preventDefault();
     // A bun is one item spawned as a bottom+top pair (handled client-side), so no
-    // half hint is needed here.
-    prepDragRef.current = { source, item: entry.item, cheese: entry.cheese || 0, model: entry.model || null };
-    setTab(source === "tray" ? "cooked" : "ingredients");
+    // half hint is needed here. A finished product from the tray is dragged as its
+    // single prop but, on drop, gets taken apart into its component stack.
+    const decompose = source === "tray" && !!entry.decompose;
+    prepDragRef.current = { source, item: entry.item, cheese: entry.cheese || 0, model: entry.model || null, decompose };
+    setTab(source === "tray" ? (entry.uncooked ? "uncooked" : "cooked") : "ingredients");
     setDragging(true);
-    setDragHint("Drop on the prep table — or onto another item to stack");
-    if (entry.model) {
+    setDragHint(decompose ? "Drop on the prep table to take it apart" : "Drop on the prep table — or onto another item to stack");
+    if (decompose) {
+      // preview the whole component stack (peeked, nothing consumed) under the cursor
+      fetchNui("cooking:beginPrepDecompose", { item: entry.item });
+    } else if (entry.model) {
       fetchNui("cooking:beginPrepPlace", {
         item: entry.item, model: entry.model,
         dual: entry.dual ? 1 : 0, cheese: entry.cheese || 0, cheeseModel: entry.cheeseModel,
@@ -476,7 +540,10 @@ export default function Cooking({ data }: { data: any }) {
         const p = prepDragRef.current;
         prepDragRef.current = null;
         setGhost(null);
-        if (p.model) {
+        if (p.decompose) {
+          // a finished product — take it apart into its component stack on drop
+          fetchNui("cooking:endPrepDecompose", { cancel: overBar, item: p.item });
+        } else if (p.model) {
           // live 3D placement — commit (or cancel back over the bar)
           fetchNui("cooking:endPrepPlace", { cancel: overBar, source: p.source, item: p.item, cheese: p.cheese });
         } else if (!overBar) {
@@ -566,6 +633,24 @@ export default function Cooking({ data }: { data: any }) {
         </div>
       )}
 
+      {/* fryer basket lower/raise — frying only advances while the basket is down */}
+      {isFryer && (
+        <div className="fixed left-1/2 top-4 flex -translate-x-1/2 items-center gap-2 rounded-lg border border-border bg-card/95 p-1 pl-3 shadow-xl">
+          <span className="text-xs font-semibold text-muted-foreground">
+            {basketDown ? "Basket in the oil — frying" : "Basket raised"}
+          </span>
+          <button
+            onClick={() => fetchNui("cooking:fryerDip", { lowered: !basketDown })}
+            className={cn(
+              "rounded-md px-3 py-1.5 text-xs font-semibold transition",
+              basketDown ? "bg-secondary text-foreground hover:bg-accent" : "bg-primary text-primary-foreground hover:opacity-90"
+            )}
+          >
+            {basketDown ? "Raise basket" : "Lower basket"}
+          </button>
+        </div>
+      )}
+
       {/* hover status panel — fades in/out over the hovered prop, click-through */}
       <div
         className={cn(
@@ -627,24 +712,26 @@ export default function Cooking({ data }: { data: any }) {
           </div>
         </div>
 
-        {/* tabs: raw ingredients vs the persistent Cooked Items tray */}
+        {/* tabs: raw ingredients · ready cooked items · still-raw uncooked items */}
         <div className="mb-2 flex gap-1">
-          {([["ingredients", "Ingredients", Carrot], ["cooked", "Cooked Items", ChefHat]] as const).map(
-            ([key, label, TabIcon]) => (
-              <button
-                key={key}
-                onClick={() => setTab(key)}
-                className={cn(
-                  "flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-semibold transition",
-                  tab === key ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:bg-accent"
-                )}
-              >
-                <TabIcon className="h-3.5 w-3.5" />
-                {label}
-                {key === "cooked" && trayTotal > 0 ? ` (${trayTotal})` : ""}
-              </button>
-            )
-          )}
+          {([
+            ["ingredients", "Ingredients", Carrot, 0],
+            ["cooked", "Cooked Items", ChefHat, cookedTotal],
+            ["uncooked", "Uncooked Items", CookingPot, uncookedTotal],
+          ] as const).map(([key, label, TabIcon, count]) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className={cn(
+                "flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-semibold transition",
+                tab === key ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:bg-accent"
+              )}
+            >
+              <TabIcon className="h-3.5 w-3.5" />
+              {label}
+              {count > 0 ? ` (${count})` : ""}
+            </button>
+          ))}
         </div>
 
         {tab === "ingredients" ? (
@@ -685,24 +772,44 @@ export default function Cooking({ data }: { data: any }) {
           </div>
         ) : (
           <div className="flex gap-2 overflow-x-auto pb-1">
-            {tray.length === 0 && (
-              <div className="py-4 text-sm text-muted-foreground">No cooked items yet — cook something and collect it.</div>
+            {trayList.length === 0 && (
+              <div className="py-4 text-sm text-muted-foreground">
+                {tab === "uncooked"
+                  ? "No uncooked items — assemble one (e.g. a pizza) at the prep table."
+                  : "No cooked items yet — cook something and collect it."}
+              </div>
             )}
-            {tray.map((e, i) => (
+            {trayList.map((e, i) => {
+              const cookHere = canCookHere(e);
+              return (
               <div
                 key={e.item + "|" + (e.cheese || 0) + "|" + i}
-                onPointerDown={(ev) => isPrep && startPrepDrag(ev, "tray", e)}
+                onPointerDown={(ev) => {
+                  if (isPrep) startPrepDrag(ev, "tray", e);
+                  else if (cookHere) startTrayCook(ev, e);
+                }}
                 className={cn(
                   "relative flex h-24 w-28 shrink-0 touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border border-border bg-secondary text-center text-xs font-medium",
-                  isPrep ? "cursor-grab hover:border-primary/60 active:cursor-grabbing" : ""
+                  (isPrep || cookHere) ? "cursor-grab hover:border-primary/60 active:cursor-grabbing" : ""
                 )}
               >
                 <ItemThumb src={e.image} alt={e.label || e.item} className="h-10 w-10 object-contain" />
                 <span className="px-1 leading-tight">{e.label || e.item}</span>
                 <Badge variant="secondary" className="absolute right-1 top-1">{e.count}</Badge>
                 {!!e.cheese && <span className="absolute left-1 top-1 text-sm">🧀</span>}
+                {isPrep && e.decompose && (
+                  <span className="mt-0.5 rounded bg-background/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    drag to take apart
+                  </span>
+                )}
+                {cookHere && (
+                  <span className="mt-0.5 rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+                    {station === "fryer" ? "drag into the basket" : "drag into the oven"}
+                  </span>
+                )}
                 {!isPrep && (
                   <button
+                    onPointerDown={(ev) => ev.stopPropagation()}
                     onClick={() => fetchNui("cooking:trayToInventory", { item: e.item, cheese: e.cheese || 0, count: 1 })}
                     className="mt-0.5 rounded bg-background/60 px-1.5 py-0.5 text-[10px] hover:bg-accent"
                   >
@@ -710,7 +817,8 @@ export default function Cooking({ data }: { data: any }) {
                   </button>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

@@ -13,6 +13,7 @@ type Recipe = {
   output_cooked_item: string; output_burnt_item: string;
   cook_ms: number; burn_ms: number;
   dual_sided?: boolean | number;
+  method?: string; // grill | oven | fry
   valid?: boolean; missing?: string[];
   invalid_models?: string[];
 };
@@ -42,7 +43,16 @@ function ItemImage({ items, name, className }: { items: Item[]; name: string; cl
 
 const BLANK: Recipe = {
   input_item: "", station: "fryer", raw_model: "", cooked_model: "", burnt_model: "",
-  output_cooked_item: "", output_burnt_item: "", cook_ms: 15000, burn_ms: 15000,
+  output_cooked_item: "", output_burnt_item: "", cook_ms: 15000, burn_ms: 15000, method: "fry",
+};
+
+// The cook methods valid for a station (fryer is always a basket fry).
+const METHODS: Record<string, { value: string; label: string }[]> = {
+  fryer: [{ value: "fry", label: "Fry (basket)" }],
+  stovetop: [
+    { value: "grill", label: "Grill (cooktop, flip)" },
+    { value: "oven", label: "Oven (bake inside a door)" },
+  ],
 };
 
 export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]; items: Item[]; onSaved: () => void }) {
@@ -169,9 +179,11 @@ function RecipeForm({ form, setForm, items }: { form: Recipe; setForm: (r: Recip
   return (
     <div className="grid grid-cols-3 gap-3">
       {itemField("Input item", "input_item")}
-      <Select label="Station" value={form.station} onChange={(v) => set("station", v)}
+      <Select label="Station" value={form.station}
+        onChange={(v) => setForm({ ...form, station: v, method: (METHODS[v] || [])[0]?.value || "grill" })}
         options={[{ value: "fryer", label: "Fryer" }, { value: "stovetop", label: "Stovetop" }]} />
-      <div />
+      <Select label="Method" value={form.method || (METHODS[form.station] || [])[0]?.value || "grill"}
+        onChange={(v) => set("method", v)} options={METHODS[form.station] || METHODS.stovetop} />
       {itemField("Cooked output", "output_cooked_item")}
       {itemField("Burnt output", "output_burnt_item")}
       <div />

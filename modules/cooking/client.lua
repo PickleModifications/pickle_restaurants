@@ -139,6 +139,162 @@ local function SpawnCookObject(uid, model, x, y, z, state)
     CookCoords[uid]  = { x = x, y = y, z = z }
 end
 
+-- ─── oven / fryer slot items ─────────────────────────────────────────────────
+--  Oven bakes and fryer fries are seated at fixed slots inside the station mesh
+--  (not free-placed). The oven's cavity slots live in modules/stovetop (SeatOvenSlot);
+--  the fryer basket slots live here. Cooking only advances while the door is closed /
+--  the basket is lowered — the server owns that gate; we just render.
+
+local CookSlot   = {} -- [uid] = { propId, method, door, slot }
+local CookProg   = {} -- [uid] = last server progress payload { prog, give, … , start }
+local FryerDown  = {} -- [propId] = basket lowered?
+local BasketTween = {} -- [propId] = tween token
+
+-- Fryer basket slots, LOCAL to the fryer prop (x,y); z is raised_z, or lowered_z when
+-- the basket is dunked. TUNE IN-GAME.
+local FRYER = {
+    slots     = { { x = -0.11, y = 0.0 }, { x = 0.11, y = 0.0 }, { x = 0.0, y = -0.12 } },
+    raised_z  = 0.60,
+    lowered_z = 0.44,
+    dip_ms    = 400,
+}
+
+local function fryerSlotWorld(propId, slot, lowered)
+    local station = GetStationEntity and GetStationEntity(propId)
+    local o = FRYER.slots[slot]
+    if not station or not DoesEntityExist(station) or not o then return nil end
+    return GetOffsetFromEntityInWorldCoords(station, o.x, o.y, lowered and FRYER.lowered_z or FRYER.raised_z)
+end
+
+local function alignToStation(propId, ent)
+    local station = GetStationEntity and GetStationEntity(propId)
+    if station and DoesEntityExist(station) and ent and DoesEntityExist(ent) then
+        local sr = GetEntityRotation(station, 2)
+        SetEntityRotation(ent, sr.x, sr.y, sr.z, 2, true)
+    end
+end
+
+-- Seat a slot item at its cavity/basket position (oven via stovetop module; fryer here).
+local function seatSlotItem(uid)
+    local s, ent = CookSlot[uid], CookObjects[uid]
+    if not s or not (ent and DoesEntityExist(ent)) then return end
+    if s.method == "oven" then
+        if SeatOvenSlot then SeatOvenSlot(s.propId, s.door, s.slot, ent) end
+    else
+        local pos = fryerSlotWorld(s.propId, s.slot, FryerDown[s.propId])
+        if pos then SetEntityCoordsNoOffset(ent, pos.x, pos.y, pos.z, false, false, false) end
+        alignToStation(s.propId, ent)
+    end
+end
+
+-- (Re)spawn a slot item's prop at its seat. Registered in CookEntityUid so the hover
+-- projection can hit-test it like a dual patty.
+local function SpawnSlotObject(uid, model, propId, method, door, slot, state)
+    if CookObjects[uid] then CookEntityUid[CookObjects[uid]] = nil; SafeDeleteEntity(CookObjects[uid]) end
+    local ent = SpawnProp(model, 0.0, 0.0, 0.0)
+    if not ent then return end
+    CookObjects[uid] = ent
+    CookState[uid]   = state
+    CookSlot[uid]    = { propId = propId, method = method, door = door, slot = slot }
+    CookEntityUid[ent] = uid
+    seatSlotItem(uid)
+end
+
+-- Animate a fryer basket (all its fry props) between raised and lowered z.
+local function tweenBasket(propId, lowered)
+    FryerDown[propId] = lowered and true or false
+    BasketTween[propId] = (BasketTween[propId] or 0) + 1
+    local token = BasketTween[propId]
+    local from = lowered and FRYER.raised_z or FRYER.lowered_z
+    local to   = lowered and FRYER.lowered_z or FRYER.raised_z
+    CreateThread(function()
+        local started = GetGameTimer()
+        while BasketTween[propId] == token do
+            local t = math.min((GetGameTimer() - started) / FRYER.dip_ms, 1.0)
+            local z = from + (to - from) * t
+            local station = GetStationEntity and GetStationEntity(propId)
+            if station and DoesEntityExist(station) then
+                for uid, s in pairs(CookSlot) do
+                    if s.method == "fry" and s.propId == propId then
+                        local ent, o = CookObjects[uid], FRYER.slots[s.slot]
+                        if ent and DoesEntityExist(ent) and o then
+                            local pos = GetOffsetFromEntityInWorldCoords(station, o.x, o.y, z)
+                            SetEntityCoordsNoOffset(ent, pos.x, pos.y, pos.z, false, false, false)
+                        end
+                    end
+                end
+            end
+            if t >= 1.0 then return end
+            Wait(0)
+        end
+    end)
+end
+
+-- Called by main/client when a station prop (re)spawns: adopt the fryer basket's
+-- synced up/down state and re-seat any slot items that spawned before the station
+-- entity (or its oven doors) existed.
+function OnStationSpawned(prop)
+    if not prop then return end
+    if prop.prop_type == "fryer" then
+        FryerDown[prop.id] = (prop.metadata and prop.metadata.basketDown == true) or false
+    end
+    for uid, s in pairs(CookSlot) do
+        if s.propId == prop.id then seatSlotItem(uid) end
+    end
+end
+
+-- Is a slot on this station already taken (by any live slot item)?
+local function slotOccupied(method, propId, door, slot)
+    for _, s in pairs(CookSlot) do
+        if s.method == method and s.propId == propId and s.slot == slot
+            and (method ~= "oven" or s.door == door) then return true end
+    end
+    return false
+end
+
+-- The open slot the cursor is CLOSE TO (within SLOT_SNAP_R normalized-screen radius),
+-- for a placement preview: { door?, slot, w }, or nil when the cursor isn't near any
+-- slot (so the preview follows the cursor instead of pre-locking onto a slot).
+-- Oven only offers slots whose door is open; fryer offers any free basket slot.
+local SLOT_SNAP_R = 0.2 -- ~ how near the cursor must be to a slot to snap onto it
+local function nearestOpenSlot(method)
+    local prop = currentCookProp; if not prop then return nil end
+    local cx, cy = GetNuiCursorPosition()
+    local sw, sh = GetActiveScreenResolution()
+    local cnx = (sw > 0) and (cx / sw) or 0.0
+    local cny = (sh > 0) and (cy / sh) or 0.0
+    local best
+    local function consider(door, slot, w)
+        local on, sx, sy = GetScreenCoordFromWorldCoord(w.x, w.y, w.z)
+        if not on then return end
+        local dx, dy = sx - cnx, sy - cny
+        local d2 = dx * dx + dy * dy
+        if d2 > SLOT_SNAP_R * SLOT_SNAP_R then return end -- too far — don't snap
+        if not best or d2 < best.d2 then best = { door = door, slot = slot, w = w, d2 = d2 } end
+    end
+    if method == "oven" then
+        local n = OvenSlotCount and OvenSlotCount() or 0
+        for door = 1, 2 do
+            if IsOvenDoorOpen and IsOvenDoorOpen(prop.id, door) then
+                for slot = 1, n do
+                    if not slotOccupied("oven", prop.id, door, slot) then
+                        local w = OvenSlotWorld and OvenSlotWorld(prop.id, door, slot)
+                        if w then consider(door, slot, w) end
+                    end
+                end
+            end
+        end
+    else
+        for slot = 1, #FRYER.slots do
+            if not slotOccupied("fry", prop.id, nil, slot) then
+                local w = fryerSlotWorld(prop.id, slot, FryerDown[prop.id])
+                if w then consider(nil, slot, w) end
+            end
+        end
+    end
+    return best
+end
+
 -- ─── dual-sided patties ──────────────────────────────────────────────────────
 
 local function modelForSide(input, state)
@@ -382,6 +538,8 @@ RegisterNetEvent("pickle_restaurants:cooking:spawn", function(uid, model, x, y, 
 end)
 
 RegisterNetEvent("pickle_restaurants:cooking:update", function(uid, model, state)
+    local s = CookSlot[uid]
+    if s then return SpawnSlotObject(uid, model, s.propId, s.method, s.door, s.slot, state) end
     local c = CookCoords[uid]; if not c then return end
     SpawnCookObject(uid, model, c.x, c.y, c.z, state)
 end)
@@ -391,21 +549,43 @@ RegisterNetEvent("pickle_restaurants:cooking:dual", function(p)
     if p then RebuildDual(p) end
 end)
 
+-- spawn an oven/fryer item at its station slot
+RegisterNetEvent("pickle_restaurants:cooking:slotSpawn", function(p)
+    if p then SpawnSlotObject(p.uid, p.model, p.prop_id, p.method, p.door, p.slot, p.state) end
+end)
+
+-- live cook progress for an oven/fryer item's hover panel
+RegisterNetEvent("pickle_restaurants:cooking:progress", function(p)
+    if p and p.uid then p.start = GetGameTimer(); CookProg[p.uid] = p end
+end)
+
+-- fryer basket lowered/raised for everyone -> animate the fry props
+RegisterNetEvent("pickle_restaurants:fryer:dip", function(propId, lowered)
+    tweenBasket(propId, lowered)
+    if cookingOpen and currentCookProp and currentCookProp.id == propId then
+        SendNUIMessage({ action = "cookingFryer", lowered = lowered and true or false })
+    end
+end)
+
 RegisterNetEvent("pickle_restaurants:cooking:move", function(uid, x, y, z)
     MoveCookObjectLocal(uid, x, y, z)
 end)
 
 RegisterNetEvent("pickle_restaurants:cooking:remove", function(uid)
+    if CookObjects[uid] then CookEntityUid[CookObjects[uid]] = nil end
     if not RemoveDual(uid) then
         SafeDeleteEntity(CookObjects[uid])
     end
-    CookObjects[uid], CookState[uid], CookCoords[uid] = nil, nil, nil
+    CookObjects[uid], CookState[uid], CookCoords[uid], CookSlot[uid], CookProg[uid] = nil, nil, nil, nil, nil
 end)
 
 RegisterNetEvent("pickle_restaurants:cooking:bulk", function(list)
     for _, it in ipairs(list or {}) do
         if it.dual then
             RebuildDual(it)
+        elseif it.method == "oven" or it.method == "fry" then
+            SpawnSlotObject(it.uid, it.model, it.prop_id, it.method, it.door, it.slot, it.state)
+            it.start = GetGameTimer(); CookProg[it.uid] = it
         else
             SpawnCookObject(it.uid, it.model, it.x, it.y, it.z, it.state)
         end
@@ -653,6 +833,19 @@ end
 
 local function StopCooking()
     local wasPrep = currentCookProp and currentCookProp.prop_type == "kitchen_prep"
+    -- Deliver completed work on the way out: each stack still on the table is saved as
+    -- its closest product (the exact variation preserved). Stacks that form no product
+    -- fall through to prepClose below, which drops their reservations — parts stay in
+    -- the player's holdings, so nothing is lost either way.
+    if wasPrep then
+        for _, stack in pairs(PrepStacks) do
+            local ids = {}
+            for _, p in ipairs(stack.parts) do if p.id then ids[#ids + 1] = p.id end end
+            if #ids > 0 then
+                lib.callback.await("pickle_restaurants:cooking:prepSaveStack", false, { ids = ids })
+            end
+        end
+    end
     cookingOpen = false
     currentCookProp = nil
     cancelPlace() -- drop any in-progress placement preview
@@ -672,7 +865,8 @@ function OpenCookingStation(prop)
     cookingOpen = true
     StartStationCamera(prop)
     local ing = lib.callback.await("pickle_restaurants:cooking:getIngredients", false, { prop_id = prop.id })
-    OpenNUI("cooking", { station = prop.prop_type, ingredients = ing })
+    OpenNUI("cooking", { station = prop.prop_type, ingredients = ing,
+                        basketDown = (prop.prop_type == "fryer") and (FryerDown[prop.id] == true) or nil })
     RefreshTray()
 
     -- The prep tooltip ranks the player's stacks against the full recipe
@@ -721,6 +915,23 @@ function OpenCookingStation(prop)
                             sides = { sideOut(1), sideOut(2) }, cooking = cookS,
                             cheese = prog.cheese,
                             give = prog.give, giveLabel = prog.giveLabel, giveImage = prog.giveImage,
+                        }
+                    elseif CookSlot[uid] then
+                        -- oven/fryer item: single gated timeline; count up locally only
+                        -- while the gate is open (door closed / basket down).
+                        local pr = CookProg[uid]
+                        local pg = (pr and pr.prog) or {}
+                        local st = pg.state or CookState[uid] or "raw"
+                        local total = pg.total or 0
+                        local elapsed = (pg.elapsed or 0) + ((pg.gate and pr and pr.start) and (now - pr.start) or 0)
+                        local percent = 0.0
+                        if st == "burnt" then percent = 1.0 elseif total > 0 then percent = math.min(1.0, elapsed / total) end
+                        items[#items + 1] = {
+                            uid = uid, single = true, onScreen = onScreen, x = sx, y = sy,
+                            method = CookSlot[uid].method, state = st, percent = percent,
+                            gate = pg.gate and true or false,
+                            burningSoon = (st == "cooked" and percent > 0.66),
+                            give = pr and pr.give, giveLabel = pr and pr.giveLabel, giveImage = pr and pr.giveImage,
                         }
                     else
                         items[#items + 1] = { uid = uid, onScreen = onScreen, x = sx, y = sy,
@@ -802,7 +1013,7 @@ RegisterNUICallback("cooking:beginPlace", function(d, cb)
             SafeDeleteEntity(e1); SafeDeleteEntity(e2)
             return cb({ ok = false })
         end
-        local p = { dual = true, ent = { e1, e2 }, kind = d.kind, item = d.item, hit = false }
+        local p = { dual = true, ent = { e1, e2 }, kind = d.kind, item = d.item, source = d.source, cheese = d.cheese, hit = false }
         placing = p
         CreateThread(function()
             while placing == p do
@@ -819,11 +1030,42 @@ RegisterNUICallback("cooking:beginPlace", function(d, cb)
         return cb({ ok = true })
     end
 
+    -- Oven / fryer: the preview snaps to the nearest OPEN slot (not a free raycast);
+    -- release drops it into that cavity/basket seat.
+    local method = recipe and recipe.method or nil
+    if recipe and (method == "oven" or method == "fry") then
+        local model = recipe.raw_model
+        local ent = model and SpawnProp(model, base.x, base.y, base.z) or nil
+        if not ent then return cb({ ok = false }) end
+        local p = { entity = ent, kind = d.kind, item = d.item, slotmode = method, source = d.source, cheese = d.cheese, hit = false }
+        placing = p
+        CreateThread(function()
+            while placing == p do
+                local best = nearestOpenSlot(method)
+                if best then
+                    -- cursor is near an open slot: snap the preview onto it (droppable)
+                    p.hit, p.door, p.slot = true, best.door, best.slot
+                    SetEntityCoordsNoOffset(ent, best.w.x, best.w.y, best.w.z, false, false, false)
+                    alignToStation(base.id, ent)
+                else
+                    -- not near a slot: follow the cursor (but it can't be dropped here)
+                    p.hit = false
+                    local hit, coords = CursorToWorld()
+                    if hit and coords then
+                        SetEntityCoordsNoOffset(ent, coords.x, coords.y, coords.z, false, false, false)
+                    end
+                end
+                Wait(0)
+            end
+        end)
+        return cb({ ok = true })
+    end
+
     local model = previewModel(d.kind, d.item)
     if not model then return cb({ ok = false, error = "Nothing to place." }) end
     local ent = SpawnProp(model, base.x, base.y, base.z)
     if not ent then return cb({ ok = false }) end
-    local p = { entity = ent, kind = d.kind, item = d.item, hit = false }
+    local p = { entity = ent, kind = d.kind, item = d.item, source = d.source, cheese = d.cheese, hit = false }
     placing = p
     CreateThread(function()
         while placing == p do
@@ -846,18 +1088,22 @@ end)
 RegisterNUICallback("cooking:endPlace", function(d, cb)
     local p = placing; placing = nil
     if not p then return cb({ ok = false }) end
-    if (d and d.cancel) or not p.hit or not p.coords then
+    if (d and d.cancel) or not p.hit or (not p.slotmode and not p.coords) then
         deletePreview(p)
         return cb({ ok = false })
     end
-    local res = lib.callback.await("pickle_restaurants:cooking:place", false, {
-        prop_id = currentCookProp and currentCookProp.id, kind = p.kind, item = p.item,
-        x = p.coords.x, y = p.coords.y, z = p.coords.z,
-    })
+    local payload = { prop_id = currentCookProp and currentCookProp.id, kind = p.kind, item = p.item,
+                      source = p.source, cheese = p.cheese } -- source "tray" cooks a tray item
+    if p.slotmode then
+        payload.door, payload.slot = p.door, p.slot   -- oven/fryer: seat into a slot
+    else
+        payload.x, payload.y, payload.z = p.coords.x, p.coords.y, p.coords.z
+    end
+    local res = lib.callback.await("pickle_restaurants:cooking:place", false, payload)
     -- Delete the preview only after the server's synced prop has spawned (same
     -- model + coords), so they overlap and there's no visible gap.
     deletePreview(p)
-    if res and res.ok then RefreshBar() elseif res and res.error then ShowNotification(res.error) end
+    if res and res.ok then RefreshBar(); RefreshTray() elseif res and res.error then ShowNotification(res.error) end
     cb(res or { ok = false })
 end)
 
@@ -868,6 +1114,9 @@ RegisterNUICallback("cooking:beginMove", function(d, cb)
     if not uid or not CookObjects[uid] then return cb({ ok = false }) end
     cancelPlace()
     cancelMove()
+    -- Oven/fryer items live in a fixed slot — they don't free-move. The drag is only
+    -- a gesture to collect (drop on the bar); the prop stays seated meanwhile.
+    if CookSlot[uid] then moving = { uid = uid, slot = true, hit = false }; return cb({ ok = true }) end
     local m = { uid = uid, hit = false, origin = CookCoords[uid] }
     moving = m
     CreateThread(function()
@@ -891,6 +1140,7 @@ end)
 RegisterNUICallback("cooking:endMove", function(d, cb)
     local m = moving; moving = nil
     if not m then return cb({ ok = false }) end
+    if m.slot then return cb({ ok = false }) end -- slot item never moved; nothing to commit
     if (d and d.cancel) or not m.hit or not m.coords then
         if m.origin then MoveCookObjectLocal(m.uid, m.origin.x, m.origin.y, m.origin.z) end
         return cb({ ok = false })
@@ -909,6 +1159,8 @@ RegisterNUICallback("cooking:collect", function(d, cb)
         if res.label then ShowNotification("Collected " .. res.label) end
         RefreshBar()
         RefreshTray()
+    elseif res and res.error then
+        ShowNotification(res.error)
     end
     cb(res or { ok = false })
 end)
@@ -1009,6 +1261,72 @@ RegisterNUICallback("cooking:endPrepPlace", function(d, cb)
     cb(res or { ok = false })
 end)
 
+-- Spawn one prep part per decompose spec (a bun layer picks its bottom/top prop, as
+-- when built). Reservation ids ride along on committed specs and are nil on a preview.
+local function partsFromDecomposeSpecs(specs)
+    local parts = {}
+    for _, spec in ipairs(specs or {}) do
+        local model = spec.model
+        if spec.item == "bun" and spec.half and BUN[spec.half] then model = BUN[spec.half] end
+        local p = makePart({ item = spec.item, model = model, source = spec.source,
+                             dual = spec.dual, cheese = spec.cheese, cheeseModel = spec.cheeseModel, half = spec.half })
+        if p then p.id = spec.id; parts[#parts + 1] = p end
+    end
+    return parts
+end
+
+-- Begin a decompose drag: preview the WHOLE component stack (peeked read-only, so
+-- nothing is consumed yet) following the cursor — not just the product's single prop.
+RegisterNUICallback("cooking:beginPrepDecompose", function(d, cb)
+    cancelPlace(); cancelMove()
+    if prepDrag then deleteParts(prepDrag.parts); prepDrag = nil end
+    if not currentCookProp then return cb({ ok = false }) end
+    local res = lib.callback.await("pickle_restaurants:cooking:prepDecomposePeek", false, {
+        prop_id = currentCookProp.id, item = d and d.item,
+    })
+    if not (res and res.ok) then return cb({ ok = false }) end
+    local parts = partsFromDecomposeSpecs(res.parts)
+    if #parts == 0 then return cb({ ok = false }) end
+    prepDrag = { parts = parts, hit = false, decompose = true }
+    runDragThread(prepDrag)
+    cb({ ok = true })
+end)
+
+-- Release a decompose drag: the previewed stack is dropped, the server un-makes the
+-- product (consume + refund + reserve), and we spawn the committed stack in place.
+RegisterNUICallback("cooking:endPrepDecompose", function(d, cb)
+    local drag = prepDrag; prepDrag = nil
+    setOutline(nil)
+    if not drag then return cb({ ok = false }) end
+    -- capture the drop target, then drop the (non-reserved) preview stack
+    local targetSid, coords, hit = drag.targetSid, drag.coords, drag.hit
+    deleteParts(drag.parts)
+    if (d and d.cancel) or not hit then return cb({ ok = false }) end
+
+    local res = lib.callback.await("pickle_restaurants:cooking:prepDecompose", false, {
+        prop_id = currentCookProp and currentCookProp.id, item = d and d.item,
+    })
+    if not (res and res.ok) then
+        if res and res.error then ShowNotification(res.error) end
+        return cb(res or { ok = false })
+    end
+
+    local parts = partsFromDecomposeSpecs(res.parts)
+    if #parts == 0 then RefreshTray(); RefreshBar(); return cb({ ok = false }) end
+
+    local stack = targetSid and PrepStacks[targetSid]
+    if stack then
+        for _, p in ipairs(parts) do stack.parts[#stack.parts + 1] = p end
+    else
+        prepSid = prepSid + 1
+        stack = { x = coords.x, y = coords.y, z0 = coords.z, parts = parts }
+        PrepStacks[prepSid] = stack
+    end
+    relayout(stack)
+    RefreshTray(); RefreshBar()
+    cb(res or { ok = true })
+end)
+
 -- Grab a placed part: lift it and everything above it off its stack (grab the top
 -- → one part; grab a lower member → that part and the rest above it). Reuses the
 -- same drag loop as placing.
@@ -1037,6 +1355,22 @@ RegisterNUICallback("cooking:prepDrop", function(d, cb)
     setOutline(nil)
     if not drag then return cb({ ok = false }) end
     if d and d.cancel then
+        -- A WHOLE stack dragged to the hotbar (grab emptied its source → no fromSid)
+        -- is saved as its closest product; a grabbed part/sub-stack, or a stack that
+        -- forms no product, just returns its parts to holdings.
+        if not drag.fromSid then
+            local ids = {}
+            for _, p in ipairs(drag.parts) do if p.id then ids[#ids + 1] = p.id end end
+            if #ids > 0 then
+                local res = lib.callback.await("pickle_restaurants:cooking:prepSaveStack", false, { ids = ids })
+                if res and res.ok then
+                    deleteParts(drag.parts)
+                    if res.label then ShowNotification("Saved " .. res.label) end
+                    RefreshTray(); RefreshBar()
+                    return cb(res)
+                end
+            end
+        end
         local res
         for _, p in ipairs(drag.parts) do
             if p.id then res = lib.callback.await("pickle_restaurants:cooking:prepRemove", false, { id = p.id }) end
@@ -1111,6 +1445,16 @@ end)
 RegisterNUICallback("cooking:setView", function(d, cb)
     if currentCookProp and SetStationView then SetStationView(currentCookProp, d.view) end
     cb({ ok = true })
+end)
+
+-- lower / raise the fryer basket (starts / pauses frying for its items)
+RegisterNUICallback("cooking:fryerDip", function(d, cb)
+    if not currentCookProp or currentCookProp.prop_type ~= "fryer" then return cb({ ok = false }) end
+    local res = lib.callback.await("pickle_restaurants:cooking:fryerDip", false, {
+        prop_id = currentCookProp.id, lowered = d and d.lowered and true or false,
+    })
+    if res and res.error then ShowNotification(res.error) end
+    cb(res or { ok = false })
 end)
 
 -- click a dual patty -> flip it to cook the other side (server validates + syncs)

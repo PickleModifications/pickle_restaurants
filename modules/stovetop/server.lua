@@ -22,5 +22,7 @@ lib.callback.register("pickle_restaurants:doors:toggle", function(src, d)
     prop.metadata.doors = doors -- in-memory only; rides the sync payload
 
     TriggerClientEvent("pickle_restaurants:doors:set", -1, prop.id, door, doors[door])
+    -- drive the bake gate: closing a door starts baking its cavity, opening pauses it
+    TriggerEvent("pickle_restaurants:oven:gate", prop.id, door, doors[door])
     return { ok = true, open = doors[door] }
 end)

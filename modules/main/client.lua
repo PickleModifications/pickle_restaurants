@@ -97,6 +97,9 @@ local function SpawnProp(prop)
 
     -- Stovetops carry two oven doors that render + sync independently.
     if prop.prop_type == "stovetop" and SpawnOvenDoors then SpawnOvenDoors(prop, ent) end
+    -- Let the cooking module (re)seat any oven/fryer items on this station and pick up
+    -- the fryer basket's synced up/down state, now the station entity exists.
+    if OnStationSpawned then OnStationSpawned(prop) end
 
     local label = STATION_LABELS[prop.prop_type] or "Station"
     propInteractions[prop.id] = CreateInteraction({

@@ -98,9 +98,11 @@ local DEFAULT_SETTINGS = {
         -- Veg toppings are whole ingredients (lettuce topping = lettuce, etc.).
         { output = "deluxe_burger", label = "Deluxe Burger", model = "pickle_bread_bun_01",
           components = { "bun", "cooked_beef_patty", "cheese", "lettuce", "tomato", "pickle" } },
-        -- Pizza: top a dough at kitchen prep, then bake the raw pizza in the oven.
+        -- Pizza: a cheese base (dough + sauce + cheese) assembled at kitchen prep, then
+        -- baked in the oven. Pepperoni (and any other prep topping) is optional — add it
+        -- on the stack as an alteration; it rides along as a variation.
         { output = "raw_pizza", label = "Pizza (uncooked)", model = "pickle_pizza_dough_01",
-          components = { "pizza_dough", "pizza_sauce", "pizza_cheese", "pepperoni" } },
+          components = { "pizza_dough", "pizza_sauce", "pizza_cheese" } },
         -- Bakery decoration: finish a fried doughnut / baked cake with frosting + sprinkles.
         { output = "frosted_doughnut", label = "Frosted Doughnut", model = "pickle_doughnut_topping_01",
           components = { "cooked_doughnut", "frosting", "sprinkles" } },
@@ -112,35 +114,35 @@ local DEFAULT_SETTINGS = {
 -- ─── default cookable recipes (one per streamed 3-variant food model) ─────────
 
 local DEFAULT_RECIPES = {
-    { input = "raw_drumstick", station = "fryer",
+    { input = "raw_drumstick", station = "fryer", method = "fry",
       raw = "pickle_fryer_drumstick_01", cooked = "pickle_fryer_drumstick_02", burnt = "pickle_fryer_drumstick_03",
       out_cooked = "cooked_drumstick", out_burnt = "burnt_drumstick", cook_ms = 15000, burn_ms = 15000 },
-    { input = "raw_fries", station = "fryer",
+    { input = "raw_fries", station = "fryer", method = "fry",
       raw = "pickle_fryer_fries_01", cooked = "pickle_fryer_fries_02", burnt = "pickle_fryer_fries_03",
       out_cooked = "cooked_fries", out_burnt = "burnt_fries", cook_ms = 12000, burn_ms = 12000 },
-    { input = "raw_nuggets", station = "fryer",
+    { input = "raw_nuggets", station = "fryer", method = "fry",
       raw = "pickle_fryer_nuggets_01", cooked = "pickle_fryer_nuggets_02", burnt = "pickle_fryer_nuggets_03",
       out_cooked = "cooked_nuggets", out_burnt = "burnt_nuggets", cook_ms = 12000, burn_ms = 12000 },
-    { input = "raw_beef_patty", station = "stovetop",
+    { input = "raw_beef_patty", station = "stovetop", method = "grill",
       raw = "pickle_patty_beef_01", cooked = "pickle_patty_beef_02", burnt = "pickle_patty_beef_03",
       out_cooked = "cooked_beef_patty", out_burnt = "burnt_beef_patty", cook_ms = 18000, burn_ms = 15000,
       dual_sided = 1 },
-    { input = "raw_chicken_patty", station = "stovetop",
+    { input = "raw_chicken_patty", station = "stovetop", method = "grill",
       raw = "pickle_patty_friedchicken_01", cooked = "pickle_patty_friedchicken_02", burnt = "pickle_patty_friedchicken_03",
       out_cooked = "cooked_chicken_patty", out_burnt = "burnt_chicken_patty", cook_ms = 18000, burn_ms = 15000 },
     -- Doughnuts are fried.
-    { input = "raw_doughnut", station = "fryer",
+    { input = "raw_doughnut", station = "fryer", method = "fry",
       raw = "pickle_doughnut_01", cooked = "pickle_doughnut_02", burnt = "pickle_doughnut_03",
       out_cooked = "cooked_doughnut", out_burnt = "burnt_doughnut", cook_ms = 12000, burn_ms = 12000 },
-    -- Cookies + cake bake in the oven (the stovetop station doubles as the oven).
-    { input = "raw_cookie", station = "stovetop",
+    -- Cookies + cake bake inside the oven doors (on their own trays).
+    { input = "raw_cookie", station = "stovetop", method = "oven",
       raw = "pickle_cookie_01", cooked = "pickle_cookie_02", burnt = "pickle_cookie_03",
       out_cooked = "cooked_cookie", out_burnt = "burnt_cookie", cook_ms = 20000, burn_ms = 18000 },
-    { input = "raw_cake", station = "stovetop",
+    { input = "raw_cake", station = "stovetop", method = "oven",
       raw = "pickle_cake_01", cooked = "pickle_cake_02", burnt = "pickle_cake_03",
       out_cooked = "cooked_cake", out_burnt = "burnt_cake", cook_ms = 30000, burn_ms = 25000 },
-    -- Pizza bakes in the oven; the raw (topped) pizza is assembled at kitchen prep first.
-    { input = "raw_pizza", station = "stovetop",
+    -- Pizza bakes bare on the oven rack; the raw (topped) pizza is assembled at kitchen prep first.
+    { input = "raw_pizza", station = "stovetop", method = "oven",
       raw = "pickle_pizza_dough_01", cooked = "pickle_pizza_dough_02", burnt = "pickle_pizza_dough_03",
       out_cooked = "cooked_pizza", out_burnt = "burnt_pizza", cook_ms = 25000, burn_ms = 20000 },
 }
@@ -213,6 +215,9 @@ local function CreateTables()
             `cook_ms`            INT          NOT NULL DEFAULT 15000,
             `burn_ms`            INT          NOT NULL DEFAULT 15000,
             `dual_sided`         TINYINT(1)   NOT NULL DEFAULT 0,
+            -- how the item is cooked: grill (cooktop surface), oven (inside a door),
+            -- or fry (fryer basket). Governs the station interaction UX.
+            `method`             VARCHAR(10)  NOT NULL DEFAULT 'grill',
             PRIMARY KEY (`id`),
             UNIQUE KEY `uniq_input` (`input_item`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -257,6 +262,10 @@ local function CreateTables()
             -- third cheese state (0=none, 1=applied, 2=melted) — 2 would read back wrong.
             `cheese`        TINYINT UNSIGNED NOT NULL DEFAULT 0,
             `count`         INT          NOT NULL DEFAULT 0,
+            -- Per-instance build stacks (JSON array, one entry per counted item) so an
+            -- assembled product remembers what actually went into it — alterations and
+            -- cheese states included — and can be taken back apart faithfully.
+            `metadata`      JSON         DEFAULT NULL,
             PRIMARY KEY (`id`),
             UNIQUE KEY `uniq_tray` (`restaurant_id`, `identifier`, `item`, `cheese`),
             KEY `idx_rest_id` (`restaurant_id`, `identifier`)
@@ -301,6 +310,19 @@ local function CreateTables()
         end
     end
 
+    -- The `method` classifier (grill/oven/fry) drives the cooking UX. On the first
+    -- add, backfill the default recipes' methods so existing servers get baking in
+    -- the oven + the fryer basket without an admin re-tagging every recipe.
+    local mcol = MySQL.query.await("SHOW COLUMNS FROM `pickle_restaurant_recipes` LIKE 'method'")
+    if not mcol or #mcol == 0 then
+        MySQL.query.await(
+            "ALTER TABLE `pickle_restaurant_recipes` ADD COLUMN `method` VARCHAR(10) NOT NULL DEFAULT 'grill'")
+        for _, r in ipairs(DEFAULT_RECIPES) do
+            MySQL.update.await(
+                "UPDATE `pickle_restaurant_recipes` SET `method` = ? WHERE `input_item` = ?", { r.method or "grill", r.input })
+        end
+    end
+
     -- The cooked-items tray's `cheese` column was originally TINYINT(1). oxmysql
     -- boolean-casts TINYINT(1) columns, which silently destroys the melted state
     -- (cheese = 2) on read-back, so a melted patty came back with no cheese after a
@@ -310,6 +332,13 @@ local function CreateTables()
     if cheeseCol and cheeseCol[1] and tostring(cheeseCol[1].Type):find("tinyint%(1%)") then
         MySQL.query.await(
             "ALTER TABLE `pickle_restaurant_cooked_items` MODIFY COLUMN `cheese` TINYINT UNSIGNED NOT NULL DEFAULT 0")
+    end
+
+    -- Add the per-instance build-stack metadata column on servers that predate it.
+    local metaCol = MySQL.query.await("SHOW COLUMNS FROM `pickle_restaurant_cooked_items` LIKE 'metadata'")
+    if not metaCol or #metaCol == 0 then
+        MySQL.query.await(
+            "ALTER TABLE `pickle_restaurant_cooked_items` ADD COLUMN `metadata` JSON DEFAULT NULL")
     end
 end
 
@@ -355,6 +384,28 @@ local function LoadSettings()
         if changed then SetSetting(key, map) end
     end
     mergeMapDefaults("prep_models")
+
+    -- One-time: pepperoni became an optional topping rather than a required pizza
+    -- component. The merges above never edit an existing recipe, so drop pepperoni
+    -- from the stored raw_pizza on servers seeded before this change (gated so it
+    -- runs once and never re-adds it if an admin later removes/keeps it themselves).
+    if not GetSetting("pizza_pepperoni_optional", false) then
+        local asm = SettingsCache.assembly
+        if type(asm) == "table" then
+            local changed = false
+            for _, a in ipairs(asm) do
+                if a.output == "raw_pizza" and type(a.components) == "table" then
+                    local kept = {}
+                    for _, c in ipairs(a.components) do
+                        if c == "pepperoni" then changed = true else kept[#kept + 1] = c end
+                    end
+                    a.components = kept
+                end
+            end
+            if changed then SetSetting("assembly", asm) end
+        end
+        SetSetting("pizza_pepperoni_optional", true)
+    end
 end
 
 local function SeedRecipes()
@@ -364,10 +415,10 @@ local function SeedRecipes()
     for _, r in ipairs(DEFAULT_RECIPES) do
         MySQL.insert.await([[
             INSERT INTO pickle_restaurant_recipes
-                (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE input_item = input_item
-        ]], { r.input, r.station, r.raw, r.cooked, r.burnt, r.out_cooked, r.out_burnt, r.cook_ms, r.burn_ms, r.dual_sided or 0 })
+        ]], { r.input, r.station, r.raw, r.cooked, r.burnt, r.out_cooked, r.out_burnt, r.cook_ms, r.burn_ms, r.dual_sided or 0, r.method or "grill" })
     end
 
     -- One-time: turn dual_sided on for the default dual recipes (e.g. beef
@@ -384,6 +435,17 @@ local function SeedRecipes()
             end
         end
         SetSetting("dual_sided_seeded", true)
+    end
+
+    -- Same idea for `method`: backfill the default recipes' cook method once (oven
+    -- for cookie/cake/pizza, fry for the fryer items, grill for patties) so a server
+    -- that predates the column gets the new UX without hand-tagging every recipe.
+    if not GetSetting("method_seeded", false) then
+        for _, r in ipairs(DEFAULT_RECIPES) do
+            MySQL.update.await(
+                "UPDATE pickle_restaurant_recipes SET method = ? WHERE input_item = ?", { r.method or "grill", r.input })
+        end
+        SetSetting("method_seeded", true)
     end
 end
 
@@ -428,7 +490,7 @@ local function LoadCookedItems()
             TrayCache[row.restaurant_id] = TrayCache[row.restaurant_id] or {}
             TrayCache[row.restaurant_id][row.identifier] = TrayCache[row.restaurant_id][row.identifier] or {}
             TrayCache[row.restaurant_id][row.identifier][row.item .. "|" .. cheese] =
-                { item = row.item, cheese = cheese, count = row.count }
+                { item = row.item, cheese = cheese, count = row.count, metas = dec(row.metadata, {}) }
         end
     end
 end
@@ -506,6 +568,10 @@ function RecipeMissingItems(r)
 end
 
 function IsRecipeValid(r) return #RecipeMissingItems(r) == 0 end
+
+-- How a recipe is cooked: "grill" (cooktop surface), "oven" (inside a door), or
+-- "fry" (fryer basket). Defaults to grill for legacy/untagged rows.
+function RecipeMethod(r) return (r and r.method) or "grill" end
 
 -- Drinks / assembly entries reference items too; same validity rules apply.
 local function drinkMissing(d)
@@ -624,7 +690,20 @@ function GetTrayCount(rid, identifier, item, cheese)
     return (e and e.count) or 0
 end
 
-function AddTray(rid, identifier, item, cheese, count)
+-- The build stack of the most-recently-added instance of a tray entry (or nil for a
+-- plain/legacy item with no recorded stack). `metas` holds one entry per counted
+-- item (a stack table, or false when that instance wasn't assembled from parts).
+function TrayTopMeta(rid, identifier, item, cheese)
+    local e = TrayCache[rid] and TrayCache[rid][identifier] and TrayCache[rid][identifier][trayKey(item, cheese)]
+    if not e or not e.metas then return nil end
+    local m = e.metas[#e.metas]
+    if m == false then return nil end
+    return m
+end
+
+-- `meta` (optional) is this add's build stack, stored per-instance so an assembled
+-- product can later be taken back apart into exactly what went into it.
+function AddTray(rid, identifier, item, cheese, count, meta)
     if not rid or not identifier or not item then return end
     cheese = CheeseVal(cheese)
     count = count or 1
@@ -632,12 +711,16 @@ function AddTray(rid, identifier, item, cheese, count)
     TrayCache[rid][identifier] = TrayCache[rid][identifier] or {}
     local key = trayKey(item, cheese)
     local e = TrayCache[rid][identifier][key]
-    if e then e.count = e.count + count else
-        TrayCache[rid][identifier][key] = { item = item, cheese = cheese, count = count }
+    if not e then
+        e = { item = item, cheese = cheese, count = 0, metas = {} }
+        TrayCache[rid][identifier][key] = e
     end
-    MySQL.update("INSERT INTO pickle_restaurant_cooked_items (restaurant_id, identifier, item, cheese, count) "
-        .. "VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE count = count + VALUES(count)",
-        { rid, identifier, item, cheese, count })
+    e.metas = e.metas or {}
+    e.count = e.count + count
+    for _ = 1, count do e.metas[#e.metas + 1] = meta or false end
+    MySQL.update("INSERT INTO pickle_restaurant_cooked_items (restaurant_id, identifier, item, cheese, count, metadata) "
+        .. "VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE count = count + VALUES(count), metadata = VALUES(metadata)",
+        { rid, identifier, item, cheese, count, json.encode(e.metas) })
 end
 
 function RemoveTray(rid, identifier, item, cheese, count)
@@ -647,13 +730,16 @@ function RemoveTray(rid, identifier, item, cheese, count)
     local key = trayKey(item, cheese)
     local e = TrayCache[rid][identifier][key]
     e.count = e.count - count
+    e.metas = e.metas or {}
+    -- drop the newest instances' stacks alongside the count (LIFO, matching TrayTopMeta)
+    for _ = 1, count do if #e.metas > 0 then table.remove(e.metas) end end
     if e.count <= 0 then
         TrayCache[rid][identifier][key] = nil
         MySQL.update("DELETE FROM pickle_restaurant_cooked_items WHERE restaurant_id = ? AND identifier = ? AND item = ? AND cheese = ?",
             { rid, identifier, item, cheese })
     else
-        MySQL.update("UPDATE pickle_restaurant_cooked_items SET count = count - ? WHERE restaurant_id = ? AND identifier = ? AND item = ? AND cheese = ?",
-            { count, rid, identifier, item, cheese })
+        MySQL.update("UPDATE pickle_restaurant_cooked_items SET count = count - ?, metadata = ? WHERE restaurant_id = ? AND identifier = ? AND item = ? AND cheese = ?",
+            { count, json.encode(e.metas), rid, identifier, item, cheese })
     end
     return true
 end

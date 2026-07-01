@@ -21,6 +21,25 @@ local DOOR = {
     tween_ms  = 320,
 }
 
+-- Baking slots inside each door's cavity, LOCAL to the stove (behind the door front
+-- face at y = -0.38, so deeper/less-negative y; a hair lower than the door hinge).
+-- TUNE IN-GAME. Cookie/cake carry their own tray, pizza sits bare — all seated here.
+local OVEN = {
+    slots = {
+        [1] = { 
+            vector3(-0.305, -0.16, 0.5),
+            vector3(-0.305, -0.16, 0.6),
+            vector3(-0.305, -0.16, 0.725),
+        },
+        [2] = { 
+            vector3(0.31, -0.16, 0.45),
+            vector3(0.31, -0.16, 0.60),
+            vector3(0.31, -0.16, 0.75),
+        },
+    },
+    z_seat = 0.0, -- extra lift so trayed food rests on the cavity floor
+}
+
 local OvenDoors = {} -- [propId] = { stove = entity, doors = { [door] = { entity, open, token } } }
 local hovered   = { propId = nil, door = nil } -- door the cursor is currently over
 
@@ -49,6 +68,36 @@ local function applyDoorTransform(stove, ent, door, t)
         sr.x + lerp(c.x, op.x, t),
         sr.y + lerp(c.y, op.y, t),
         sr.z + lerp(c.z, op.z, t), 2, true)
+end
+
+-- ─── oven baking slots (used by the cooking module) ─────────────────────────
+
+-- How many baking slots each door cavity holds.
+function OvenSlotCount() return #OVEN.slots[1] end
+
+-- World position of an oven slot, or nil if the stove/slot isn't known.
+function OvenSlotWorld(propId, door, slot)
+    local rec = OvenDoors[propId]
+    local o = rec and door and slot and OVEN.slots[door] and OVEN.slots[door][slot]
+    if not rec or not o or not DoesEntityExist(rec.stove) then return nil end
+    return GetOffsetFromEntityInWorldCoords(rec.stove, o.x, o.y, o.z + OVEN.z_seat)
+end
+
+-- Seat a food entity in an oven slot, aligned to the stove's heading.
+function SeatOvenSlot(propId, door, slot, ent)
+    local rec = OvenDoors[propId]
+    local o = rec and OVEN.slots[door] and OVEN.slots[door][slot]
+    if not rec or not o or not DoesEntityExist(rec.stove) or not (ent and DoesEntityExist(ent)) then return end
+    local pos = GetOffsetFromEntityInWorldCoords(rec.stove, o.x, o.y, o.z + OVEN.z_seat)
+    SetEntityCoordsNoOffset(ent, pos.x, pos.y, pos.z, false, false, false)
+    local sr = GetEntityRotation(rec.stove, 2)
+    SetEntityRotation(ent, sr.x, sr.y, sr.z, 2, true)
+end
+
+-- Is a given oven door currently open (this client's view of the tween state)?
+function IsOvenDoorOpen(propId, door)
+    local rec = OvenDoors[propId]
+    return (rec and rec.doors[door] and rec.doors[door].open) == true
 end
 
 local function loadModel(model)
