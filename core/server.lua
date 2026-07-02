@@ -13,7 +13,7 @@ RecipeCache     = {}    -- array of recipe rows
 RecipeByInput   = {}    -- [input_item]    = recipe
 EmployeeCache   = {}    -- [restaurantId][identifier] = employee row
 StockCache      = {}    -- [restaurantId][item] = count
-TrayCache       = {}    -- [restaurantId][identifier][item.."|"..cheese] = { item, cheese, count }
+TrayCache       = {}    -- [restaurantId][identifier][item.."|"..cheese] = { item, cheese, count, metas } (metas: one build stack — or false — per counted instance; TraySig(meta) addresses a variation)
 SettingsCache   = {}    -- [key]           = decoded value
 
 PERMISSIONS = { "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance" }
@@ -86,6 +86,16 @@ local DEFAULT_SETTINGS = {
         pepperoni    = "pickle_pizza_pepperoni_01",
         frosting     = "pickle_frosting_tube_01",
         sprinkles    = "pickle_sprinkles_tube_01",
+        -- Single-serving props for the fryer batch outputs: the batch cooks as the
+        -- basket pile (the recipe's models) but each collected item is held/stacked
+        -- as one serving. An explicit mapping here overrides the recipe-derived
+        -- model in itemModel.
+        cooked_drumstick = "pickle_chicken_drumstick_02",
+        burnt_drumstick  = "pickle_chicken_drumstick_03",
+        cooked_fries     = "pickle_side_fries_02",
+        burnt_fries      = "pickle_side_fries_03",
+        cooked_nuggets   = "pickle_side_nuggets_02",
+        burnt_nuggets    = "pickle_side_nuggets_03",
     },
     -- Kitchen-prep assembly: combine components -> output item.
     assembly = {
@@ -114,15 +124,20 @@ local DEFAULT_SETTINGS = {
 -- ─── default cookable recipes (one per streamed 3-variant food model) ─────────
 
 local DEFAULT_RECIPES = {
+    -- The fryer batch models render a basketful, so one fry yields a serving of
+    -- individual items (output_count) when collected cooked/burnt.
     { input = "raw_drumstick", station = "fryer", method = "fry",
       raw = "pickle_fryer_drumstick_01", cooked = "pickle_fryer_drumstick_02", burnt = "pickle_fryer_drumstick_03",
-      out_cooked = "cooked_drumstick", out_burnt = "burnt_drumstick", cook_ms = 15000, burn_ms = 15000 },
+      out_cooked = "cooked_drumstick", out_burnt = "burnt_drumstick", cook_ms = 15000, burn_ms = 15000,
+      output_count = 4 },
     { input = "raw_fries", station = "fryer", method = "fry",
       raw = "pickle_fryer_fries_01", cooked = "pickle_fryer_fries_02", burnt = "pickle_fryer_fries_03",
-      out_cooked = "cooked_fries", out_burnt = "burnt_fries", cook_ms = 12000, burn_ms = 12000 },
+      out_cooked = "cooked_fries", out_burnt = "burnt_fries", cook_ms = 12000, burn_ms = 12000,
+      output_count = 4 },
     { input = "raw_nuggets", station = "fryer", method = "fry",
       raw = "pickle_fryer_nuggets_01", cooked = "pickle_fryer_nuggets_02", burnt = "pickle_fryer_nuggets_03",
-      out_cooked = "cooked_nuggets", out_burnt = "burnt_nuggets", cook_ms = 12000, burn_ms = 12000 },
+      out_cooked = "cooked_nuggets", out_burnt = "burnt_nuggets", cook_ms = 12000, burn_ms = 12000,
+      output_count = 20 },
     { input = "raw_beef_patty", station = "stovetop", method = "grill",
       raw = "pickle_patty_beef_01", cooked = "pickle_patty_beef_02", burnt = "pickle_patty_beef_03",
       out_cooked = "cooked_beef_patty", out_burnt = "burnt_beef_patty", cook_ms = 18000, burn_ms = 15000,
@@ -218,6 +233,9 @@ local function CreateTables()
             -- how the item is cooked: grill (cooktop surface), oven (inside a door),
             -- or fry (fryer basket). Governs the station interaction UX.
             `method`             VARCHAR(10)  NOT NULL DEFAULT 'grill',
+            -- how many output items one cook yields when collected cooked/burnt
+            -- (a basket of fries is a batch, not one giant fry)
+            `output_count`       SMALLINT UNSIGNED NOT NULL DEFAULT 1,
             PRIMARY KEY (`id`),
             UNIQUE KEY `uniq_input` (`input_item`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -323,6 +341,15 @@ local function CreateTables()
         end
     end
 
+    -- Per-recipe output yield (a fry basket holds a batch). Added in place for
+    -- servers that predate the column; the default values are backfilled once in
+    -- SeedRecipes (gated by the output_count_seeded flag).
+    local ycol = MySQL.query.await("SHOW COLUMNS FROM `pickle_restaurant_recipes` LIKE 'output_count'")
+    if not ycol or #ycol == 0 then
+        MySQL.query.await(
+            "ALTER TABLE `pickle_restaurant_recipes` ADD COLUMN `output_count` SMALLINT UNSIGNED NOT NULL DEFAULT 1")
+    end
+
     -- The cooked-items tray's `cheese` column was originally TINYINT(1). oxmysql
     -- boolean-casts TINYINT(1) columns, which silently destroys the melted state
     -- (cheese = 2) on read-back, so a melted patty came back with no cheese after a
@@ -415,10 +442,10 @@ local function SeedRecipes()
     for _, r in ipairs(DEFAULT_RECIPES) do
         MySQL.insert.await([[
             INSERT INTO pickle_restaurant_recipes
-                (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE input_item = input_item
-        ]], { r.input, r.station, r.raw, r.cooked, r.burnt, r.out_cooked, r.out_burnt, r.cook_ms, r.burn_ms, r.dual_sided or 0, r.method or "grill" })
+        ]], { r.input, r.station, r.raw, r.cooked, r.burnt, r.out_cooked, r.out_burnt, r.cook_ms, r.burn_ms, r.dual_sided or 0, r.method or "grill", r.output_count or 1 })
     end
 
     -- One-time: turn dual_sided on for the default dual recipes (e.g. beef
@@ -446,6 +473,18 @@ local function SeedRecipes()
                 "UPDATE pickle_restaurant_recipes SET method = ? WHERE input_item = ?", { r.method or "grill", r.input })
         end
         SetSetting("method_seeded", true)
+    end
+
+    -- And for `output_count`: backfill the fryer batch yields (fries/drumsticks 4,
+    -- nuggets 20) once, so existing servers get servings without re-entering recipes.
+    if not GetSetting("output_count_seeded", false) then
+        for _, r in ipairs(DEFAULT_RECIPES) do
+            if (r.output_count or 1) > 1 then
+                MySQL.update.await(
+                    "UPDATE pickle_restaurant_recipes SET output_count = ? WHERE input_item = ?", { r.output_count, r.input })
+            end
+        end
+        SetSetting("output_count_seeded", true)
     end
 end
 
@@ -685,20 +724,64 @@ end
 
 local function trayKey(item, cheese) return item .. "|" .. CheeseVal(cheese) end
 
-function GetTrayCount(rid, identifier, item, cheese)
-    local e = TrayCache[rid] and TrayCache[rid][identifier] and TrayCache[rid][identifier][trayKey(item, cheese)]
-    return (e and e.count) or 0
+-- Canonical signature of one instance's build stack: its ordered layers as
+-- "item|cheese|half" joined with ",". "" = no recorded stack (a plain instance).
+-- Two builds of the same item with different stacks (e.g. a pizza with and without
+-- pepperoni) get different signatures, so the tray can tell the variations apart
+-- instead of merging them into one count and popping the wrong one on removal.
+function TraySig(meta)
+    if type(meta) ~= "table" or #meta == 0 then return "" end
+    local parts = {}
+    for _, l in ipairs(meta) do
+        -- tolerate the older aggregated `count` layer format
+        for _ = 1, (tonumber(l.count) or 1) do
+            local part = tostring(l.item) .. "|" .. CheeseVal(l.cheese) .. "|" .. tostring(l.half or "")
+            -- a layer that is itself a product carries its own nested build stack
+            -- (a burger holding a pepperoni pizza ≠ one holding a plain pizza)
+            if type(l.stack) == "table" and #l.stack > 0 then
+                part = part .. "{" .. TraySig(l.stack) .. "}"
+            end
+            parts[#parts + 1] = part
+        end
+    end
+    return table.concat(parts, ",")
 end
 
--- The build stack of the most-recently-added instance of a tray entry (or nil for a
--- plain/legacy item with no recorded stack). `metas` holds one entry per counted
--- item (a stack table, or false when that instance wasn't assembled from parts).
-function TrayTopMeta(rid, identifier, item, cheese)
+-- Signature of the i-th counted instance. `metas` can be shorter than `count`
+-- (legacy rows persisted before per-instance stacks); the tail is plain ("").
+local function traySigAt(e, i)
+    local m = e.metas and e.metas[i]
+    if type(m) ~= "table" then return "" end
+    return TraySig(m)
+end
+
+-- `sig` (optional, here and below): address only the instances whose build stack
+-- matches that signature. nil = any instance (the legacy LIFO behaviour).
+function GetTrayCount(rid, identifier, item, cheese, sig)
     local e = TrayCache[rid] and TrayCache[rid][identifier] and TrayCache[rid][identifier][trayKey(item, cheese)]
-    if not e or not e.metas then return nil end
-    local m = e.metas[#e.metas]
-    if m == false then return nil end
-    return m
+    if not e then return 0 end
+    if sig == nil then return e.count or 0 end
+    local n = 0
+    for i = 1, e.count or 0 do
+        if traySigAt(e, i) == sig then n = n + 1 end
+    end
+    return n
+end
+
+-- The build stack of the most-recently-added (matching) instance of a tray entry,
+-- or nil for a plain/legacy instance with no recorded stack. `metas` holds one
+-- entry per counted item (a stack table, or false when that instance wasn't
+-- assembled from parts).
+function TrayTopMeta(rid, identifier, item, cheese, sig)
+    local e = TrayCache[rid] and TrayCache[rid][identifier] and TrayCache[rid][identifier][trayKey(item, cheese)]
+    if not e then return nil end
+    for i = e.count or 0, 1, -1 do
+        if sig == nil or traySigAt(e, i) == sig then
+            local m = e.metas and e.metas[i]
+            return (type(m) == "table") and m or nil
+        end
+    end
+    return nil
 end
 
 -- `meta` (optional) is this add's build stack, stored per-instance so an assembled
@@ -723,16 +806,24 @@ function AddTray(rid, identifier, item, cheese, count, meta)
         { rid, identifier, item, cheese, count, json.encode(e.metas) })
 end
 
-function RemoveTray(rid, identifier, item, cheese, count)
+function RemoveTray(rid, identifier, item, cheese, count, sig)
     cheese = CheeseVal(cheese)
     count = count or 1
-    if GetTrayCount(rid, identifier, item, cheese) < count then return false end
+    if GetTrayCount(rid, identifier, item, cheese, sig) < count then return false end
     local key = trayKey(item, cheese)
     local e = TrayCache[rid][identifier][key]
-    e.count = e.count - count
     e.metas = e.metas or {}
-    -- drop the newest instances' stacks alongside the count (LIFO, matching TrayTopMeta)
-    for _ = 1, count do if #e.metas > 0 then table.remove(e.metas) end end
+    -- Drop the newest matching instances alongside the count (LIFO, matching
+    -- TrayTopMeta). An instance past #metas is plain (""), so removing it only
+    -- decrements the count — it must never pop another instance's stack.
+    for _ = 1, count do
+        local idx
+        for i = e.count, 1, -1 do
+            if sig == nil or traySigAt(e, i) == sig then idx = i; break end
+        end
+        if idx and idx <= #e.metas then table.remove(e.metas, idx) end
+        e.count = e.count - 1
+    end
     if e.count <= 0 then
         TrayCache[rid][identifier][key] = nil
         MySQL.update("DELETE FROM pickle_restaurant_cooked_items WHERE restaurant_id = ? AND identifier = ? AND item = ? AND cheese = ?",
@@ -744,17 +835,34 @@ function RemoveTray(rid, identifier, item, cheese, count)
     return true
 end
 
--- A display list for the NUI: resolves label/image and a cheese flag.
+-- A display list for the NUI: resolves label/image and a cheese flag. Instances
+-- with different build stacks are split into separate entries (a pepperoni pizza
+-- is not the same thing as a plain one), each carrying its `sig` so every drag /
+-- consume can address exactly that variation, plus its `meta` (one instance's
+-- stack) for stack rendering and descriptions.
 function GetTray(rid, identifier)
     local out = {}
     local byKey = TrayCache[rid] and TrayCache[rid][identifier]
     if not byKey then return out end
     for _, e in pairs(byKey) do
         if e.count > 0 then
-            out[#out + 1] = {
-                item = e.item, cheese = e.cheese, count = e.count,
-                label = GetItemLabel(e.item), image = GetItemImage(e.item),
-            }
+            local groups, order = {}, {}
+            for i = 1, e.count do
+                local s = traySigAt(e, i)
+                if not groups[s] then
+                    local m = e.metas and e.metas[i]
+                    groups[s] = { count = 0, meta = (type(m) == "table") and m or nil }
+                    order[#order + 1] = s
+                end
+                groups[s].count = groups[s].count + 1
+            end
+            for _, s in ipairs(order) do
+                out[#out + 1] = {
+                    item = e.item, cheese = e.cheese, count = groups[s].count,
+                    sig = s, meta = groups[s].meta,
+                    label = GetItemLabel(e.item), image = GetItemImage(e.item),
+                }
+            end
         end
     end
     return out

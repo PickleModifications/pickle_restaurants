@@ -44,6 +44,7 @@ end
 local function ClearWorld()
     for id, ent in pairs(spawnedProps) do
         if DespawnOvenDoors then DespawnOvenDoors(id) end
+        if DespawnFryerBaskets then DespawnFryerBaskets(id) end
         SafeDeleteEntity(ent)
         spawnedProps[id] = nil
     end
@@ -205,6 +206,7 @@ end)
 
 RegisterNetEvent("pickle_restaurants:propRemoved", function(propId)
     if DespawnOvenDoors then DespawnOvenDoors(propId) end
+    if DespawnFryerBaskets then DespawnFryerBaskets(propId) end
     SafeDeleteEntity(spawnedProps[propId])
     spawnedProps[propId] = nil
     if propInteractions[propId] then DeleteInteraction(propInteractions[propId]); propInteractions[propId] = nil end

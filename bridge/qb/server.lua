@@ -314,6 +314,37 @@ CreateThread(function()
         if usingOx() then return exports.ox_inventory:Items(name) ~= nil end
         return QBCore.Shared.Items[name:lower()] ~= nil
     end
+
+    -- Per-slot access so item variations survive the inventory round-trip: the
+    -- cooking module reads each slot's metadata (build stack / cheese) and removes
+    -- from the exact slot it showed. ox_inventory first, qb slots as fallback.
+    Inventory.GetItemSlots = function(source, name)
+        local out = {}
+        if usingOx() then
+            for _, s in ipairs(exports.ox_inventory:Search(source, "slots", name) or {}) do
+                out[#out + 1] = { slot = s.slot, count = s.count or 1, metadata = s.metadata }
+            end
+            return out
+        end
+        local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
+        for slot, item in pairs(xPlayer and xPlayer.PlayerData.items or {}) do
+            if item and item.name == name then
+                out[#out + 1] = { slot = item.slot or slot, count = item.amount or 1, metadata = item.info }
+            end
+        end
+        return out
+    end
+
+    Inventory.RemoveItemSlot = function(source, name, count, slot)
+        if usingOx() then
+            exports.ox_inventory:RemoveItem(source, name, count, nil, slot)
+            return
+        end
+        local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
+        if xPlayer then xPlayer.Functions.RemoveItem(name, count, slot) end
+        Inventory.UpdateInventory(source)
+    end
+
     Inventory.RefreshItems()
     Inventory.Ready = true
 end)

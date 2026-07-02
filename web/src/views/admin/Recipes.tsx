@@ -12,6 +12,7 @@ type Recipe = {
   raw_model: string; cooked_model: string; burnt_model: string;
   output_cooked_item: string; output_burnt_item: string;
   cook_ms: number; burn_ms: number;
+  output_count?: number; // items one cook yields when collected cooked/burnt (a fry basket is a batch)
   dual_sided?: boolean | number;
   method?: string; // grill | oven | fry
   valid?: boolean; missing?: string[];
@@ -192,6 +193,8 @@ function RecipeForm({ form, setForm, items }: { form: Recipe; setForm: (r: Recip
       {modelField("Burnt model (_03)", "burnt_model")}
       <NumberField label="Cook time (ms)" value={form.cook_ms} min={0} step={1000} onChange={(v) => set("cook_ms", v)} />
       <NumberField label="Burn time (ms)" value={form.burn_ms} min={0} step={1000} onChange={(v) => set("burn_ms", v)} />
+      <NumberField label="Output count (per cook)" value={form.output_count ?? 1} min={1} step={1}
+        onChange={(v) => set("output_count", v)} />
       {form.station === "stovetop" && (
         <div className="col-span-3">
           <Toggle checked={!!form.dual_sided} onChange={(v) => set("dual_sided", v)}

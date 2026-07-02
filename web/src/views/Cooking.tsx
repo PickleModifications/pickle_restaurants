@@ -1,12 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { Badge } from "@/components/ui/badge";
-import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot } from "lucide-react";
+import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type Ingredient = { kind: string; item: string; label: string; image?: string; count?: number; canMake?: boolean; model?: string; dual?: boolean };
 type SideInfo = { state: string; percent: number; cooking?: boolean };
-type TrayEntry = { item: string; cheese?: number; count: number; label?: string; image?: string; model?: string; dual?: boolean; cheeseModel?: string; decompose?: boolean; uncooked?: boolean; cookStation?: string };
+// One aggregated component of a build stack (bun halves collapse to one bun).
+type TrayComp = { item: string; label: string; image?: string; count: number };
+type TrayEntry = {
+  item: string; cheese?: number; count: number; label?: string; image?: string; model?: string;
+  dual?: boolean; cheeseModel?: string; decompose?: boolean; uncooked?: boolean; cookStation?: string;
+  // per-build-variation identity: sig addresses exactly this variation on the server;
+  // stack/stackState render its full layer tower; extras (toppings over the base
+  // recipe) and comps (full component list) tell otherwise-identical entries apart.
+  // source "inv" = an inventory-held product listed alongside the tray ("Item" pill).
+  sig?: string; stack?: string[]; stackState?: string; extras?: TrayComp[]; comps?: TrayComp[]; source?: string;
+};
 // A buildable recipe (kitchen prep) with its output + components resolved for the tooltip.
 type RecipeComp = { item: string; label: string; image?: string };
 type RecipeCat = { output: string; label: string; image?: string; components: RecipeComp[] };
@@ -19,20 +29,23 @@ type ChipItem = {
   state?: string;                         // single items
   dual?: boolean;                         // dual patties below
   single?: boolean;                       // oven/fryer gated single item (progress below)
+  locked?: boolean;                       // in a lowered fryer basket — can't be grabbed
   percent?: number; gate?: boolean; method?: string; burningSoon?: boolean;
   sides?: SideInfo[]; cooking?: number;   // per-face progress + which face is on the grill
   cheese?: string;                        // "none" | "applied" | "melted"
   give?: string; giveLabel?: string; giveImage?: string;
 };
 
-const STOVE_VIEWS = [
-  { key: "stovetop", label: "Stovetop" },
-  { key: "door1", label: "Oven Door #1" },
-  { key: "door2", label: "Oven Door #2" },
+// The stovetop's camera views as icon tabs (sidebar left of the item listings):
+// a cooktop for the stovetop, the same oven icon twice with a #1/#2 badge.
+const STOVE_VIEWS: { key: string; label: string; icon: any; num?: number }[] = [
+  { key: "stovetop", label: "Stovetop", icon: Heater },
+  { key: "door1", label: "Oven Door #1", icon: Microwave, num: 1 },
+  { key: "door2", label: "Oven Door #2", icon: Microwave, num: 2 },
 ];
 
 const STATION_META: Record<string, { label: string; icon: any; hint: string }> = {
-  fryer: { label: "Fryer", icon: Flame, hint: "Drop food into the basket, then lower it into the oil to fry. Raise it to take food out." },
+  fryer: { label: "Fryer", icon: Flame, hint: "Drop food into a basket, then click that basket to lower it into the oil. Click it again to raise it and take the food out." },
   stovetop: { label: "Stovetop", icon: Flame, hint: "Grill patties on the cooktop (click to flip); open a door to bake cookies, cakes & pizzas inside." },
   soda_machine: { label: "Soda Machine", icon: CupSoda, hint: "Drag a cup out to fill a drink." },
   kitchen_prep: { label: "Kitchen Prep", icon: Sandwich, hint: "Stack ingredients on the table, then hover a stack to pick a recipe and make it." },
@@ -58,6 +71,140 @@ function ItemThumb({ src, alt, className }: { src?: string; alt: string; classNa
 
 const inRect = (x: number, y: number, r: DOMRect) =>
   x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+
+// "+ 2 toppings" — how many extras ride on top of the base recipe (tooltip header);
+// the per-topping detail lives in the "Made with" list below it.
+const extrasCount = (e?: TrayEntry) => (e?.extras ?? []).reduce((n, c) => n + c.count, 0);
+
+// ── tray-card toppings row ────────────────────────────────────────────────────
+// A fixed-height row on every tray card: square icons for the toppings that fit,
+// "+X" for the overflow, grey "No toppings" when the build is exactly the base
+// recipe — so all cards keep the same spacing.
+
+const TOPPING_SLOTS = 4;
+
+function ToppingsRow({ e }: { e: TrayEntry }) {
+  const units: TrayComp[] = [];
+  for (const c of e.extras || []) for (let n = 0; n < c.count; n++) units.push(c);
+  if (units.length === 0) {
+    return <div className="flex h-[18px] items-center text-[9px] text-muted-foreground/70">No toppings</div>;
+  }
+  const shown = units.slice(0, units.length > TOPPING_SLOTS ? TOPPING_SLOTS - 1 : TOPPING_SLOTS);
+  const over = units.length - shown.length;
+  return (
+    <div className="flex h-[18px] items-center justify-center gap-0.5">
+      {shown.map((c, i) => (
+        <div
+          key={c.item + i}
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-border/60 bg-background/60"
+        >
+          <ItemThumb src={c.image} alt={c.label} className="h-3.5 w-3.5 object-contain" />
+        </div>
+      ))}
+      {over > 0 && (
+        <span className="rounded-sm border border-border/60 bg-background/60 px-1 text-[9px] font-semibold tabular-nums text-muted-foreground">
+          +{over}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ── bar-item hover tooltip ────────────────────────────────────────────────────
+// Floats above a hovered tray/ingredient card: what the item is, what it's made
+// of (with icons), its cheese state, and what you can do with it here. Anchored
+// fixed so the bar's horizontal scroll can't clip it.
+
+type BarTip = { x: number; y: number; tray?: TrayEntry; ing?: Ingredient; hint?: string };
+
+function BarTooltip({ tip }: { tip: BarTip }) {
+  const e = tip.tray;
+  const ing = tip.ing;
+  const label = e ? e.label || e.item : ing?.label || "";
+  const image = e ? e.image : ing?.image;
+  const count = e ? e.count : ing?.count;
+  // clamp the w-56 (224px) card inside the viewport; the caret keeps pointing at
+  // the card's centre even when the box has been shoved off-centre to fit
+  const HALF = 112, MARGIN = 8;
+  const x = Math.min(Math.max(tip.x, HALF + MARGIN), window.innerWidth - HALF - MARGIN);
+  const caretShift = Math.min(Math.max(tip.x - x, -HALF + 16), HALF - 16);
+  return (
+    <div
+      // NOTE: the fade-in animation lives on the INNER card — its keyframes set
+      // `transform`, which would override this centering translate mid-animation
+      // (the tooltip would start off to the right/below and slide into place)
+      className="pointer-events-none fixed z-50 -translate-x-1/2 -translate-y-[104%]"
+      style={{ left: x, top: tip.y }}
+    >
+      <div className="relative w-56 animate-fade-in rounded-xl border border-border bg-card p-3 shadow-2xl">
+        <div className="flex items-center gap-2">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-muted/50">
+            <ItemThumb src={image} alt={label} className="h-9 w-9 object-contain" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className="truncate text-sm font-semibold">{label}</span>
+              {e?.source === "inv" && (
+                <span className="shrink-0 rounded border border-border bg-secondary px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Item
+                </span>
+              )}
+            </div>
+            {e &&
+              (extrasCount(e) > 0 ? (
+                <div className="truncate text-[11px] font-medium text-amber-300">
+                  + {extrasCount(e)} topping{extrasCount(e) === 1 ? "" : "s"}
+                </div>
+              ) : (
+                <div className="truncate text-[11px] font-medium text-muted-foreground">No toppings</div>
+              ))}
+          </div>
+          {count != null && (
+            <span className="ml-auto shrink-0 rounded bg-secondary px-1.5 py-0.5 text-[11px] font-semibold tabular-nums">
+              ×{count}
+            </span>
+          )}
+        </div>
+
+        {!!e?.cheese && (
+          <div className="mt-2 flex items-center gap-1.5 text-[11px] text-amber-300">
+            🧀 {e.cheese === 2 ? "Cheese melted in" : "Cheese applied"}
+          </div>
+        )}
+
+        {e?.comps && e.comps.length > 0 && (
+          <>
+            <div className="mt-2.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Made with
+            </div>
+            <div className="mt-1 space-y-1">
+              {e.comps.map((c, i) => (
+                <div key={c.item + i} className="flex items-center gap-1.5 text-[11px]">
+                  <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-muted/50">
+                    <ItemThumb src={c.image} alt={c.label} className="h-4 w-4 object-contain" />
+                  </div>
+                  <span className="truncate">{c.label}</span>
+                  {c.count > 1 && <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">×{c.count}</span>}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {tip.hint && (
+          <div className="mt-2.5 border-t border-border/60 pt-2 text-[11px] leading-snug text-muted-foreground">
+            {tip.hint}
+          </div>
+        )}
+        {/* caret pointing down at the card */}
+        <div
+          className="absolute top-full h-0 w-0 -translate-x-1/2 border-x-[6px] border-t-[6px] border-x-transparent border-t-card"
+          style={{ left: `calc(50% + ${caretShift}px)` }}
+        />
+      </div>
+    </div>
+  );
+}
 
 // ── hover status panel ────────────────────────────────────────────────────────
 
@@ -101,7 +248,9 @@ function StatusPanel({ c }: { c: ChipItem }) {
       const done = c.state === "burnt";
       const pausedHint = !c.gate
         ? (c.method === "oven" ? "Close the door to bake" : "Lower the basket to fry")
-        : null;
+        : c.locked
+          ? "Raise the basket to take it out"
+          : null;
       return (
         <div className="w-56 rounded-xl border border-border bg-card p-3 shadow-2xl">
           <div className="flex items-center gap-2">
@@ -312,9 +461,8 @@ export default function Cooking({ data }: { data: any }) {
   const [dragHint, setDragHint] = useState<string | null>(null);
   // floating 2D ghost for a topping (cheese) drag onto a patty
   const [ghost, setGhost] = useState<{ x: number; y: number; label: string; image?: string } | null>(null);
-  // fryer basket lowered (frying) vs raised
-  const [basketDown, setBasketDown] = useState<boolean>(!!data?.basketDown);
-
+  // hover tooltip for a bar card (tray item / ingredient): contents + what to do with it
+  const [barTip, setBarTip] = useState<BarTip | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
   const tipPinnedRef = useRef(false);           // cursor is over the build tooltip
   const tipHideTimer = useRef<number | null>(null);
@@ -322,7 +470,7 @@ export default function Cooking({ data }: { data: any }) {
   const hoveredRef = useRef<number | null>(null);
   const placingRef = useRef(false);          // dragging an ingredient out of the bar
   const toppingRef = useRef<string | null>(null); // dragging a topping (cheese) onto a patty
-  const prepDragRef = useRef<{ source: string; item: string; cheese: number; model?: string | null; decompose?: boolean } | null>(null); // dragging a NEW part (or a product to take apart) onto the prep table
+  const prepDragRef = useRef<{ source: string; item: string; cheese: number; model?: string | null; decompose?: boolean; sig?: string } | null>(null); // dragging a NEW part (or a product to take apart) onto the prep table
   const prepHoveredRef = useRef<number | null>(null); // placed prep part under the cursor (grab target)
   const prepMoveRef = useRef<{ puid: number } | null>(null); // re-dragging a placed prep part
   const worldRef = useRef<{ uid: number | null; startX: number; startY: number; dragging: boolean } | null>(null);
@@ -334,12 +482,10 @@ export default function Cooking({ data }: { data: any }) {
     setTab("ingredients");
     setTip(null);
     setTipShow(false);
-    setBasketDown(!!data?.basketDown);
   }, [data]);
 
-  useNuiEvent("cookingIngredients", (d) => setIngredients(d.ingredients || []));
-  useNuiEvent("cookingFryer", (d) => setBasketDown(!!d.lowered));
-  useNuiEvent("cookingTray", (d) => setTray(d.tray || []));
+  useNuiEvent("cookingIngredients", (d) => { setIngredients(d.ingredients || []); setBarTip(null); });
+  useNuiEvent("cookingTray", (d) => { setTray(d.tray || []); setBarTip(null); });
   useNuiEvent("cookingRecipes", (d) => setRecipes(d.recipes || []));
   useNuiEvent("cookingItems", (d) => {
     const its: ChipItem[] = d.items || [];
@@ -435,11 +581,31 @@ export default function Cooking({ data }: { data: any }) {
   // an uncooked tray item (e.g. an uncooked pizza) can be dragged straight into its
   // own station to cook — consumed from the tray rather than the inventory.
   const canCookHere = (e: TrayEntry) => !isPrep && !!e.uncooked && e.cookStation === station;
+
+  // one contextual "what can I do with this here" line for the hover tooltip
+  const trayHint = (e: TrayEntry): string => {
+    if (isPrep && e.decompose) return "Drag onto the table to take it apart, or stack it as a layer.";
+    if (isPrep) return "Drag onto the table to build with it.";
+    if (canCookHere(e)) return station === "fryer" ? "Drag into the fryer basket to cook it." : "Drag into an open oven door to bake it.";
+    if (e.uncooked) return `Still raw — cook it at the ${e.cookStation === "fryer" ? "fryer" : "stovetop oven"}.`;
+    if (e.source === "inv") return "In your inventory — ready to stock or sell.";
+    return "Use “→ inventory” to take it with you.";
+  };
+  const ingHint = (ing: Ingredient): string => {
+    if (ing.kind === "topping") return "Drag onto a cooked patty to add it.";
+    if (ing.kind === "drink") return "Drag out under the tap to start filling.";
+    if (isPrep) return "Drag onto the table — stack parts to build recipes.";
+    return station === "fryer" ? "Drag into the fryer basket to cook." : "Drag onto the cooktop or into an open oven door.";
+  };
+  const showBarTip = (ev: React.PointerEvent, tip: Omit<BarTip, "x" | "y">) => {
+    const r = (ev.currentTarget as HTMLElement).getBoundingClientRect();
+    setBarTip({ x: r.left + r.width / 2, y: r.top, ...tip });
+  };
   const startTrayCook = (ev: React.PointerEvent, e: TrayEntry) => {
     ev.preventDefault();
     placingRef.current = true;
     setDragging(true);
-    fetchNui("cooking:beginPlace", { kind: "cook", item: e.item, source: "tray", cheese: e.cheese || 0 });
+    fetchNui("cooking:beginPlace", { kind: "cook", item: e.item, source: e.source || "tray", cheese: e.cheese || 0, sig: e.sig || "" });
   };
   // toppings (cheese) aren't placed in the world — they're dragged onto a patty.
   // The real slice prop renders in 3D under the cursor (no 2D pill); releasing
@@ -456,24 +622,38 @@ export default function Cooking({ data }: { data: any }) {
   // stovetop); without one it falls back to a 2D ghost + auto-stack.
   const startPrepDrag = (
     e: React.PointerEvent, source: string,
-    entry: { item: string; cheese?: number; model?: string; label?: string; image?: string; dual?: boolean; cheeseModel?: string; decompose?: boolean; uncooked?: boolean }
+    entry: { item: string; cheese?: number; model?: string; label?: string; image?: string; dual?: boolean; cheeseModel?: string; decompose?: boolean; uncooked?: boolean; sig?: string; stack?: string[]; stackState?: string }
   ) => {
     e.preventDefault();
     // A bun is one item spawned as a bottom+top pair (handled client-side), so no
     // half hint is needed here. A finished product from the tray is dragged as its
     // single prop but, on drop, gets taken apart into its component stack.
     const decompose = source === "tray" && !!entry.decompose;
-    prepDragRef.current = { source, item: entry.item, cheese: entry.cheese || 0, model: entry.model || null, decompose };
-    setTab(source === "tray" ? (entry.uncooked ? "uncooked" : "cooked") : "ingredients");
+    // the exact build variation this drag addresses: tray entries always carry a
+    // sig; inventory PRODUCT entries carry one too (slot metadata). Plain
+    // Ingredients-bar components have none — they reserve item-wide.
+    const sig = entry.sig ?? (source === "tray" ? "" : undefined);
+    // model doubles as the "3D drag in progress" marker on release — a stack-only
+    // entry uses its base layer so the endPrepPlace commit path still runs
+    const dragModel = entry.model || (entry.stack && entry.stack.length > 1 ? entry.stack[0] : null);
+    prepDragRef.current = { source, item: entry.item, cheese: entry.cheese || 0, model: dragModel, decompose, sig };
+    // stay on the tab the card actually lives in: tray entries AND inventory-held
+    // products (they carry a sig) file under Cooked/Uncooked; only true
+    // Ingredients-bar components switch to Ingredients
+    const fromTab = source === "tray" || entry.sig !== undefined;
+    setTab(fromTab ? (entry.uncooked ? "uncooked" : "cooked") : "ingredients");
     setDragging(true);
     setDragHint(decompose ? "Drop on the prep table to take it apart" : "Drop on the prep table — or onto another item to stack");
     if (decompose) {
       // preview the whole component stack (peeked, nothing consumed) under the cursor
-      fetchNui("cooking:beginPrepDecompose", { item: entry.item });
-    } else if (entry.model) {
+      fetchNui("cooking:beginPrepDecompose", { item: entry.item, sig });
+    } else if (entry.model || (entry.stack && entry.stack.length > 1)) {
+      // a product carrying a build stack (e.g. a cooked pizza) drags as its whole
+      // layer tower, not just the base model
       fetchNui("cooking:beginPrepPlace", {
         item: entry.item, model: entry.model,
         dual: entry.dual ? 1 : 0, cheese: entry.cheese || 0, cheeseModel: entry.cheeseModel,
+        sig, stack: entry.stack, state: entry.stackState,
       });
     } else {
       setGhost({ x: e.clientX, y: e.clientY, label: entry.label || entry.item, image: entry.image });
@@ -507,6 +687,9 @@ export default function Cooking({ data }: { data: any }) {
       if (w && w.uid != null && !w.dragging) {
         const dx = e.clientX - w.startX, dy = e.clientY - w.startY;
         if (dx * dx + dy * dy > DRAG_THRESH) {
+          // an item in a lowered fryer basket can't be grabbed at all — the drag
+          // never starts (no reaching into hot oil; raise the basket first)
+          if (itemsRef.current.find((c) => c.uid === w.uid)?.locked) return;
           w.dragging = true;
           setDragging(true); // hide the tooltip while moving the prop
           setTab("cooked");  // dragging a cooked prop -> show where it'll land
@@ -542,12 +725,12 @@ export default function Cooking({ data }: { data: any }) {
         setGhost(null);
         if (p.decompose) {
           // a finished product — take it apart into its component stack on drop
-          fetchNui("cooking:endPrepDecompose", { cancel: overBar, item: p.item });
+          fetchNui("cooking:endPrepDecompose", { cancel: overBar, item: p.item, sig: p.sig });
         } else if (p.model) {
           // live 3D placement — commit (or cancel back over the bar)
-          fetchNui("cooking:endPrepPlace", { cancel: overBar, source: p.source, item: p.item, cheese: p.cheese });
+          fetchNui("cooking:endPrepPlace", { cancel: overBar, source: p.source, item: p.item, cheese: p.cheese, sig: p.sig });
         } else if (!overBar) {
-          fetchNui("cooking:prepAdd", { source: p.source, item: p.item, cheese: p.cheese });
+          fetchNui("cooking:prepAdd", { source: p.source, item: p.item, cheese: p.cheese, sig: p.sig });
         }
         return;
       }
@@ -615,42 +798,6 @@ export default function Cooking({ data }: { data: any }) {
         </div>
       )}
 
-      {/* stovetop view switcher — re-frames the scripted camera onto a part */}
-      {isStove && (
-        <div className="fixed left-1/2 top-4 flex -translate-x-1/2 gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-xl">
-          {STOVE_VIEWS.map((v) => (
-            <button
-              key={v.key}
-              onClick={() => switchView(v.key)}
-              className={cn(
-                "rounded-md px-3 py-1.5 text-xs font-semibold transition",
-                view === v.key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent"
-              )}
-            >
-              {v.label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* fryer basket lower/raise — frying only advances while the basket is down */}
-      {isFryer && (
-        <div className="fixed left-1/2 top-4 flex -translate-x-1/2 items-center gap-2 rounded-lg border border-border bg-card/95 p-1 pl-3 shadow-xl">
-          <span className="text-xs font-semibold text-muted-foreground">
-            {basketDown ? "Basket in the oil — frying" : "Basket raised"}
-          </span>
-          <button
-            onClick={() => fetchNui("cooking:fryerDip", { lowered: !basketDown })}
-            className={cn(
-              "rounded-md px-3 py-1.5 text-xs font-semibold transition",
-              basketDown ? "bg-secondary text-foreground hover:bg-accent" : "bg-primary text-primary-foreground hover:opacity-90"
-            )}
-          >
-            {basketDown ? "Raise basket" : "Lower basket"}
-          </button>
-        </div>
-      )}
-
       {/* hover status panel — fades in/out over the hovered prop, click-through */}
       <div
         className={cn(
@@ -680,6 +827,9 @@ export default function Cooking({ data }: { data: any }) {
           <div className="absolute left-1/2 top-full h-0 w-0 -translate-x-1/2 border-x-[6px] border-t-[6px] border-x-transparent border-t-card" />
         </div>
       </div>
+
+      {/* hover tooltip for a bar card (tray item / ingredient) */}
+      {barTip && !dragging && <BarTooltip tip={barTip} />}
 
       {/* floating ghost while dragging a topping (cheese) onto a patty */}
       {ghost && (
@@ -712,6 +862,46 @@ export default function Cooking({ data }: { data: any }) {
           </div>
         </div>
 
+        <div className="flex gap-3">
+          {/* stovetop view switcher — icon tabs for the cooktop and each oven door;
+              the pictures do the talking (labels only on hover) */}
+          {isStove && (
+            <div className="flex shrink-0 flex-col justify-center gap-1.5 border-r border-border pr-3">
+              {STOVE_VIEWS.map((v) => {
+                const VIcon = v.icon;
+                const active = view === v.key;
+                return (
+                  <button
+                    key={v.key}
+                    title={v.label}
+                    onClick={() => switchView(v.key)}
+                    className={cn(
+                      "relative flex h-10 w-10 items-center justify-center rounded-lg border transition",
+                      active
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border bg-secondary text-muted-foreground hover:border-primary/60 hover:text-foreground"
+                    )}
+                  >
+                    <VIcon className="h-5 w-5" />
+                    {v.num != null && (
+                      <span
+                        className={cn(
+                          "absolute -bottom-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full border text-[9px] font-bold",
+                          active
+                            ? "border-primary bg-background text-primary"
+                            : "border-border bg-background text-muted-foreground"
+                        )}
+                      >
+                        {v.num}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="min-w-0 flex-1">
         {/* tabs: raw ingredients · ready cooked items · still-raw uncooked items */}
         <div className="mb-2 flex gap-1">
           {([
@@ -735,14 +925,15 @@ export default function Cooking({ data }: { data: any }) {
         </div>
 
         {tab === "ingredients" ? (
-          <div className="flex gap-2 overflow-x-auto pb-1">
+          <div className="flex min-h-[132px] items-center gap-2 overflow-x-auto pb-1">
             {ingredients.length === 0 && (
-              <div className="py-4 text-sm text-muted-foreground">You have no ingredients for this station.</div>
+              <div className="text-sm text-muted-foreground">You have no ingredients for this station.</div>
             )}
             {ingredients.map((ing, i) => {
               const can = draggable(ing);
               const onDown = (e: React.PointerEvent) => {
                 if (!can) return;
+                setBarTip(null);
                 if (ing.kind === "topping") startTopping(e, ing);
                 else if (isPrep) startPrepDrag(e, "inv", { item: ing.item, cheese: 0, model: ing.model, label: ing.label, image: ing.image, dual: ing.dual });
                 else startPlace(e, ing);
@@ -751,15 +942,17 @@ export default function Cooking({ data }: { data: any }) {
                 <div
                   key={ing.item + i}
                   onPointerDown={onDown}
+                  onPointerEnter={(ev) => showBarTip(ev, { ing, hint: can ? ingHint(ing) : undefined })}
+                  onPointerLeave={() => setBarTip(null)}
                   className={cn(
-                    "relative flex h-24 w-28 shrink-0 touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border text-center text-xs font-medium",
+                    "relative flex h-32 w-28 shrink-0 touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border text-center text-xs font-medium",
                     can
                       ? "cursor-grab border-border bg-secondary hover:border-primary/60 active:cursor-grabbing"
                       : "cursor-not-allowed border-dashed border-border/60 bg-muted/40 opacity-60"
                   )}
                 >
                   <ItemThumb src={ing.image} alt={ing.label} className="h-10 w-10 object-contain" />
-                  <span className="px-1 leading-tight">{ing.label}</span>
+                  <span className="w-full truncate px-1.5 leading-tight">{ing.label}</span>
                   {ing.kind !== "assembly" && (
                     <Badge variant="secondary" className="absolute right-1 top-1">{ing.count ?? 0}</Badge>
                   )}
@@ -771,9 +964,9 @@ export default function Cooking({ data }: { data: any }) {
             })}
           </div>
         ) : (
-          <div className="flex gap-2 overflow-x-auto pb-1">
+          <div className="flex min-h-[132px] items-center gap-2 overflow-x-auto pb-1">
             {trayList.length === 0 && (
-              <div className="py-4 text-sm text-muted-foreground">
+              <div className="text-sm text-muted-foreground">
                 {tab === "uncooked"
                   ? "No uncooked items — assemble one (e.g. a pizza) at the prep table."
                   : "No cooked items yet — cook something and collect it."}
@@ -781,46 +974,68 @@ export default function Cooking({ data }: { data: any }) {
             )}
             {trayList.map((e, i) => {
               const cookHere = canCookHere(e);
+              const fromInv = e.source === "inv";
               return (
               <div
-                key={e.item + "|" + (e.cheese || 0) + "|" + i}
+                key={e.item + "|" + (e.cheese || 0) + "|" + (e.sig || "") + "|" + (e.source || "tray") + "|" + i}
                 onPointerDown={(ev) => {
-                  if (isPrep) startPrepDrag(ev, "tray", e);
+                  setBarTip(null);
+                  if (isPrep) startPrepDrag(ev, e.source || "tray", e);
                   else if (cookHere) startTrayCook(ev, e);
                 }}
+                onPointerEnter={(ev) => showBarTip(ev, { tray: e, hint: trayHint(e) })}
+                onPointerLeave={() => setBarTip(null)}
                 className={cn(
-                  "relative flex h-24 w-28 shrink-0 touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border border-border bg-secondary text-center text-xs font-medium",
-                  (isPrep || cookHere) ? "cursor-grab hover:border-primary/60 active:cursor-grabbing" : ""
+                  "relative flex h-32 w-28 shrink-0 touch-none select-none flex-col items-center rounded-lg border border-border bg-secondary pt-2 text-center text-xs font-medium",
+                  (isPrep || cookHere) ? "cursor-grab hover:border-primary/60 active:cursor-grabbing" : "hover:border-border"
                 )}
               >
-                <ItemThumb src={e.image} alt={e.label || e.item} className="h-10 w-10 object-contain" />
-                <span className="px-1 leading-tight">{e.label || e.item}</span>
+                {/* content block centered in the space above the action row */}
+                <div className="flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-0.5">
+                  <ItemThumb src={e.image} alt={e.label || e.item} className="h-10 w-10 object-contain" />
+                  <span className="w-full truncate px-1.5 leading-tight">{e.label || e.item}</span>
+                  {/* toppings over the base recipe — fixed height so every card lines up */}
+                  <ToppingsRow e={e} />
+                </div>
+                {/* action row pinned to the card's bottom edge */}
+                <div className="flex w-full flex-col items-center gap-0.5 pb-1.5">
+                  {isPrep && e.decompose && (
+                    <span className="rounded bg-background/60 px-1.5 py-0.5 text-[9px] text-muted-foreground">
+                      drag to take apart
+                    </span>
+                  )}
+                  {cookHere && (
+                    <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[9px] font-semibold text-primary">
+                      {station === "fryer" ? "drag into the basket" : "drag into the oven"}
+                    </span>
+                  )}
+                  {!isPrep && !fromInv && (
+                    <button
+                      onPointerDown={(ev) => ev.stopPropagation()}
+                      onClick={() => fetchNui("cooking:trayToInventory", { item: e.item, cheese: e.cheese || 0, count: 1, sig: e.sig || "" })}
+                      className="rounded bg-background/60 px-1.5 py-0.5 text-[9px] hover:bg-accent"
+                    >
+                      → inventory
+                    </button>
+                  )}
+                </div>
                 <Badge variant="secondary" className="absolute right-1 top-1">{e.count}</Badge>
-                {!!e.cheese && <span className="absolute left-1 top-1 text-sm">🧀</span>}
-                {isPrep && e.decompose && (
-                  <span className="mt-0.5 rounded bg-background/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                    drag to take apart
-                  </span>
-                )}
-                {cookHere && (
-                  <span className="mt-0.5 rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
-                    {station === "fryer" ? "drag into the basket" : "drag into the oven"}
-                  </span>
-                )}
-                {!isPrep && (
-                  <button
-                    onPointerDown={(ev) => ev.stopPropagation()}
-                    onClick={() => fetchNui("cooking:trayToInventory", { item: e.item, cheese: e.cheese || 0, count: 1 })}
-                    className="mt-0.5 rounded bg-background/60 px-1.5 py-0.5 text-[10px] hover:bg-accent"
-                  >
-                    → inventory
-                  </button>
-                )}
+                {/* origin marker (inventory item) + cheese state */}
+                <div className="absolute left-1 top-1 flex items-center gap-0.5">
+                  {fromInv && (
+                    <span className="rounded border border-border bg-background/70 px-1 py-px text-[8px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      Item
+                    </span>
+                  )}
+                  {!!e.cheese && <span className="text-sm">🧀</span>}
+                </div>
               </div>
               );
             })}
           </div>
         )}
+          </div>
+        </div>
       </div>
     </>
   );

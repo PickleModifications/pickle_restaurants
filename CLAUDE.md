@@ -1,0 +1,153 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+`pickle_restaurants` is a FiveM (FXServer, `fx_version 'cerulean'`, Lua 5.4) resource
+implementing a fully in-game-configurable restaurant/cooking job. Servers create and
+configure restaurants, props, recipes, menus, and employees entirely from an in-game
+admin panel — **there is intentionally no `config.lua`**. All gameplay configuration
+lives in the database; `core/shared.lua`'s `Config` table holds only engine constants
+and runtime-detected values (framework / target / inventory). Admin-tunable values live
+in the `pickle_restaurant_settings` DB table, edited via the NUI.
+
+## Building the UI
+
+The NUI is a React + TypeScript + Vite + Tailwind app under `web/`, built to `nui/`
+(the committed build output that FiveM serves).
+
+```bash
+cd web
+npm install
+npm run dev     # vite dev server (browser, mocked NUI)
+npm run build   # outputs to ../nui (emptyOutDir) — commit the result
+```
+
+There is no linter or test suite. `vite.config.ts` sets `base: "./"` and `outDir: "../nui"`.
+After changing anything in `web/src`, you must `npm run build` for the change to appear in
+game — editing `nui/assets/*` directly is pointless (they're generated bundles).
+
+There is no build step for the Lua; FiveM loads it directly per `fxmanifest.lua`.
+
+## Runtime architecture
+
+**Database is the source of truth.** `core/server.lua` is the spine: on `MySQL.ready` it
+runs `CreateTables()` (all `CREATE TABLE IF NOT EXISTS` + in-place `ALTER`/backfill
+migrations), seeds default settings and recipes, then loads everything into module-global
+caches and sets `RestaurantsReady`. Tables are prefixed `pickle_restaurant*`.
+
+**Caches (server, module-global, defined at the top of `core/server.lua`):**
+`RestaurantCache`, `PropCache`, `RecipeCache`/`RecipeByInput`, `EmployeeCache`,
+`StockCache`, `TrayCache`, `SettingsCache`. Mutators (`AddStock`, `AddTray`,
+`AdjustBalance`, `SetSetting`, …) write-through to both the cache and MySQL. Read the
+cache; never re-query for data already cached.
+
+**Client sync:** the client sends `pickle_restaurants:requestSync`; the server refreshes
+the inventory catalogue and replies with `pickle_restaurants:setupInventory` (item list)
++ `pickle_restaurants:sync` (`BuildSyncPayload`). **Only valid configs are synced to the
+world** — a recipe/drink/assembly referencing an item missing from the inventory
+catalogue is filtered out of the payload (but still shown, flagged, in the admin panel so
+it can be fixed). After any config change, server code calls `SyncToClient(-1)`.
+
+**Migrations pattern:** schema changes are additive `SHOW COLUMNS` / `ALTER TABLE` guards
+in `CreateTables()`, plus one-time data backfills gated behind a `pickle_restaurant_settings`
+flag (e.g. `dual_sided_seeded`, `method_seeded`, `pizza_pepperoni_optional`). Default
+settings/recipes are merged in idempotently on boot (missing keys only — never clobbering
+admin customisations). Follow this pattern for new columns/defaults.
+
+### Framework & inventory bridge
+
+`bridge/**` abstracts the framework so modules never call ESX/QB directly. Each bridge
+file guards on `GetResourceState(...)` and returns early if its framework isn't running,
+so all variants can be loaded together (`bridge/**/server.lua` glob) and only the active
+one defines the globals. Bridges provide a common API: `GetIdentifier`, `IsPlayerAdmin`,
+`ShowNotification`, `AddMoney`/`RemoveMoney`, `GetPlayerCharacterName`, and an `Inventory`
+table (`AddItem`, `RemoveItem`, `Items`, `ItemExists`, `RefreshItems`, …). Variants:
+`esx`, `qb`, `custom`, plus `xp` and a `target/` layer (`ox_target`/`qb-target`/`qtarget`).
+Target usage is auto-detected in `core/shared.lua` (`Config.UseTarget`); no manual toggle.
+
+`Inventory.Items` (name → `{ label, image }`) is the catalogue the NUI uses so configs are
+built by **picking real items** rather than typing codenames. `InventoryImageBase()` /
+`InvImageUrl()` in `core/shared.lua` resolve `nui://` image paths across ~9 supported
+inventories.
+
+### Modules (`modules/<name>/{client,server}.lua`)
+
+Each module is a self-contained feature loaded by the `modules/**` glob. Key ones:
+- `main` — receives the sync, spawns placed station props, blips, and the interactions
+  that open cooking/ordering/management.
+- `cooking` — the heavy interactive station UX (drag ingredients into the 3D world, props
+  cook `01→02→03`, dual-sided patties, cheese melt states, oven/fryer/grill methods).
+- `placement` / `gizmo` — placing & positioning station props (`PLACEABLE_MODELS` maps
+  `prop_type` → model).
+- `management` / `admin` — the boss/owner and admin panels (employees, roles, finances,
+  settings, recipes).
+- `sales` / `npc_customers` — selling to players and NPC customers.
+- `rendertarget` — runtime **brand-texture replacement** via a DUI (`html/brand.html`);
+  `AddReplaceTexture` is global per txd+txn, so only the nearest branded restaurant is
+  active at once.
+- `itemgen` — `/restaurants_items` admin command exports ready-to-install item
+  definitions (ox_inventory / ESX SQL / QBCore) into `generated_items/` from the **live**
+  in-game config.
+
+### Client interaction & NUI conventions
+
+`core/client.lua` is a generic interaction engine (`CreateInteraction`/`DeleteInteraction`,
+distance + target-zone based, with `ShowInteractText` and `onResourceStop` cleanup of all
+spawned entities). This file is shared with sibling `pickle_*` resources and still contains
+some `dealerships_`-prefixed context ids.
+
+Server↔NUI: Lua uses `ox_lib` callbacks (`lib.callback.register("pickle_restaurants:...")`)
+and `TriggerClientEvent` → `SendNUIMessage({ type/action = ..., ... })`. On the React side,
+`web/src/lib/nui.ts` provides `fetchNui(event, data)` (POST to `https://<resource>/<event>`)
+and `useNuiEvent(name, handler)` (matches on `action` **or** `type`). `App.tsx` switches a
+single `setView` message between views: `cooking`, `admin`, `management`, `order`,
+`register`, plus the always-on `InteractText` overlay.
+
+### Permissions
+
+Server-side authority only. `ResolvePerms(restaurantId, source)` returns
+`(permsTable, isOwnerOrAdmin, employeeRow)`; admins and the owner get `ALL_PERMS`, otherwise
+the employee's role (`r.roles` or the `default_roles` setting, keyed by grade) supplies the
+permission set. Gate every mutating callback with `HasPerm(...)` / `IsPlayerAdmin(...)` —
+the NUI is untrusted.
+
+## Money & the cooked-items tray (subtle bits)
+
+- All money crossing a boundary goes through `RoundMoney()` (whole dollars) so commissions
+  never leave fractional cents.
+- The **cooked-items tray** (`pickle_restaurant_cooked_items`, `TrayCache`) is a per-player,
+  per-restaurant holding area between the grill and prep station. Its `cheese` column is
+  `TINYINT UNSIGNED` (not `TINYINT(1)`) on purpose: oxmysql boolean-casts `TINYINT(1)`,
+  which would destroy the third cheese state (`0=none, 1=applied, 2=melted`). Use
+  `CheeseVal()` and the `item.."|"..cheese` tray key. Per-instance build stacks are stored
+  in the row's `metadata` JSON so an assembled product can be taken back apart faithfully.
+- **Build variations are addressed by signature.** `TraySig(meta)` canonicalises one
+  instance's build stack ("" = plain); `GetTrayCount`/`TrayTopMeta`/`RemoveTray` take an
+  optional trailing `sig` to target exactly that variation (nil = legacy any-instance),
+  and `GetTray` splits display entries per sig. Every NUI drag/consume of a tray item
+  threads the entry's `sig` through, so a pepperoni pizza and a plain one are separate
+  tray entries and the right instance is consumed — never blind LIFO across variations.
+  Variations survive the INVENTORY round-trip too: `buildInvMeta` writes the stack to
+  the slot metadata, and the bridge's `Inventory.GetItemSlots`/`RemoveItemSlot`
+  (ox_inventory/qb; absent on bare ESX → base-recipe fallback) let the cooking module's
+  `invVariations`/`removeInvVariation` list, cook, and build with the exact slot.
+  **Stacks nest one meta layer deep:** a product used as a layer inside another product
+  (a pizza in a burger) keeps its own build stack on the layer's `stack` field —
+  `makeStack` captures it off the consumed instance, `TraySig` recurses into it, and
+  `prepDecompose` refunds/reserves that exact nested variation (rendered as its full
+  layer tower via `compSpec`).
+
+## Localization
+
+`locales/locale.lua` defines `_L(key, ...)` (string.format-style) reading
+`Language[Config.Language]`. Strings live in `locales/translations/*.lua` (currently
+`en.lua`). Use `_L(...)` for user-facing server text.
+
+## Memory / house rule
+
+Never add a `config.lua` to this resource — configuration is DB + in-game only. See
+`memory/no-config-lua-design.md`.
+</content>
+</invoke>

@@ -168,6 +168,21 @@ CreateThread(function()
         return Inventory.Items[name] ~= nil
     end
 
+    -- Per-slot access (ox only) so item variations survive the inventory
+    -- round-trip — see the qb bridge for the shape.
+    if hasOx then
+        Inventory.GetItemSlots = function(source, name)
+            local out = {}
+            for _, s in ipairs(exports.ox_inventory:Search(source, "slots", name) or {}) do
+                out[#out + 1] = { slot = s.slot, count = s.count or 1, metadata = s.metadata }
+            end
+            return out
+        end
+        Inventory.RemoveItemSlot = function(source, name, count, slot)
+            exports.ox_inventory:RemoveItem(source, name, count, nil, slot)
+        end
+    end
+
     Inventory.RefreshItems()
     Inventory.Ready = true
 end)
