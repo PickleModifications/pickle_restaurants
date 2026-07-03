@@ -30,7 +30,7 @@ INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('e
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('frosted_doughnut', 'Frosted Doughnut', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('frosting', 'Frosting', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('lettuce', 'Lettuce', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
-INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('pepperoni', 'Pepperoni', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
+INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('meal', 'Meal', 8, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('pickle', 'Pickle', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('pizza_cheese', 'Shredded Cheese', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('pizza_dough', 'Pizza Dough', 3, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);

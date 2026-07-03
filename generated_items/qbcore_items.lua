@@ -33,7 +33,7 @@
     ['frosted_doughnut'] = { name = 'frosted_doughnut', label = 'Frosted Doughnut', weight = 160, type = 'item', image = 'frosted_doughnut.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Frosted Doughnut' },
     ['frosting'] = { name = 'frosting', label = 'Frosting', weight = 100, type = 'item', image = 'frosting.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Frosting' },
     ['lettuce'] = { name = 'lettuce', label = 'Lettuce', weight = 80, type = 'item', image = 'lettuce.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Lettuce' },
-    ['pepperoni'] = { name = 'pepperoni', label = 'Pepperoni', weight = 80, type = 'item', image = 'pepperoni.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Pepperoni' },
+    ['meal'] = { name = 'meal', label = 'Meal', weight = 800, type = 'item', image = 'meal.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Meal' },
     ['pickle'] = { name = 'pickle', label = 'Pickle', weight = 40, type = 'item', image = 'pickle.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Pickle' },
     ['pizza_cheese'] = { name = 'pizza_cheese', label = 'Shredded Cheese', weight = 120, type = 'item', image = 'pizza_cheese.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Shredded Cheese' },
     ['pizza_dough'] = { name = 'pizza_dough', label = 'Pizza Dough', weight = 300, type = 'item', image = 'pizza_dough.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Pizza Dough' },

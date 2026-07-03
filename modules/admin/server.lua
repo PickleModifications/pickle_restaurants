@@ -11,6 +11,7 @@ local function buildAdminData()
         recipes     = AnnotateRecipes(),   -- each row flagged valid/missing
         drinks      = AnnotateDrinks(),
         assembly    = AnnotateAssembly(),
+        finishes    = AnnotateFinishes(),  -- finish tools (frosting…), flagged too
         items       = BuildItemList(),     -- catalogue for item-pickers
         players     = {},
     }
@@ -134,21 +135,25 @@ lib.callback.register("pickle_restaurants:admin:saveRecipe", function(src, r)
     if not IsPlayerAdmin(src) then return { ok = false } end
     if not r.input_item or r.input_item == "" then return { ok = false, error = "input_item required" } end
     local method = (r.method == "oven" or r.method == "fry") and r.method or "grill"
+    -- optional container prop the food cooks in (cake tin…); empty clears it
+    local container = (type(r.container_model) == "string" and r.container_model ~= "") and r.container_model or nil
     MySQL.update.await([[
         INSERT INTO pickle_restaurant_recipes
-            (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count, container_model)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
             station = VALUES(station), raw_model = VALUES(raw_model), cooked_model = VALUES(cooked_model),
             burnt_model = VALUES(burnt_model), output_cooked_item = VALUES(output_cooked_item),
             output_burnt_item = VALUES(output_burnt_item), cook_ms = VALUES(cook_ms), burn_ms = VALUES(burn_ms),
-            dual_sided = VALUES(dual_sided), method = VALUES(method), output_count = VALUES(output_count)
+            dual_sided = VALUES(dual_sided), method = VALUES(method), output_count = VALUES(output_count),
+            container_model = VALUES(container_model)
     ]], {
         r.input_item, r.station or "fryer", r.raw_model or "", r.cooked_model or "", r.burnt_model or "",
         r.output_cooked_item or "", r.output_burnt_item or "",
         tonumber(r.cook_ms) or 15000, tonumber(r.burn_ms) or 15000,
         (r.dual_sided == true or r.dual_sided == 1) and 1 or 0, method,
         math.max(1, math.floor(tonumber(r.output_count) or 1)),
+        container,
     })
     LoadRecipes()
     SyncToClient(-1)

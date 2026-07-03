@@ -80,7 +80,15 @@ Each module is a self-contained feature loaded by the `modules/**` glob. Key one
 - `cooking` — the heavy interactive station UX (drag ingredients into the 3D world, props
   cook `01→02→03`, dual-sided patties, cheese melt states, oven/fryer/grill methods).
 - `placement` / `gizmo` — placing & positioning station props (`PLACEABLE_MODELS` maps
-  `prop_type` → model).
+  `prop_type` → model). Also places **seats**: `prop_type = "seat"` rows in the same
+  `pickle_restaurant_props` table, but INVISIBLE — no model/runtime prop, only a
+  point + heading (placed with a ghost-ped gizmo preview, `saveSeat`).
+- `seating` — players sit on the placed seat anchors. `main`'s `SpawnProp` gives a
+  `seat` prop a "Sit" interaction (no world prop) → `SitOnSeat` plays a seated
+  scenario at the anchor; `E` stands up (`EnableInteraction` is toggled off while
+  seated). Server tracks per-anchor occupancy so two players can't share one seat.
+  Player-only for now; NPCs sitting to be served would be a larger phase-2. Tunables:
+  `SIT_SCENARIO` / `SIT_OFFSET_Z` in `modules/seating/client.lua` (TUNE IN-GAME).
 - `management` / `admin` — the boss/owner and admin panels (employees, roles, finances,
   settings, recipes).
 - `sales` / `npc_customers` — selling to players and NPC customers.
@@ -138,6 +146,45 @@ the NUI is untrusted.
   `makeStack` captures it off the consumed instance, `TraySig` recurses into it, and
   `prepDecompose` refunds/reserves that exact nested variation (rendered as its full
   layer tower via `compSpec`).
+- **Serving tray & meals (kitchen prep).** The prep bar's "Serving Tray" card (kitchen
+  equipment, never gated on an inventory item — the `meal_item` setting's item, default
+  `meal`, is what gets *generated*, itemgen exports it; only `trayToInventory` requires
+  it installed) places `pickle_tray_01` + `pickle_tray_paper_01` on the table. Food dropped over the tray anchors where it lands on the paper (clamped
+  inside the rim); a pile on a tray is a normal client `PrepStacks` entry carrying
+  `tid` + its `(dx, dy)` offset. `prepMakeMeal` consumes the arranged parts (the same
+  `consumeLayers` path recipe makes use) and stores ONE meal whose metadata layers
+  each carry `dx`/`dy` — `TraySig` appends `@x,y` (quantized to 1cm at make time), so
+  the layout is part of the variation signature. Dragging a meal (tray- or
+  inventory-held; `source` rides the decompose callbacks) un-makes it back into an
+  editable tray build rendered 1:1. Trays auto-make into meals on station exit, and a
+  pile made into a product while sitting on a tray is re-reserved and re-seated in
+  place (`prepMakeStack` returns `sig` + a render `spec` for this).
+- **Containered bakes.** A recipe's nullable `container_model` column (cake tin
+  `pickle_cake_container_01`, future cookie trays) renders the food inside a container
+  prop EVERYWHERE — oven slot, drag preview, prep table — by prepending it to the
+  existing build-stack machinery (`it.stack`/`stackBase` in `place`; `withContainer`
+  in `getTray`); only the `stackBase` layer swaps models as it cooks. The container is
+  visual-only, never an item. NOTE: `pickle_cake_01..04` are the four flavored WHOLE
+  cakes (strawberry/chocolate/vanilla/pickle), NOT cook states — the batter sheet
+  bakes as `pickle_cake_mix_pour_02/03/04` (raw/cooked/burnt; best-guess mapping,
+  correctable in the recipe editor; a one-time `cake_models_seeded` backfill repoints
+  old DB rows that still hold the wrong defaults).
+- **Finish tools (frosting) — the `finishes` setting.** A reusable "rub a tool over a
+  product" system at kitchen prep: config is a list of `{ tool, tool_model, rub_dist,
+  targets = { { item, output, mode = "replace"|"overlay", flavors = {{id,label,model}} } } }`
+  (defaults: `frosting` → cooked_cake ⇒ `decorated_cake` replace-mode with the four
+  whole-cake models; cooked_doughnut ⇒ `frosted_doughnut` overlay-mode with
+  `pickle_doughnut_topping_01..05` incl. glazed). The NUI card (`kind = "finish"`) has
+  flavor chips; the client drags the tube prop, accrues coverage from cursor travel
+  over a valid reserved part, and fades the result prop in via `SetEntityAlpha`; at
+  full coverage `cooking:applyFinish` re-validates everything, consumes the target
+  layer + 1 tool item, and trays the output with ONE meta layer
+  `{ item, flavor, flavorLabel, stack }` — `TraySig` appends `#flavor`, so flavors are
+  separate variations end-to-end (replace-mode deletes the container+sheet props;
+  finished items are deliberately NOT decomposable). Sync ships only `ItemExists`-valid
+  entries (`BuildSyncPayload` → client `Finishes` global); itemgen collects finish
+  tools/targets/outputs + `prep_models` keys. A sprinkles tool is one more config row —
+  no code. There is no admin-panel editor for finishes yet (settings table only).
 
 ## Localization
 

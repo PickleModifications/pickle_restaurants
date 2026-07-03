@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Field } from "@/components/form";
 import { money } from "@/lib/utils";
 import {
-  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, Store, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt,
+  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, Store, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair,
 } from "lucide-react";
 
 const STATIONS = [
@@ -177,6 +177,33 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
           <p className="mt-3 text-[11px] text-muted-foreground">
             Placing a station closes this panel so you can position it in the world. Re-open with the admin command to continue.
           </p>
+        </div>
+
+        {/* seating — invisible sit anchors; players sit on existing furniture */}
+        <div className="rounded-lg border border-border p-3">
+          <div className="mb-1.5 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <Armchair className="h-4 w-4 text-muted-foreground" /> Seating
+              <Badge variant="secondary">{byType("seat").length}</Badge>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => fetchNui("admin:placeSeat", { id: r.id })}>
+              <Plus className="h-3.5 w-3.5" /> Place
+            </Button>
+          </div>
+          {byType("seat").length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {byType("seat").map((p) => (
+                <Badge key={p.id} variant="outline" className="gap-1.5">
+                  #{p.id}
+                  <button onClick={() => act("admin:removeProp", { propId: p.id })}><Trash2 className="h-3 w-3" /></button>
+                </Badge>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[11px] text-muted-foreground">
+              A seat is an invisible sit point — place it on one of this restaurant's chairs and players get a “Sit” prompt there.
+            </p>
+          )}
         </div>
       </div>
     </div>

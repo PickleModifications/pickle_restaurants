@@ -32,8 +32,60 @@ local function findAssembly(output)
     end
 end
 
+-- ─── finish tools (frosting …) ───────────────────────────────────────────────
+-- A finish tool is an inventory item whose prop the player rubs over a finished
+-- product at kitchen prep (`finishes` setting): pick a flavor on the tool's card,
+-- rub to full coverage, and the target is consumed into the flavored output.
+
+-- Resolve the (tool, target item, flavor id) config triple. Returns whatever
+-- levels matched: cfg[, target[, flavor]].
+local function findFinish(tool, targetItem, flavorId)
+    for _, f in ipairs(GetSetting("finishes", {})) do
+        if f.tool == tool then
+            for _, t in ipairs(f.targets or {}) do
+                if t.item == targetItem then
+                    for _, fl in ipairs(t.flavors or {}) do
+                        if fl.id == flavorId then return f, t, fl end
+                    end
+                    return f, t, nil
+                end
+            end
+            return f, nil, nil
+        end
+    end
+end
+
+-- The finish target an OUTPUT item came from (first match), for rendering and
+-- classifying finished products (they live in the tray like any other product).
+local function finishForOutput(item)
+    for _, f in ipairs(GetSetting("finishes", {})) do
+        for _, t in ipairs(f.targets or {}) do
+            if t.output == item then return t, f end
+        end
+    end
+end
+
+-- The target's flavor entry a finished item's meta records (nil when the meta is
+-- missing — e.g. stripped by a framework without slot metadata).
+local function metaFlavor(target, meta)
+    local l = type(meta) == "table" and meta[1]
+    local fid = type(l) == "table" and l.flavor or nil
+    if not fid or not target then return nil end
+    for _, fl in ipairs(target.flavors or {}) do
+        if fl.id == fid then return fl end
+    end
+end
+
+-- The item a serving-tray arrangement becomes (kitchen prep). Its metadata is the
+-- tray's exact layout — every layer with its (dx, dy) offset from the tray centre —
+-- so a meal re-renders 1:1 (tray, paper, and each item where it was) whenever it's
+-- set back down at prep, and survives the tray/inventory round trips like any other
+-- build variation.
+local function MealItem() return GetSetting("meal_item", "meal") end
+
 local function broadcastSpawn(it)
-    TriggerClientEvent("pickle_restaurants:cooking:spawn", -1, it.uid, it.model, it.x, it.y, it.z, it.state)
+    -- prop_id rides along so every client can face the item to its station's heading
+    TriggerClientEvent("pickle_restaurants:cooking:spawn", -1, it.uid, it.model, it.x, it.y, it.z, it.state, it.prop_id)
 end
 
 -- ─── dual-sided patties ──────────────────────────────────────────────────────
@@ -74,7 +126,7 @@ local function dualPayload(it)
     local give = dualGiveItem(it)
     return {
         uid = it.uid, dual = true, input = it.recipe.input_item,
-        x = it.x, y = it.y, z = it.z,
+        x = it.x, y = it.y, z = it.z, prop_id = it.prop_id,
         sides = { sideProgress(it, 1), sideProgress(it, 2) },
         cooking = it.down, flipped = it.flipped, cheese = it.cheese or "none",
         give = give, giveLabel = give and GetItemLabel(give) or nil,
@@ -226,7 +278,7 @@ local function activeEntry(it)
                  give = give, giveLabel = give and GetItemLabel(give) or nil,
                  giveImage = give and GetItemImage(give) or nil }
     end
-    return { uid = it.uid, model = it.model, x = it.x, y = it.y, z = it.z, state = it.state }
+    return { uid = it.uid, model = it.model, x = it.x, y = it.y, z = it.z, state = it.state, prop_id = it.prop_id }
 end
 
 -- A world model for an item: cook recipe outputs/inputs, assembly outputs, drink
@@ -249,6 +301,17 @@ function itemModel(item)
     -- The cheese slice is ALWAYS the unmelted slice (_01). _02 is the melted variant,
     -- used only for the stovetop cook animation — never as a stackable/applied slice.
     if item == "cheese" then return "pickle_cheese_applied_01" end
+    -- A finish output with no recorded flavor (plain instance / a framework that
+    -- strips slot metadata): first flavor for a replace-mode product, the bare
+    -- target's prop for an overlay-mode one. finishRender handles flavored metas.
+    local ft = finishForOutput(item)
+    if ft then
+        if (ft.mode or "replace") ~= "overlay" then
+            local fl = (ft.flavors or {})[1]
+            if fl and fl.model then return fl.model end
+        end
+        return itemModel(ft.item)
+    end
 end
 
 -- The dual-sided recipe an item belongs to (matched by raw input or cooked/burnt
@@ -274,6 +337,7 @@ local function isTrayItem(item)
     for _, a in ipairs(GetSetting("assembly", {})) do
         if a.output == item then return true end
     end
+    if finishForOutput(item) then return true end -- finished products are products
     return false
 end
 
@@ -286,9 +350,11 @@ local function compsFromMeta(asm, meta)
         for _, m in ipairs(meta) do
             for _ = 1, (tonumber(m.count) or 1) do
                 -- a product layer keeps its own nested build stack (m.stack) so a
-                -- pizza inside a burger comes back out as THAT pizza, toppings intact
+                -- pizza inside a burger comes back out as THAT pizza, toppings intact;
+                -- a meal layer keeps its (dx, dy) tray offset so the arrangement survives
                 comps[#comps + 1] = { item = m.item, cheese = CheeseVal(m.cheese), half = m.half,
-                                      stack = (type(m.stack) == "table" and #m.stack > 0) and m.stack or nil }
+                                      stack = (type(m.stack) == "table" and #m.stack > 0) and m.stack or nil,
+                                      dx = tonumber(m.dx), dy = tonumber(m.dy) }
             end
         end
     else
@@ -323,6 +389,32 @@ local function recipeForOutput(item)
     end
 end
 
+-- Prepend a recipe's container tray to a cooked/burnt output's render stack, so a
+-- containered bake (the cake sheet in its tin) renders as container + food
+-- everywhere it appears. Returns the (possibly created) stack, or nil untouched.
+local function withContainer(recipe, models, baseModel)
+    if not (recipe and recipe.container_model and recipe.container_model ~= "") then return models end
+    models = models or { baseModel }
+    table.insert(models, 1, recipe.container_model)
+    return models
+end
+
+-- How a finished (frosted…) item renders: replace-mode = the recorded flavor's
+-- model IS the whole product; overlay-mode = the target's prop with the flavor
+-- model stacked on top. Falls back like itemModel when the meta carries no flavor.
+-- Returns model, stack (one of them nil).
+local function finishRender(item, meta)
+    local target = finishForOutput(item)
+    if not target then return nil, nil end
+    local fl = metaFlavor(target, meta) or (target.flavors or {})[1]
+    local base = itemModel(target.item)
+    if (target.mode or "replace") == "overlay" then
+        if fl and fl.model and base then return nil, { base, fl.model } end
+        return base, nil
+    end
+    return (fl and fl.model) or base, nil
+end
+
 -- A client part spec for one decomposed layer (no reservation id — that's stamped on
 -- when the take-apart actually commits). Shared by the drag preview and the commit so
 -- the previewed stack and the placed stack are identical.
@@ -332,7 +424,17 @@ local function compSpec(c)
         item = c.item, source = isTrayItem(c.item) and "tray" or "inv", cheese = c.cheese, half = c.half,
         model = itemModel(c.item), dual = dual,
         cheeseModel = (c.cheese >= 1 and dual) and ((c.cheese == 2) and "pickle_cheese_applied_02" or "pickle_cheese_applied_01") or nil,
+        dx = c.dx, dy = c.dy, -- meal layers ride with their tray offset
     }
+    -- a finished (frosted…) product renders by its recorded flavor — the flavor
+    -- model itself (replace) or target + flavor overlay (overlay)
+    if finishForOutput(c.item) then
+        local model, stack = finishRender(c.item, c.stack)
+        if model then spec.model = model end
+        if stack then spec.stack = stack end
+        if c.stack then spec.sig = TraySig(c.stack) end
+        return spec
+    end
     -- a nested product renders as its whole recorded stack (crust swapped to its
     -- cook state), not its single base model, and addresses that exact variation
     if c.stack then
@@ -360,6 +462,11 @@ end
 -- Lettuce, Tomato".
 local function stackDescription(stack)
     if type(stack) ~= "table" then return nil end
+    -- a finished product's single flavor layer reads as its flavor, not a parts
+    -- list: "Strawberry Cake" instead of "Cake"
+    if #stack == 1 and type(stack[1]) == "table" and stack[1].flavorLabel then
+        return stack[1].flavorLabel .. " " .. GetItemLabel(stack[1].item)
+    end
     local order, counts = {}, {}
     for _, l in ipairs(stack) do
         if not counts[l.item] then order[#order + 1] = l.item; counts[l.item] = 0 end
@@ -536,12 +643,48 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         -- across assembly recipes, PLUS any other mapped prep ingredient — optional
         -- toppings like pepperoni that aren't a *required* component of a recipe but can
         -- be added to a stack as an alteration. Cooked components come from the tray.
+        -- The serving tray leads the bar: kitchen equipment (not an inventory item)
+        -- you drag onto the table, arrange food on, and turn into ONE meal item.
+        -- Never gated on the meal item existing — equipment doesn't require items;
+        -- the meal lives in the tray holding either way (only "→ inventory" needs
+        -- the item installed).
+        out[#out + 1] = { kind = "tray", item = MealItem(), label = "Serving Tray",
+                          image = GetItemImage(MealItem()) }
+        -- Finish tools (frosting…) are draggable applicators, flavor picked on the
+        -- card itself. The card shows the union of every valid target's flavors;
+        -- per-target validity is enforced while rubbing and again at apply time.
+        local finishTools = {}
+        for _, f in ipairs(GetSetting("finishes", {})) do
+            if f.tool and ItemExists(f.tool) then
+                finishTools[f.tool] = true
+                local count = Inventory.GetItemCount(src, f.tool) or 0
+                if count > 0 then
+                    local flavors, seenFl = {}, {}
+                    for _, t in ipairs(f.targets or {}) do
+                        if ItemExists(t.item) and ItemExists(t.output) then
+                            for _, fl in ipairs(t.flavors or {}) do
+                                if fl.id and not seenFl[fl.id] then
+                                    seenFl[fl.id] = true
+                                    flavors[#flavors + 1] = { id = fl.id, label = fl.label or fl.id, color = fl.color }
+                                end
+                            end
+                        end
+                    end
+                    if #flavors > 0 then
+                        out[#out + 1] = { kind = "finish", item = f.tool, label = GetItemLabel(f.tool),
+                                          image = GetItemImage(f.tool), count = count,
+                                          model = f.tool_model, flavors = flavors }
+                    end
+                end
+            end
+        end
         local build = PrepBuilds[src]
         local seen = {}
         local function addComp(comp)
             -- Products (cook/assembly outputs — a cooked patty, a burger) are never
             -- "ingredients": inventory-held ones file under the Cooked/Uncooked tabs.
-            if seen[comp] or not ItemExists(comp) or isTrayItem(comp) then return end
+            -- Finish tools already have their own applicator card above.
+            if seen[comp] or finishTools[comp] or not ItemExists(comp) or isTrayItem(comp) then return end
             seen[comp] = true
             local count = Inventory.GetItemCount(src, comp) or 0
             if count <= 0 then return end
@@ -634,6 +777,15 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
                 if stackMeta or findAssembly(d.item) then
                     stackModels = stackModelsFromMeta(d.item, stackMeta)
                 end
+            end
+
+            -- A containered bake (cake tin, cookie tray…) renders as container +
+            -- food, folded into the existing build-stack machinery: only the
+            -- stackBase layer swaps models as it cooks; the container rides along
+            -- un-swapped and despawns with the stack. Never an item.
+            if recipe.container_model and recipe.container_model ~= "" then
+                stackModels = stackModels or { recipe.raw_model }
+                table.insert(stackModels, 1, recipe.container_model)
             end
 
             consume()
@@ -905,6 +1057,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
     if not prop then return {} end
     if not HasPerm(prop.restaurant_id, src, "cook") then return {} end
     local list = GetTray(prop.restaurant_id, GetIdentifier(src))
+    local mealItem = MealItem()
     -- At the prep table, cooked items placed on a build are spoken for — subtract
     -- the reservations so the tray shows what's still free to grab.
     local build = (prop.prop_type == "kitchen_prep") and PrepBuilds[src] or nil
@@ -924,8 +1077,15 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 e.cheeseModel = (e.cheese == 2) and "pickle_cheese_applied_02" or "pickle_cheese_applied_01"
             end
             -- an assembled product (burger etc.) can be dropped on the prep table to
-            -- be taken back apart into its component stack
-            if prop.prop_type == "kitchen_prep" and findAssembly(e.item) then e.decompose = true end
+            -- be taken back apart into its component stack; a meal sets back down as
+            -- its full tray (same un-make flow, tray + layout preserved). A finished
+            -- (frosted) instance is terminal — never decomposable, even on servers
+            -- whose DB still carries the legacy stack-assembly recipe for the same
+            -- output item (taking it apart would destroy the applied frosting).
+            local ftarget = finishForOutput(e.item)
+            local isFinished = ftarget ~= nil and type(e.meta) == "table" and e.meta[1] ~= nil and e.meta[1].flavor ~= nil
+            if e.item == mealItem then e.meal = true end
+            if prop.prop_type == "kitchen_prep" and (findAssembly(e.item) or e.meal) and not isFinished then e.decompose = true end
             -- still-raw items that are a cook-recipe input (e.g. an uncooked pizza) go
             -- to the oven/fryer next; the NUI files them under "Uncooked Items" and lets
             -- them be dragged straight into their station (cookStation) to cook.
@@ -940,10 +1100,11 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 -- pizza) still renders as the WHOLE stack — its crust layer swapped
                 -- to the recipe's cooked/burnt model, toppings riding along (the
                 -- client swaps their looks by stackState) — so dragging it at prep
-                -- shows the full pizza, not a bare dough base.
+                -- shows the full pizza, not a bare dough base. A containered bake
+                -- (the cake sheet) renders inside its container tray either way.
                 local rout, state = recipeForOutput(e.item)
-                if rout and e.meta then
-                    local models = stackModelsFromMeta(e.item, e.meta)
+                if rout then
+                    local models = e.meta and stackModelsFromMeta(e.item, e.meta) or nil
                     if models then
                         for i, m in ipairs(models) do
                             if m == rout.raw_model then
@@ -951,13 +1112,23 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                                 break
                             end
                         end
-                        e.stack, e.stackState = models, state
                     end
+                    models = withContainer(rout, models, (state == "burnt") and rout.burnt_model or rout.cooked_model)
+                    if models then e.stack, e.stackState = models, state end
                 end
+            end
+            -- a finished (frosted…) product renders by its recorded flavor and
+            -- shows a flavor badge instead of a parts/toppings breakdown
+            if ftarget then
+                local model, stack = finishRender(e.item, e.meta)
+                if model then e.model = model end
+                if stack then e.stack = stack end
+                local fl = metaFlavor(ftarget, e.meta)
+                if fl then e.flavorLabel = fl.label or fl.id end
             end
             -- how this variation differs from the base recipe (its toppings), plus
             -- the full component list for the hover tooltip
-            if e.meta then
+            if e.meta and not ftarget then
                 e.extras = extrasComponents(e.item, e.meta)
                 e.comps  = stackComponents(e.meta)
             end
@@ -991,7 +1162,8 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                     entry.stack = stackModelsFromMeta(item, v.meta) -- exact stack, or base recipe
                 else
                     -- a cooked/burnt product renders its recorded stack (else the
-                    -- base recipe), crust swapped to its cooked/burnt model
+                    -- base recipe), crust swapped to its cooked/burnt model, inside
+                    -- its container tray when the recipe bakes in one
                     local rout, state = recipeForOutput(item)
                     if rout then
                         local models = v.meta and stackModelsFromMeta(item, v.meta)
@@ -1003,13 +1175,28 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                                     break
                                 end
                             end
-                            entry.stack, entry.stackState = models, state
                         end
+                        models = withContainer(rout, models, (state == "burnt") and rout.burnt_model or rout.cooked_model)
+                        if models then entry.stack, entry.stackState = models, state end
                     end
                 end
-                if v.meta then
+                -- finished (frosted…) products render by their recorded flavor
+                local ftarget = finishForOutput(item)
+                if ftarget then
+                    local model, stack = finishRender(item, v.meta)
+                    if model then entry.model = model end
+                    if stack then entry.stack = stack end
+                    local fl = metaFlavor(ftarget, v.meta)
+                    if fl then entry.flavorLabel = fl.label or fl.id end
+                end
+                if v.meta and not ftarget then
                     entry.extras = extrasComponents(item, v.meta)
                     entry.comps  = stackComponents(v.meta)
+                end
+                -- an inventory-held meal can be set back down (un-made) at prep too
+                if item == mealItem then
+                    entry.meal = true
+                    if prop.prop_type == "kitchen_prep" then entry.decompose = true end
                 end
                 out[#out + 1] = entry
             end
@@ -1021,6 +1208,10 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
         once(r.output_cooked_item); once(r.output_burnt_item)
     end
     for _, a in ipairs(GetSetting("assembly", {})) do once(a.output) end
+    for _, f in ipairs(GetSetting("finishes", {})) do
+        for _, t in ipairs(f.targets or {}) do once(t.output) end
+    end
+    once(mealItem) -- meals aren't a recipe/assembly output, so list them explicitly
 
     return out
 end)
@@ -1049,6 +1240,12 @@ lib.callback.register("pickle_restaurants:cooking:trayToInventory", function(src
     local sig    = (type(d.sig) == "string") and d.sig or nil
     local count  = tonumber(d.count) or 1
     if not item or GetTrayCount(rid, id, item, cheese, sig) < count then return { ok = false, error = "Not enough." } end
+    -- The tray holding accepts anything (e.g. a meal made before its item was
+    -- installed), but the real inventory can't — don't consume the tray entry
+    -- into an item the framework doesn't know (it would just vanish).
+    if not ItemExists(item) then
+        return { ok = false, error = ("Item '%s' isn't installed — run /restaurants_items and install it."):format(item) }
+    end
     -- Move one instance at a time so each keeps its OWN build variation on the
     -- inventory slot (ox/qb slot metadata). TrayTopMeta must be read before the
     -- matching RemoveTray, which pops that instance's stack (LIFO).
@@ -1228,18 +1425,13 @@ local function bestAssemblyForLayers(layers)
     return best
 end
 
--- Consume a stack's reserved layers and produce `asm`'s output into the tray, tagged
--- with the EXACT ordered build stack (order/cheese/bun-half) so it stays that exact
--- variation — takeable apart later, and preserved through to delivery. The whole pile
--- is consumed, extras included. Assumes the superset match is already verified.
-local function makeStack(src, b, id, ids, asm)
-    local layers = orderedLayers(b, ids)
-    if #layers == 0 then return { ok = false, error = "Nothing to build." } end
-
-    -- A layer that is itself a built product (a cooked pizza going into a burger)
-    -- keeps its OWN build stack: capture it off the exact instance being consumed —
-    -- BEFORE removal below — so the nested variation survives inside the output's
-    -- meta and comes back out intact when the product is taken apart.
+-- Capture each product layer's own build stack off the exact instance being
+-- consumed (BEFORE removal, so the nested variation survives inside the output's
+-- meta), then tally consumption per source (bun halves round up to whole buns),
+-- verify, and remove. Layers consume the exact build variation they reserved
+-- (sig) — from the tray, or from the matching inventory slot for "inv" products.
+-- Shared by recipe makes and meal makes. Returns true, or nil + error message.
+local function consumeLayers(src, b, id, layers)
     for _, l in ipairs(layers) do
         if l.sig and l.sig ~= "" then
             l.stack = (l.source == "tray")
@@ -1248,9 +1440,6 @@ local function makeStack(src, b, id, ids, asm)
         end
     end
 
-    -- Tally consumption per source (bun halves round up to whole buns), verify,
-    -- remove. Layers consume the exact build variation they reserved (sig) —
-    -- from the tray, or from the matching inventory slot for "inv" products.
     local trayUnits, invUnits = {}, {}
     for _, l in ipairs(layers) do
         local k = l.item .. "|" .. (l.cheese or 0) .. "|" .. (l.sig or "")
@@ -1264,24 +1453,39 @@ local function makeStack(src, b, id, ids, asm)
 
     for _, t in pairs(needTray) do
         if GetTrayCount(b.rid, id, t.item, t.cheese, t.sig) < t.n then
-            return { ok = false, error = "Cooked items changed — rebuild." }
+            return nil, "Cooked items changed — rebuild."
         end
     end
     for _, t in pairs(needInv) do
         if invVariationCount(src, t.item, t.cheese, t.sig) < t.n then
-            return { ok = false, error = "Missing components." }
+            return nil, "Missing components."
         end
     end
     for _, t in pairs(needTray) do RemoveTray(b.rid, id, t.item, t.cheese, t.n, t.sig) end
     for _, t in pairs(needInv) do removeInvVariation(src, t.item, t.cheese, t.sig, t.n) end
+    return true
+end
 
-    -- Drop just this stack's reservations; other stacks keep building.
+-- Drop just these layers' reservations; other stacks keep building.
+local function dropLayerReservations(src, b, layers)
     local wanted = {}
     for _, l in ipairs(layers) do wanted[l.id] = true end
     local keep = {}
     for _, l in ipairs(b.layers) do if not (l.id and wanted[l.id]) then keep[#keep + 1] = l end end
     b.layers = keep
     if #b.layers == 0 then PrepBuilds[src] = nil end
+end
+
+-- Consume a stack's reserved layers and produce `asm`'s output into the tray, tagged
+-- with the EXACT ordered build stack (order/cheese/bun-half) so it stays that exact
+-- variation — takeable apart later, and preserved through to delivery. The whole pile
+-- is consumed, extras included. Assumes the superset match is already verified.
+local function makeStack(src, b, id, ids, asm)
+    local layers = orderedLayers(b, ids)
+    if #layers == 0 then return { ok = false, error = "Nothing to build." } end
+    local ok, err = consumeLayers(src, b, id, layers)
+    if not ok then return { ok = false, error = err } end
+    dropLayerReservations(src, b, layers)
 
     -- The exact ordered stack (bottom-to-top), each layer's cheese + bun-half kept,
     -- plus any nested build stack a product layer carried in.
@@ -1290,8 +1494,53 @@ local function makeStack(src, b, id, ids, asm)
         stackMeta[#stackMeta + 1] = { item = l.item, cheese = l.cheese or 0, half = l.half, stack = l.stack }
     end
     AddTray(b.rid, id, asm.output, 0, 1, stackMeta)
-    return { ok = true, output = asm.output, label = asm.label or asm.output }
+    -- sig + a render spec for the made product, so the client can seat it back in
+    -- place (a burger built directly on a serving tray stays on the tray).
+    return { ok = true, output = asm.output, label = asm.label or asm.output,
+             sig = TraySig(stackMeta), spec = compSpec({ item = asm.output, cheese = 0, stack = stackMeta }) }
 end
+
+-- Turn everything arranged on a serving tray into ONE meal item. The client sends
+-- the tray's piles — each pile's reservation ids (bottom-to-top) plus its (dx, dy)
+-- offset from the tray centre — and the meal's metadata records every layer WITH
+-- its position, so it re-renders 1:1 (tray, paper, and each item exactly where it
+-- was) wherever it's set back down. Offsets are clamped and quantized to 1cm so
+-- the layout is part of the variation signature (TraySig) deterministically.
+local function quantOffset(v)
+    v = tonumber(v) or 0.0
+    if v > 2.0 then v = 2.0 elseif v < -2.0 then v = -2.0 end
+    return math.floor(v * 100 + 0.5) / 100
+end
+
+lib.callback.register("pickle_restaurants:cooking:prepMakeMeal", function(src, d)
+    local b = PrepBuilds[src]; if not b then return { ok = false } end
+    if not HasPerm(b.rid, src, "cook") then return { ok = false } end
+    -- The meal item is what gets GENERATED — never a requirement. It lands in the
+    -- tray holding (our own store) whether or not the item is installed yet; only
+    -- trayToInventory needs the real item.
+    local mealItem = MealItem()
+    local id = GetIdentifier(src)
+    local layers = {}
+    for _, pile in ipairs((d and d.items) or {}) do
+        local dx, dy = quantOffset(pile.dx), quantOffset(pile.dy)
+        for _, l in ipairs(orderedLayers(b, pile.ids)) do
+            l.mealDx, l.mealDy = dx, dy
+            layers[#layers + 1] = l
+        end
+    end
+    if #layers == 0 then return { ok = false, error = "Nothing on the tray." } end
+    local ok, err = consumeLayers(src, b, id, layers)
+    if not ok then return { ok = false, error = err } end
+    dropLayerReservations(src, b, layers)
+
+    local meta = {}
+    for _, l in ipairs(layers) do
+        meta[#meta + 1] = { item = l.item, cheese = l.cheese or 0, half = l.half,
+                            stack = l.stack, dx = l.mealDx, dy = l.mealDy }
+    end
+    AddTray(b.rid, id, mealItem, 0, 1, meta)
+    return { ok = true, output = mealItem, label = GetItemLabel(mealItem) }
+end)
 
 -- Build ONE stack into a chosen recipe (the tooltip's Make). The client sends the
 -- output plus the stack's reservation ids (bottom-to-top). Alterations are allowed:
@@ -1305,6 +1554,49 @@ lib.callback.register("pickle_restaurants:cooking:prepMakeStack", function(src, 
     if #layers == 0 then return { ok = false, error = "Nothing to build." } end
     if not stackSatisfies(buildProvides(layers), asm) then return { ok = false, error = "Missing components." } end
     return makeStack(src, b, GetIdentifier(src), d.ids, asm)
+end)
+
+-- Apply a finish tool (frosting…) to ONE reserved part on the prep table. The
+-- client owns the rub/coverage animation; everything consumable is re-validated
+-- here — the reservation, the (tool, target, flavor) config triple, and the tool
+-- item — before the target layer is consumed together with 1 tool item. The
+-- finished output lands in the tray with the flavor recorded as its build-stack
+-- metadata (part of the TraySig, so each flavor is its own variation), and the
+-- response carries sig + a render spec so the client can seat the finished prop
+-- exactly where the target was.
+lib.callback.register("pickle_restaurants:cooking:applyFinish", function(src, d)
+    local prop = PropCache[tonumber(d and d.prop_id)]
+    if not prop or prop.prop_type ~= "kitchen_prep" then return { ok = false } end
+    if not HasPerm(prop.restaurant_id, src, "cook") then return { ok = false } end
+    local b = PrepBuilds[src]
+    if not b or b.prop_id ~= prop.id then return { ok = false, error = "That item changed — pick it up again." } end
+    local layer
+    for _, l in ipairs(b.layers) do
+        if l.id == tonumber(d and d.id) then layer = l break end
+    end
+    if not layer then return { ok = false, error = "That item changed — pick it up again." } end
+    -- Only configured (cooked) targets pass; raw/burnt items never match a target.
+    local cfg, target, flavor = findFinish(d and d.tool, layer.item, d and d.flavor)
+    if not cfg or not target or not flavor then return { ok = false, error = "Can't apply that here." } end
+    if not ItemExists(cfg.tool) then return { ok = false } end
+    if (Inventory.GetItemCount(src, cfg.tool) or 0) < 1 then
+        return { ok = false, error = "No " .. GetItemLabel(cfg.tool) .. " left." }
+    end
+
+    local id = GetIdentifier(src)
+    local ok, err = consumeLayers(src, b, id, { layer }) -- sig-pinned; captures the target's own nested stack
+    if not ok then return { ok = false, error = err } end
+    dropLayerReservations(src, b, { layer })
+    Inventory.RemoveItem(src, cfg.tool, 1)
+
+    -- ONE meta layer: the finished target with its flavor (and whatever nested
+    -- stack it carried), so the exact variation survives every round trip.
+    local meta = { { item = layer.item, cheese = layer.cheese or 0, half = layer.half,
+                     stack = layer.stack, flavor = flavor.id, flavorLabel = flavor.label or flavor.id } }
+    AddTray(b.rid, id, target.output, 0, 1, meta)
+    return { ok = true, output = target.output,
+             label = (flavor.label or flavor.id) .. " " .. GetItemLabel(target.output),
+             sig = TraySig(meta), spec = compSpec({ item = target.output, cheese = 0, stack = meta }) }
 end)
 
 -- Save a whole stack as its CLOSEST product — the drag-whole-stack-to-hotbar and
@@ -1332,17 +1624,44 @@ lib.callback.register("pickle_restaurants:cooking:prepDecompose", function(src, 
     if not prop or prop.prop_type ~= "kitchen_prep" then return { ok = false } end
     local rid = prop.restaurant_id
     if not HasPerm(rid, src, "cook") then return { ok = false } end
-    local asm = findAssembly(d and d.item)
-    if not asm then return { ok = false, error = "Can't take that apart." } end
+    local item = d and d.item
+    -- a MEAL un-makes the same way — no recipe; its recorded layout IS the definition
+    local isMeal = item ~= nil and item == MealItem()
+    local asm = findAssembly(item)
+    if not asm and not isMeal then return { ok = false, error = "Can't take that apart." } end
     local id = GetIdentifier(src)
     local sig = (type(d.sig) == "string") and d.sig or nil
 
-    -- assembly outputs are stored in the tray at cheese 0
-    if GetTrayCount(rid, id, asm.output, 0, sig) < 1 then return { ok = false, error = "None to take apart." } end
-    -- The exact stack this was built from (order/cheese/bun-half intact), else recipe.
-    local meta = TrayTopMeta(rid, id, asm.output, 0, sig)
-    RemoveTray(rid, id, asm.output, 0, 1, sig)
-    local comps = compsFromMeta(asm, meta)
+    -- A finished (frosted…) instance is terminal: the applied frosting can't be
+    -- recovered, so it never comes apart — checked on the meta (per-instance)
+    -- because a legacy stack-assembled instance of the same output item may
+    -- legitimately still decompose on servers whose DB keeps the old recipe.
+    local function isFinishedMeta(m)
+        return type(m) == "table" and m[1] ~= nil and m[1].flavor ~= nil
+    end
+
+    -- Products/meals are stored at cheese 0 — in the tray, or (source "inv") on an
+    -- inventory slot whose metadata carries the exact build/layout.
+    local meta
+    if d.source == "inv" then
+        if invVariationCount(src, item, 0, sig) < 1 then return { ok = false, error = "None to take apart." } end
+        meta = invVariationMeta(src, item, 0, sig)
+        if isMeal and not (type(meta) == "table" and #meta > 0) then
+            return { ok = false, error = "That meal is empty." }
+        end
+        if isFinishedMeta(meta) then return { ok = false, error = "Can't take that apart." } end
+        removeInvVariation(src, item, 0, sig, 1)
+    else
+        if GetTrayCount(rid, id, item, 0, sig) < 1 then return { ok = false, error = "None to take apart." } end
+        -- The exact stack this was built from (order/cheese/bun-half intact), else recipe.
+        meta = TrayTopMeta(rid, id, item, 0, sig)
+        if isMeal and not (type(meta) == "table" and #meta > 0) then
+            return { ok = false, error = "That meal is empty." }
+        end
+        if isFinishedMeta(meta) then return { ok = false, error = "Can't take that apart." } end
+        RemoveTray(rid, id, item, 0, 1, sig)
+    end
+    local comps = compsFromMeta(asm or { components = {} }, meta)
 
     local b = PrepBuilds[src]
     if b and b.prop_id ~= prop.id then b = nil end
@@ -1379,7 +1698,7 @@ lib.callback.register("pickle_restaurants:cooking:prepDecompose", function(src, 
         local spec = compSpec(c); spec.id = b.seq
         parts[#parts + 1] = spec
     end
-    return { ok = true, parts = parts }
+    return { ok = true, parts = parts, meal = isMeal or nil }
 end)
 
 -- Read-only preview: the component parts a product WOULD decompose into, without
@@ -1389,15 +1708,27 @@ lib.callback.register("pickle_restaurants:cooking:prepDecomposePeek", function(s
     local prop = PropCache[tonumber(d and d.prop_id)]
     if not prop or prop.prop_type ~= "kitchen_prep" then return { ok = false } end
     if not HasPerm(prop.restaurant_id, src, "cook") then return { ok = false } end
-    local asm = findAssembly(d and d.item)
-    if not asm then return { ok = false } end
+    local item = d and d.item
+    local isMeal = item ~= nil and item == MealItem()
+    local asm = findAssembly(item)
+    if not asm and not isMeal then return { ok = false } end
     local id = GetIdentifier(src)
     local sig = (type(d.sig) == "string") and d.sig or nil
-    if GetTrayCount(prop.restaurant_id, id, asm.output, 0, sig) < 1 then return { ok = false } end
-    local comps = compsFromMeta(asm, TrayTopMeta(prop.restaurant_id, id, asm.output, 0, sig))
+    local meta
+    if d.source == "inv" then
+        if invVariationCount(src, item, 0, sig) < 1 then return { ok = false } end
+        meta = invVariationMeta(src, item, 0, sig)
+    else
+        if GetTrayCount(prop.restaurant_id, id, item, 0, sig) < 1 then return { ok = false } end
+        meta = TrayTopMeta(prop.restaurant_id, id, item, 0, sig)
+    end
+    if isMeal and not (type(meta) == "table" and #meta > 0) then return { ok = false } end
+    -- finished (frosted) instances never come apart — mirror prepDecompose
+    if type(meta) == "table" and meta[1] ~= nil and meta[1].flavor ~= nil then return { ok = false } end
+    local comps = compsFromMeta(asm or { components = {} }, meta)
     local parts = {}
     for _, c in ipairs(comps) do parts[#parts + 1] = compSpec(c) end
-    return { ok = true, parts = parts }
+    return { ok = true, parts = parts, meal = isMeal or nil }
 end)
 
 -- closing the station / dropping just discards the reservation (nothing consumed)

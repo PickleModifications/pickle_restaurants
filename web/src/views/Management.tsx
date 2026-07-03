@@ -9,7 +9,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Field, TextField, NumberField } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
 import { money } from "@/lib/utils";
-import { UserPlus, Trash2, Plus, MapPin, Banknote, TriangleAlert, Image } from "lucide-react";
+import { UserPlus, Trash2, Plus, MapPin, Banknote, TriangleAlert, Image, Armchair } from "lucide-react";
 
 export default function Management({ data, onClose }: { data: any; onClose: () => void }) {
   const id = data?.restaurantId;
@@ -203,6 +203,8 @@ function Finances({ id, balance, ledger, canManage }: any) {
 
 function Stations({ id, props, stock, brand }: any) {
   const STATIONS = ["soda_machine", "fryer", "stovetop", "kitchen_prep"];
+  const seats = (props as any[]).filter((p) => p.prop_type === "seat");
+  const stationProps = (props as any[]).filter((p) => p.prop_type !== "seat");
   return (
     <div className="space-y-3">
       <Card>
@@ -233,11 +235,35 @@ function Stations({ id, props, stock, brand }: any) {
         </CardContent>
       </Card>
 
+      <Card>
+        <CardContent className="pt-4">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="flex items-center gap-2 text-sm font-semibold"><Armchair className="h-4 w-4" /> Seating</h3>
+            <Button variant="outline" size="sm" onClick={() => fetchNui("management:placeSeat", { id })}>
+              <MapPin className="h-3.5 w-3.5" /> place seat
+            </Button>
+          </div>
+          {seats.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {seats.map((p: any) => (
+                <Badge key={p.id} variant="outline" className="gap-1.5">
+                  Seat #{p.id}
+                  <button onClick={() => fetchNui("management:removeProp", { id, propId: p.id })}><Trash2 className="h-3 w-3" /></button>
+                </Badge>
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-muted-foreground">No seats placed. Players sit on your interior's own chairs at the points you place.</div>
+          )}
+          <p className="mt-2 text-[11px] text-muted-foreground">Placing a seat closes this panel so you can position it in the world.</p>
+        </CardContent>
+      </Card>
+
       <div className="grid grid-cols-2 gap-3">
         <Card>
           <CardContent className="pt-4">
             <h3 className="mb-2 text-sm font-semibold">Stations</h3>
-            {props.map((p: any) => (
+            {stationProps.map((p: any) => (
               <div key={p.id} className="flex items-center justify-between py-1 text-sm">
                 <span className="capitalize">{p.prop_type.replace("_", " ")}</span>
                 <Button size="sm" variant="destructive" onClick={() => fetchNui("management:removeProp", { id, propId: p.id })}>
@@ -245,7 +271,7 @@ function Stations({ id, props, stock, brand }: any) {
                 </Button>
               </div>
             ))}
-            {props.length === 0 && <div className="text-xs text-muted-foreground">No stations placed.</div>}
+            {stationProps.length === 0 && <div className="text-xs text-muted-foreground">No stations placed.</div>}
           </CardContent>
         </Card>
         <Card>

@@ -51,6 +51,12 @@ local DEFAULT_SETTINGS = {
     starting_balance = 0,
     default_commission = 10,
     cheese_melt_ms  = 8000, -- how long applied cheese takes to melt on a patty
+    -- The inventory item a serving-tray arrangement becomes at kitchen prep. The
+    -- meal's metadata records every item WITH its position on the tray, so it
+    -- re-renders 1:1 wherever it's set back down. The item is what gets GENERATED
+    -- (itemgen exports it) — never a requirement to use the tray; only moving a
+    -- meal into the real inventory needs it installed.
+    meal_item       = "meal",
     blip            = { sprite = 93, color = 1, scale = 0.8, enabled = true },
     default_roles   = {
         ["0"] = { label = "Trainee", commission = 5,  permissions = { cook = true } },
@@ -113,11 +119,38 @@ local DEFAULT_SETTINGS = {
         -- on the stack as an alteration; it rides along as a variation.
         { output = "raw_pizza", label = "Pizza (uncooked)", model = "pickle_pizza_dough_01",
           components = { "pizza_dough", "pizza_sauce", "pizza_cheese" } },
-        -- Bakery decoration: finish a fried doughnut / baked cake with frosting + sprinkles.
-        { output = "frosted_doughnut", label = "Frosted Doughnut", model = "pickle_doughnut_topping_01",
-          components = { "cooked_doughnut", "frosting", "sprinkles" } },
-        { output = "decorated_cake", label = "Decorated Cake", model = "pickle_cake_04",
-          components = { "cooked_cake", "frosting", "sprinkles" } },
+    },
+    -- Gradual "finish tools": an inventory item whose prop the player rubs over a
+    -- finished product on the kitchen-prep table. Coverage builds with cursor
+    -- movement (rub_dist metres of tool travel = fully applied); at 100% the target
+    -- is consumed together with 1 tool item and the output lands in the tray with
+    -- the chosen flavor recorded as build-stack metadata (so it survives every
+    -- tray/inventory round trip as its own variation).
+    --   mode = "replace": the target's props (e.g. container + batter sheet) are
+    --          deleted and the flavor model IS the whole finished product.
+    --   mode = "overlay": the flavor model stacks on top of the target's prop,
+    --          which stays (e.g. frosting coats a doughnut).
+    finishes = {
+        { tool = "frosting", tool_model = "pickle_frosting_tube_01", rub_dist = 1.2,
+          targets = {
+            { item = "cooked_cake", output = "decorated_cake", mode = "replace",
+              -- color drives the flavor swatch on the NUI card (falls back to a
+              -- built-in palette by flavor id when omitted)
+              flavors = {
+                { id = "strawberry", label = "Strawberry", model = "pickle_cake_01", color = "#f472b6" },
+                { id = "chocolate",  label = "Chocolate",  model = "pickle_cake_02", color = "#8b5a2b" },
+                { id = "vanilla",    label = "Vanilla",    model = "pickle_cake_03", color = "#f3e5ab" },
+                { id = "pickle",     label = "Pickle",     model = "pickle_cake_04", color = "#65a30d" },
+              } },
+            { item = "cooked_doughnut", output = "frosted_doughnut", mode = "overlay",
+              flavors = {
+                { id = "strawberry", label = "Strawberry", model = "pickle_doughnut_topping_01", color = "#f472b6" },
+                { id = "chocolate",  label = "Chocolate",  model = "pickle_doughnut_topping_02", color = "#8b5a2b" },
+                { id = "glazed",     label = "Glazed",     model = "pickle_doughnut_topping_03", color = "#f0c36d" },
+                { id = "vanilla",    label = "Vanilla",    model = "pickle_doughnut_topping_04", color = "#f3e5ab" },
+                { id = "pickle",     label = "Pickle",     model = "pickle_doughnut_topping_05", color = "#65a30d" },
+              } },
+          } },
     },
 }
 
@@ -153,8 +186,12 @@ local DEFAULT_RECIPES = {
     { input = "raw_cookie", station = "stovetop", method = "oven",
       raw = "pickle_cookie_01", cooked = "pickle_cookie_02", burnt = "pickle_cookie_03",
       out_cooked = "cooked_cookie", out_burnt = "burnt_cookie", cook_ms = 20000, burn_ms = 18000 },
+    -- Cake batter bakes as a thin sheet inside its container tray (the container
+    -- rides along visually, never an item). pickle_cake_01..04 are the four whole
+    -- flavored cakes the frosting finish tool produces — not cook states.
     { input = "raw_cake", station = "stovetop", method = "oven",
-      raw = "pickle_cake_01", cooked = "pickle_cake_02", burnt = "pickle_cake_03",
+      raw = "pickle_cake_mix_pour_02", cooked = "pickle_cake_mix_pour_03", burnt = "pickle_cake_mix_pour_04",
+      container = "pickle_cake_container_01",
       out_cooked = "cooked_cake", out_burnt = "burnt_cake", cook_ms = 30000, burn_ms = 25000 },
     -- Pizza bakes bare on the oven rack; the raw (topped) pizza is assembled at kitchen prep first.
     { input = "raw_pizza", station = "stovetop", method = "oven",
@@ -236,6 +273,9 @@ local function CreateTables()
             -- how many output items one cook yields when collected cooked/burnt
             -- (a basket of fries is a batch, not one giant fry)
             `output_count`       SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+            -- optional container prop the food cooks in (cake tin, cookie tray…):
+            -- rendered under the cook models everywhere, purely visual, never an item
+            `container_model`    VARCHAR(80)  DEFAULT NULL,
             PRIMARY KEY (`id`),
             UNIQUE KEY `uniq_input` (`input_item`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -350,6 +390,15 @@ local function CreateTables()
             "ALTER TABLE `pickle_restaurant_recipes` ADD COLUMN `output_count` SMALLINT UNSIGNED NOT NULL DEFAULT 1")
     end
 
+    -- Optional per-recipe container prop (cake tin, cookie tray…). Added in place
+    -- for servers that predate the column; the cake default is backfilled once in
+    -- SeedRecipes (gated by the cake_models_seeded flag).
+    local ccol = MySQL.query.await("SHOW COLUMNS FROM `pickle_restaurant_recipes` LIKE 'container_model'")
+    if not ccol or #ccol == 0 then
+        MySQL.query.await(
+            "ALTER TABLE `pickle_restaurant_recipes` ADD COLUMN `container_model` VARCHAR(80) DEFAULT NULL")
+    end
+
     -- The cooked-items tray's `cheese` column was originally TINYINT(1). oxmysql
     -- boolean-casts TINYINT(1) columns, which silently destroys the melted state
     -- (cheese = 2) on read-back, so a melted patty came back with no cheese after a
@@ -398,6 +447,7 @@ local function LoadSettings()
     end
     mergeListDefaults("assembly", "output")
     mergeListDefaults("drinks", "output")
+    mergeListDefaults("finishes", "tool")
 
     -- Same idea for the item->model map: add any newly-defaulted entries without
     -- overwriting models an admin remapped.
@@ -442,10 +492,10 @@ local function SeedRecipes()
     for _, r in ipairs(DEFAULT_RECIPES) do
         MySQL.insert.await([[
             INSERT INTO pickle_restaurant_recipes
-                (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count, container_model)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE input_item = input_item
-        ]], { r.input, r.station, r.raw, r.cooked, r.burnt, r.out_cooked, r.out_burnt, r.cook_ms, r.burn_ms, r.dual_sided or 0, r.method or "grill", r.output_count or 1 })
+        ]], { r.input, r.station, r.raw, r.cooked, r.burnt, r.out_cooked, r.out_burnt, r.cook_ms, r.burn_ms, r.dual_sided or 0, r.method or "grill", r.output_count or 1, r.container })
     end
 
     -- One-time: turn dual_sided on for the default dual recipes (e.g. beef
@@ -485,6 +535,21 @@ local function SeedRecipes()
             end
         end
         SetSetting("output_count_seeded", true)
+    end
+
+    -- One-time: the original seed wrongly used the four flavored whole cakes
+    -- (pickle_cake_01..03) as the cake batter's cook models. Repoint the stored
+    -- recipe at the batter-sheet models + container tray — but ONLY while it still
+    -- holds the old defaults verbatim (an admin who edited any of the three models
+    -- owns the row now; they can set container_model in the recipe editor).
+    if not GetSetting("cake_models_seeded", false) then
+        MySQL.update.await([[
+            UPDATE pickle_restaurant_recipes
+               SET raw_model = ?, cooked_model = ?, burnt_model = ?, container_model = ?
+             WHERE input_item = 'raw_cake'
+               AND raw_model = 'pickle_cake_01' AND cooked_model = 'pickle_cake_02' AND burnt_model = 'pickle_cake_03'
+        ]], { "pickle_cake_mix_pour_02", "pickle_cake_mix_pour_03", "pickle_cake_mix_pour_04", "pickle_cake_container_01" })
+        SetSetting("cake_models_seeded", true)
     end
 end
 
@@ -664,6 +729,22 @@ function AnnotateAssembly()
     return out
 end
 
+function AnnotateFinishes()
+    local out = {}
+    for _, f in ipairs(GetSetting("finishes", {})) do
+        local missing = {}
+        if not ItemExists(f.tool) then missing[#missing + 1] = f.tool end
+        for _, t in ipairs(f.targets or {}) do
+            if not ItemExists(t.item) then missing[#missing + 1] = t.item end
+            if not ItemExists(t.output) then missing[#missing + 1] = t.output end
+        end
+        local copy = {}; for k, v in pairs(f) do copy[k] = v end
+        copy.valid, copy.missing = #missing == 0, missing
+        out[#out + 1] = copy
+    end
+    return out
+end
+
 -- ─── permissions ─────────────────────────────────────────────────────────────
 
 -- Returns: permsTable, isOwnerOrAdmin, employeeRow
@@ -740,6 +821,17 @@ function TraySig(meta)
             -- (a burger holding a pepperoni pizza ≠ one holding a plain pizza)
             if type(l.stack) == "table" and #l.stack > 0 then
                 part = part .. "{" .. TraySig(l.stack) .. "}"
+            end
+            -- a finished (frosted…) layer carries its flavor: a strawberry cake and
+            -- a chocolate one are different variations of the same output item
+            if l.flavor ~= nil then
+                part = part .. "#" .. tostring(l.flavor)
+            end
+            -- a meal layer carries its tray offset: the same items in a different
+            -- arrangement are a different meal (offsets are quantized to 1cm at
+            -- make time, so the format is stable through the JSON round trip)
+            if l.dx ~= nil or l.dy ~= nil then
+                part = part .. ("@%.2f,%.2f"):format(tonumber(l.dx) or 0.0, tonumber(l.dy) or 0.0)
             end
             parts[#parts + 1] = part
         end
@@ -917,10 +1009,27 @@ function BuildSyncPayload()
         for _, comp in ipairs(a.components or {}) do if not ItemExists(comp) then ok = false end end
         if ok then assembly[#assembly + 1] = a end
     end
+    -- Finish tools ship with only their valid targets (tool + target + output items
+    -- must all exist); an entry with no surviving targets is dropped entirely.
+    local finishes = {}
+    for _, f in ipairs(GetSetting("finishes", {})) do
+        if ItemExists(f.tool) then
+            local targets = {}
+            for _, t in ipairs(f.targets or {}) do
+                if ItemExists(t.item) and ItemExists(t.output) then targets[#targets + 1] = t end
+            end
+            if #targets > 0 then
+                local copy = {}; for k, v in pairs(f) do copy[k] = v end
+                copy.targets = targets
+                finishes[#finishes + 1] = copy
+            end
+        end
+    end
 
     local payload = { restaurants = {}, props = {}, recipes = recipes, settings = {
         drinks   = drinks,
         assembly = assembly,
+        finishes = finishes,
     } }
     for _, r in pairs(RestaurantCache) do payload.restaurants[#payload.restaurants + 1] = BuildClientRestaurant(r) end
     for _, p in pairs(PropCache) do payload.props[#payload.props + 1] = p end

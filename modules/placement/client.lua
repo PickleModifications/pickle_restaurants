@@ -31,6 +31,29 @@ function StartPropPlacement(restaurantId, propType)
     end
 end
 
+-- The ghost ped shown while positioning a seat anchor, so the admin can see where
+-- (and which way) a player will be seated. Reuses one of the NPC-customer models.
+local SEAT_PREVIEW_PED = "a_m_y_business_01"
+
+-- Place an invisible seat anchor: the gizmo shows a ghost person; we persist only
+-- the point + facing. No model/prop is spawned at runtime — players sit on the
+-- restaurant's existing furniture here.
+function StartSeatPlacement(restaurantId)
+    Wait(250)
+    local result = StartGizmoEditor({ isPed = true, model = SEAT_PREVIEW_PED, enableCancel = true, deleteEntity = true })
+    if not result or not result.position then return end
+    local res = lib.callback.await("pickle_restaurants:placement:saveSeat", false, {
+        restaurant_id = restaurantId,
+        x = result.position.x, y = result.position.y, z = result.position.z,
+        heading = (result.rotation and result.rotation.z) or 0.0,
+    })
+    if res and res.ok then
+        ShowNotification("Seat placed.")
+    else
+        ShowNotification((res and res.error) or "Failed to place seat.")
+    end
+end
+
 function StartCounterPlacement(restaurantId)
     Wait(250)
     local result = StartGizmoEditor({ model = "prop_till_01", enableCancel = true, deleteEntity = true })

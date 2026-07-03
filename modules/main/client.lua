@@ -9,6 +9,7 @@ RecipesByInput   = {}    -- [input_item]    = recipe
 RecipesByStation = {}    -- [station]       = { recipe, ... }
 Drinks           = {}    -- soda definitions
 Assembly         = {}    -- kitchen-prep definitions
+Finishes         = {}    -- finish tools (frosting…): tool -> targets -> flavors
 
 local STATION_LABELS = {
     soda_machine = "Soda Machine",
@@ -65,6 +66,23 @@ end
 function GetStationEntity(propId) return spawnedProps[propId] end
 
 local function SpawnProp(prop)
+    -- A seat is an INVISIBLE sit anchor: no world model spawns — just a "Sit"
+    -- interaction at the point. Players sit on the restaurant's own furniture here
+    -- (the seating module plays the pose). Cleaned up via propInteractions like any
+    -- other placed prop (ClearWorld / propRemoved).
+    if prop.prop_type == "seat" then
+        propInteractions[prop.id] = CreateInteraction({
+            coords         = vector3(prop.x, prop.y, prop.z),
+            label          = "Sit",
+            icon           = "fa-solid fa-chair",
+            radius         = 0.9,
+            interactRadius = 1.4,
+        }, function()
+            if SitOnSeat then SitOnSeat(prop) end
+        end)
+        return
+    end
+
     -- Spawn the model ourselves (rather than core's CreateProp) so we can log
     -- exactly why a station doesn't appear. Watch the F8 / server console.
     local hash = (type(prop.model) == "number") and prop.model or GetHashKey(prop.model)
@@ -165,7 +183,7 @@ end
 
 local function ApplySync(payload)
     ClearWorld()
-    Restaurants, RecipesByInput, RecipesByStation, Drinks, Assembly = {}, {}, {}, {}, {}
+    Restaurants, RecipesByInput, RecipesByStation, Drinks, Assembly, Finishes = {}, {}, {}, {}, {}, {}
 
     for _, r in ipairs(payload.restaurants or {}) do
         r.props = {}
@@ -179,6 +197,7 @@ local function ApplySync(payload)
     if payload.settings then
         Drinks   = payload.settings.drinks or {}
         Assembly = payload.settings.assembly or {}
+        Finishes = payload.settings.finishes or {}
     end
 
     for _, prop in ipairs(payload.props or {}) do

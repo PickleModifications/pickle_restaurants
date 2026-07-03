@@ -4,7 +4,21 @@ import { Badge } from "@/components/ui/badge";
 import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-type Ingredient = { kind: string; item: string; label: string; image?: string; count?: number; canMake?: boolean; model?: string; dual?: boolean };
+// kind "finish" = a finish tool (frosting): flavors is picked on the card, then the
+// tube is rubbed over a cooked target on the prep table until fully coated.
+type Ingredient = { kind: string; item: string; label: string; image?: string; count?: number; canMake?: boolean; model?: string; dual?: boolean; flavors?: { id: string; label: string; color?: string }[] };
+
+// Swatch colors for the flavor squares on a finish card. The config can carry a
+// per-flavor `color`; these cover the default flavors on servers seeded before
+// colors existed (and anything unknown gets the neutral fallback).
+const FLAVOR_COLORS: Record<string, string> = {
+  strawberry: "#f472b6",
+  chocolate: "#8b5a2b",
+  glazed: "#f0c36d",
+  vanilla: "#f3e5ab",
+  pickle: "#65a30d",
+};
+const flavorColor = (fl: { id: string; color?: string }) => fl.color || FLAVOR_COLORS[fl.id] || "#9ca3af";
 type SideInfo = { state: string; percent: number; cooking?: boolean };
 // One aggregated component of a build stack (bun halves collapse to one bun).
 type TrayComp = { item: string; label: string; image?: string; count: number };
@@ -16,12 +30,20 @@ type TrayEntry = {
   // recipe) and comps (full component list) tell otherwise-identical entries apart.
   // source "inv" = an inventory-held product listed alongside the tray ("Item" pill).
   sig?: string; stack?: string[]; stackState?: string; extras?: TrayComp[]; comps?: TrayComp[]; source?: string;
+  // a serving-tray meal: sets back down at prep as its full tray, layout intact
+  meal?: boolean;
+  // a finished (frosted…) product's recorded flavor, e.g. "Strawberry"
+  flavorLabel?: string;
 };
 // A buildable recipe (kitchen prep) with its output + components resolved for the tooltip.
 type RecipeComp = { item: string; label: string; image?: string };
 type RecipeCat = { output: string; label: string; image?: string; components: RecipeComp[] };
 // The hovered stack's live snapshot: where it is on screen + what it provides.
-type PrepTip = { sid: number; onScreen: boolean; x: number; y: number; provides: Record<string, number> };
+// A hovered serving tray sends { tray: true, tid, count } instead (Make Meal tooltip).
+type PrepTip = {
+  sid?: number; onScreen: boolean; x: number; y: number; provides?: Record<string, number>;
+  tray?: boolean; tid?: number; count?: number;
+};
 // A recipe scored against a stack: how many components are satisfied + what's short.
 type Ranked = { rec: RecipeCat; matched: number; ready: boolean; missing: { item: string; label: string; image?: string; short: number }[] };
 type ChipItem = {
@@ -151,7 +173,13 @@ function BarTooltip({ tip }: { tip: BarTip }) {
               )}
             </div>
             {e &&
-              (extrasCount(e) > 0 ? (
+              (e.meal ? (
+                <div className="truncate text-[11px] font-medium text-amber-300">
+                  Serving-tray meal — sets down as arranged
+                </div>
+              ) : e.flavorLabel ? (
+                <div className="truncate text-[11px] font-medium text-pink-300">{e.flavorLabel}</div>
+              ) : extrasCount(e) > 0 ? (
                 <div className="truncate text-[11px] font-medium text-amber-300">
                   + {extrasCount(e)} topping{extrasCount(e) === 1 ? "" : "s"}
                 </div>
@@ -441,6 +469,49 @@ function BuildTooltip({
   );
 }
 
+// Floating tooltip over the hovered serving tray: item count + the Make Meal
+// button. The whole arrangement (every pile, exact offsets) becomes one meal item.
+function MealTooltip({
+  count, onMake, onPin,
+}: {
+  count: number;
+  onMake: () => void;
+  onPin: (pinned: boolean) => void;
+}) {
+  return (
+    <div
+      onPointerEnter={() => onPin(true)}
+      onPointerLeave={() => onPin(false)}
+      className="w-60 rounded-xl border border-border bg-card p-3 shadow-2xl"
+    >
+      <div className="flex items-center gap-2">
+        <UtensilsCrossed className="h-4 w-4 shrink-0 text-primary" />
+        <span className="text-sm font-semibold">Serving Tray</span>
+        <span className="ml-auto shrink-0 rounded bg-secondary px-1.5 py-0.5 text-[11px] font-semibold tabular-nums">
+          {count} item{count === 1 ? "" : "s"}
+        </span>
+      </div>
+      <div className="mt-2 text-[11px] leading-snug text-muted-foreground">
+        {count === 0
+          ? "Drag food onto the tray to arrange a meal. Grab the tray to move it."
+          : "Grab the tray to move it — or drop it on the bar to make the meal."}
+      </div>
+      <button
+        disabled={count === 0}
+        onClick={onMake}
+        className={cn(
+          "mt-3 w-full rounded-md px-3 py-1.5 text-xs font-semibold transition",
+          count > 0
+            ? "bg-primary text-primary-foreground hover:opacity-90"
+            : "cursor-not-allowed bg-muted text-muted-foreground"
+        )}
+      >
+        Make Meal
+      </button>
+    </div>
+  );
+}
+
 export default function Cooking({ data }: { data: any }) {
   const [station, setStation] = useState<string>(data?.station || "fryer");
   const [ingredients, setIngredients] = useState<Ingredient[]>(data?.ingredients || []);
@@ -470,9 +541,13 @@ export default function Cooking({ data }: { data: any }) {
   const hoveredRef = useRef<number | null>(null);
   const placingRef = useRef(false);          // dragging an ingredient out of the bar
   const toppingRef = useRef<string | null>(null); // dragging a topping (cheese) onto a patty
-  const prepDragRef = useRef<{ source: string; item: string; cheese: number; model?: string | null; decompose?: boolean; sig?: string } | null>(null); // dragging a NEW part (or a product to take apart) onto the prep table
+  const finishRef = useRef<string | null>(null); // rubbing a finish tool (frosting) over a target
+  const [finishFlavor, setFinishFlavor] = useState<Record<string, string>>({}); // chosen flavor per finish tool
+  const prepDragRef = useRef<{ source: string; item: string; cheese: number; model?: string | null; decompose?: boolean; sig?: string } | null>(null); // dragging a NEW part (or a product/meal to take apart) onto the prep table
   const prepHoveredRef = useRef<number | null>(null); // placed prep part under the cursor (grab target)
-  const prepMoveRef = useRef<{ puid: number } | null>(null); // re-dragging a placed prep part
+  const trayHoveredRef = useRef<number | null>(null); // placed serving tray under the cursor (grab target)
+  const prepMoveRef = useRef<{ puid?: number; tray?: boolean } | null>(null); // re-dragging a placed prep part / a whole serving tray
+  const trayPlaceRef = useRef(false); // dragging a fresh serving tray out of the bar
   const worldRef = useRef<{ uid: number | null; startX: number; startY: number; dragging: boolean } | null>(null);
 
   useEffect(() => {
@@ -485,6 +560,12 @@ export default function Cooking({ data }: { data: any }) {
   }, [data]);
 
   useNuiEvent("cookingIngredients", (d) => { setIngredients(d.ingredients || []); setBarTip(null); });
+  // finish drag concluded on the Lua side (fully coated & applied, or rejected)
+  useNuiEvent("cookingFinishDone", () => {
+    finishRef.current = null;
+    setDragging(false);
+    setDragHint(null);
+  });
   useNuiEvent("cookingTray", (d) => { setTray(d.tray || []); setBarTip(null); });
   useNuiEvent("cookingRecipes", (d) => setRecipes(d.recipes || []));
   useNuiEvent("cookingItems", (d) => {
@@ -492,6 +573,7 @@ export default function Cooking({ data }: { data: any }) {
     itemsRef.current = its;
     hoveredRef.current = d.hovered ?? null;
     prepHoveredRef.current = d.prepHovered ?? null;
+    trayHoveredRef.current = d.prepTrayHovered ?? null;
     setItems(its);
     setHovered(d.hovered ?? null);
 
@@ -553,7 +635,7 @@ export default function Cooking({ data }: { data: any }) {
   // A fresh stack resets the pick to its top recipe.
   useEffect(() => { setSelectedOutput(null); }, [tip?.sid]);
 
-  const tipVisible = isPrep && tipShow && !!tip && !!tip.onScreen && !dragging && ranked.length > 0;
+  const tipVisible = isPrep && tipShow && !!tip && !!tip.onScreen && !dragging && (tip.tray ? true : ranked.length > 0);
   const onTipPin = (pinned: boolean) => {
     tipPinnedRef.current = pinned;
     if (pinned) {
@@ -565,6 +647,14 @@ export default function Cooking({ data }: { data: any }) {
   const onTipMake = () => {
     if (!tip || !selected?.ready) return;
     fetchNui("cooking:prepMakeStack", { sid: tip.sid, output: selected.rec.output });
+    setTipShow(false);
+    setTip(null);
+    tipPinnedRef.current = false;
+  };
+  // the hovered serving tray's Make Meal — the whole arrangement becomes one item
+  const onMealMake = () => {
+    if (!tip?.tray || !(tip.count || 0)) return;
+    fetchNui("cooking:prepMakeMeal", { tid: tip.tid });
     setTipShow(false);
     setTip(null);
     tipPinnedRef.current = false;
@@ -584,6 +674,7 @@ export default function Cooking({ data }: { data: any }) {
 
   // one contextual "what can I do with this here" line for the hover tooltip
   const trayHint = (e: TrayEntry): string => {
+    if (isPrep && e.meal) return "Drag onto the table to set the meal down — exactly as it was arranged.";
     if (isPrep && e.decompose) return "Drag onto the table to take it apart, or stack it as a layer.";
     if (isPrep) return "Drag onto the table to build with it.";
     if (canCookHere(e)) return station === "fryer" ? "Drag into the fryer basket to cook it." : "Drag into an open oven door to bake it.";
@@ -592,7 +683,9 @@ export default function Cooking({ data }: { data: any }) {
     return "Use “→ inventory” to take it with you.";
   };
   const ingHint = (ing: Ingredient): string => {
+    if (ing.kind === "tray") return "Drag onto the table — arrange food on it, then make it a meal.";
     if (ing.kind === "topping") return "Drag onto a cooked patty to add it.";
+    if (ing.kind === "finish") return "Pick a flavor, then rub the tube over a cooked item on the table until fully coated.";
     if (ing.kind === "drink") return "Drag out under the tap to start filling.";
     if (isPrep) return "Drag onto the table — stack parts to build recipes.";
     return station === "fryer" ? "Drag into the fryer basket to cook." : "Drag onto the cooktop or into an open oven door.";
@@ -607,6 +700,15 @@ export default function Cooking({ data }: { data: any }) {
     setDragging(true);
     fetchNui("cooking:beginPlace", { kind: "cook", item: e.item, source: e.source || "tray", cheese: e.cheese || 0, sig: e.sig || "" });
   };
+  // the serving tray (kitchen prep): equipment, not an item — drag it onto the
+  // table, arrange food on it, then turn the whole thing into one meal item.
+  const startTrayPlace = (e: React.PointerEvent) => {
+    e.preventDefault();
+    trayPlaceRef.current = true;
+    setDragging(true);
+    setDragHint("Drop on the table to set the tray down");
+    fetchNui("cooking:beginTrayPlace", {});
+  };
   // toppings (cheese) aren't placed in the world — they're dragged onto a patty.
   // The real slice prop renders in 3D under the cursor (no 2D pill); releasing
   // over a cooked patty applies it.
@@ -616,6 +718,19 @@ export default function Cooking({ data }: { data: any }) {
     setTab("ingredients");
     setDragging(true);
     fetchNui("cooking:beginTopping", { item: ing.item, model: ing.model });
+  };
+  // finish tools (frosting): the chosen flavor rides the drag; the tube renders in
+  // 3D under the cursor and is rubbed over a cooked target until fully coated —
+  // the Lua side commits at full coverage (cookingFinishDone ends the drag state).
+  const startFinish = (e: React.PointerEvent, ing: Ingredient) => {
+    e.preventDefault();
+    const flavor = finishFlavor[ing.item] ?? ing.flavors?.[0]?.id;
+    if (!flavor) return;
+    finishRef.current = ing.item;
+    setTab("ingredients");
+    setDragging(true);
+    setDragHint("Rub the tube over a cooked item on the table until fully coated");
+    fetchNui("cooking:beginFinish", { item: ing.item, flavor });
   };
   // at the prep station, drag a tray item / ingredient onto the table to add a
   // layer. With a model it spawns a live 3D prop that follows the cursor (like the
@@ -627,8 +742,10 @@ export default function Cooking({ data }: { data: any }) {
     e.preventDefault();
     // A bun is one item spawned as a bottom+top pair (handled client-side), so no
     // half hint is needed here. A finished product from the tray is dragged as its
-    // single prop but, on drop, gets taken apart into its component stack.
-    const decompose = source === "tray" && !!entry.decompose;
+    // single prop but, on drop, gets taken apart into its component stack. The
+    // server flags what's decomposable (tray products; meals from either source —
+    // a meal previews and sets down as its whole tray).
+    const decompose = !!entry.decompose;
     // the exact build variation this drag addresses: tray entries always carry a
     // sig; inventory PRODUCT entries carry one too (slot metadata). Plain
     // Ingredients-bar components have none — they reserve item-wide.
@@ -645,8 +762,9 @@ export default function Cooking({ data }: { data: any }) {
     setDragging(true);
     setDragHint(decompose ? "Drop on the prep table to take it apart" : "Drop on the prep table — or onto another item to stack");
     if (decompose) {
-      // preview the whole component stack (peeked, nothing consumed) under the cursor
-      fetchNui("cooking:beginPrepDecompose", { item: entry.item, sig });
+      // preview the whole component stack (peeked, nothing consumed) under the
+      // cursor; source tells the server which store holds it (tray vs inventory)
+      fetchNui("cooking:beginPrepDecompose", { item: entry.item, sig, source });
     } else if (entry.model || (entry.stack && entry.stack.length > 1)) {
       // a product carrying a build stack (e.g. a cooked pizza) drags as its whole
       // layer tower, not just the base model
@@ -672,6 +790,15 @@ export default function Cooking({ data }: { data: any }) {
         setDragging(true);
         setDragHint("Drag onto another item to stack — drop on the bar to remove");
         fetchNui("cooking:prepGrab", { puid });
+        return;
+      }
+      // no part hovered: grab the serving tray itself (with everything on it)
+      const tid = trayHoveredRef.current;
+      if (tid != null) {
+        prepMoveRef.current = { tray: true };
+        setDragging(true);
+        setDragHint("Drop on the bar to make it a meal — or set the tray down elsewhere");
+        fetchNui("cooking:trayGrab", { tid });
       }
       return;
     }
@@ -702,10 +829,27 @@ export default function Cooking({ data }: { data: any }) {
       setDragging(false);
       setDragHint(null);
 
-      // re-dragged a placed prep part: drop on the bar removes it, else it stays
+      // dragging a fresh serving tray out of the bar: drop on the table places it
+      if (trayPlaceRef.current) {
+        trayPlaceRef.current = false;
+        fetchNui("cooking:endTrayPlace", { cancel: overBar });
+        return;
+      }
+
+      // re-dragged a placed prep part (or a grabbed serving tray): drop on the bar
+      // removes it (a tray becomes its meal), else it stays / moves
       if (prepMoveRef.current) {
         prepMoveRef.current = null;
         fetchNui("cooking:prepDrop", { cancel: overBar });
+        return;
+      }
+
+      // finish tool (frosting) released before full coverage: cancels harmlessly
+      // (coverage resets, nothing consumed). At full coverage the Lua side already
+      // committed and cleared the drag via cookingFinishDone.
+      if (finishRef.current) {
+        finishRef.current = null;
+        fetchNui("cooking:endFinish", { cancel: overBar });
         return;
       }
 
@@ -725,7 +869,8 @@ export default function Cooking({ data }: { data: any }) {
         setGhost(null);
         if (p.decompose) {
           // a finished product — take it apart into its component stack on drop
-          fetchNui("cooking:endPrepDecompose", { cancel: overBar, item: p.item, sig: p.sig });
+          // (a meal recreates its full tray + arrangement)
+          fetchNui("cooking:endPrepDecompose", { cancel: overBar, item: p.item, sig: p.sig, source: p.source });
         } else if (p.model) {
           // live 3D placement — commit (or cancel back over the bar)
           fetchNui("cooking:endPrepPlace", { cancel: overBar, source: p.source, item: p.item, cheese: p.cheese, sig: p.sig });
@@ -779,7 +924,8 @@ export default function Cooking({ data }: { data: any }) {
   const meta = STATION_META[station] || STATION_META.fryer;
   const Icon = meta.icon;
 
-  const draggable = (ing: Ingredient) => (ing.kind === "assembly" ? !!ing.canMake : (ing.count || 0) > 0);
+  const draggable = (ing: Ingredient) =>
+    ing.kind === "tray" ? true : ing.kind === "assembly" ? !!ing.canMake : (ing.count || 0) > 0;
 
   return (
     <>
@@ -823,7 +969,11 @@ export default function Cooking({ data }: { data: any }) {
         style={{ left: `${(tip?.x ?? 0.5) * 100}%`, top: `${(tip?.y ?? 0.5) * 100}%` }}
       >
         <div className="relative">
-          <BuildTooltip ranked={ranked} selected={selected} onSelect={setSelectedOutput} onMake={onTipMake} onPin={onTipPin} />
+          {tip?.tray ? (
+            <MealTooltip count={tip.count || 0} onMake={onMealMake} onPin={onTipPin} />
+          ) : (
+            <BuildTooltip ranked={ranked} selected={selected} onSelect={setSelectedOutput} onMake={onTipMake} onPin={onTipPin} />
+          )}
           <div className="absolute left-1/2 top-full h-0 w-0 -translate-x-1/2 border-x-[6px] border-t-[6px] border-x-transparent border-t-card" />
         </div>
       </div>
@@ -934,7 +1084,9 @@ export default function Cooking({ data }: { data: any }) {
               const onDown = (e: React.PointerEvent) => {
                 if (!can) return;
                 setBarTip(null);
-                if (ing.kind === "topping") startTopping(e, ing);
+                if (ing.kind === "tray") startTrayPlace(e);
+                else if (ing.kind === "topping") startTopping(e, ing);
+                else if (ing.kind === "finish") startFinish(e, ing);
                 else if (isPrep) startPrepDrag(e, "inv", { item: ing.item, cheese: 0, model: ing.model, label: ing.label, image: ing.image, dual: ing.dual });
                 else startPlace(e, ing);
               };
@@ -945,15 +1097,53 @@ export default function Cooking({ data }: { data: any }) {
                   onPointerEnter={(ev) => showBarTip(ev, { ing, hint: can ? ingHint(ing) : undefined })}
                   onPointerLeave={() => setBarTip(null)}
                   className={cn(
-                    "relative flex h-32 w-28 shrink-0 touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border text-center text-xs font-medium",
+                    "relative flex h-32 shrink-0 touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border text-center text-xs font-medium",
+                    ing.kind === "finish" ? "w-32" : "w-28",
                     can
                       ? "cursor-grab border-border bg-secondary hover:border-primary/60 active:cursor-grabbing"
                       : "cursor-not-allowed border-dashed border-border/60 bg-muted/40 opacity-60"
                   )}
                 >
-                  <ItemThumb src={ing.image} alt={ing.label} className="h-10 w-10 object-contain" />
+                  {ing.kind === "tray" ? (
+                    <UtensilsCrossed className="h-10 w-10 text-primary/80" />
+                  ) : (
+                    <ItemThumb src={ing.image} alt={ing.label} className={ing.kind === "finish" ? "h-8 w-8 object-contain" : "h-10 w-10 object-contain"} />
+                  )}
                   <span className="w-full truncate px-1.5 leading-tight">{ing.label}</span>
-                  {ing.kind !== "assembly" && (
+                  {ing.kind === "tray" && (
+                    <span className="text-[10px] text-muted-foreground">build a meal</span>
+                  )}
+                  {/* finish tool: flavor picked right on the card (colored swatch
+                      squares, hover for the flavor name), then drag to apply.
+                      NOTE: native title tooltips don't render in NUI/CEF, so each
+                      swatch carries its own CSS group-hover label. */}
+                  {ing.kind === "finish" && !!ing.flavors?.length && (
+                    <div className="mx-auto flex w-[70%] flex-wrap items-center justify-center gap-1">
+                      {ing.flavors.map((fl) => {
+                        const active = (finishFlavor[ing.item] ?? ing.flavors![0].id) === fl.id;
+                        return (
+                          <div key={fl.id} className="group relative">
+                            <button
+                              aria-label={fl.label}
+                              onPointerDown={(ev) => ev.stopPropagation()}
+                              onClick={() => setFinishFlavor((m) => ({ ...m, [ing.item]: fl.id }))}
+                              style={{ backgroundColor: flavorColor(fl) }}
+                              className={cn(
+                                "block h-5 w-5 shrink-0 rounded-md border transition",
+                                active
+                                  ? "scale-110 border-white ring-2 ring-primary"
+                                  : "border-black/40 opacity-70 hover:opacity-100"
+                              )}
+                            />
+                            <span className="pointer-events-none absolute -top-6 left-1/2 z-50 hidden -translate-x-1/2 whitespace-nowrap rounded border border-border bg-card px-1.5 py-0.5 text-[9px] font-semibold text-foreground shadow-lg group-hover:block">
+                              {fl.label}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {ing.kind !== "assembly" && ing.kind !== "tray" && (
                     <Badge variant="secondary" className="absolute right-1 top-1">{ing.count ?? 0}</Badge>
                   )}
                   {ing.kind === "assembly" && !ing.canMake && (
@@ -994,12 +1184,22 @@ export default function Cooking({ data }: { data: any }) {
                 <div className="flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-0.5">
                   <ItemThumb src={e.image} alt={e.label || e.item} className="h-10 w-10 object-contain" />
                   <span className="w-full truncate px-1.5 leading-tight">{e.label || e.item}</span>
-                  {/* toppings over the base recipe — fixed height so every card lines up */}
-                  <ToppingsRow e={e} />
+                  {/* flavor line for finished (frosted) products; toppings row for
+                      everything else — fixed height so every card lines up */}
+                  {e.flavorLabel ? (
+                    <div className="flex h-[18px] items-center text-[9px] font-semibold text-pink-300">{e.flavorLabel}</div>
+                  ) : (
+                    <ToppingsRow e={e} />
+                  )}
                 </div>
                 {/* action row pinned to the card's bottom edge */}
                 <div className="flex w-full flex-col items-center gap-0.5 pb-1.5">
-                  {isPrep && e.decompose && (
+                  {isPrep && e.meal && (
+                    <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[9px] font-semibold text-primary">
+                      drag to set down
+                    </span>
+                  )}
+                  {isPrep && e.decompose && !e.meal && (
                     <span className="rounded bg-background/60 px-1.5 py-0.5 text-[9px] text-muted-foreground">
                       drag to take apart
                     </span>

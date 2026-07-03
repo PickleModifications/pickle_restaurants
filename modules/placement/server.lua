@@ -30,6 +30,29 @@ lib.callback.register("pickle_restaurants:placement:saveProp", function(src, d)
     return { ok = true, id = propId }
 end)
 
+-- A seat is an INVISIBLE sit anchor (prop_type "seat"): stored in the same props
+-- table as stations, but nothing spawns in the world — players sit on the
+-- restaurant's own furniture at this point/heading. No model is validated (there's
+-- no runtime prop); the placement preview is a ghost ped, position + heading only.
+lib.callback.register("pickle_restaurants:placement:saveSeat", function(src, d)
+    local id = tonumber(d.restaurant_id)
+    if not GetRestaurant(id) then return { ok = false, error = "No such restaurant" } end
+    if not HasPerm(id, src, "manage_props") then return { ok = false, error = "No permission" } end
+
+    local propId = MySQL.insert.await(
+        "INSERT INTO pickle_restaurant_props (restaurant_id, prop_type, model, x, y, z, heading) VALUES (?, 'seat', '', ?, ?, ?, ?)",
+        { id, d.x + 0.0, d.y + 0.0, d.z + 0.0, (d.heading or 0.0) + 0.0 })
+    if not propId then return { ok = false } end
+
+    local prop = {
+        id = propId, restaurant_id = id, prop_type = "seat", model = "",
+        x = d.x + 0.0, y = d.y + 0.0, z = d.z + 0.0, heading = (d.heading or 0.0) + 0.0, metadata = {},
+    }
+    PropCache[propId] = prop
+    TriggerClientEvent("pickle_restaurants:propPlaced", -1, prop)
+    return { ok = true, id = propId }
+end)
+
 lib.callback.register("pickle_restaurants:placement:saveCounter", function(src, d)
     local id = tonumber(d.restaurant_id)
     if not GetRestaurant(id) then return { ok = false, error = "No such restaurant" } end
@@ -50,6 +73,9 @@ lib.callback.register("pickle_restaurants:placement:removeProp", function(src, d
     MySQL.update.await("DELETE FROM pickle_restaurant_props WHERE id = ?", { propId })
     PropCache[propId] = nil
     TriggerClientEvent("pickle_restaurants:propRemoved", -1, propId)
+    -- server-side notice so other modules can release state tied to this prop
+    -- (cooking drops any items cooking on it; seating frees its occupancy)
+    TriggerEvent("pickle_restaurants:propDeleted", propId)
     return { ok = true }
 end)
 

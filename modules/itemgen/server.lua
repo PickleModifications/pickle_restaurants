@@ -61,6 +61,7 @@ local KNOWN = {
     burger               = { label = "Burger",               weight = 350, hunger = 250000 },
     cheeseburger         = { label = "Cheeseburger",         weight = 380, hunger = 280000 },
     chicken_sandwich     = { label = "Chicken Sandwich",     weight = 350, hunger = 250000 },
+    meal                 = { label = "Meal",                 weight = 800, hunger = 400000 },
 }
 
 local DEFAULT_WEIGHT = 200
@@ -85,8 +86,18 @@ local function collectItems()
         add(a.output)
         for _, c in ipairs(a.components or {}) do add(c) end
     end
+    -- finish tools (frosting…) + their targets/outputs
+    for _, f in ipairs(GetSetting("finishes", {})) do
+        add(f.tool)
+        for _, t in ipairs(f.targets or {}) do add(t.item); add(t.output) end
+    end
+    -- any item an admin mapped to a prep prop is a real item too (sprinkles etc.,
+    -- optional toppings that aren't a required component of any recipe)
+    for item in pairs(GetSetting("prep_models", {})) do add(item) end
     local menu = MySQL.query.await("SELECT DISTINCT item FROM pickle_restaurant_menu") or {}
     for _, m in ipairs(menu) do add(m.item) end
+    -- the serving-tray meal item (kitchen prep) isn't a recipe/assembly output
+    add(GetSetting("meal_item", "meal"))
 
     local list = {}
     for name in pairs(set) do

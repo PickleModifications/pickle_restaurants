@@ -253,11 +253,16 @@
         stack  = true,
         close  = true,
     },
-    ['pepperoni'] = {
-        label  = 'Pepperoni',
-        weight = 80,
+    ['meal'] = {
+        label  = 'Meal',
+        weight = 800,
         stack  = true,
         close  = true,
+        client = {
+            status = { hunger = 400000, },
+            anim = { dict = 'mp_player_inteat@burger', clip = 'mp_player_int_eat_burger' }, usetime = 2500,
+        },
+        consume = 1,
     },
     ['pickle'] = {
         label  = 'Pickle',

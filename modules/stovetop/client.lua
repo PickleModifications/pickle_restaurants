@@ -98,7 +98,7 @@ end
 -- lifted by the summed height of the parts below it, all aligned to the stove heading.
 -- Renders an uncooked assembled bake (e.g. a topped pizza) as its full build stack
 -- rather than just the base prop.
-function SeatOvenSlotStack(propId, door, slot, ents, heights)
+function SeatOvenSlotStack(propId, door, slot, ents, heights, baseDz)
     local rec = OvenDoors[propId]
     local o = rec and OVEN.slots[door] and OVEN.slots[door][slot]
     if not rec or not o or not DoesEntityExist(rec.stove) then return end
@@ -107,9 +107,11 @@ function SeatOvenSlotStack(propId, door, slot, ents, heights)
     -- tip the tower sideways and push its top layer (e.g. the pizza cheese) into the
     -- cavity wall, so it appears to vanish on release. Layers keep only the stove's
     -- heading so they stay flat but still face the oven — matching the drag preview.
+    -- `baseDz` (optional) lifts the whole tower: a container base layer's mesh-bottom
+    -- correction, so a cake tin rests ON the rack instead of sinking through it.
     local base = GetOffsetFromEntityInWorldCoords(rec.stove, o.x, o.y, o.z + OVEN.z_seat)
     local sr = GetEntityRotation(rec.stove, 2)
-    local lift = 0.0
+    local lift = baseDz or 0.0
     for i, ent in ipairs(ents or {}) do
         if ent and DoesEntityExist(ent) then
             SetEntityCoordsNoOffset(ent, base.x, base.y, base.z + lift, false, false, false)
