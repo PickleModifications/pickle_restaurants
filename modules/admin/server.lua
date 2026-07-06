@@ -78,7 +78,7 @@ end
 
 lib.callback.register("pickle_restaurants:admin:create", function(src, d)
     if not IsPlayerAdmin(src) then return { ok = false } end
-    if not d or not d.name or d.name == "" then return { ok = false, error = "Name required" } end
+    if not d or not d.name or d.name == "" then return { ok = false, error = _L("admin_name_required") } end
     local id = MySQL.insert.await(
         "INSERT INTO pickle_restaurants (name, label, blip, balance) VALUES (?, ?, ?, ?)",
         { d.name, d.label or d.name, json.encode(GetSetting("blip", {})), GetSetting("starting_balance", 0) })
@@ -114,7 +114,7 @@ lib.callback.register("pickle_restaurants:admin:setOwner", function(src, d)
     local identifier = nil
     if d.target then
         identifier = GetIdentifier(tonumber(d.target))
-        if not identifier then return { ok = false, error = "Player not found" } end
+        if not identifier then return { ok = false, error = _L("admin_player_not_found") } end
     end
     MySQL.update.await("UPDATE pickle_restaurants SET owner_identifier = ? WHERE id = ?", { identifier, id })
     RestaurantCache[id].owner_identifier = identifier
@@ -126,7 +126,7 @@ end)
 lib.callback.register("pickle_restaurants:admin:setBrandImage", function(src, d)
     if not IsPlayerAdmin(src) then return { ok = false } end
     local res = SetRestaurantBrand(tonumber(d.id), d.key, d.url, d.crop)
-    if res and res.ok then ShowNotification(src, "Branding saved.") end
+    if res and res.ok then ShowNotification(src, _L("branding_saved")) end
     return res
 end)
 
@@ -137,7 +137,7 @@ lib.callback.register("pickle_restaurants:admin:saveSetting", function(src, d)
     if not d.key then return { ok = false } end
     SetSetting(d.key, d.value)
     SyncToClient(-1) -- drinks/assembly/blip may have changed
-    ShowNotification(src, "Settings saved.")
+    ShowNotification(src, _L("admin_settings_saved"))
     return { ok = true }
 end)
 
@@ -151,7 +151,7 @@ lib.callback.register("pickle_restaurants:admin:saveSettings", function(src, d)
     for k, v in pairs(d.settings) do SetSetting(k, v); n = n + 1 end
     if n == 0 then return { ok = false } end
     SyncToClient(-1)
-    ShowNotification(src, "Settings saved.")
+    ShowNotification(src, _L("admin_settings_saved"))
     return { ok = true }
 end)
 
@@ -159,7 +159,7 @@ end)
 
 lib.callback.register("pickle_restaurants:admin:saveRecipe", function(src, r)
     if not IsPlayerAdmin(src) then return { ok = false } end
-    if not r.input_item or r.input_item == "" then return { ok = false, error = "input_item required" } end
+    if not r.input_item or r.input_item == "" then return { ok = false, error = _L("admin_input_item_required") } end
     local method = (r.method == "oven" or r.method == "fry") and r.method or "grill"
     -- optional container prop the food cooks in (cake tin…); empty clears it
     local container = (type(r.container_model) == "string" and r.container_model ~= "") and r.container_model or nil
@@ -189,7 +189,7 @@ lib.callback.register("pickle_restaurants:admin:saveRecipe", function(src, r)
     })
     LoadRecipes()
     SyncToClient(-1)
-    ShowNotification(src, "Recipe saved.")
+    ShowNotification(src, _L("admin_recipe_saved"))
     return { ok = true }
 end)
 
@@ -198,6 +198,6 @@ lib.callback.register("pickle_restaurants:admin:deleteRecipe", function(src, d)
     MySQL.update.await("DELETE FROM pickle_restaurant_recipes WHERE input_item = ?", { d.input_item })
     LoadRecipes()
     SyncToClient(-1)
-    ShowNotification(src, "Recipe deleted.")
+    ShowNotification(src, _L("admin_recipe_deleted"))
     return { ok = true }
 end)

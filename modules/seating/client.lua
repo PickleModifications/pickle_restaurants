@@ -39,13 +39,13 @@ end
 -- share one anchor), then plays the seated scenario at the anchor's point/heading.
 function SitOnSeat(seat)
     if not seat then return end
-    if seatedSeat then return ShowNotification("You're already sitting.") end
+    if seatedSeat then return ShowNotification(_L("seat_already_sitting")) end
     local ped = PlayerPedId()
     if IsPedInAnyVehicle(ped, false) or IsEntityDead(ped) then return end
 
     local res = lib.callback.await("pickle_restaurants:seating:sit", false, { id = seat.id })
     if not (res and res.ok) then
-        return ShowNotification((res and res.error) or "That seat is taken.")
+        return ShowNotification((res and res.error) or _L("seat_taken"))
     end
 
     seatedSeat = seat
@@ -65,7 +65,7 @@ function SitOnSeat(seat)
             if not settled and (IsPedUsingScenario(ped, SIT_SCENARIO) or GetGameTimer() - startT > 3000) then
                 settled = true
             end
-            helpText("Press ~INPUT_CONTEXT~ to stand up")
+            helpText(_L("seat_stand_prompt"))
             -- stand on demand, on death, or once the pose breaks (ragdolled / warped)
             if IsControlJustPressed(0, SIT_CONTROL)
                 or IsEntityDead(ped)

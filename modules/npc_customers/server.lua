@@ -74,12 +74,12 @@ end)
 lib.callback.register("pickle_restaurants:npc:serve", function(src, d)
     local rid = tonumber(d.id)
     local oid = tonumber(d.orderId)
-    if not HasPerm(rid, src, "sell") then return { ok = false, error = "No permission." } end
+    if not HasPerm(rid, src, "sell") then return { ok = false, error = _L("no_permission") } end
     local order = PendingOrders[rid] and PendingOrders[rid][oid]
-    if not order then return { ok = false, error = "Customer left." } end
-    if GetStockCount(rid, order.item) < 1 then return { ok = false, error = "No stock for that item." } end
+    if not order then return { ok = false, error = _L("npc_customer_left") } end
+    if GetStockCount(rid, order.item) < 1 then return { ok = false, error = _L("npc_no_stock_item") } end
     if not RestaurantSell(rid, order.item, order.price, src, "Customer " .. order.name) then
-        return { ok = false, error = "No stock." }
+        return { ok = false, error = _L("npc_no_stock") }
     end
     PendingOrders[rid][oid] = nil
     TriggerClientEvent("pickle_restaurants:npc:orderRemoved", -1, rid, oid)

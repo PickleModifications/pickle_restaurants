@@ -378,7 +378,7 @@ CreateThread(function()
                     else 
                         lib.registerContext({
                             id = 'dealerships_'..k,
-                            title = v.title or "Options",
+                            title = v.title or _L("interact_options"),
                             options = v.options
                         })
                         lib.showContext('dealerships_'..k)
@@ -391,7 +391,7 @@ CreateThread(function()
                     else 
                         lib.registerContext({
                             id = 'dealerships_'..k,
-                            title = v.title or "Options",
+                            title = v.title or _L("interact_options"),
                             options = v.options
                         })
                         lib.showContext('dealerships_'..k)

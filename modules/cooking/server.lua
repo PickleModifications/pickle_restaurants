@@ -933,7 +933,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
     local prop = PropCache[tonumber(d.prop_id)]
     if not prop then return { ok = false } end
     local rid = prop.restaurant_id
-    if not HasPerm(rid, src, "cook") then return { ok = false, error = "You don't work here." } end
+    if not HasPerm(rid, src, "cook") then return { ok = false, error = _L("no_work_here") } end
     local station = prop.prop_type
 
     cookUid = cookUid + 1
@@ -944,7 +944,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
 
     if (station == "fryer" or station == "stovetop") and d.kind == "cook" then
         local recipe = RecipeByInput[d.item]
-        if not recipe or recipe.station ~= station then return { ok = false, error = "Can't cook that here." } end
+        if not recipe or recipe.station ~= station then return { ok = false, error = _L("cook_cant_cook_here") } end
         local method = RecipeMethod(recipe)
 
         -- Raw cook-inputs can come from the player's inventory OR from the "Uncooked
@@ -956,7 +956,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         local sig = (type(d.sig) == "string") and d.sig or nil
         local cheese = CheeseVal(d.cheese)
         local have = fromTray and GetTrayCount(rid, id, d.item, cheese, sig) or invVariationCount(src, d.item, cheese, sig)
-        if have < 1 then return { ok = false, error = "Missing ingredient." } end
+        if have < 1 then return { ok = false, error = _L("cook_missing_ingredient") } end
         local function consume()
             if fromTray then RemoveTray(rid, id, d.item, cheese, 1, sig)
             else removeInvVariation(src, d.item, cheese, sig, 1) end
@@ -968,9 +968,9 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
             local door = (method == "oven") and tonumber(d.door) or nil
             local slot = tonumber(d.slot)
             if not slot or (method == "oven" and door ~= 1 and door ~= 2) then
-                return { ok = false, error = "Pick a spot." }
+                return { ok = false, error = _L("cook_pick_spot") }
             end
-            if not slotFree(prop.id, method, door, slot) then return { ok = false, error = "That spot's taken." } end
+            if not slotFree(prop.id, method, door, slot) then return { ok = false, error = _L("cook_spot_taken") } end
 
             -- An uncooked assembled input (e.g. a topped pizza) carries a build stack;
             -- capture it BEFORE consuming so the station renders the whole stack — not
@@ -1064,22 +1064,22 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         local slot = tonumber(d.slot)
         if not slot or slot < 1 or slot > SODA_SLOTS
             or (slot ~= SODA_ICE_SLOT and not flavorForSlot(slot)) then
-            return { ok = false, error = "Put the cup under a tap." }
+            return { ok = false, error = _L("cook_cup_under_tap") }
         end
-        if not slotFree(prop.id, "soda", nil, slot) then return { ok = false, error = "That spot's taken." } end
+        if not slotFree(prop.id, "soda", nil, slot) then return { ok = false, error = _L("cook_spot_taken") } end
         -- one cup per fountain: reject a second cup anywhere on this machine
         -- (moving the seated cup between taps goes through reslot, not here)
         for _, c in pairs(CookingItems) do
             if c.method == "soda" and c.prop_id == prop.id then
-                return { ok = false, error = "There's already a cup on the machine." }
+                return { ok = false, error = _L("cook_already_cup") }
             end
         end
         local cup, model
         for _, dd in ipairs(sodaFlavors()) do
             if dd.input == d.item then cup, model = dd.input, dd.model break end
         end
-        if not cup then return { ok = false, error = "Unknown cup." } end
-        if (Inventory.GetItemCount(src, cup) or 0) < 1 then return { ok = false, error = "Need a cup." } end
+        if not cup then return { ok = false, error = _L("cook_unknown_cup") } end
+        if (Inventory.GetItemCount(src, cup) or 0) < 1 then return { ok = false, error = _L("cook_need_cup") } end
         Inventory.RemoveItem(src, cup, 1)
         it.kind, it.method, it.slot = "drink", "soda", slot
         it.input, it.state, it.ice = cup, "empty", false
@@ -1091,9 +1091,9 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
 
     elseif station == "kitchen_prep" and d.kind == "assembly" then
         local asm = findAssembly(d.item)
-        if not asm then return { ok = false, error = "Unknown recipe." } end
+        if not asm then return { ok = false, error = _L("cook_unknown_recipe") } end
         for _, comp in ipairs(asm.components or {}) do
-            if (Inventory.GetItemCount(src, comp) or 0) < 1 then return { ok = false, error = "Missing components." } end
+            if (Inventory.GetItemCount(src, comp) or 0) < 1 then return { ok = false, error = _L("cook_missing_components") } end
         end
         for _, comp in ipairs(asm.components or {}) do Inventory.RemoveItem(src, comp, 1) end
         it.kind, it.output, it.state, it.model = "assembly", asm.output, "done", asm.model
@@ -1102,7 +1102,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         return { ok = true, uid = uid }
     end
 
-    return { ok = false, error = "Invalid action." }
+    return { ok = false, error = _L("cook_invalid_action") }
 end)
 
 -- ─── oven door gate + fryer basket ───────────────────────────────────────────
@@ -1159,16 +1159,16 @@ lib.callback.register("pickle_restaurants:cooking:sodaTap", function(src, d)
     for _, c in pairs(CookingItems) do
         if c.method == "soda" and c.prop_id == prop.id and c.slot == slot then it = c break end
     end
-    if not it then return { ok = false, error = "Put a cup under the tap first." } end
-    if it.state == "filling" then return { ok = false, error = "Still pouring." } end
-    if it.state == "capped" then return { ok = false, error = "The lid's already on." } end
+    if not it then return { ok = false, error = _L("cook_cup_under_tap_first") } end
+    if it.state == "filling" then return { ok = false, error = _L("cook_still_pouring") } end
+    if it.state == "capped" then return { ok = false, error = _L("cook_lid_already_on") } end
 
     local uid = it.uid
     it.timerToken = (it.timerToken or 0) + 1
     local token = it.timerToken
 
     if slot == SODA_ICE_SLOT then
-        if it.ice then return { ok = false, error = "Already has ice." } end
+        if it.ice then return { ok = false, error = _L("cook_already_ice") } end
         local prev = it.state -- ice drops into an empty OR an already-filled cup
         it.state, it.fillTotal, it.phaseStart, it.fillKind = "filling", GetSetting("soda_ice_ms", 1500), GetGameTimer(), "ice"
         SetTimeout(it.fillTotal, function()
@@ -1182,9 +1182,9 @@ lib.callback.register("pickle_restaurants:cooking:sodaTap", function(src, d)
         end)
     else
         local drink = flavorForSlot(slot)
-        if not drink then return { ok = false, error = "Nothing on tap there." } end
-        if it.state ~= "empty" then return { ok = false, error = "The cup is already full." } end
-        if drink.input ~= it.input then return { ok = false, error = "Wrong cup for that tap." } end
+        if not drink then return { ok = false, error = _L("cook_nothing_on_tap") } end
+        if it.state ~= "empty" then return { ok = false, error = _L("cook_cup_full") } end
+        if drink.input ~= it.input then return { ok = false, error = _L("cook_wrong_cup") } end
         it.state, it.fillTotal, it.phaseStart, it.fillKind = "filling", tonumber(drink.fill_ms) or 3000, GetGameTimer(), "drink"
         it.drink, it.output = drink, drink.output
         if drink.model then it.model = drink.model end
@@ -1207,8 +1207,8 @@ lib.callback.register("pickle_restaurants:cooking:applyLid", function(src, d)
     local it = CookingItems[tonumber(d and d.uid)]
     if not it or it.method ~= "soda" then return { ok = false } end
     if not HasPerm(it.rid, src, "cook") then return { ok = false } end
-    if it.state == "capped" then return { ok = false, error = "Already has a lid." } end
-    if it.state ~= "filled" then return { ok = false, error = "Fill the cup first." } end
+    if it.state == "capped" then return { ok = false, error = _L("cook_already_lid") } end
+    if it.state ~= "filled" then return { ok = false, error = _L("cook_fill_cup_first") } end
     it.state = "capped"
     it.stack = { it.model, GetSetting("drink_lid_model", "pickle_drink_lid_01") }
     TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, sodaSpawnPayload(it))
@@ -1238,11 +1238,11 @@ lib.callback.register("pickle_restaurants:cooking:applyCheese", function(src, d)
     local it = CookingItems[tonumber(d.uid)]
     if not it or not it.dual then return { ok = false } end
     if not HasPerm(it.rid, src, "cook") then return { ok = false } end
-    if (it.cheese or "none") ~= "none" then return { ok = false, error = "Already has cheese." } end
+    if (it.cheese or "none") ~= "none" then return { ok = false, error = _L("cook_already_cheese") } end
 
     local up = (it.down == 1) and 2 or 1
-    if it.sides[up] ~= "cooked" then return { ok = false, error = "Cook this side first." } end
-    if (Inventory.GetItemCount(src, "cheese") or 0) < 1 then return { ok = false, error = "No cheese." } end
+    if it.sides[up] ~= "cooked" then return { ok = false, error = _L("cook_cook_side_first") } end
+    if (Inventory.GetItemCount(src, "cheese") or 0) < 1 then return { ok = false, error = _L("cook_no_cheese") } end
     Inventory.RemoveItem(src, "cheese", 1)
 
     it.cheese = "applied"
@@ -1283,11 +1283,11 @@ lib.callback.register("pickle_restaurants:cooking:reslot", function(src, d)
     if it.method == "soda" then
         local slot = tonumber(d.slot)
         if not slot or (slot ~= SODA_ICE_SLOT and not flavorForSlot(slot)) then
-            return { ok = false, error = "Pick a tap." }
+            return { ok = false, error = _L("cook_pick_tap") }
         end
         if it.slot == slot then return { ok = false } end -- already there
-        if it.state == "filling" then return { ok = false, error = "Still pouring." } end
-        if not slotFree(it.prop_id, "soda", nil, slot) then return { ok = false, error = "That spot's taken." } end
+        if it.state == "filling" then return { ok = false, error = _L("cook_still_pouring") } end
+        if not slotFree(it.prop_id, "soda", nil, slot) then return { ok = false, error = _L("cook_spot_taken") } end
         it.slot = slot
         TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, sodaSpawnPayload(it))
         broadcastSoda(it)
@@ -1295,11 +1295,11 @@ lib.callback.register("pickle_restaurants:cooking:reslot", function(src, d)
     end
     local door = (it.method == "oven") and tonumber(d.door) or nil
     local slot = tonumber(d.slot)
-    if not slot or (it.method == "oven" and door ~= 1 and door ~= 2) then return { ok = false, error = "Pick a spot." } end
+    if not slot or (it.method == "oven" and door ~= 1 and door ~= 2) then return { ok = false, error = _L("cook_pick_spot") } end
     if it.slot == slot and (it.method ~= "oven" or it.door == door) then return { ok = false } end -- already there
-    if not slotFree(it.prop_id, it.method, door, slot) then return { ok = false, error = "That spot's taken." } end
+    if not slotFree(it.prop_id, it.method, door, slot) then return { ok = false, error = _L("cook_spot_taken") } end
     -- can't fish food out of a lowered basket either — raise it first
-    if it.method == "fry" and basketDown(prop, it.slot) then return { ok = false, error = "Raise the basket first." } end
+    if it.method == "fry" and basketDown(prop, it.slot) then return { ok = false, error = _L("cook_raise_basket") } end
 
     it.door, it.slot = door, slot
     -- A different door may be open/closed — or a different basket lowered/raised —
@@ -1323,11 +1323,11 @@ lib.callback.register("pickle_restaurants:cooking:collect", function(src, d)
     if not HasPerm(it.rid, src, "cook") then return { ok = false } end
     -- Can't reach into a closed oven — the door has to be open to take a bake out.
     if it.method == "oven" and not doorOpen(PropCache[it.prop_id], it.door) then
-        return { ok = false, error = "Open the door first." }
+        return { ok = false, error = _L("cook_open_door") }
     end
     -- Nor into hot oil — the basket has to be raised to take a fry out.
     if it.method == "fry" and basketDown(PropCache[it.prop_id], it.slot) then
-        return { ok = false, error = "Raise the basket first." }
+        return { ok = false, error = _L("cook_raise_basket") }
     end
 
     local giveItem
@@ -1340,8 +1340,8 @@ lib.callback.register("pickle_restaurants:cooking:collect", function(src, d)
     elseif it.kind == "drink" then
         -- An empty cup collects straight back; a poured drink always needs its
         -- lid pressed on first (the lid tool is free — cups come with lids).
-        if it.state == "filling" then return { ok = false, error = "Still pouring." } end
-        if it.state == "filled" then return { ok = false, error = "Press a lid on first." } end
+        if it.state == "filling" then return { ok = false, error = _L("cook_still_pouring") } end
+        if it.state == "filled" then return { ok = false, error = _L("cook_press_lid") } end
         giveItem = sodaGiveItem(it)
     elseif it.kind == "assembly" then
         giveItem = it.output
@@ -1581,12 +1581,12 @@ lib.callback.register("pickle_restaurants:cooking:trayToInventory", function(src
     local cheese = CheeseVal(d.cheese)
     local sig    = (type(d.sig) == "string") and d.sig or nil
     local count  = tonumber(d.count) or 1
-    if not item or GetTrayCount(rid, id, item, cheese, sig) < count then return { ok = false, error = "Not enough." } end
+    if not item or GetTrayCount(rid, id, item, cheese, sig) < count then return { ok = false, error = _L("cook_not_enough") } end
     -- The tray holding accepts anything (e.g. a meal made before its item was
     -- installed), but the real inventory can't — don't consume the tray entry
     -- into an item the framework doesn't know (it would just vanish).
     if not ItemExists(item) then
-        return { ok = false, error = ("Item '%s' isn't installed — run /restaurants_items and install it."):format(item) }
+        return { ok = false, error = _L("cook_item_not_installed", item) }
     end
     -- Move one instance at a time so each keeps its OWN build variation on the
     -- inventory slot (ox/qb slot metadata). TrayTopMeta must be read before the
@@ -1616,7 +1616,7 @@ lib.callback.register("pickle_restaurants:cooking:trayDiscard", function(src, d)
                 n = n + e.count
             end
         end
-        if n == 0 then return { ok = false, error = "Nothing burnt to throw away." } end
+        if n == 0 then return { ok = false, error = _L("cook_nothing_burnt") } end
         return { ok = true, count = n }
     end
     local item   = d.item
@@ -1626,7 +1626,7 @@ lib.callback.register("pickle_restaurants:cooking:trayDiscard", function(src, d)
     if not item or count < 1 then return { ok = false } end
     count = math.min(count, GetTrayCount(rid, id, item, cheese, sig))
     if count < 1 or not RemoveTray(rid, id, item, cheese, count, sig) then
-        return { ok = false, error = "Not enough." }
+        return { ok = false, error = _L("cook_not_enough") }
     end
     return { ok = true, item = item, count = count, label = GetItemLabel(item) }
 end)
@@ -1696,19 +1696,19 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     if d.source == "tray" then
         local needed = math.ceil(reservedUnits(b, "tray", item, cheese, sig) + addUnits)
         if GetTrayCount(rid, GetIdentifier(src), item, cheese, sig) < needed then
-            return { ok = false, error = "Not enough in tray." }
+            return { ok = false, error = _L("cook_not_enough_tray") }
         end
     elseif sig then
         -- an inventory-held PRODUCT reserves its exact variation (cheese + sig)
         local needed = math.ceil(reservedUnits(b, "inv", item, cheese, sig) + addUnits)
         if invVariationCount(src, item, cheese, sig) < needed then
-            return { ok = false, error = "Missing item." }
+            return { ok = false, error = _L("cook_missing_item") }
         end
     else
         cheese = 0
         local needed = math.ceil(reservedUnits(b, "inv", item, 0) + addUnits)
         if (Inventory.GetItemCount(src, item) or 0) < needed then
-            return { ok = false, error = "Missing item." }
+            return { ok = false, error = _L("cook_missing_item") }
         end
     end
 
@@ -1827,12 +1827,12 @@ local function consumeLayers(src, b, id, layers)
 
     for _, t in pairs(needTray) do
         if GetTrayCount(b.rid, id, t.item, t.cheese, t.sig) < t.n then
-            return nil, "Cooked items changed — rebuild."
+            return nil, _L("cook_cooked_changed")
         end
     end
     for _, t in pairs(needInv) do
         if invVariationCount(src, t.item, t.cheese, t.sig) < t.n then
-            return nil, "Missing components."
+            return nil, _L("cook_missing_components")
         end
     end
     for _, t in pairs(needTray) do RemoveTray(b.rid, id, t.item, t.cheese, t.n, t.sig) end
@@ -1856,7 +1856,7 @@ end
 -- is consumed, extras included. Assumes the superset match is already verified.
 local function makeStack(src, b, id, ids, asm)
     local layers = orderedLayers(b, ids)
-    if #layers == 0 then return { ok = false, error = "Nothing to build." } end
+    if #layers == 0 then return { ok = false, error = _L("cook_nothing_to_build") } end
     local ok, err = consumeLayers(src, b, id, layers)
     if not ok then return { ok = false, error = err } end
     dropLayerReservations(src, b, layers)
@@ -1902,7 +1902,7 @@ lib.callback.register("pickle_restaurants:cooking:prepMakeMeal", function(src, d
             layers[#layers + 1] = l
         end
     end
-    if #layers == 0 then return { ok = false, error = "Nothing on the tray." } end
+    if #layers == 0 then return { ok = false, error = _L("cook_nothing_on_tray") } end
     local ok, err = consumeLayers(src, b, id, layers)
     if not ok then return { ok = false, error = err } end
     dropLayerReservations(src, b, layers)
@@ -1923,10 +1923,10 @@ lib.callback.register("pickle_restaurants:cooking:prepMakeStack", function(src, 
     local b = PrepBuilds[src]; if not b then return { ok = false } end
     if not HasPerm(b.rid, src, "cook") then return { ok = false } end
     local asm = findAssembly(d and d.output)
-    if not asm then return { ok = false, error = "Unknown recipe." } end
+    if not asm then return { ok = false, error = _L("cook_unknown_recipe") } end
     local layers = orderedLayers(b, d.ids)
-    if #layers == 0 then return { ok = false, error = "Nothing to build." } end
-    if not stackSatisfies(buildProvides(layers), asm) then return { ok = false, error = "Missing components." } end
+    if #layers == 0 then return { ok = false, error = _L("cook_nothing_to_build") } end
+    if not stackSatisfies(buildProvides(layers), asm) then return { ok = false, error = _L("cook_missing_components") } end
     return makeStack(src, b, GetIdentifier(src), d.ids, asm)
 end)
 
@@ -1943,18 +1943,18 @@ lib.callback.register("pickle_restaurants:cooking:applyFinish", function(src, d)
     if not prop or prop.prop_type ~= "kitchen_prep" then return { ok = false } end
     if not HasPerm(prop.restaurant_id, src, "cook") then return { ok = false } end
     local b = PrepBuilds[src]
-    if not b or b.prop_id ~= prop.id then return { ok = false, error = "That item changed — pick it up again." } end
+    if not b or b.prop_id ~= prop.id then return { ok = false, error = _L("cook_item_changed") } end
     local layer
     for _, l in ipairs(b.layers) do
         if l.id == tonumber(d and d.id) then layer = l break end
     end
-    if not layer then return { ok = false, error = "That item changed — pick it up again." } end
+    if not layer then return { ok = false, error = _L("cook_item_changed") } end
     -- Only configured (cooked) targets pass; raw/burnt items never match a target.
     local cfg, target, flavor = findFinish(d and d.tool, layer.item, d and d.flavor)
-    if not cfg or not target or not flavor then return { ok = false, error = "Can't apply that here." } end
+    if not cfg or not target or not flavor then return { ok = false, error = _L("cook_cant_apply") } end
     if not ItemExists(cfg.tool) then return { ok = false } end
     if (Inventory.GetItemCount(src, cfg.tool) or 0) < 1 then
-        return { ok = false, error = "No " .. GetItemLabel(cfg.tool) .. " left." }
+        return { ok = false, error = _L("cook_no_tool_left", GetItemLabel(cfg.tool)) }
     end
 
     local id = GetIdentifier(src)
@@ -2002,7 +2002,7 @@ lib.callback.register("pickle_restaurants:cooking:prepDecompose", function(src, 
     -- a MEAL un-makes the same way — no recipe; its recorded layout IS the definition
     local isMeal = item ~= nil and item == MealItem()
     local asm = findAssembly(item)
-    if not asm and not isMeal then return { ok = false, error = "Can't take that apart." } end
+    if not asm and not isMeal then return { ok = false, error = _L("cook_cant_take_apart") } end
     local id = GetIdentifier(src)
     local sig = (type(d.sig) == "string") and d.sig or nil
 
@@ -2018,21 +2018,21 @@ lib.callback.register("pickle_restaurants:cooking:prepDecompose", function(src, 
     -- inventory slot whose metadata carries the exact build/layout.
     local meta
     if d.source == "inv" then
-        if invVariationCount(src, item, 0, sig) < 1 then return { ok = false, error = "None to take apart." } end
+        if invVariationCount(src, item, 0, sig) < 1 then return { ok = false, error = _L("cook_none_to_take") } end
         meta = invVariationMeta(src, item, 0, sig)
         if isMeal and not (type(meta) == "table" and #meta > 0) then
-            return { ok = false, error = "That meal is empty." }
+            return { ok = false, error = _L("cook_meal_empty") }
         end
-        if isFinishedMeta(meta) then return { ok = false, error = "Can't take that apart." } end
+        if isFinishedMeta(meta) then return { ok = false, error = _L("cook_cant_take_apart") } end
         removeInvVariation(src, item, 0, sig, 1)
     else
-        if GetTrayCount(rid, id, item, 0, sig) < 1 then return { ok = false, error = "None to take apart." } end
+        if GetTrayCount(rid, id, item, 0, sig) < 1 then return { ok = false, error = _L("cook_none_to_take") } end
         -- The exact stack this was built from (order/cheese/bun-half intact), else recipe.
         meta = TrayTopMeta(rid, id, item, 0, sig)
         if isMeal and not (type(meta) == "table" and #meta > 0) then
-            return { ok = false, error = "That meal is empty." }
+            return { ok = false, error = _L("cook_meal_empty") }
         end
-        if isFinishedMeta(meta) then return { ok = false, error = "Can't take that apart." } end
+        if isFinishedMeta(meta) then return { ok = false, error = _L("cook_cant_take_apart") } end
         RemoveTray(rid, id, item, 0, 1, sig)
     end
     local comps = compsFromMeta(asm or { components = {} }, meta)
