@@ -73,10 +73,25 @@ local DEFAULT_SETTINGS = {
         patience = 60000,
         models   = { "a_m_y_business_01", "a_f_y_business_02", "a_m_m_business_01", "a_f_y_hipster_02", "a_m_y_skater_01" },
     },
-    -- Soda machine fill definitions: dragged cup item -> filled drink item.
+    -- Soda machine taps: dragged cup item -> filled drink item. The first SIX
+    -- valid entries appear left-to-right as the fountain's flavor taps (the
+    -- middle nozzle always dispenses ice, so the physical order is 1,2,3, ICE,
+    -- 4,5,6). Order here = tap order; reorder to re-arrange the fountain.
+    -- `color` = the {r,g,b} of the poured liquid stream (marker droplets), sampled
+    -- from each tap's flavor art on the fountain model.
     drinks = {
-        { input = "empty_cup", output = "soda", label = "Soda", model = "pickle_drink_container_01", fill_ms = 3000 },
+        { input = "empty_cup", output = "water",      label = "Pure Aqua",      model = "pickle_drink_container_01", fill_ms = 3000, color = { 160, 205, 230 } },
+        { input = "empty_cup", output = "lemonade",   label = "Lemonade Bliss", model = "pickle_drink_container_01", fill_ms = 3000, color = { 235, 215, 90 } },
+        { input = "empty_cup", output = "soda",       label = "Classic Cola",   model = "pickle_drink_container_01", fill_ms = 3000, color = { 90, 50, 25 } },
+        { input = "empty_cup", output = "diet_cola",  label = "Diet Cola",      model = "pickle_drink_container_01", fill_ms = 3000, color = { 120, 80, 55 } },
+        { input = "empty_cup", output = "grape_soda", label = "Grape Zap",      model = "pickle_drink_container_01", fill_ms = 3000, color = { 135, 70, 170 } },
+        { input = "empty_cup", output = "coffee",     label = "Coffee",         model = "pickle_drink_container_01", fill_ms = 3000, color = { 80, 50, 30 } },
     },
+    -- The lid pressed onto a filled cup before it can be collected — kitchen
+    -- equipment like the serving tray (no inventory item; cups come with lids),
+    -- only its world model is configurable.
+    drink_lid_model = "pickle_drink_lid_01",
+    soda_ice_ms     = 1500, -- how long the middle (ice) nozzle takes to dispense
     -- World prop for a prep component that isn't a cook/assembly/drink output (raw
     -- veg, toppings, doughs…). Any item mapped here becomes a real 3D prop you can
     -- drag out and stack on the kitchen-prep table; add a row for any new item.
@@ -461,6 +476,60 @@ local function LoadSettings()
         if changed then SetSetting(key, map) end
     end
     mergeMapDefaults("prep_models")
+
+    -- One-time: the soda machine grew per-tap flavors; the original single default
+    -- drink ("Soda") becomes the Classic Cola tap. Only relabels an entry still
+    -- holding the old default label verbatim — an admin-renamed drink is theirs.
+    -- (The 5 new flavor entries themselves arrive via mergeListDefaults above.)
+    if not GetSetting("soda_flavors_seeded", false) then
+        local dr = SettingsCache.drinks
+        if type(dr) == "table" then
+            local changed = false
+            for _, d in ipairs(dr) do
+                if d.output == "soda" and d.label == "Soda" then d.label = "Classic Cola"; changed = true end
+            end
+            if changed then SetSetting("drinks", dr) end
+        end
+        SetSetting("soda_flavors_seeded", true)
+    end
+
+    -- One-time: tap order matters now (tap N = the Nth `drinks` entry, and the
+    -- fountain model's printed flavor strip reads water/lemonade/cola/ICE/diet/
+    -- grape/coffee). Move the six default flavors into their printed positions —
+    -- legacy DBs have the old lone "soda" first — keeping any admin-added drinks
+    -- after them in their existing order. Entries are moved, never modified.
+    if not GetSetting("soda_tap_order_seeded", false) then
+        local dr = SettingsCache.drinks
+        if type(dr) == "table" and #dr > 1 then
+            local wantOrder = {}
+            for i, d in ipairs(DEFAULT_SETTINGS.drinks) do wantOrder[d.output] = i end
+            local defaults, extras = {}, {}
+            for _, d in ipairs(dr) do
+                if wantOrder[d.output] then defaults[#defaults + 1] = d else extras[#extras + 1] = d end
+            end
+            table.sort(defaults, function(a, b) return wantOrder[a.output] < wantOrder[b.output] end)
+            for _, d in ipairs(extras) do defaults[#defaults + 1] = d end
+            SetSetting("drinks", defaults)
+        end
+        SetSetting("soda_tap_order_seeded", true)
+    end
+
+    -- One-time: stamp the default pour colors onto the seeded flavors that predate
+    -- the per-drink `color` field (matched by output; an admin-set color is left
+    -- alone). The client also has a fallback palette, so this is belt-and-suspenders.
+    if not GetSetting("soda_colors_seeded", false) then
+        local dr = SettingsCache.drinks
+        if type(dr) == "table" then
+            local want = {}
+            for _, d in ipairs(DEFAULT_SETTINGS.drinks) do want[d.output] = d.color end
+            local changed = false
+            for _, d in ipairs(dr) do
+                if d.color == nil and want[d.output] then d.color = want[d.output]; changed = true end
+            end
+            if changed then SetSetting("drinks", dr) end
+        end
+        SetSetting("soda_colors_seeded", true)
+    end
 
     -- One-time: pepperoni became an optional topping rather than a required pizza
     -- component. The merges above never edit an existing recipe, so drop pepperoni
@@ -1000,8 +1069,16 @@ function BuildSyncPayload()
         if IsRecipeValid(r) then recipes[#recipes + 1] = r end
     end
     local drinks = {}
-    for _, d in ipairs(GetSetting("drinks", {})) do
-        if ItemExists(d.input) and ItemExists(d.output) then drinks[#drinks + 1] = d end
+    for i, d in ipairs(GetSetting("drinks", {})) do
+        if ItemExists(d.input) and ItemExists(d.output) then
+            -- `tap` = the entry's RAW config position: the fountain tap it holds
+            -- (first six only). Stamped on a copy so the cached setting row never
+            -- carries the derived field back into the DB.
+            local copy = {}
+            for k, v in pairs(d) do copy[k] = v end
+            copy.tap = (i <= 6) and i or nil
+            drinks[#drinks + 1] = copy
+        end
     end
     local assembly = {}
     for _, a in ipairs(GetSetting("assembly", {})) do

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { Badge } from "@/components/ui/badge";
-import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave } from "lucide-react";
+import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave, CircleDot } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // kind "finish" = a finish tool (frosting): flavors is picked on the card, then the
@@ -50,9 +50,10 @@ type ChipItem = {
   uid: number; onScreen: boolean; x: number; y: number;
   state?: string;                         // single items
   dual?: boolean;                         // dual patties below
-  single?: boolean;                       // oven/fryer gated single item (progress below)
-  locked?: boolean;                       // in a lowered fryer basket — can't be grabbed
+  single?: boolean;                       // oven/fryer/soda gated single item (progress below)
+  locked?: boolean;                       // in a lowered fryer basket / mid-pour — can't be grabbed
   percent?: number; gate?: boolean; method?: string; burningSoon?: boolean;
+  ice?: boolean; needLid?: boolean;       // soda cups: ice dispensed / lid still required
   sides?: SideInfo[]; cooking?: number;   // per-face progress + which face is on the grill
   cheese?: string;                        // "none" | "applied" | "melted"
   give?: string; giveLabel?: string; giveImage?: string;
@@ -69,7 +70,7 @@ const STOVE_VIEWS: { key: string; label: string; icon: any; num?: number }[] = [
 const STATION_META: Record<string, { label: string; icon: any; hint: string }> = {
   fryer: { label: "Fryer", icon: Flame, hint: "Drop food into a basket, then click that basket to lower it into the oil. Click it again to raise it and take the food out." },
   stovetop: { label: "Stovetop", icon: Flame, hint: "Grill patties on the cooktop (click to flip); open a door to bake cookies, cakes & pizzas inside." },
-  soda_machine: { label: "Soda Machine", icon: CupSoda, hint: "Drag a cup out to fill a drink." },
+  soda_machine: { label: "Soda Machine", icon: CupSoda, hint: "Drag a cup under a tap and click the tap to pour — the middle tap adds ice. Press a lid on, then drag the drink to the bar." },
   kitchen_prep: { label: "Kitchen Prep", icon: Sandwich, hint: "Stack ingredients on the table, then hover a stack to pick a recipe and make it." },
 };
 
@@ -79,6 +80,10 @@ const STATE_STYLE: Record<string, { label: string; cls: string }> = {
   cooked: { label: "Cooked", cls: "bg-emerald-500/80 border-emerald-300" },
   done: { label: "Ready", cls: "bg-emerald-500/80 border-emerald-300" },
   burnt: { label: "Burnt", cls: "bg-zinc-800/90 border-zinc-500" },
+  // soda cups
+  empty: { label: "Empty", cls: "bg-zinc-600/80 border-zinc-400" },
+  filled: { label: "Filled", cls: "bg-emerald-500/80 border-emerald-300" },
+  capped: { label: "Ready", cls: "bg-emerald-500/80 border-emerald-300" },
 };
 
 const stateMeta = (s?: string) => STATE_STYLE[s || "raw"] || STATE_STYLE.raw;
@@ -269,16 +274,24 @@ function SideRow({ name, side }: { name: string; side?: SideInfo }) {
 
 function StatusPanel({ c }: { c: ChipItem }) {
   if (!c.dual) {
-    // oven / fryer item: live progress bar, collect-now, paused/burning hints
+    // oven / fryer / soda item: live progress bar, collect-now, next-step hints
     if (c.single) {
       const st = stateMeta(c.state);
       const pct = Math.round((c.percent ?? 0) * 100);
       const done = c.state === "burnt";
-      const pausedHint = !c.gate
-        ? (c.method === "oven" ? "Close the door to bake" : "Lower the basket to fry")
-        : c.locked
-          ? "Raise the basket to take it out"
-          : null;
+      const pausedHint = c.method === "soda"
+        ? (c.state === "empty"
+            ? "Click a tap to pour — the middle tap adds ice"
+            : c.state === "filled"
+              ? (c.needLid ? "Drag a lid onto the cup to finish it" : "Drag it to the bar to collect")
+              : c.state === "capped"
+                ? "Drag it to the bar to collect"
+                : null)
+        : !c.gate
+          ? (c.method === "oven" ? "Close the door to bake" : "Lower the basket to fry")
+          : c.locked
+            ? "Raise the basket to take it out"
+            : null;
       return (
         <div className="w-56 rounded-xl border border-border bg-card p-3 shadow-2xl">
           <div className="flex items-center gap-2">
@@ -303,6 +316,9 @@ function StatusPanel({ c }: { c: ChipItem }) {
           </div>
           {c.burningSoon && !done && (
             <div className="mt-2 text-[11px] font-semibold text-amber-400">⚠ Burning soon!</div>
+          )}
+          {c.ice && (
+            <div className="mt-2 flex items-center gap-1.5 text-[11px] text-sky-300">❄ Ice added</div>
           )}
           {pausedHint && <div className="mt-2 text-[11px] text-muted-foreground">{pausedHint}</div>}
         </div>
@@ -541,6 +557,7 @@ export default function Cooking({ data }: { data: any }) {
   const hoveredRef = useRef<number | null>(null);
   const placingRef = useRef(false);          // dragging an ingredient out of the bar
   const toppingRef = useRef<string | null>(null); // dragging a topping (cheese) onto a patty
+  const lidRef = useRef<string | null>(null);     // dragging a lid onto a filled soda cup
   const finishRef = useRef<string | null>(null); // rubbing a finish tool (frosting) over a target
   const [finishFlavor, setFinishFlavor] = useState<Record<string, string>>({}); // chosen flavor per finish tool
   const prepDragRef = useRef<{ source: string; item: string; cheese: number; model?: string | null; decompose?: boolean; sig?: string } | null>(null); // dragging a NEW part (or a product/meal to take apart) onto the prep table
@@ -686,7 +703,8 @@ export default function Cooking({ data }: { data: any }) {
     if (ing.kind === "tray") return "Drag onto the table — arrange food on it, then make it a meal.";
     if (ing.kind === "topping") return "Drag onto a cooked patty to add it.";
     if (ing.kind === "finish") return "Pick a flavor, then rub the tube over a cooked item on the table until fully coated.";
-    if (ing.kind === "drink") return "Drag out under the tap to start filling.";
+    if (ing.kind === "drink") return "Drag the cup under a tap, then click the tap to pour (middle tap = ice).";
+    if (ing.kind === "lid") return "Drag onto a filled cup to press the lid on.";
     if (isPrep) return "Drag onto the table — stack parts to build recipes.";
     return station === "fryer" ? "Drag into the fryer basket to cook." : "Drag onto the cooktop or into an open oven door.";
   };
@@ -708,6 +726,15 @@ export default function Cooking({ data }: { data: any }) {
     setDragging(true);
     setDragHint("Drop on the table to set the tray down");
     fetchNui("cooking:beginTrayPlace", {});
+  };
+  // the lid (soda machine): dragged as its real 3D prop and released over a
+  // filled cup to press it on — same gesture as a cheese slice on a patty.
+  const startLid = (e: React.PointerEvent, ing: Ingredient) => {
+    e.preventDefault();
+    lidRef.current = ing.item;
+    setTab("ingredients");
+    setDragging(true);
+    fetchNui("cooking:beginLid", { item: ing.item, model: ing.model });
   };
   // toppings (cheese) aren't placed in the world — they're dragged onto a patty.
   // The real slice prop renders in 3D under the cursor (no 2D pill); releasing
@@ -853,6 +880,15 @@ export default function Cooking({ data }: { data: any }) {
         return;
       }
 
+      // lid dropped onto a filled soda cup — the live 3D lid ends here; the
+      // server caps the hovered cup (or it just cancels).
+      if (lidRef.current) {
+        lidRef.current = null;
+        const uid = hoveredRef.current;
+        fetchNui("cooking:endLid", { uid: overBar ? null : uid, cancel: overBar });
+        return;
+      }
+
       // topping (cheese) dropped onto a patty — the live 3D slice ends here; the
       // server sticks it on the hovered patty (or it just cancels).
       if (toppingRef.current) {
@@ -895,9 +931,12 @@ export default function Cooking({ data }: { data: any }) {
             if (overBar) fetchNui("cooking:collect", { uid: w.uid });
             else fetchNui("cooking:endMove", { cancel: false });
           } else {
-            // a click (no drag) on a patty flips it; only dual patties flip
+            // a click (no drag) on a patty flips it; only dual patties flip. A
+            // click on a soda cup falls through to the tap under the cursor —
+            // the cup sits right below its nozzle, so it must not eat the click.
             const it = itemsRef.current.find((c) => c.uid === w.uid);
             if (it?.dual) fetchNui("cooking:flip", { uid: w.uid });
+            else if (it?.method === "soda") fetchNui("cooking:worldClick");
           }
         } else if (!w.dragging) {
           // clicked empty grill -> toggle the oven door under the cursor
@@ -925,7 +964,8 @@ export default function Cooking({ data }: { data: any }) {
   const Icon = meta.icon;
 
   const draggable = (ing: Ingredient) =>
-    ing.kind === "tray" ? true : ing.kind === "assembly" ? !!ing.canMake : (ing.count || 0) > 0;
+    // tray + lid are kitchen equipment, never gated on an item count
+    ing.kind === "tray" || ing.kind === "lid" ? true : ing.kind === "assembly" ? !!ing.canMake : (ing.count || 0) > 0;
 
   return (
     <>
@@ -1085,6 +1125,7 @@ export default function Cooking({ data }: { data: any }) {
                 if (!can) return;
                 setBarTip(null);
                 if (ing.kind === "tray") startTrayPlace(e);
+                else if (ing.kind === "lid") startLid(e, ing);
                 else if (ing.kind === "topping") startTopping(e, ing);
                 else if (ing.kind === "finish") startFinish(e, ing);
                 else if (isPrep) startPrepDrag(e, "inv", { item: ing.item, cheese: 0, model: ing.model, label: ing.label, image: ing.image, dual: ing.dual });
@@ -1106,12 +1147,17 @@ export default function Cooking({ data }: { data: any }) {
                 >
                   {ing.kind === "tray" ? (
                     <UtensilsCrossed className="h-10 w-10 text-primary/80" />
+                  ) : ing.kind === "lid" ? (
+                    <CircleDot className="h-10 w-10 text-primary/80" />
                   ) : (
                     <ItemThumb src={ing.image} alt={ing.label} className={ing.kind === "finish" ? "h-8 w-8 object-contain" : "h-10 w-10 object-contain"} />
                   )}
                   <span className="w-full truncate px-1.5 leading-tight">{ing.label}</span>
                   {ing.kind === "tray" && (
                     <span className="text-[10px] text-muted-foreground">build a meal</span>
+                  )}
+                  {ing.kind === "lid" && (
+                    <span className="text-[10px] text-muted-foreground">caps a filled drink</span>
                   )}
                   {/* finish tool: flavor picked right on the card (colored swatch
                       squares, hover for the flavor name), then drag to apply.
@@ -1143,7 +1189,7 @@ export default function Cooking({ data }: { data: any }) {
                       })}
                     </div>
                   )}
-                  {ing.kind !== "assembly" && ing.kind !== "tray" && (
+                  {ing.kind !== "assembly" && ing.kind !== "tray" && ing.kind !== "lid" && (
                     <Badge variant="secondary" className="absolute right-1 top-1">{ing.count ?? 0}</Badge>
                   )}
                   {ing.kind === "assembly" && !ing.canMake && (

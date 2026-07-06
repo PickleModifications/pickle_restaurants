@@ -55,7 +55,12 @@ local KNOWN = {
     frosted_doughnut     = { label = "Frosted Doughnut",     weight = 160, hunger = 130000 },
     decorated_cake       = { label = "Decorated Cake",       weight = 420, hunger = 220000 },
     empty_cup            = { label = "Empty Cup",            weight = 100 },
-    soda                 = { label = "Soda",                 weight = 300, thirst = 200000 },
+    soda                 = { label = "Classic Cola",         weight = 300, thirst = 200000 },
+    water                = { label = "Pure Aqua",            weight = 300, thirst = 250000 },
+    lemonade             = { label = "Lemonade Bliss",       weight = 300, thirst = 200000 },
+    diet_cola            = { label = "Diet Cola",            weight = 300, thirst = 200000 },
+    grape_soda           = { label = "Grape Zap",            weight = 300, thirst = 200000 },
+    coffee               = { label = "Coffee",               weight = 300, thirst = 150000 },
     bun                  = { label = "Burger Bun",           weight = 120 },
     cheese               = { label = "Cheese Slice",         weight = 60  },
     burger               = { label = "Burger",               weight = 350, hunger = 250000 },
@@ -82,6 +87,7 @@ local function collectItems()
         add(r.input_item); add(r.output_cooked_item); add(r.output_burnt_item)
     end
     for _, d in ipairs(GetSetting("drinks", {})) do add(d.input); add(d.output) end
+    -- (no lid item: the cup lid is kitchen equipment — cups come with lids)
     for _, a in ipairs(GetSetting("assembly", {})) do
         add(a.output)
         for _, c in ipairs(a.components or {}) do add(c) end

@@ -169,6 +169,41 @@ the NUI is untrusted.
   bakes as `pickle_cake_mix_pour_02/03/04` (raw/cooked/burnt; best-guess mapping,
   correctable in the recipe editor; a one-time `cake_models_seeded` backfill repoints
   old DB rows that still hold the wrong defaults).
+- **Soda machine (drinks).** The fountain has SEVEN taps: the middle one dispenses
+  ice, the other six map to the first six `drinks` settings entries by RAW config
+  position (tap N = entry N — STABLE even when some flavors are invalid; a missing
+  item just leaves its tap dark. BuildSyncPayload stamps each synced drink with its
+  `tap` index so the client mirrors the server's `flavorForSlot` exactly; the model's
+  printed flavor strip matches the default order, and a one-time
+  `soda_tap_order_seeded` backfill reorders legacy DBs to it). Cups are slot items
+  (`method = "soda"`, like fryer baskets): drag the cup item (`drinks[].input`) under
+  a tap — the preview always LOCKS to the nearest free tap (`nearestOpenSlot`'s
+  `anyDistance`), never trailing the cursor — click the tap to pour
+  (`cooking:sodaTap`; empty → filling → filled), move a cup between taps with the
+  normal reslot drag (ice first, then a flavor). A fountain holds ONE cup at a
+  time (client offers no seat + server rejects a second). A poured cup ALWAYS
+  needs the lid dragged onto it before it collects as `drinks[].output` — the
+  lid is kitchen EQUIPMENT like the prep serving tray (no inventory item, never
+  consumed; cups come with lids; only `drink_lid_model` configures it); the
+  capped cup renders cup+lid as a normal slot build stack. Ice is a flag on the cup, rendered client-side as a
+  cluster of the VANILLA loose-cube props (`prop_ice_cube_01..03`, the `ICE` table)
+  sunk into the cup's measured rim — hidden again once the lid goes on, and NOT
+  recorded on the collected item. Dispensing ANIMATES (never teleports): the
+  progress payload's `fillKind` tells clients what a running tap is pouring — ice
+  cubes spawn at the nozzle and free-fall (0.5·g·t², staggered; `dropSodaIce`,
+  landing exactly in the `SodaIce` cluster seats so the ice-complete sync is a
+  no-op), a drink pours a colored liquid STREAM — a column of sphere `DrawMarker`
+  droplets recycling down the nozzle→cup gap with fake gravity (`startSodaPour`/
+  `POUR`), tinted by the drink's `drinks[].color` (synced; a `POUR_COLORS` fallback
+  by output covers pre-`color` configs; one-time `soda_colors_seeded` backfill) —
+  markers not ptfx, so the color is ours and it never fizzles early. There is NO
+  on-screen tap label: the fountain model prints each flavor, and a click on the
+  printed nozzle is resolved world-side by `hoveredTapSlot` in `cooking:worldClick`
+  (no NUI pill). Tap/cup/ICE/POUR tables live in `modules/cooking/client.lua`
+  (TUNE IN-GAME). Tap X positions are COMPUTED, not hard-listed: `SODA.ice_gap`
+  (centre → innermost drink tap = the ice area's half-width) + `SODA.gap` (spacing
+  between adjacent drink taps) drive `sodaSlotX(slot)` — 3 taps step out to each
+  side of the middle ice nozzle.
 - **Finish tools (frosting) — the `finishes` setting.** A reusable "rub a tool over a
   product" system at kitchen prep: config is a list of `{ tool, tool_model, rub_dist,
   targets = { { item, output, mode = "replace"|"overlay", flavors = {{id,label,model}} } } }`

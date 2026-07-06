@@ -20,10 +20,36 @@ local PrepBuilds = {} -- [src] = { prop_id, rid, seq, layers = { {id, source, it
 local layerUnits      -- fwd: units a single layer contributes (bun half = 0.5)
 local reservedUnits   -- fwd: units of (source,item,cheese) a build already reserved
 
-local function findDrink(item)
-    for _, d in ipairs(GetSetting("drinks", {})) do
-        if d.input == item then return d end
+-- ─── soda machine taps ───────────────────────────────────────────────────────
+-- The fountain has SEVEN nozzles: the MIDDLE one dispenses ice, the other six
+-- pour the first six valid `drinks` entries left-to-right (config order = tap
+-- order; the client derives the same mapping from its synced Drinks payload).
+-- Cups are slot items like fryer fries: seated under a tap, poured by clicking
+-- THAT tap, and moved between taps with the normal reslot drag (ice, then soda).
+
+local SODA_SLOTS    = 7
+local SODA_ICE_SLOT = 4
+
+-- Tap N = the Nth `drinks` CONFIG entry (raw position, valid or not), so tap
+-- positions are STABLE: a flavor whose item isn't installed leaves its tap dark
+-- instead of every flavor sliding down a slot. The client mirrors this via the
+-- `tap` index BuildSyncPayload stamps on each synced drink.
+local function flavorForSlot(slot)
+    if slot == SODA_ICE_SLOT then return nil end
+    local idx = (slot < SODA_ICE_SLOT) and slot or (slot - 1)
+    local d = GetSetting("drinks", {})[idx]
+    if d and ItemExists(d.input) and ItemExists(d.output) then return d end
+end
+
+-- The valid drinks that actually hold a tap (first six config entries only).
+local function sodaFlavors()
+    local out = {}
+    local list = GetSetting("drinks", {})
+    for i = 1, math.min(#list, SODA_SLOTS - 1) do
+        local d = list[i]
+        if ItemExists(d.input) and ItemExists(d.output) then out[#out + 1] = d end
     end
+    return out
 end
 
 local function findAssembly(output)
@@ -267,9 +293,58 @@ local function armGateTimer(it)
     end)
 end
 
+-- ─── soda cups (slot items on a fountain tap) ────────────────────────────────
+-- A cup's timeline: empty -> (click a tap) filling -> filled -> (lid) capped.
+-- Ice is an independent flag the middle nozzle sets; it can go in before or
+-- after the drink but never through a lid.
+
+-- What collecting this cup right now hands back: the poured drink once filled
+-- (capped or not), else the empty cup item.
+local function sodaGiveItem(it)
+    if it.state == "filled" or it.state == "capped" then return it.output end
+    return it.input
+end
+
+local function sodaProgress(it)
+    local elapsed = 0
+    if it.state == "filling" and it.phaseStart then elapsed = GetGameTimer() - it.phaseStart end
+    return { state = it.state, total = it.fillTotal or 0, elapsed = elapsed,
+             gate = it.state == "filling", ice = it.ice and true or false,
+             -- what the tap is dispensing while filling ("ice"/"drink") — drives
+             -- the client's pour visuals (falling cubes vs. liquid stream)
+             fillKind = (it.state == "filling") and it.fillKind or nil,
+             needLid = (it.state == "filled") or nil }
+end
+
+-- Push a live status snapshot for the cup's hover panel (mirrors broadcastGate).
+local function broadcastSoda(it)
+    local give = sodaGiveItem(it)
+    TriggerClientEvent("pickle_restaurants:cooking:progress", -1, {
+        uid = it.uid, method = "soda", prog = sodaProgress(it),
+        give = give, giveLabel = give and GetItemLabel(give) or nil,
+        giveImage = give and GetItemImage(give) or nil,
+    })
+end
+
+-- (Re)spawn payload for a cup at its tap; a capped cup carries the cup+lid build
+-- stack so everyone renders the lid through the normal slot-stack machinery, and
+-- `ice` drives the client's loose-cube cluster at the rim (hidden once capped).
+local function sodaSpawnPayload(it)
+    return { uid = it.uid, model = it.model, prop_id = it.prop_id, method = "soda",
+             slot = it.slot, state = it.state, stack = it.stack, ice = it.ice or nil }
+end
+
 -- one sync entry for a (re)connecting / station-opening client
 local function activeEntry(it)
     if it.dual then return dualPayload(it) end
+    if it.method == "soda" then
+        local give = sodaGiveItem(it)
+        return { uid = it.uid, method = "soda", model = it.model, prop_id = it.prop_id,
+                 slot = it.slot, state = it.state, prog = sodaProgress(it),
+                 stack = it.stack, ice = it.ice or nil,
+                 give = give, giveLabel = give and GetItemLabel(give) or nil,
+                 giveImage = give and GetItemImage(give) or nil }
+    end
     if it.method == "oven" or it.method == "fry" then
         local give = cookGiveItem(it)
         return { uid = it.uid, method = it.method, model = it.model, prop_id = it.prop_id,
@@ -399,6 +474,21 @@ local function withContainer(recipe, models, baseModel)
     return models
 end
 
+-- A collected drink is a CAPPED cup — the lid always presses on before it
+-- collects — so a drink output renders as its cup+lid tower everywhere at prep
+-- (bar card, dragged/placed part, meal layer), never the bare cup. Mirrors
+-- withContainer: returns models untouched for anything that isn't a drink.
+local function withLid(item, models, baseModel)
+    local isDrink = false
+    for _, dd in ipairs(GetSetting("drinks", {})) do
+        if dd.output == item then isDrink = true break end
+    end
+    if not isDrink then return models end
+    models = models or { baseModel }
+    models[#models + 1] = GetSetting("drink_lid_model", "pickle_drink_lid_01")
+    return models
+end
+
 -- How a finished (frosted…) item renders: replace-mode = the recorded flavor's
 -- model IS the whole product; overlay-mode = the target's prop with the flavor
 -- model stacked on top. Falls back like itemModel when the meta carries no flavor.
@@ -453,6 +543,10 @@ local function compSpec(c)
             end
             spec.stack = models
         end
+    end
+    -- a collected drink is capped: render cup + lid, never the bare cup
+    if not spec.stack and spec.model then
+        spec.stack = withLid(c.item, nil, spec.model)
     end
     return spec
 end
@@ -631,13 +725,22 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
             end
         end
     elseif station == "soda_machine" then
-        for _, drink in ipairs(GetSetting("drinks", {})) do
-            if ItemExists(drink.input) and ItemExists(drink.output) then
+        -- ONE cup card per distinct cup item across the taps (the default flavors
+        -- all share one cup) — the flavor is picked at the tap, not on the bar.
+        local seen = {}
+        for _, drink in ipairs(sodaFlavors()) do
+            if not seen[drink.input] then
+                seen[drink.input] = true
                 local count = Inventory.GetItemCount(src, drink.input) or 0
-                out[#out + 1] = { kind = "drink", item = drink.input, label = drink.label or GetItemLabel(drink.input),
+                out[#out + 1] = { kind = "drink", item = drink.input, label = GetItemLabel(drink.input),
                                   image = GetItemImage(drink.input), count = count }
             end
         end
+        -- The lid pressed onto a filled cup: kitchen EQUIPMENT like the prep
+        -- station's serving tray, not an inventory item — cups come with lids,
+        -- so the tool is always on the bar and never consumed.
+        out[#out + 1] = { kind = "lid", item = "cup_lid", label = "Cup Lid",
+                          model = GetSetting("drink_lid_model", "pickle_drink_lid_01") }
     elseif station == "kitchen_prep" then
         -- Interactive build: the bar lists the raw components (held in inventory) used
         -- across assembly recipes, PLUS any other mapped prep ingredient — optional
@@ -697,6 +800,8 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
             -- a beef/dual patty renders as the full two-faced patty, same as one
             -- pulled from the tray (raw components carry no cheese)
             if dualRecipeForItem(comp) then entry.dual = true end
+            -- a collected drink drags/places as its capped cup+lid tower
+            if entry.model then entry.stack = withLid(comp, nil, entry.model) end
             out[#out + 1] = entry
         end
         for _, asm in ipairs(GetSetting("assembly", {})) do
@@ -848,18 +953,34 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         return { ok = true }
 
     elseif station == "soda_machine" and d.kind == "drink" then
-        local drink = findDrink(d.item)
-        if not drink then return { ok = false, error = "Unknown drink." } end
-        if (Inventory.GetItemCount(src, drink.input) or 0) < 1 then return { ok = false, error = "Need a cup." } end
-        Inventory.RemoveItem(src, drink.input, 1)
-        it.kind, it.drink, it.output, it.state, it.model = "drink", drink, drink.output, "filling", drink.model
+        -- A cup seats under a tap (slot placement, like a fryer basket). Nothing
+        -- pours yet — the player clicks the tap (middle nozzle = ice) once seated.
+        local slot = tonumber(d.slot)
+        if not slot or slot < 1 or slot > SODA_SLOTS
+            or (slot ~= SODA_ICE_SLOT and not flavorForSlot(slot)) then
+            return { ok = false, error = "Put the cup under a tap." }
+        end
+        if not slotFree(prop.id, "soda", nil, slot) then return { ok = false, error = "That spot's taken." } end
+        -- one cup per fountain: reject a second cup anywhere on this machine
+        -- (moving the seated cup between taps goes through reslot, not here)
+        for _, c in pairs(CookingItems) do
+            if c.method == "soda" and c.prop_id == prop.id then
+                return { ok = false, error = "There's already a cup on the machine." }
+            end
+        end
+        local cup, model
+        for _, dd in ipairs(sodaFlavors()) do
+            if dd.input == d.item then cup, model = dd.input, dd.model break end
+        end
+        if not cup then return { ok = false, error = "Unknown cup." } end
+        if (Inventory.GetItemCount(src, cup) or 0) < 1 then return { ok = false, error = "Need a cup." } end
+        Inventory.RemoveItem(src, cup, 1)
+        it.kind, it.method, it.slot = "drink", "soda", slot
+        it.input, it.state, it.ice = cup, "empty", false
+        it.model = model or "pickle_drink_container_01"
         CookingItems[uid] = it
-        broadcastSpawn(it)
-        SetTimeout(drink.fill_ms or 3000, function()
-            local cur = CookingItems[uid]; if not cur or cur.state ~= "filling" then return end
-            cur.state = "done"
-            TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, cur.model, cur.state)
-        end)
+        TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, sodaSpawnPayload(it))
+        broadcastSoda(it)
         return { ok = true }
 
     elseif station == "kitchen_prep" and d.kind == "assembly" then
@@ -915,6 +1036,78 @@ lib.callback.register("pickle_restaurants:cooking:fryerDip", function(src, d)
     end
     TriggerClientEvent("pickle_restaurants:fryer:dip", -1, prop.id, slot, lowered)
     return { ok = true, lowered = lowered }
+end)
+
+-- ─── soda machine: tap pour + lid ────────────────────────────────────────────
+
+-- Click a tap with a cup seated under it: the middle nozzle dispenses ice, any
+-- other pours that tap's drink into an empty cup. One drink per cup; ice can go
+-- in before or after the drink, but never through a lid.
+lib.callback.register("pickle_restaurants:cooking:sodaTap", function(src, d)
+    local prop = PropCache[tonumber(d and d.prop_id)]
+    if not prop or prop.prop_type ~= "soda_machine" then return { ok = false } end
+    if not HasPerm(prop.restaurant_id, src, "cook") then return { ok = false } end
+    local slot = tonumber(d.slot)
+    if not slot then return { ok = false } end
+    local it
+    for _, c in pairs(CookingItems) do
+        if c.method == "soda" and c.prop_id == prop.id and c.slot == slot then it = c break end
+    end
+    if not it then return { ok = false, error = "Put a cup under the tap first." } end
+    if it.state == "filling" then return { ok = false, error = "Still pouring." } end
+    if it.state == "capped" then return { ok = false, error = "The lid's already on." } end
+
+    local uid = it.uid
+    it.timerToken = (it.timerToken or 0) + 1
+    local token = it.timerToken
+
+    if slot == SODA_ICE_SLOT then
+        if it.ice then return { ok = false, error = "Already has ice." } end
+        local prev = it.state -- ice drops into an empty OR an already-filled cup
+        it.state, it.fillTotal, it.phaseStart, it.fillKind = "filling", GetSetting("soda_ice_ms", 1500), GetGameTimer(), "ice"
+        SetTimeout(it.fillTotal, function()
+            local cur = CookingItems[uid]
+            if not cur or cur.timerToken ~= token then return end
+            cur.ice, cur.state, cur.phaseStart = true, prev, nil
+            -- full slotSpawn (not update) so the payload carries the new ice flag
+            -- and every client spawns the rim cubes
+            TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, sodaSpawnPayload(cur))
+            broadcastSoda(cur)
+        end)
+    else
+        local drink = flavorForSlot(slot)
+        if not drink then return { ok = false, error = "Nothing on tap there." } end
+        if it.state ~= "empty" then return { ok = false, error = "The cup is already full." } end
+        if drink.input ~= it.input then return { ok = false, error = "Wrong cup for that tap." } end
+        it.state, it.fillTotal, it.phaseStart, it.fillKind = "filling", tonumber(drink.fill_ms) or 3000, GetGameTimer(), "drink"
+        it.drink, it.output = drink, drink.output
+        if drink.model then it.model = drink.model end
+        SetTimeout(it.fillTotal, function()
+            local cur = CookingItems[uid]
+            if not cur or cur.timerToken ~= token then return end
+            cur.state, cur.phaseStart = "filled", nil
+            TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, cur.model, cur.state)
+            broadcastSoda(cur)
+        end)
+    end
+    broadcastSoda(it)
+    return { ok = true }
+end)
+
+-- Press a lid onto a filled cup (the lid card dragged over it). The lid is
+-- kitchen equipment (cups come with lids) — nothing is consumed; the capped cup
+-- renders cup+lid through the normal slot build stack.
+lib.callback.register("pickle_restaurants:cooking:applyLid", function(src, d)
+    local it = CookingItems[tonumber(d and d.uid)]
+    if not it or it.method ~= "soda" then return { ok = false } end
+    if not HasPerm(it.rid, src, "cook") then return { ok = false } end
+    if it.state == "capped" then return { ok = false, error = "Already has a lid." } end
+    if it.state ~= "filled" then return { ok = false, error = "Fill the cup first." } end
+    it.state = "capped"
+    it.stack = { it.model, GetSetting("drink_lid_model", "pickle_drink_lid_01") }
+    TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, sodaSpawnPayload(it))
+    broadcastSoda(it)
+    return { ok = true, label = GetItemLabel(it.output) }
 end)
 
 -- ─── flip (dual-sided patties) ───────────────────────────────────────────────
@@ -976,9 +1169,24 @@ lib.callback.register("pickle_restaurants:cooking:reslot", function(src, d)
     local it = CookingItems[tonumber(d and d.uid)]
     if not it then return { ok = false } end
     if not HasPerm(it.rid, src, "cook") then return { ok = false } end
-    if it.method ~= "oven" and it.method ~= "fry" then return { ok = false } end
+    if it.method ~= "oven" and it.method ~= "fry" and it.method ~= "soda" then return { ok = false } end
     local prop = PropCache[it.prop_id]
     if not prop then return { ok = false } end
+    -- A soda cup moved to another tap (ice first, then a flavor). No door/gate —
+    -- just re-seat it, as long as nothing is mid-pour.
+    if it.method == "soda" then
+        local slot = tonumber(d.slot)
+        if not slot or (slot ~= SODA_ICE_SLOT and not flavorForSlot(slot)) then
+            return { ok = false, error = "Pick a tap." }
+        end
+        if it.slot == slot then return { ok = false } end -- already there
+        if it.state == "filling" then return { ok = false, error = "Still pouring." } end
+        if not slotFree(it.prop_id, "soda", nil, slot) then return { ok = false, error = "That spot's taken." } end
+        it.slot = slot
+        TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, sodaSpawnPayload(it))
+        broadcastSoda(it)
+        return { ok = true }
+    end
     local door = (it.method == "oven") and tonumber(d.door) or nil
     local slot = tonumber(d.slot)
     if not slot or (it.method == "oven" and door ~= 1 and door ~= 2) then return { ok = false, error = "Pick a spot." } end
@@ -1024,7 +1232,11 @@ lib.callback.register("pickle_restaurants:cooking:collect", function(src, d)
         elseif it.state == "cooked" then giveItem = it.recipe.output_cooked_item
         else giveItem = it.recipe.output_burnt_item end
     elseif it.kind == "drink" then
-        giveItem = (it.state == "done") and it.output or it.drink.input
+        -- An empty cup collects straight back; a poured drink always needs its
+        -- lid pressed on first (the lid tool is free — cups come with lids).
+        if it.state == "filling" then return { ok = false, error = "Still pouring." } end
+        if it.state == "filled" then return { ok = false, error = "Press a lid on first." } end
+        giveItem = sodaGiveItem(it)
     elseif it.kind == "assembly" then
         giveItem = it.output
     end

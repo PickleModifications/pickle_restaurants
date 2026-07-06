@@ -267,6 +267,117 @@ local function fryerSlotWorld(propId, slot, lowered)
     return GetOffsetFromEntityInWorldCoords(station, o.x, o.y, lowered and FRYER.lowered_z or FRYER.raised_z)
 end
 
+-- Soda fountain taps, LOCAL to pickle_soda_fountain_01 (x = right, y = front,
+-- z = up): SEVEN nozzles left-to-right. The MIDDLE one (ice_slot) dispenses ice,
+-- with three drink taps to each side. The tap X positions are COMPUTED, not
+-- hard-listed: `ice_gap` is the central ice area's half-width (centre → the
+-- innermost drink tap on either side) and `gap` is the spacing between adjacent
+-- drink taps, so the three left taps sit at -ice_gap, -ice_gap-gap, -ice_gap-2·gap
+-- and the three right ones mirror them. A cup seats on the drip tray at cup_z;
+-- the clickable nozzle / push-button hover point sits tap_dz above that. The
+-- DISPENSE mouth — where ice/liquid visually leaves the machine — is a separate
+-- point from the click target: pour_dy/pour_dz offset it from the cup seat so
+-- the render origin can be tuned without moving where clicks land. TUNE
+-- IN-GAME.
+local SODA = {
+    slots    = 7,
+    ice_slot = 4,
+    ice_gap  = 0.078, -- centre → innermost drink tap (= the ice area's half-width)
+    gap      = 0.0665, -- spacing between adjacent drink taps
+    cup_y    = -0.155,
+    cup_z    = 1.121,
+    tap_dz   = 0.231, -- clickable nozzle point above the cup seat
+    pour_dy  = 0.018,   -- dispense mouth Y offset from the cup seat (render origin only)
+    pour_dz  = 0.22,  -- dispense mouth height above the cup seat (render origin only)
+}
+
+-- Local X of a tap slot: 0 at the ice nozzle, else stepped out from the ice
+-- area's edge by `gap` per tap (negative = left of centre, positive = right).
+-- nil for an out-of-range slot (keeps the seat/world guards working).
+local function sodaSlotX(slot)
+    if type(slot) ~= "number" or slot < 1 or slot > SODA.slots then return nil end
+    if slot == SODA.ice_slot then return 0.0 end
+    local step = math.abs(slot - SODA.ice_slot) -- 1 = nearest the ice, up to 3
+    local mag  = SODA.ice_gap + (step - 1) * SODA.gap
+    return (slot < SODA.ice_slot) and -mag or mag
+end
+
+-- The drink a tap pours (nil for the ice nozzle / a tap with no valid drink).
+-- Each synced drink carries `tap` — its RAW config position, stamped by
+-- BuildSyncPayload — so tap positions stay stable even when some flavors are
+-- filtered out (missing items) and mirror the server's flavorForSlot exactly.
+local function sodaFlavorForSlot(slot)
+    if slot == SODA.ice_slot then return nil end
+    local idx = (slot < SODA.ice_slot) and slot or (slot - 1)
+    for _, d in ipairs(Drinks or {}) do
+        if d.tap == idx then return d end
+    end
+end
+
+-- A tap slot is live when it's the ice nozzle or has a drink on it.
+local function sodaSlotLive(slot)
+    return slot == SODA.ice_slot or sodaFlavorForSlot(slot) ~= nil
+end
+
+-- World position of a tap's cup seat (drip tray), or of its clickable nozzle
+-- when `tap` is set.
+local function sodaSlotWorld(propId, slot, tap)
+    local station = GetStationEntity and GetStationEntity(propId)
+    local x = sodaSlotX(slot)
+    if not station or not DoesEntityExist(station) or not x then return nil end
+    return GetOffsetFromEntityInWorldCoords(station, x, SODA.cup_y, SODA.cup_z + (tap and SODA.tap_dz or 0.0))
+end
+
+-- World position of a tap's DISPENSE mouth — where ice/liquid visually leaves
+-- the machine. Deliberately separate from the clickable nozzle point (tap_dz):
+-- SODA.pour_dy/pour_dz move the render origin without moving the click target.
+local function sodaDispenseWorld(propId, slot)
+    local station = GetStationEntity and GetStationEntity(propId)
+    local x = sodaSlotX(slot)
+    if not station or not DoesEntityExist(station) or not x then return nil end
+    return GetOffsetFromEntityInWorldCoords(station, x, SODA.cup_y + SODA.pour_dy, SODA.cup_z + SODA.pour_dz)
+end
+
+-- Loose ice cubes shown at the cup's rim while it has ice (the vanilla bar-cube
+-- props — visual only, like the fryer baskets / cheese slices). A small cluster
+-- of the three cube variants at per-cube offsets/yaws so it reads as scooped
+-- ice, not a stacked tower; each dz is relative to the cup's measured TOP and
+-- slightly negative so the cubes sit sunk into the rim. Hidden again once the
+-- lid goes on (the ice is inside). TUNE IN-GAME.
+local ICE = {
+    cubes = {
+        { model = "prop_ice_cube_01", dx =  0.016, dy =  0.010, dz = -0.020, yaw = 0.0 },
+        { model = "prop_ice_cube_02", dx = -0.018, dy = -0.008, dz = -0.025, yaw = 55.0 },
+        { model = "prop_ice_cube_03", dx =  0.000, dy = -0.017, dz = -0.012, yaw = 110.0 },
+    },
+}
+local SodaIce = {} -- [uid] = { ents = { {ent, c}, … }, topZ } rim cubes on a cup
+
+-- Seat a cup's ice cubes around its rim: (x, y, z) is the cup's seat point,
+-- each cube's local (dx, dy) rotated by the station heading, dz off the cup top.
+local function seatSodaIce(uid, x, y, z, headingZ)
+    local rec = SodaIce[uid]; if not rec then return end
+    local h = math.rad(headingZ or 0.0)
+    local cosH, sinH = math.cos(h), math.sin(h)
+    for _, it in ipairs(rec.ents) do
+        local e, c = it.ent, it.c
+        -- a cube still mid-fall owns its own position until it lands
+        if e and DoesEntityExist(e) and not it.falling then
+            SetEntityCoordsNoOffset(e,
+                x + c.dx * cosH - c.dy * sinH,
+                y + c.dx * sinH + c.dy * cosH,
+                z + rec.topZ + c.dz, false, false, false)
+            SetEntityRotation(e, 0.0, 0.0, (headingZ or 0.0) + (c.yaw or 0.0), 2, true)
+        end
+    end
+end
+
+local function removeSodaIce(uid)
+    local rec = SodaIce[uid]; if not rec then return end
+    for _, it in ipairs(rec.ents) do SafeDeleteEntity(it.ent) end
+    SodaIce[uid] = nil
+end
+
 local function alignToStation(propId, ent)
     local station = GetStationEntity and GetStationEntity(propId)
     if station and DoesEntityExist(station) and ent and DoesEntityExist(ent) then
@@ -298,9 +409,17 @@ local function seatSlotItem(uid, fryerZ)
         elseif SeatOvenSlot then SeatOvenSlot(s.propId, s.door, s.slot, ent) end
     else
         local station = GetStationEntity and GetStationEntity(s.propId)
-        local o = FRYER.slots[s.slot]
-        if not station or not DoesEntityExist(station) or not o then return end
-        local z = fryerZ or (slotDown(s.propId, s.slot) and FRYER.lowered_z or FRYER.raised_z)
+        if not station or not DoesEntityExist(station) then return end
+        local o, z
+        if s.method == "soda" then -- cup on the fountain's drip tray under its tap
+            local x = sodaSlotX(s.slot)
+            if not x then return end
+            o, z = { x = x, y = SODA.cup_y }, SODA.cup_z
+        else
+            o = FRYER.slots[s.slot]
+            if not o then return end
+            z = fryerZ or (slotDown(s.propId, s.slot) and FRYER.lowered_z or FRYER.raised_z)
+        end
         local sr = GetEntityRotation(station, 2)
         local function seatAt(e, lift)
             if not (e and DoesEntityExist(e)) then return end
@@ -314,7 +433,239 @@ local function seatSlotItem(uid, fryerZ)
         else
             seatAt(ent, 0.0)
         end
+        -- a cup's rim ice rides with it (soda only; no-op without a cluster)
+        if s.method == "soda" and SodaIce[uid] then
+            local base = GetOffsetFromEntityInWorldCoords(station, o.x, o.y, z)
+            seatSodaIce(uid, base.x, base.y, base.z, sr.z)
+        end
     end
+end
+
+-- (Re)spawn or remove a cup's rim-ice cubes to match its synced state: visible
+-- while the cup has ice and no lid (capped ice is inside, under the lid). The
+-- cubes' dz rides on the cup model's measured top so they hug whatever cup prop
+-- the drink is configured with.
+local function updateSodaIce(uid, hasIce, state)
+    if not hasIce or state == "capped" then return removeSodaIce(uid) end
+    if SodaIce[uid] then return end -- already rendered; seatSlotItem keeps it placed
+    local cup = CookObjects[uid]
+    local topZ = (cup and DoesEntityExist(cup)) and modelHeight(GetEntityModel(cup)) or 0.12
+    local ents = {}
+    for _, c in ipairs(ICE.cubes) do
+        local e = SpawnProp(c.model, 0.0, 0.0, 0.0)
+        if e then ents[#ents + 1] = { ent = e, c = c } end
+    end
+    if #ents == 0 then return end
+    SodaIce[uid] = { ents = ents, topZ = topZ }
+    seatSlotItem(uid) -- seat the fresh cubes at the cup's current spot
+end
+
+-- Ice DISPENSING: the cubes drop out of the nozzle one at a time and free-fall
+-- (0.5·g·t²) into their rim seats — gravity, not a teleport. Runs while the
+-- middle tap pours; by the time the server's ice-complete sync lands the cluster
+-- already exists, so updateSodaIce is a no-op and nothing pops.
+local ICE_FALL = { g = 9.8, stagger_ms = 240 }
+local function dropSodaIce(uid)
+    if SodaIce[uid] then return end -- already iced / already falling
+    local s = CookSlot[uid]
+    if not s or s.method ~= "soda" then return end
+    local cup = CookObjects[uid]
+    local topZ = (cup and DoesEntityExist(cup)) and modelHeight(GetEntityModel(cup)) or 0.12
+    local rec = { ents = {}, topZ = topZ }
+    SodaIce[uid] = rec
+    CreateThread(function()
+        for _, c in ipairs(ICE.cubes) do
+            if SodaIce[uid] ~= rec then return end -- cup removed mid-pour
+            local nozzle = sodaDispenseWorld(s.propId, s.slot)
+            local seat   = sodaSlotWorld(s.propId, s.slot)
+            if not nozzle or not seat then break end
+            local station = GetStationEntity and GetStationEntity(s.propId)
+            local headingZ = (station and DoesEntityExist(station)) and GetEntityRotation(station, 2).z or 0.0
+            local h = math.rad(headingZ)
+            local cosH, sinH = math.cos(h), math.sin(h)
+            local tx = seat.x + c.dx * cosH - c.dy * sinH
+            local ty = seat.y + c.dx * sinH + c.dy * cosH
+            local tz = seat.z + topZ + c.dz
+            local e = SpawnProp(c.model, tx, ty, nozzle.z)
+            if e then
+                local entry = { ent = e, c = c, falling = true }
+                rec.ents[#rec.ents + 1] = entry
+                SetEntityRotation(e, 0.0, 0.0, headingZ + (c.yaw or 0.0), 2, true)
+                CreateThread(function()
+                    local z0 = nozzle.z
+                    local started = GetGameTimer()
+                    while SodaIce[uid] == rec and DoesEntityExist(e) do
+                        local t = (GetGameTimer() - started) / 1000.0
+                        local z = z0 - 0.5 * ICE_FALL.g * t * t
+                        if z <= tz then break end
+                        SetEntityCoordsNoOffset(e, tx, ty, z, false, false, false)
+                        Wait(0)
+                    end
+                    entry.falling = nil
+                    if SodaIce[uid] == rec and DoesEntityExist(e) then
+                        SetEntityCoordsNoOffset(e, tx, ty, tz, false, false, false) -- settle in the seat
+                    end
+                end)
+            end
+            Wait(ICE_FALL.stagger_ms)
+        end
+    end)
+end
+
+-- ─── soda pour stream (marker droplets) ──────────────────────────────────────
+-- A colored liquid stream from the dispense mouth (SODA.pour_dy/pour_dz) into
+-- the cup while a drink pours, drawn as a column of small sphere markers that
+-- free-fall (fake gravity) and recycle, so it reads as a continuous flowing
+-- stream — and each drink pours in its OWN color (synced `drinks[].color`,
+-- sampled from the fountain's flavor art). While it pours, a liquid SURFACE
+-- disc rises inside the cup with the fill's progress, from the cup bottom up to
+-- `fill_to` of the cup model's height. Drawn each frame for the fill's
+-- duration; the state sync also stops it. Markers, not ptfx, so the color is
+-- ours and it never fizzles out early. TUNE IN-GAME.
+local POUR = {
+    droplets    = 7,     -- droplets visible along the stream at once
+    radius      = 0.009, -- droplet marker radius (m)
+    pool_r0     = 0.022, -- liquid surface radius at the cup BOTTOM (cups taper: narrow base…)
+    pool_r1     = 0.034, -- …lerped up to this radius at the top of the fill (fill_to height)
+    fill_to     = 0.9,   -- the surface tops out at this fraction of the cup model's height
+    cycle_ms    = 220,   -- time a droplet takes to fall the stream (visual speed)
+    min_fall    = 0.03,  -- skip drawing the stream if the mouth-to-surface gap is tiny
+}
+-- Fallback pour colors by drink OUTPUT for the seeded flavors, so the stream is
+-- colored even on configs predating the per-drink `color` field. A synced config
+-- color always wins over these.
+local POUR_COLORS = {
+    water      = { 160, 205, 230 }, -- Pure Aqua: pale icy blue
+    lemonade   = { 235, 215, 90 },  -- Lemonade Bliss: yellow
+    soda       = { 90, 50, 25 },    -- Classic Cola: dark cola
+    diet_cola  = { 120, 80, 55 },   -- Diet Cola: lighter cola
+    grape_soda = { 135, 70, 170 },  -- Grape Zap: purple
+    coffee     = { 80, 50, 30 },    -- Coffee: brown
+}
+local SodaPour = {} -- [uid] = token (nil = not pouring)
+
+-- The pour color for a cup's tap: its drink's config `color`, else the seeded
+-- fallback by output, else a pale default.
+local function pourColor(uid)
+    local s = CookSlot[uid]
+    local d = s and sodaFlavorForSlot(s.slot)
+    local c = d and (d.color or (d.output and POUR_COLORS[d.output]))
+    if type(c) == "table" then return c[1] or 200, c[2] or 200, c[3] or 210 end
+    return 200, 200, 210
+end
+
+local function stopSodaPour(uid)
+    SodaPour[uid] = nil -- the running thread checks its token and exits
+end
+
+-- The poured liquid itself, PERSISTENT: unlike the pour stream, the surface
+-- must outlive the pour — a filled cup keeps its drink visible until the lid
+-- caps it or the cup leaves. One shared per-frame loop draws every cup's
+-- surface disc at its current level, riding the cup ENTITY (so it follows a
+-- reslot drag between taps too).
+local SodaFill = {} -- [uid] = { f = 0..1 fill fraction, r, g, b }
+local sodaFillLoop = false
+-- The cup a dragged lid is currently snapped onto: a lid on the rim — preview
+-- or applied — hides the liquid, so the surface is suppressed while snapped and
+-- comes back if the drag moves off. Set by the lid drag, read by the loop.
+local SodaLidPreviewUid = nil
+
+local function drawSodaFillLoop()
+    if sodaFillLoop then return end
+    sodaFillLoop = true
+    CreateThread(function()
+        while next(SodaFill) do
+            local ped = GetEntityCoords(PlayerPedId())
+            for uid, rec in pairs(SodaFill) do
+                local cup = CookObjects[uid]
+                if uid ~= SodaLidPreviewUid and cup and DoesEntityExist(cup) then
+                    local pos = GetEntityCoords(cup)
+                    if #(pos - ped) < 30.0 then
+                        local cupH = modelHeight(GetEntityModel(cup)) or 0.12
+                        local f = rec.f or 0.0
+                        -- the surface widens as it rises, tracking the cup's taper
+                        local pr = POUR.pool_r0 + (POUR.pool_r1 - POUR.pool_r0) * f
+                        DrawMarker(28, pos.x, pos.y, pos.z + f * cupH * POUR.fill_to,
+                            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            pr, pr, pr * 0.35,
+                            rec.r, rec.g, rec.b, 200,
+                            false, false, 2, false, nil, nil, false)
+                    end
+                end
+            end
+            Wait(0)
+        end
+        sodaFillLoop = false
+    end)
+end
+
+-- Keep a cup's liquid surface in sync with its synced state: pinned full once
+-- "filled", removed when the lid caps it (the drink is hidden inside), when
+-- the cup is empty, or when it leaves. "filling" is a no-op — the pour thread
+-- drives the level up itself, and an ICE fill on an already-poured cup must
+-- not wipe the drink that's in it.
+local function updateSodaFill(uid, state)
+    if state == "filled" then
+        local rec = SodaFill[uid]
+        if rec then
+            rec.f = 1.0
+        else -- synced in already-filled (reconnect / station open): appear full
+            local r, g, b = pourColor(uid)
+            SodaFill[uid] = { f = 1.0, r = r, g = g, b = b }
+        end
+        drawSodaFillLoop()
+    elseif state ~= "filling" then -- empty / capped / removed
+        SodaFill[uid] = nil
+    end
+end
+
+local function startSodaPour(uid, totalMs, elapsedMs)
+    local s = CookSlot[uid]
+    if not s or s.method ~= "soda" then return end
+    SodaPour[uid] = (SodaPour[uid] or 0) + 1
+    local token = SodaPour[uid]
+    local r, g, b = pourColor(uid)
+    -- fill fraction picks up mid-pour on a resync: elapsed0/total is where the
+    -- surface already sits when this thread starts
+    local total    = math.max(tonumber(totalMs) or 3000, 250)
+    local elapsed0 = math.min(math.max(tonumber(elapsedMs) or 0, 0), total)
+    local started  = GetGameTimer()
+    local endAt    = started + (total - elapsed0)
+    -- the rising surface lives in SodaFill (drawn by the shared loop, so it
+    -- persists after the pour); this thread only pushes its level up
+    SodaFill[uid] = { f = elapsed0 / total, r = r, g = g, b = b }
+    drawSodaFillLoop()
+    CreateThread(function()
+        while SodaPour[uid] == token do
+            if GetGameTimer() > endAt then break end -- backstop; the state sync also stops us
+            local seat  = sodaSlotWorld(s.propId, s.slot) -- cup seat, directly under the tap
+            local mouth = sodaDispenseWorld(s.propId, s.slot)
+            if seat and mouth then
+                local cup  = CookObjects[uid]
+                local cupH = (cup and DoesEntityExist(cup)) and modelHeight(GetEntityModel(cup)) or 0.12
+                local now  = GetGameTimer()
+                -- the liquid surface rises with fill progress, cup bottom → fill_to of its height
+                local f = math.min((elapsed0 + (now - started)) / total, 1.0)
+                local rec = SodaFill[uid]
+                if rec then rec.f = f end
+                local surface = seat.z + f * cupH * POUR.fill_to
+                local fall = mouth.z - surface
+                if fall > POUR.min_fall then
+                    for i = 1, POUR.droplets do
+                        -- staggered phase 0..1; quadratic = accelerating fall (fake
+                        -- gravity), STRAIGHT down from the dispense mouth
+                        local phase = ((now / POUR.cycle_ms) + (i / POUR.droplets)) % 1.0
+                        DrawMarker(28, mouth.x, mouth.y,
+                            mouth.z - fall * phase * phase, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            POUR.radius, POUR.radius, POUR.radius, r, g, b, 210,
+                            false, false, 2, false, nil, nil, false)
+                    end
+                end
+            end
+            Wait(0)
+        end
+        if SodaPour[uid] == token then SodaPour[uid] = nil end
+    end)
 end
 
 -- (Re)spawn a slot item's prop at its seat. Registered in CookEntityUid so the hover
@@ -367,6 +718,14 @@ function OnStationSpawned(prop)
     end
     for uid, s in pairs(CookSlot) do
         if s.propId == prop.id then seatSlotItem(uid) end
+    end
+end
+
+-- The uid of the cup already on a soda fountain (any tap) — a fountain holds
+-- ONE cup at a time, so a second cup gets no seat offered.
+local function sodaCupUid(propId)
+    for uid, s in pairs(CookSlot) do
+        if s.method == "soda" and s.propId == propId then return uid end
     end
 end
 
@@ -455,7 +814,12 @@ end
 -- slot (so the preview follows the cursor instead of pre-locking onto a slot).
 -- Oven only offers slots whose door is open; fryer offers any free basket slot.
 local SLOT_SNAP_R = 0.2 -- ~ how near the cursor must be to a slot to snap onto it
-local function nearestOpenSlot(method)
+-- `anyDistance` drops the radius gate: the preview LOCKS to the nearest free
+-- slot no matter where the cursor is (soda taps — the cup always sits in a
+-- seat rather than trailing the cursor around the machine). `ignoreUid` names
+-- a slot item being re-slotted, so its own presence doesn't block it (the
+-- one-cup-per-fountain rule would otherwise pin a cup to its tap).
+local function nearestOpenSlot(method, anyDistance, ignoreUid)
     local prop = currentCookProp; if not prop then return nil end
     local cx, cy = GetNuiCursorPosition()
     local sw, sh = GetActiveScreenResolution()
@@ -467,7 +831,7 @@ local function nearestOpenSlot(method)
         if not on then return end
         local dx, dy = sx - cnx, sy - cny
         local d2 = dx * dx + dy * dy
-        if d2 > SLOT_SNAP_R * SLOT_SNAP_R then return end -- too far — don't snap
+        if not anyDistance and d2 > SLOT_SNAP_R * SLOT_SNAP_R then return end -- too far — don't snap
         if not best or d2 < best.d2 then best = { door = door, slot = slot, w = w, d2 = d2 } end
     end
     if method == "oven" then
@@ -480,6 +844,17 @@ local function nearestOpenSlot(method)
                         if w then consider(door, slot, w) end
                     end
                 end
+            end
+        end
+    elseif method == "soda" then
+        -- one cup per fountain: a machine already holding a cup (other than the
+        -- one being moved between taps) offers no seat at all
+        local cupUid = sodaCupUid(prop.id)
+        if cupUid and cupUid ~= ignoreUid then return nil end
+        for slot = 1, SODA.slots do
+            if sodaSlotLive(slot) and not slotOccupied("soda", prop.id, nil, slot) then
+                local w = sodaSlotWorld(prop.id, slot)
+                if w then consider(nil, slot, w) end
             end
         end
     else
@@ -509,6 +884,30 @@ local function hoveredBasketSlot(propId)
                 local dx, dy = sx - cnx, sy - cny
                 local d = dx * dx + dy * dy
                 if d <= SLOT_SNAP_R * SLOT_SNAP_R and (not bestD or d < bestD) then best, bestD = slot, d end
+            end
+        end
+    end
+    return best
+end
+
+-- The soda tap nozzle the cursor is over (screen-projected, same convention as
+-- the fryer baskets) — click = pour that tap into the cup seated under it.
+local function hoveredTapSlot(propId)
+    local cx, cy = GetNuiCursorPosition()
+    local sw, sh = GetActiveScreenResolution()
+    local cnx = (sw > 0) and (cx / sw) or 0.0
+    local cny = (sh > 0) and (cy / sh) or 0.0
+    local best, bestD
+    for slot = 1, SODA.slots do
+        if sodaSlotLive(slot) then
+            local w = sodaSlotWorld(propId, slot, true)
+            if w then
+                local on, sx, sy = GetScreenCoordFromWorldCoord(w.x, w.y, w.z)
+                if on then
+                    local dx, dy = sx - cnx, sy - cny
+                    local d = dx * dx + dy * dy
+                    if d <= SLOT_SNAP_R * SLOT_SNAP_R and (not bestD or d < bestD) then best, bestD = slot, d end
+                end
             end
         end
     end
@@ -776,6 +1175,7 @@ local function moveSlotStackTo(uid, x, y, z)
             SetEntityRotation(ent, 0.0, 0.0, headingZ, 2, true)
         end
     end
+    seatSodaIce(uid, x, y, z, headingZ) -- a cup's rim ice rides the drag
 end
 
 -- Delete a placement preview's entity/entities (dual + stack previews carry several).
@@ -816,14 +1216,37 @@ RegisterNetEvent("pickle_restaurants:cooking:dual", function(p)
     if p then RebuildDual(p) end
 end)
 
--- spawn an oven/fryer item at its station slot
+-- spawn an oven/fryer/soda item at its station slot
 RegisterNetEvent("pickle_restaurants:cooking:slotSpawn", function(p)
-    if p then SpawnSlotObject(p.uid, p.model, p.prop_id, p.method, p.door, p.slot, p.state, p.stack) end
+    if not p then return end
+    SpawnSlotObject(p.uid, p.model, p.prop_id, p.method, p.door, p.slot, p.state, p.stack)
+    if p.method == "soda" then
+        updateSodaIce(p.uid, p.ice, p.state)
+        updateSodaFill(p.uid, p.state)
+    end
 end)
 
--- live cook progress for an oven/fryer item's hover panel
+-- live cook progress for an oven/fryer/soda item's hover panel
 RegisterNetEvent("pickle_restaurants:cooking:progress", function(p)
-    if p and p.uid then p.start = GetGameTimer(); CookProg[p.uid] = p end
+    if not (p and p.uid) then return end
+    p.start = GetGameTimer()
+    CookProg[p.uid] = p
+    -- soda dispensing: pour visuals while the tap runs — cubes free-fall from the
+    -- ice nozzle, a drink pours a liquid stream — instead of contents appearing
+    -- from nowhere at completion.
+    if p.method == "soda" then
+        local pg = p.prog or {}
+        if pg.state == "filling" then
+            if pg.fillKind == "ice" then
+                dropSodaIce(p.uid)
+            else
+                startSodaPour(p.uid, pg.total, pg.elapsed)
+            end
+        else
+            stopSodaPour(p.uid)
+        end
+        updateSodaFill(p.uid, pg.state)
+    end
 end)
 
 -- one fryer basket lowered/raised for everyone -> animate that basket + its item
@@ -844,6 +1267,9 @@ RegisterNetEvent("pickle_restaurants:cooking:remove", function(uid)
         SafeDeleteEntity(CookObjects[uid])
     end
     clearSlotStack(uid)
+    removeSodaIce(uid)
+    stopSodaPour(uid)
+    SodaFill[uid] = nil
     CookObjects[uid], CookState[uid], CookCoords[uid], CookSlot[uid], CookProg[uid], CookYaw[uid] = nil, nil, nil, nil, nil, nil
 end)
 
@@ -851,8 +1277,18 @@ RegisterNetEvent("pickle_restaurants:cooking:bulk", function(list)
     for _, it in ipairs(list or {}) do
         if it.dual then
             RebuildDual(it)
-        elseif it.method == "oven" or it.method == "fry" then
+        elseif it.method == "oven" or it.method == "fry" or it.method == "soda" then
             SpawnSlotObject(it.uid, it.model, it.prop_id, it.method, it.door, it.slot, it.state, it.stack)
+            if it.method == "soda" then
+                updateSodaIce(it.uid, it.ice, it.state)
+                updateSodaFill(it.uid, it.state) -- a filled cup shows its drink again
+                -- resynced mid-pour: pick the dispensing visuals back up
+                local pg = it.prog or {}
+                if pg.state == "filling" then
+                    if pg.fillKind == "ice" then dropSodaIce(it.uid)
+                    else startSodaPour(it.uid, pg.total, pg.elapsed) end
+                end
+            end
             it.start = GetGameTimer(); CookProg[it.uid] = it
         else
             SpawnCookObject(it.uid, it.model, it.x, it.y, it.z, it.state, it.prop_id)
@@ -1160,22 +1596,64 @@ local function setTrayOutline(tid, r, g, b)
         if DoesEntityExist(e) then SetEntityDrawOutline(e, true); SetEntityDrawOutlineColor(r or 80, g or 200, b or 120, 255) end end end
 end
 
+-- Size-aware part picking: instead of one generous fixed screen radius, each
+-- part is targeted within ITS OWN projected footprint — half its model's
+-- horizontal extent (GetModelDimensions), projected at the part's distance from
+-- the camera — so a small topping can't steal the cursor from half a table
+-- away. pad/min are normalized-screen slack for thin/tiny props. TUNE IN-GAME.
+local PART_PICK = { pad = 0.012, min = 0.025 }
+local ModelHalfXY = {} -- [model hash] = half the larger horizontal extent (m)
+
+local function modelHalfXY(hash)
+    local r = ModelHalfXY[hash]
+    if not r then
+        local mn, mx = GetModelDimensions(hash)
+        r = math.max(mx.x - mn.x, mx.y - mn.y) * 0.5
+        ModelHalfXY[hash] = r
+    end
+    return r
+end
+
+-- A part's world pick radius: the widest of its rendered entities (a stacked
+-- tower picks by its broadest layer). Cached on the part — its props never
+-- change model after spawn.
+local function partHalfXY(part)
+    local r = part.pickR
+    if r then return r end
+    r = 0.03
+    for _, e in ipairs(part.ents or {}) do
+        if DoesEntityExist(e) then r = math.max(r, modelHalfXY(GetEntityModel(e))) end
+    end
+    part.pickR = r
+    return r
+end
+
 -- The placed part under the cursor, by screen proximity to each part's rendered
 -- CENTRE (same projection the stovetop hover uses → lines up with the station
--- cam). Returns sid, index, part. `exceptSid` skips one stack (rarely needed).
+-- cam), within that part's own projected size. Returns sid, index, part.
+-- `exceptSid` skips one stack (rarely needed).
 local function pickPart(exceptSid)
     local cx, cy = GetNuiCursorPosition()
     local sw, sh = GetActiveScreenResolution()
     local cnx = (sw > 0) and (cx / sw) or 0.0
     local cny = (sh > 0) and (cy / sh) or 0.0
-    local R = 0.11 -- screen radius (0-1) that counts as pointing at a stack
     local bsid, bidx, bpart, bd
     for sid, stack in pairs(PrepStacks) do
         if sid ~= exceptSid then
             local z = stack.z0
             for i, part in ipairs(stack.parts) do
-                local on, sx, sy = GetScreenCoordFromWorldCoord(stack.x, stack.y, z + (part.height or 0.0) * 0.5)
+                local mz = z + (part.height or 0.0) * 0.5
+                local on, sx, sy = GetScreenCoordFromWorldCoord(stack.x, stack.y, mz)
                 if on then
+                    -- project the part's world radius to a screen radius: how far
+                    -- (on screen) a point one radius above the centre lands
+                    local rw = partHalfXY(part)
+                    local R = PART_PICK.min
+                    local on2, sx2, sy2 = GetScreenCoordFromWorldCoord(stack.x, stack.y, mz + rw)
+                    if on2 then
+                        local rx, ry = sx2 - sx, sy2 - sy
+                        R = math.max(math.sqrt(rx * rx + ry * ry) + PART_PICK.pad, PART_PICK.min)
+                    end
                     local dx, dy = sx - cnx, sy - cny
                     local d2 = dx * dx + dy * dy
                     if d2 <= R * R and (not bd or d2 < bd) then bd, bsid, bidx, bpart = d2, sid, i, part end
@@ -1480,8 +1958,9 @@ function OpenCookingStation(prop)
                             give = prog.give, giveLabel = prog.giveLabel, giveImage = prog.giveImage,
                         }
                     elseif CookSlot[uid] then
-                        -- oven/fryer item: single gated timeline; count up locally only
-                        -- while the gate is open (door closed / basket down).
+                        -- oven/fryer/soda item: single gated timeline; count up locally
+                        -- only while the gate is open (door closed / basket down / tap
+                        -- pouring).
                         local pr = CookProg[uid]
                         local pg = (pr and pr.prog) or {}
                         local st = pg.state or CookState[uid] or "raw"
@@ -1490,14 +1969,18 @@ function OpenCookingStation(prop)
                         local percent = 0.0
                         if st == "burnt" then percent = 1.0 elseif total > 0 then percent = math.min(1.0, elapsed / total) end
                         local slot = CookSlot[uid]
+                        -- a poured cup's bar reads full even though no timer is running
+                        if slot.method == "soda" and (st == "filled" or st == "capped") then percent = 1.0 end
                         items[#items + 1] = {
                             uid = uid, single = true, onScreen = onScreen, x = sx, y = sy,
                             method = slot.method, state = st, percent = percent,
                             gate = pg.gate and true or false,
-                            burningSoon = (st == "cooked" and percent > 0.66),
-                            -- a fry in a lowered basket can't be grabbed — the NUI
-                            -- refuses to even start the drag (raise the basket first)
-                            locked = (slot.method == "fry" and slotDown(slot.propId, slot.slot)) or nil,
+                            ice = pg.ice or nil, needLid = pg.needLid or nil,
+                            burningSoon = (slot.method ~= "soda" and st == "cooked" and percent > 0.66),
+                            -- a fry in a lowered basket / a cup mid-pour can't be
+                            -- grabbed — the NUI refuses to even start the drag
+                            locked = ((slot.method == "fry" and slotDown(slot.propId, slot.slot))
+                                   or (slot.method == "soda" and st == "filling")) or nil,
                             give = pr and pr.give, giveLabel = pr and pr.giveLabel, giveImage = pr and pr.giveImage,
                         }
                     else
@@ -1545,6 +2028,10 @@ function OpenCookingStation(prop)
             end
             prepHovered = prepHoverPid
             trayHovered = prepHoverTid
+
+            -- (Soda taps carry no on-screen label: the fountain model already
+            -- prints each flavor, so clicking the printed nozzle — resolved
+            -- world-side by hoveredTapSlot on worldClick — is all that's needed.)
 
             SendNUIMessage({ action = "cookingItems", items = items, hovered = hoveredUid,
                              prepHovered = prepHoverPid, prepTrayHovered = prepHoverTid, prepTip = prepTip })
@@ -1682,6 +2169,37 @@ RegisterNUICallback("cooking:beginPlace", function(d, cb)
         return cb({ ok = true })
     end
 
+    -- Soda machine: the cup snaps under the nearest free tap (slot placement,
+    -- like the fryer baskets); release seats it on the drip tray.
+    if d.kind == "drink" then
+        local model = previewModel("drink", d.item)
+        local ent = model and SpawnProp(model, base.x, base.y, base.z) or nil
+        if not ent then return cb({ ok = false }) end
+        SetEntityRotation(ent, 0.0, 0.0, curYaw(), 2, true)
+        local p = { entity = ent, kind = d.kind, item = d.item, slotmode = "soda", source = d.source, hit = false }
+        placing = p
+        CreateThread(function()
+            while placing == p do
+                -- always LOCK onto the nearest free tap — the cup never trails
+                -- the cursor loosely around the machine
+                local best = nearestOpenSlot("soda", true)
+                if best then
+                    p.hit, p.door, p.slot = true, nil, best.slot
+                    SetEntityCoordsNoOffset(ent, best.w.x, best.w.y, best.w.z, false, false, false)
+                    alignToStation(base.id, ent)
+                else
+                    p.hit = false
+                    local hit, coords = CursorToWorld()
+                    if hit and coords then
+                        SetEntityCoordsNoOffset(ent, coords.x, coords.y, coords.z, false, false, false)
+                    end
+                end
+                Wait(0)
+            end
+        end)
+        return cb({ ok = true })
+    end
+
     local model = previewModel(d.kind, d.item)
     if not model then return cb({ ok = false, error = "Nothing to place." }) end
     local ent = SpawnProp(model, base.x, base.y, base.z)
@@ -1748,8 +2266,9 @@ RegisterNUICallback("cooking:beginMove", function(d, cb)
                 if not CookObjects[uid] then break end -- collected / removed mid-drag
                 -- Snap onto the nearest OPEN slot (any other rack), exactly like placing a
                 -- fresh item — release there re-slots it. Otherwise trail the cursor; a
-                -- release off any slot just snaps it back to where it was.
-                local best = nearestOpenSlot(method)
+                -- release off any slot just snaps it back to where it was. Soda cups
+                -- always LOCK to a tap seat (no loose trailing between nozzles).
+                local best = nearestOpenSlot(method, method == "soda", uid)
                 if best then
                     m.hit, m.targetDoor, m.targetSlot = true, best.door, best.slot
                     moveSlotStackTo(uid, best.w.x, best.w.y, best.w.z)
@@ -2332,6 +2851,89 @@ RegisterNUICallback("cooking:endTopping", function(d, cb)
     cb({ ok = false })
 end)
 
+-- ─── soda machine lid ────────────────────────────────────────────────────────
+
+-- The fountain's cup when the cursor is over it AND it can take a lid (filled,
+-- not yet capped) — the lid drag snaps onto it. Screen-projected against the
+-- cup's mid-height, same snap radius as the slot seats.
+local function lidSnapCup()
+    local prop = currentCookProp; if not prop then return nil end
+    local uid = sodaCupUid(prop.id)
+    if not uid or CookState[uid] ~= "filled" then return nil end
+    local cup = CookObjects[uid]
+    if not (cup and DoesEntityExist(cup)) then return nil end
+    local pos = GetEntityCoords(cup)
+    local cupH = modelHeight(GetEntityModel(cup)) or 0.12
+    local on, sx, sy = GetScreenCoordFromWorldCoord(pos.x, pos.y, pos.z + cupH * 0.5)
+    if not on then return nil end
+    local cx, cy = GetNuiCursorPosition()
+    local sw, sh = GetActiveScreenResolution()
+    local dx = sx - ((sw > 0) and (cx / sw) or 0.0)
+    local dy = sy - ((sh > 0) and (cy / sh) or 0.0)
+    if dx * dx + dy * dy > SLOT_SNAP_R * SLOT_SNAP_R then return nil end
+    return uid, cup, pos, cupH
+end
+
+-- begin dragging a lid: the real lid prop follows the cursor in 3D (exactly like
+-- a cheese slice) — but TARGETING the cup snaps it onto the rim right away, so
+-- it previews attached, not only on release. Releasing while snapped presses it on.
+RegisterNUICallback("cooking:beginLid", function(d, cb)
+    cancelPlace()
+    cancelMove()
+    local model, base = d.model, currentCookProp
+    if not model or not base then return cb({ ok = false }) end
+    local ent = SpawnProp(model, base.x, base.y, base.z)
+    if not ent then return cb({ ok = false }) end
+    SetEntityRotation(ent, 0.0, 0.0, curYaw(), 2, true) -- face the station while dragging
+    local p = { entity = ent, lid = true, item = d.item, hit = false }
+    placing = p
+    CreateThread(function()
+        while placing == p do
+            local uid, cup, pos, cupH = lidSnapCup()
+            if uid then
+                -- hovering the (filled) cup: seat the lid on its rim, aligned to
+                -- it — and hide the liquid underneath while the lid covers it
+                p.hit, p.snapUid = true, uid
+                SodaLidPreviewUid = uid
+                SetEntityCoordsNoOffset(ent, pos.x, pos.y, pos.z + cupH, false, false, false)
+                local cr = GetEntityRotation(cup, 2)
+                SetEntityRotation(ent, cr.x, cr.y, cr.z, 2, true)
+            else
+                p.snapUid = nil
+                SodaLidPreviewUid = nil
+                local hit, coords = CursorToWorld()
+                if hit and coords then
+                    p.hit, p.coords = true, coords
+                    SetEntityCoordsNoOffset(ent, coords.x, coords.y, coords.z, false, false, false)
+                else
+                    p.hit = false
+                end
+            end
+            Wait(0)
+        end
+        SodaLidPreviewUid = nil -- drag over (released / cancelled): liquid shows again
+    end)
+    cb({ ok = true })
+end)
+
+-- release a lid drag: drop the preview and, if snapped onto (or released over) a
+-- soda cup, press it on (the server validates + consumes the lid and re-renders
+-- the capped cup for everyone).
+RegisterNUICallback("cooking:endLid", function(d, cb)
+    local p = placing; placing = nil
+    deletePreview(p)
+    local uid = (d and d.uid) or (p and p.snapUid)
+    if not (d and d.cancel) and uid and CookSlot[uid] and CookSlot[uid].method == "soda" then
+        local res = lib.callback.await("pickle_restaurants:cooking:applyLid", false, { uid = uid })
+        if res and res.error then ShowNotification(res.error) end
+        -- drop the liquid right away — don't let it flash back in the gap
+        -- before the capped-cup sync lands
+        if res and res.ok then SodaFill[uid] = nil; RefreshBar() end
+        return cb(res or { ok = false })
+    end
+    cb({ ok = false })
+end)
+
 -- drop cheese on a dual patty's cooked up-face (server validates + consumes cheese)
 RegisterNUICallback("cooking:applyCheese", function(d, cb)
     local uid = d and d.uid
@@ -2539,6 +3141,15 @@ RegisterNUICallback("cooking:worldClick", function(_, cb)
             })
             if res and res.error then ShowNotification(res.error) end
         end
+    elseif currentCookProp and currentCookProp.prop_type == "soda_machine" then
+        -- clicking a tap pours it into the cup seated under it (middle = ice)
+        local slot = hoveredTapSlot(currentCookProp.id)
+        if slot then
+            local res = lib.callback.await("pickle_restaurants:cooking:sodaTap", false, {
+                prop_id = currentCookProp.id, slot = slot,
+            })
+            if res and res.error then ShowNotification(res.error) end
+        end
     end
     cb({ ok = true })
 end)
@@ -2552,6 +3163,9 @@ AddEventHandler("onResourceStop", function(res)
     if res ~= GetCurrentResourceName() then return end
     for uid in pairs(CookDual) do RemoveDual(uid) end
     for uid in pairs(CookSlotStack) do clearSlotStack(uid) end
+    for uid in pairs(SodaIce) do removeSodaIce(uid) end
+    for uid in pairs(SodaPour) do stopSodaPour(uid) end
+    for uid in pairs(SodaFill) do SodaFill[uid] = nil end
     for _, ent in pairs(CookObjects) do
         SafeDeleteEntity(ent)
     end

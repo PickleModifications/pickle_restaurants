@@ -290,7 +290,7 @@ function Drinks({ settings, items, onSaved }: { settings: any; items: Item[]; on
   return (
     <Section
       title="Drinks"
-      description="Soda-machine fills: a cup item becomes a filled drink item."
+      description="Soda-machine taps: the first six drinks appear left-to-right on the fountain (the middle nozzle always dispenses ice). A cup item is filled at the tap into the drink item."
       onSave={async () => { await saveSetting("drinks", list); onSaved(); }}
     >
       <div className="space-y-3">
@@ -299,7 +299,10 @@ function Drinks({ settings, items, onSaved }: { settings: any; items: Item[]; on
           return (
             <div key={i} className="rounded-lg border border-border p-3">
               <div className="mb-2 flex items-center justify-between">
-                <span className="text-sm font-medium">{d.label || d.output || "New drink"}</span>
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  {d.label || d.output || "New drink"}
+                  <Badge variant="secondary">{i < 6 ? `Tap ${i + 1}` : "no tap"}</Badge>
+                </span>
                 <div className="flex items-center gap-2">
                   <MissingBadge missing={missing} />
                   <Button size="icon" variant="destructive" onClick={() => setList((l) => l.filter((_, idx) => idx !== i))}><Trash2 className="h-4 w-4" /></Button>

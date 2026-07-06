@@ -103,6 +103,17 @@
         },
         consume = 1,
     },
+    ['coffee'] = {
+        label  = 'Coffee',
+        weight = 300,
+        stack  = true,
+        close  = true,
+        client = {
+            status = { thirst = 150000, },
+            anim = { dict = 'mp_player_intdrink', clip = 'loop_bottle' }, usetime = 2500,
+        },
+        consume = 1,
+    },
     ['cooked_beef_patty'] = {
         label  = 'Beef Patty',
         weight = 220,
@@ -202,6 +213,12 @@
         },
         consume = 1,
     },
+    ['cup_lid'] = {
+        label  = 'Cup Lid',
+        weight = 20,
+        stack  = true,
+        close  = true,
+    },
     ['decorated_cake'] = {
         label  = 'Decorated Cake',
         weight = 420,
@@ -221,6 +238,17 @@
         client = {
             status = { hunger = 300000, },
             anim = { dict = 'mp_player_inteat@burger', clip = 'mp_player_int_eat_burger' }, usetime = 2500,
+        },
+        consume = 1,
+    },
+    ['diet_cola'] = {
+        label  = 'Diet Cola',
+        weight = 300,
+        stack  = true,
+        close  = true,
+        client = {
+            status = { thirst = 200000, },
+            anim = { dict = 'mp_player_intdrink', clip = 'loop_bottle' }, usetime = 2500,
         },
         consume = 1,
     },
@@ -247,6 +275,28 @@
         stack  = true,
         close  = true,
     },
+    ['grape_soda'] = {
+        label  = 'Grape Zap',
+        weight = 300,
+        stack  = true,
+        close  = true,
+        client = {
+            status = { thirst = 200000, },
+            anim = { dict = 'mp_player_intdrink', clip = 'loop_bottle' }, usetime = 2500,
+        },
+        consume = 1,
+    },
+    ['lemonade'] = {
+        label  = 'Lemonade Bliss',
+        weight = 300,
+        stack  = true,
+        close  = true,
+        client = {
+            status = { thirst = 200000, },
+            anim = { dict = 'mp_player_intdrink', clip = 'loop_bottle' }, usetime = 2500,
+        },
+        consume = 1,
+    },
     ['lettuce'] = {
         label  = 'Lettuce',
         weight = 80,
@@ -263,6 +313,12 @@
             anim = { dict = 'mp_player_inteat@burger', clip = 'mp_player_int_eat_burger' }, usetime = 2500,
         },
         consume = 1,
+    },
+    ['pepperoni'] = {
+        label  = 'Pepperoni',
+        weight = 80,
+        stack  = true,
+        close  = true,
     },
     ['pickle'] = {
         label  = 'Pickle',
@@ -343,7 +399,7 @@
         close  = true,
     },
     ['soda'] = {
-        label  = 'Soda',
+        label  = 'Classic Cola',
         weight = 300,
         stack  = true,
         close  = true,
@@ -364,4 +420,15 @@
         weight = 90,
         stack  = true,
         close  = true,
+    },
+    ['water'] = {
+        label  = 'Pure Aqua',
+        weight = 300,
+        stack  = true,
+        close  = true,
+        client = {
+            status = { thirst = 250000, },
+            anim = { dict = 'mp_player_intdrink', clip = 'loop_bottle' }, usetime = 2500,
+        },
+        consume = 1,
     },

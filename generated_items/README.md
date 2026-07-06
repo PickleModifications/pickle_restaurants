@@ -5,7 +5,7 @@ and restaurant menus configured in-game. They contain every inventory item the
 restaurant system references. Re-run `/restaurants_items` after editing your
 configuration to regenerate them.
 
-46 items were exported.
+53 items were exported.
 
 ## Install (pick the one matching your inventory)
 
