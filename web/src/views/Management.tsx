@@ -143,7 +143,7 @@ function Menu({ id, menu, items }: { id: number; menu: any[]; items: Item[] }) {
           <TextField label="Label" value={form.label} onChange={(v) => set("label", v)} />
           <NumberField label="Price" value={form.price} min={0} onChange={(v) => set("price", v)} />
           <Button onClick={() => { if (form.item) { fetchNui("management:saveMenuItem", { id, ...form, label: form.label || form.item, enabled: true }); setForm(blank); } }}>
-            <Plus className="h-4 w-4" /> Save
+            <Plus className="h-4 w-4" /> Add
           </Button>
         </div>
         <p className="mt-2 text-[11px] text-muted-foreground">Pick the item players receive when they buy this menu entry.</p>

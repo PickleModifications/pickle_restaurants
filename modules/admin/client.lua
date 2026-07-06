@@ -41,6 +41,7 @@ RegisterNUICallback("admin:delete",       relay("pickle_restaurants:admin:delete
 RegisterNUICallback("admin:setOwner",     relay("pickle_restaurants:admin:setOwner"))
 RegisterNUICallback("admin:setBrandImage", relay("pickle_restaurants:admin:setBrandImage"))
 RegisterNUICallback("admin:saveSetting",  relay("pickle_restaurants:admin:saveSetting"))
+RegisterNUICallback("admin:saveSettings", relay("pickle_restaurants:admin:saveSettings"))
 RegisterNUICallback("admin:saveRecipe",   relay("pickle_restaurants:admin:saveRecipe"))
 RegisterNUICallback("admin:deleteRecipe", relay("pickle_restaurants:admin:deleteRecipe"))
 

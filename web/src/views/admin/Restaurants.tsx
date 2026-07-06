@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Field } from "@/components/form";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import Branding from "@/components/Branding";
 import { money } from "@/lib/utils";
 import {
@@ -108,7 +109,13 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
         )}
       </div>
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+      <Tabs defaultValue="overview" className="flex min-h-0 flex-1 flex-col">
+        <TabsList className="shrink-0">
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="settings">Settings</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="overview" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
         {/* ownership + counter */}
         <div className="grid grid-cols-2 gap-3">
           <div className="rounded-lg border border-border p-3">
@@ -207,19 +214,25 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
           )}
         </div>
 
-        {/* branding — per-texture packaging photos, same editor as the boss panel */}
-        <div className="rounded-lg border border-border p-3">
-          <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
-            <ImageIcon className="h-4 w-4 text-primary" /> Branding
+        </TabsContent>
+
+        {/* per-restaurant settings — branding (per-texture packaging photos, same
+            editor as the boss panel). Server-wide settings live in the top-level
+            Settings tab; this is scoped to THIS restaurant. */}
+        <TabsContent value="settings" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+          <div className="rounded-lg border border-border p-3">
+            <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
+              <ImageIcon className="h-4 w-4 text-primary" /> Branding
+            </div>
+            <Branding
+              id={r.id}
+              brand={r.brand_image || ""}
+              brandImages={r.brand_images || {}}
+              event="admin:setBrandImage"
+            />
           </div>
-          <Branding
-            id={r.id}
-            brand={r.brand_image || ""}
-            brandImages={r.brand_images || {}}
-            event="admin:setBrandImage"
-          />
-        </div>
-      </div>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

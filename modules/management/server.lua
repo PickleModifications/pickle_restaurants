@@ -134,6 +134,7 @@ lib.callback.register("pickle_restaurants:management:setGrade", function(src, d)
     local grade = math.max(0, math.min(maxGrade(roles), tonumber(d.grade) or 0))
     MySQL.update.await("UPDATE pickle_restaurant_employees SET grade = ? WHERE restaurant_id = ? AND identifier = ?", { grade, id, d.identifier })
     emp.grade = grade
+    ShowNotification(src, "Employee role saved.")
     return { ok = true, grade = grade }
 end)
 
@@ -145,6 +146,7 @@ lib.callback.register("pickle_restaurants:management:setCommission", function(sr
     local rate = math.max(0, math.min(100, tonumber(d.commission) or 0))
     MySQL.update.await("UPDATE pickle_restaurant_employees SET commission_rate = ? WHERE restaurant_id = ? AND identifier = ?", { rate, id, d.identifier })
     emp.commission_rate = rate
+    ShowNotification(src, "Commission saved.")
     return { ok = true }
 end)
 
@@ -159,6 +161,7 @@ lib.callback.register("pickle_restaurants:management:saveMenuItem", function(src
         VALUES (?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE label = VALUES(label), price = VALUES(price), category = VALUES(category), enabled = VALUES(enabled)
     ]], { id, d.item, d.label or d.item, tonumber(d.price) or 0, d.category or "food", d.enabled and 1 or 0 })
+    ShowNotification(src, "Menu item saved.")
     return { ok = true }
 end)
 
@@ -166,6 +169,7 @@ lib.callback.register("pickle_restaurants:management:deleteMenuItem", function(s
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_menu") then return { ok = false, error = "No permission." } end
     MySQL.update.await("DELETE FROM pickle_restaurant_menu WHERE restaurant_id = ? AND item = ?", { id, d.item })
+    ShowNotification(src, "Menu item removed.")
     return { ok = true }
 end)
 
@@ -242,5 +246,7 @@ end
 lib.callback.register("pickle_restaurants:management:setBrandImage", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_props") then return { ok = false, error = "No permission." } end
-    return SetRestaurantBrand(id, d.key, d.url, d.crop)
+    local res = SetRestaurantBrand(id, d.key, d.url, d.crop)
+    if res and res.ok then ShowNotification(src, "Branding saved.") end
+    return res
 end)

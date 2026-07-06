@@ -464,6 +464,75 @@ local function recipeForOutput(item)
     end
 end
 
+-- ─── tray expiration (freshness) ─────────────────────────────────────────────
+-- How long (seconds) a collected item stays fresh in the tray: the recipe's own
+-- `expire_seconds` if set (NULL = fall through), else the global default setting.
+-- 0 = never expires. Non-recipe items (assembled products, meals, drinks) only use
+-- the global default.
+local function ExpireSecondsFor(item)
+    local r = recipeForOutput(item)
+    if r and r.expire_seconds ~= nil then
+        local n = tonumber(r.expire_seconds)
+        if n and n >= 0 then return n end
+    end
+    return math.max(0, math.floor(tonumber(GetSetting("cooked_expire_seconds", 0)) or 0))
+end
+
+-- The epoch second a tray row expires at, or nil if it never expires.
+local function TrayExpiresAt(item, cookedAt)
+    local secs = ExpireSecondsFor(item)
+    if secs <= 0 or not cookedAt or cookedAt <= 0 then return nil end
+    return cookedAt + secs
+end
+
+-- Drop every spoiled row from one player's tray (cache + DB). Returns true if it
+-- removed anything (so callers can resync). Uses GetTray's grouped entries only for
+-- the cookedAt/item; removal is by the full (item, cheese) row.
+local function PurgeExpiredTray(rid, identifier)
+    local byKey = TrayCache[rid] and TrayCache[rid][identifier]
+    if not byKey then return false end
+    local now = os.time()
+    local removed = false
+    -- collect first (don't mutate while iterating), then remove whole rows
+    local spoiled = {}
+    for _, e in pairs(byKey) do
+        local exp = TrayExpiresAt(e.item, e.cookedAt)
+        if exp and now >= exp and (e.count or 0) > 0 then
+            spoiled[#spoiled + 1] = { item = e.item, cheese = e.cheese, count = e.count }
+        end
+    end
+    for _, s in ipairs(spoiled) do
+        if RemoveTray(rid, identifier, s.item, s.cheese, s.count) then removed = true end
+    end
+    return removed
+end
+
+-- The online source for an identifier, or nil (offline). GetPlayers() returns
+-- string ids; GetIdentifier resolves each to its framework identifier.
+local function sourceForIdentifier(identifier)
+    for _, src in ipairs(GetPlayers()) do
+        local s = tonumber(src)
+        if s and GetIdentifier(s) == identifier then return s end
+    end
+end
+
+-- Sweep every tray periodically so food spoils even when no one has the station
+-- open. When a sweep clears anything for an ONLINE player, nudge them to re-fetch
+-- the tray so the NUI drops it (the client also counts down locally between sweeps).
+CreateThread(function()
+    while true do
+        Wait(15000)
+        for rid, byId in pairs(TrayCache or {}) do
+            for identifier in pairs(byId) do
+                if PurgeExpiredTray(rid, identifier) then
+                    local src = sourceForIdentifier(identifier)
+                    if src then TriggerClientEvent("pickle_restaurants:cooking:trayDirty", src) end
+                end
+            end
+        end
+    end
+end)
+
 -- Prepend a recipe's container tray to a cooked/burnt output's render stack, so a
 -- containered bake (the cake sheet in its tin) renders as container + food
 -- everywhere it appears. Returns the (possibly created) stack, or nil untouched.
@@ -489,6 +558,30 @@ local function withLid(item, models, baseModel)
     return models
 end
 
+-- A "side" (fries…) is served INSIDE a container box — kitchen equipment like the
+-- drink lid (no inventory item; visual-only). The box is the BASE layer (food sits
+-- in it), so it prepends to the build stack the way the cake tin does in
+-- withContainer. Returns models untouched for anything that isn't a listed side.
+local function withSideContainer(item, models, baseModel)
+    local box = GetSetting("side_container_model", "pickle_side_container_01")
+    if not box or box == "" then return models end
+    local isSide = false
+    for _, s in ipairs(GetSetting("side_container_items", {})) do
+        if s == item then isSide = true break end
+    end
+    if not isSide then return models end
+    models = models or { baseModel }
+    table.insert(models, 1, box) -- box first = the base the serving rests in
+    return models
+end
+
+-- The serving-container stack a bare collected item renders as: a drink's cup+lid,
+-- a side's box+food. Visual-only equipment either way. nil for anything served
+-- bare (so callers keep whatever stack they already built).
+local function servedStack(item, baseModel)
+    return withLid(item, nil, baseModel) or withSideContainer(item, nil, baseModel)
+end
+
 -- How a finished (frosted…) item renders: replace-mode = the recorded flavor's
 -- model IS the whole product; overlay-mode = the target's prop with the flavor
 -- model stacked on top. Falls back like itemModel when the meta carries no flavor.
@@ -497,8 +590,21 @@ local function finishRender(item, meta)
     local target = finishForOutput(item)
     if not target then return nil, nil end
     local fl = metaFlavor(target, meta) or (target.flavors or {})[1]
+    -- Applied OVER another finished product (e.g. sprinkles on a frosted doughnut):
+    -- render that nested product's whole tower as the base so its flavor (the
+    -- frosting) still shows, then stack this flavor (the sprinkles) on top of it.
+    local nested = type(meta) == "table" and meta[1] and meta[1].stack
+    local baseStack
+    if type(nested) == "table" and nested[1] and nested[1].flavor and finishForOutput(target.item) then
+        local nm, ns = finishRender(target.item, nested)
+        baseStack = ns or (nm and { nm }) or nil
+    end
     local base = itemModel(target.item)
     if (target.mode or "replace") == "overlay" then
+        if baseStack then
+            if fl and fl.model then baseStack[#baseStack + 1] = fl.model end
+            return nil, baseStack
+        end
         if fl and fl.model and base then return nil, { base, fl.model } end
         return base, nil
     end
@@ -544,9 +650,9 @@ local function compSpec(c)
             spec.stack = models
         end
     end
-    -- a collected drink is capped: render cup + lid, never the bare cup
+    -- a collected drink renders cup+lid, a side renders in its box — never bare
     if not spec.stack and spec.model then
-        spec.stack = withLid(c.item, nil, spec.model)
+        spec.stack = servedStack(c.item, spec.model)
     end
     return spec
 end
@@ -914,7 +1020,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
                 door = door, slot = slot, state = it.state, stack = it.stack })
             armGateTimer(it)
             broadcastGate(it)
-            return { ok = true }
+            return { ok = true, uid = uid }
         end
 
         consume()
@@ -934,7 +1040,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
             CookingItems[uid] = it
             broadcastDual(it)
             armSideTimer(it)
-            return { ok = true }
+            return { ok = true, uid = uid }
         end
 
         it.state, it.model = "raw", recipe.raw_model
@@ -950,7 +1056,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
                 TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, c2.model, c2.state)
             end)
         end)
-        return { ok = true }
+        return { ok = true, uid = uid }
 
     elseif station == "soda_machine" and d.kind == "drink" then
         -- A cup seats under a tap (slot placement, like a fryer basket). Nothing
@@ -981,7 +1087,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         CookingItems[uid] = it
         TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, sodaSpawnPayload(it))
         broadcastSoda(it)
-        return { ok = true }
+        return { ok = true, uid = uid }
 
     elseif station == "kitchen_prep" and d.kind == "assembly" then
         local asm = findAssembly(d.item)
@@ -993,7 +1099,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         it.kind, it.output, it.state, it.model = "assembly", asm.output, "done", asm.model
         CookingItems[uid] = it
         broadcastSpawn(it)
-        return { ok = true }
+        return { ok = true, uid = uid }
     end
 
     return { ok = false, error = "Invalid action." }
@@ -1268,6 +1374,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
     local prop = PropCache[tonumber(d.prop_id)]
     if not prop then return {} end
     if not HasPerm(prop.restaurant_id, src, "cook") then return {} end
+    PurgeExpiredTray(prop.restaurant_id, GetIdentifier(src)) -- drop spoiled rows before listing
     local list = GetTray(prop.restaurant_id, GetIdentifier(src))
     local mealItem = MealItem()
     -- At the prep table, cooked items placed on a build are spoken for — subtract
@@ -1340,6 +1447,8 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 local fl = metaFlavor(ftarget, e.meta)
                 if fl then e.flavorLabel = fl.label or fl.id end
             end
+            -- a collected drink renders cup+lid, a side renders in its box — never bare
+            if not e.stack then e.stack = servedStack(e.item, e.model) end
             -- how this variation differs from the base recipe (its toppings), plus
             -- the full component list for the hover tooltip
             if e.meta and not ftarget then
@@ -1347,6 +1456,12 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 e.comps  = stackComponents(e.meta)
             end
             e.meta = nil -- the NUI keys variations by sig; no need to ship the raw stack
+            -- freshness clock: SECONDS LEFT until this item spoils (nil = never). Sent as
+            -- a remaining count, not an epoch, so the NUI counts down against its own
+            -- clock (no server-time sync needed) and re-syncs on each tray refresh.
+            local exp = TrayExpiresAt(e.item, e.cookedAt)
+            e.expiresIn = exp and math.max(0, exp - os.time()) or nil
+            e.cookedAt = nil
             out[#out + 1] = e
         end
     end
@@ -1404,6 +1519,18 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                     local fl = metaFlavor(ftarget, v.meta)
                     if fl then entry.flavorLabel = fl.label or fl.id end
                 end
+                -- An inventory-held assembled product (a burger, an uncooked pizza) can be
+                -- taken apart on the prep table exactly like a tray one — drop it, add/remove
+                -- toppings, rebuild. Without this it drops as ONE solid part, so a topping
+                -- added to it can't merge and the rebuild forms no recipe (it re-adds the
+                -- same item unchanged). Mirrors the tray path; a finished/frosted instance
+                -- is terminal (never comes apart).
+                local isFinishedInv = ftarget ~= nil and type(v.meta) == "table" and v.meta[1] ~= nil and v.meta[1].flavor ~= nil
+                if prop.prop_type == "kitchen_prep" and findAssembly(item) and not isFinishedInv then
+                    entry.decompose = true
+                end
+                -- a collected drink renders cup+lid, a side renders in its box — never bare
+                if not entry.stack then entry.stack = servedStack(item, entry.model) end
                 if v.meta and not ftarget then
                     entry.extras = extrasComponents(item, v.meta)
                     entry.comps  = stackComponents(v.meta)

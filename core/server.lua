@@ -51,6 +51,11 @@ local DEFAULT_SETTINGS = {
     starting_balance = 0,
     default_commission = 10,
     cheese_melt_ms  = 8000, -- how long applied cheese takes to melt on a patty
+    -- Global default freshness window (seconds) for collected cooked items in the
+    -- tray before they spoil and are swept. Default 900 = 15 minutes; 0 = never
+    -- expire. A recipe's own `expire_seconds` overrides this per item (NULL on a
+    -- recipe = use this default).
+    cooked_expire_seconds = 900,
     -- The inventory item a serving-tray arrangement becomes at kitchen prep. The
     -- meal's metadata records every item WITH its position on the tray, so it
     -- re-renders 1:1 wherever it's set back down. The item is what gets GENERATED
@@ -91,6 +96,14 @@ local DEFAULT_SETTINGS = {
     -- equipment like the serving tray (no inventory item; cups come with lids),
     -- only its world model is configurable.
     drink_lid_model = "pickle_drink_lid_01",
+    -- Sides (fries…) are served IN a container box — kitchen equipment like the drink
+    -- lid (no inventory item; visual-only). `side_container_model` is the box prop;
+    -- `side_container_items` lists the collected item(s) rendered inside it. The box
+    -- prepends to the item's build stack, so a served side shows box + food as ONE
+    -- unit everywhere (bar, dragged, placed, meal layer) — never a bare loose serving.
+    -- Add nuggets (cooked_nuggets/burnt_nuggets) here to box them too.
+    side_container_model = "pickle_side_container_01",
+    side_container_items = { "cooked_fries", "burnt_fries" },
     soda_ice_ms     = 1500, -- how long the middle (ice) nozzle takes to dispense
     -- World prop for a prep component that isn't a cook/assembly/drink output (raw
     -- veg, toppings, doughs…). Any item mapped here becomes a real 3D prop you can
@@ -164,6 +177,20 @@ local DEFAULT_SETTINGS = {
                 { id = "glazed",     label = "Glazed",     model = "pickle_doughnut_topping_03", color = "#f0c36d" },
                 { id = "vanilla",    label = "Vanilla",    model = "pickle_doughnut_topping_04", color = "#f3e5ab" },
                 { id = "pickle",     label = "Pickle",     model = "pickle_doughnut_topping_05", color = "#65a30d" },
+              } },
+          } },
+        -- Sprinkles: a second finish tool, DONUTS ONLY, and only AFTER frosting — its
+        -- one target is `frosted_doughnut` (the frosting output), so a plain cooked
+        -- doughnut can't be sprinkled. Overlay-mode, so the sprinkles ride on top of
+        -- the frosted doughnut and the frosting still shows through (finishRender
+        -- composes the nested tower). `sprinkled_doughnut` is the generated output
+        -- item; `pickle_doughnut_sprinkles_01` is a best-guess prop — correct it in
+        -- the finishes setting if your sprinkles model is named differently.
+        { tool = "sprinkles", tool_model = "pickle_sprinkles_tube_01", rub_dist = 1.2,
+          targets = {
+            { item = "frosted_doughnut", output = "sprinkled_doughnut", mode = "overlay",
+              flavors = {
+                { id = "sprinkles", label = "Sprinkles", model = "pickle_doughnut_sprinkles_01", color = "#f472b6" },
               } },
           } },
     },
@@ -291,6 +318,10 @@ local function CreateTables()
             -- optional container prop the food cooks in (cake tin, cookie tray…):
             -- rendered under the cook models everywhere, purely visual, never an item
             `container_model`    VARCHAR(80)  DEFAULT NULL,
+            -- how long (seconds) a collected cooked/burnt item of this recipe stays
+            -- fresh in the tray before it spoils; NULL = use the global default
+            -- (`cooked_expire_seconds` setting), 0 = never expires.
+            `expire_seconds`     INT          DEFAULT NULL,
             PRIMARY KEY (`id`),
             UNIQUE KEY `uniq_input` (`input_item`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -339,6 +370,9 @@ local function CreateTables()
             -- assembled product remembers what actually went into it — alterations and
             -- cheese states included — and can be taken back apart faithfully.
             `metadata`      JSON         DEFAULT NULL,
+            -- UNIX seconds the row's items were cooked (freshness clock for expiration);
+            -- set when the row is created, preserved as more are stacked onto it.
+            `cooked_at`     BIGINT       NOT NULL DEFAULT 0,
             PRIMARY KEY (`id`),
             UNIQUE KEY `uniq_tray` (`restaurant_id`, `identifier`, `item`, `cheese`),
             KEY `idx_rest_id` (`restaurant_id`, `identifier`)
@@ -431,6 +465,26 @@ local function CreateTables()
         MySQL.query.await(
             "ALTER TABLE `pickle_restaurant_cooked_items` ADD COLUMN `metadata` JSON DEFAULT NULL")
     end
+
+    -- Optional per-recipe freshness window (expiration). Added in place for servers
+    -- that predate the column; NULL means "use the global cooked_expire_seconds".
+    local expCol = MySQL.query.await("SHOW COLUMNS FROM `pickle_restaurant_recipes` LIKE 'expire_seconds'")
+    if not expCol or #expCol == 0 then
+        MySQL.query.await(
+            "ALTER TABLE `pickle_restaurant_recipes` ADD COLUMN `expire_seconds` INT DEFAULT NULL")
+    end
+
+    -- The tray freshness clock. Added in place for servers that predate it.
+    local caCol = MySQL.query.await("SHOW COLUMNS FROM `pickle_restaurant_cooked_items` LIKE 'cooked_at'")
+    if not caCol or #caCol == 0 then
+        MySQL.query.await(
+            "ALTER TABLE `pickle_restaurant_cooked_items` ADD COLUMN `cooked_at` BIGINT NOT NULL DEFAULT 0")
+    end
+    -- Backfill any row that still has no freshness clock (0) to "now" — both the
+    -- one-time column add above and any pre-existing tray items — so existing cooked
+    -- items get a fresh window on upgrade instead of an instant spoil (0 = never).
+    -- Idempotent: new AddTray rows always store a non-zero cooked_at.
+    MySQL.query.await("UPDATE `pickle_restaurant_cooked_items` SET `cooked_at` = UNIX_TIMESTAMP() WHERE `cooked_at` = 0")
 end
 
 -- ─── loaders ─────────────────────────────────────────────────────────────────
@@ -529,6 +583,16 @@ local function LoadSettings()
             if changed then SetSetting("drinks", dr) end
         end
         SetSetting("soda_colors_seeded", true)
+    end
+
+    -- One-time: the cooked-item expiry default shipped as 0 (never) before it became
+    -- 15 minutes. Bump servers still on the old 0 default up to the real default —
+    -- flag-gated so an admin who deliberately sets 0 later isn't overridden.
+    if not GetSetting("cooked_expire_default_seeded", false) then
+        if (tonumber(GetSetting("cooked_expire_seconds", 0)) or 0) == 0 then
+            SetSetting("cooked_expire_seconds", DEFAULT_SETTINGS.cooked_expire_seconds or 900)
+        end
+        SetSetting("cooked_expire_default_seeded", true)
     end
 
     -- One-time: pepperoni became an optional topping rather than a required pizza
@@ -663,7 +727,8 @@ local function LoadCookedItems()
             TrayCache[row.restaurant_id] = TrayCache[row.restaurant_id] or {}
             TrayCache[row.restaurant_id][row.identifier] = TrayCache[row.restaurant_id][row.identifier] or {}
             TrayCache[row.restaurant_id][row.identifier][row.item .. "|" .. cheese] =
-                { item = row.item, cheese = cheese, count = row.count, metas = dec(row.metadata, {}) }
+                { item = row.item, cheese = cheese, count = row.count, metas = dec(row.metadata, {}),
+                  cookedAt = tonumber(row.cooked_at) or 0 }
         end
     end
 end
@@ -956,15 +1021,18 @@ function AddTray(rid, identifier, item, cheese, count, meta)
     local key = trayKey(item, cheese)
     local e = TrayCache[rid][identifier][key]
     if not e then
-        e = { item = item, cheese = cheese, count = 0, metas = {} }
+        -- new row: stamp the freshness clock now. Topping up an existing row PRESERVES
+        -- its clock (the SQL update below leaves cooked_at alone), so a stack still
+        -- expires from when it was first cooked instead of resetting on every add.
+        e = { item = item, cheese = cheese, count = 0, metas = {}, cookedAt = os.time() }
         TrayCache[rid][identifier][key] = e
     end
     e.metas = e.metas or {}
     e.count = e.count + count
     for _ = 1, count do e.metas[#e.metas + 1] = meta or false end
-    MySQL.update("INSERT INTO pickle_restaurant_cooked_items (restaurant_id, identifier, item, cheese, count, metadata) "
-        .. "VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE count = count + VALUES(count), metadata = VALUES(metadata)",
-        { rid, identifier, item, cheese, count, json.encode(e.metas) })
+    MySQL.update("INSERT INTO pickle_restaurant_cooked_items (restaurant_id, identifier, item, cheese, count, metadata, cooked_at) "
+        .. "VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE count = count + VALUES(count), metadata = VALUES(metadata)",
+        { rid, identifier, item, cheese, count, json.encode(e.metas), e.cookedAt or os.time() })
 end
 
 function RemoveTray(rid, identifier, item, cheese, count, sig)
@@ -1020,7 +1088,7 @@ function GetTray(rid, identifier)
             for _, s in ipairs(order) do
                 out[#out + 1] = {
                     item = e.item, cheese = e.cheese, count = groups[s].count,
-                    sig = s, meta = groups[s].meta,
+                    sig = s, meta = groups[s].meta, cookedAt = e.cookedAt or 0,
                     label = GetItemLabel(e.item), image = GetItemImage(e.item),
                 }
             end
@@ -1110,6 +1178,9 @@ function BuildSyncPayload()
         drinks   = drinks,
         assembly = assembly,
         finishes = finishes,
+        -- the side-serving container box (fries…) — shipped so the client can apply
+        -- the mesh-bottom base-lift correction when it's the base of a build stack
+        side_container_model = GetSetting("side_container_model", ""),
     } }
     for _, r in pairs(RestaurantCache) do payload.restaurants[#payload.restaurants + 1] = BuildClientRestaurant(r) end
     for _, p in pairs(PropCache) do payload.props[#payload.props + 1] = p end

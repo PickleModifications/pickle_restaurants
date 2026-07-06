@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchNui } from "@/lib/nui";
+import { useAutoSave } from "@/lib/autosave";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Field, TextField, NumberField, Select, Toggle } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
 import { cn } from "@/lib/utils";
-import { Plus, Trash2, Pencil, X, TriangleAlert, EyeOff, ImageOff, Boxes } from "lucide-react";
+import { Plus, Trash2, Pencil, X, TriangleAlert, EyeOff, ImageOff, Boxes, Check, Loader2 } from "lucide-react";
 
 type Recipe = {
   input_item: string; station: string;
@@ -16,6 +17,7 @@ type Recipe = {
   dual_sided?: boolean | number;
   method?: string; // grill | oven | fry
   container_model?: string; // optional prop the food cooks in (cake tin…), visual only
+  expire_seconds?: number | null; // freshness window in the tray; null/blank = global default, 0 = never
   valid?: boolean; missing?: string[];
   invalid_models?: string[];
 };
@@ -61,12 +63,20 @@ export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]
   const [form, setForm] = useState<Recipe | null>(null);
   const editing = !!form;
 
-  const save = async () => {
-    if (!form) return;
-    await fetchNui("admin:saveRecipe", form);
-    setForm(null);
-    onSaved();
-  };
+  // The JSON of the form as it was last persisted, so auto-save only fires on a real
+  // change (not just opening the editor, and not repeatedly for the same value).
+  const lastSaved = useRef<string>("");
+  const openEditor = (r: Recipe) => { lastSaved.current = JSON.stringify(r); setForm(r); };
+
+  // Debounced auto-save — no Save button. Only writes once the recipe has an
+  // input_item (the server requires it) and the form actually changed.
+  const status = useAutoSave(() => {
+    if (!form || !form.input_item) return;
+    const json = JSON.stringify(form);
+    if (json === lastSaved.current) return;
+    lastSaved.current = json;
+    return Promise.resolve(fetchNui("admin:saveRecipe", form)).then(() => onSaved());
+  }, [form]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -75,20 +85,24 @@ export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]
           Cookable recipes. Items are picked from the server catalogue — a recipe with a missing item is flagged and hidden in-game until fixed.
         </p>
         {!editing && (
-          <Button size="sm" onClick={() => setForm({ ...BLANK })}><Plus className="h-4 w-4" /> New recipe</Button>
+          <Button size="sm" onClick={() => openEditor({ ...BLANK })}><Plus className="h-4 w-4" /> New recipe</Button>
         )}
       </div>
 
       {editing && (
         <div className="shrink-0 rounded-lg border border-primary/40 bg-primary/5 p-3">
           <div className="mb-2 flex items-center justify-between">
-            <span className="text-sm font-semibold">{form!.input_item ? "Edit recipe" : "New recipe"}</span>
+            <span className="flex items-center gap-2 text-sm font-semibold">
+              {form!.input_item ? "Edit recipe" : "New recipe"}
+              {status === "saving" && <span className="flex items-center gap-1 text-xs font-normal text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> Saving…</span>}
+              {status === "saved" && <span className="flex items-center gap-1 text-xs font-normal text-muted-foreground"><Check className="h-3 w-3 text-primary" /> Saved</span>}
+              {!form!.input_item && <span className="text-xs font-normal text-muted-foreground">— pick an input item to start saving</span>}
+            </span>
             <Button size="icon" variant="ghost" onClick={() => setForm(null)}><X className="h-4 w-4" /></Button>
           </div>
           <RecipeForm form={form!} setForm={setForm} items={items} />
-          <div className="mt-3 flex justify-end gap-2">
-            <Button size="sm" variant="outline" onClick={() => setForm(null)}>Cancel</Button>
-            <Button size="sm" disabled={!form!.input_item} onClick={save}>Save recipe</Button>
+          <div className="mt-3 flex justify-end">
+            <Button size="sm" variant="outline" onClick={() => setForm(null)}>Done</Button>
           </div>
         </div>
       )}
@@ -132,7 +146,7 @@ export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]
                 </div>
               </div>
               <div className="flex shrink-0 gap-2">
-                <Button size="sm" variant="outline" onClick={() => setForm({ ...BLANK, ...r })}><Pencil className="h-4 w-4" /></Button>
+                <Button size="sm" variant="outline" onClick={() => openEditor({ ...BLANK, ...r })}><Pencil className="h-4 w-4" /></Button>
                 <Button size="sm" variant="destructive" onClick={async () => { await fetchNui("admin:deleteRecipe", { input_item: r.input_item }); onSaved(); }}>
                   <Trash2 className="h-4 w-4" />
                 </Button>
@@ -197,6 +211,10 @@ function RecipeForm({ form, setForm, items }: { form: Recipe; setForm: (r: Recip
       <NumberField label="Output count (per cook)" value={form.output_count ?? 1} min={1} step={1}
         onChange={(v) => set("output_count", v)} />
       {modelField("Container model (optional — cooks inside it)", "container_model")}
+      <TextField label="Expiry (seconds — blank = default, 0 = never)"
+        hint="How long the cooked item stays fresh in the tray before it spoils."
+        value={form.expire_seconds == null ? "" : String(form.expire_seconds)}
+        onChange={(v) => set("expire_seconds", (v === "" ? null : Number(v)) as never)} />
       {form.station === "stovetop" && (
         <div className="col-span-3">
           <Toggle checked={!!form.dual_sided} onChange={(v) => set("dual_sided", v)}

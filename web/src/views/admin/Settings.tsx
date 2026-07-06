@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { fetchNui } from "@/lib/nui";
+import { useAutoSave, type SaveStatus } from "@/lib/autosave";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Field, TextField, NumberField, Toggle, Select } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
 import { cn } from "@/lib/utils";
 import {
-  Settings2, Coins, Users, Bot, CupSoda, Sandwich, MapPin, Plus, Trash2, Save, Check, TriangleAlert,
+  Settings2, Coins, Users, Bot, CupSoda, Sandwich, MapPin, Plus, Trash2, Check, Loader2, TriangleAlert,
 } from "lucide-react";
 
 const PERMISSIONS = [
@@ -64,18 +65,13 @@ export default function Settings({ settings, items, onSaved }: Props) {
   );
 }
 
-/** Section frame with a title and a sticky save button that confirms on click. */
+/** Section frame with a title and an auto-save status hint (no Save button — edits
+ * persist automatically, debounced). */
 function Section({
-  title, description, onSave, children,
+  title, description, status, children,
 }: {
-  title: string; description?: string; onSave: () => Promise<void> | void; children: React.ReactNode;
+  title: string; description?: string; status?: SaveStatus; children: React.ReactNode;
 }) {
-  const [saved, setSaved] = useState(false);
-  const save = async () => {
-    await onSave();
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1500);
-  };
   return (
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-3">
@@ -83,26 +79,43 @@ function Section({
           <h3 className="text-sm font-semibold">{title}</h3>
           {description && <p className="text-xs text-muted-foreground">{description}</p>}
         </div>
-        <Button size="sm" onClick={save}>
-          {saved ? <><Check className="h-4 w-4" /> Saved</> : <><Save className="h-4 w-4" /> Save</>}
-        </Button>
+        <SaveStatusHint status={status} />
       </div>
       {children}
     </div>
   );
 }
 
-const saveSetting = (key: string, value: any) => fetchNui("admin:saveSetting", { key, value });
+function SaveStatusHint({ status }: { status?: SaveStatus }) {
+  if (!status || status === "idle") return <span className="text-xs text-muted-foreground/60">Auto-saves</span>;
+  return (
+    <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+      {status === "saving"
+        ? <><Loader2 className="h-3 w-3 animate-spin" /> Saving…</>
+        : <><Check className="h-3 w-3 text-primary" /> Saved</>}
+    </span>
+  );
+}
+
+// Batched save: the whole group's keys go up together, so an auto-save writes once
+// (one sync + one in-game "Settings saved." notification), not per field.
+const saveSettings = (obj: Record<string, any>) => fetchNui("admin:saveSettings", { settings: obj });
 
 function General({ settings, onSaved }: { settings: any; onSaved: () => void }) {
   const [cmd, setCmd] = useState(settings.admin_command ?? "restaurants");
+  const [expire, setExpire] = useState(Number(settings.cooked_expire_seconds ?? 0));
+  const status = useAutoSave(
+    () => saveSettings({ admin_command: cmd, cooked_expire_seconds: Math.max(0, Math.floor(expire || 0)) }).then(onSaved),
+    [cmd, expire]
+  );
   return (
-    <Section
-      title="General"
-      description="Core command and behaviour."
-      onSave={async () => { await saveSetting("admin_command", cmd); onSaved(); }}
-    >
+    <Section title="General" description="Core command and behaviour." status={status}>
       <TextField label="Admin command" hint="Chat command admins run to open this panel." value={cmd} onChange={setCmd} />
+      <NumberField
+        label="Cooked item expiry (seconds)"
+        hint="Default freshness window for collected cooked items before they spoil in the tray. 0 = never. A recipe's own expiry overrides this."
+        value={expire} min={0} step={10} onChange={setExpire}
+      />
     </Section>
   );
 }
@@ -111,17 +124,12 @@ function Economy({ settings, onSaved }: { settings: any; onSaved: () => void }) 
   const [currency, setCurrency] = useState(settings.currency ?? "money");
   const [starting, setStarting] = useState(Number(settings.starting_balance ?? 0));
   const [commission, setCommission] = useState(Number(settings.default_commission ?? 10));
+  const status = useAutoSave(
+    () => saveSettings({ currency, starting_balance: starting, default_commission: commission }).then(onSaved),
+    [currency, starting, commission]
+  );
   return (
-    <Section
-      title="Economy"
-      description="Currency, opening balance and the fallback commission rate."
-      onSave={async () => {
-        await saveSetting("currency", currency);
-        await saveSetting("starting_balance", starting);
-        await saveSetting("default_commission", commission);
-        onSaved();
-      }}
-    >
+    <Section title="Economy" description="Currency, opening balance and the fallback commission rate." status={status}>
       <div className="grid grid-cols-2 gap-3">
         <Select
           label="Currency"
@@ -159,18 +167,17 @@ function Roles({ settings, onSaved }: { settings: any; onSaved: () => void }) {
   };
   const removeRole = (i: number) => setRoles((rs) => rs.filter((_, idx) => idx !== i));
 
+  const status = useAutoSave(() => {
+    const map: Record<string, any> = {};
+    roles.forEach((r) => { map[String(r.grade)] = { label: r.label, commission: r.commission, permissions: r.permissions }; });
+    return saveSettings({ default_roles: map }).then(onSaved);
+  }, [roles]);
+
   return (
     <Section
       title="Default Roles"
       description="The role ladder new restaurants start with. Owners can customise their own later."
-      onSave={async () => {
-        const map: Record<string, any> = {};
-        roles.forEach((r) => {
-          map[String(r.grade)] = { label: r.label, commission: r.commission, permissions: r.permissions };
-        });
-        await saveSetting("default_roles", map);
-        onSaved();
-      }}
+      status={status}
     >
       <div className="space-y-3">
         {roles.map((r, i) => (
@@ -212,12 +219,13 @@ function Npc({ settings, onSaved }: { settings: any; onSaved: () => void }) {
   const [models, setModels] = useState<string[]>(Array.isArray(n.models) ? n.models : []);
   const [modelInput, setModelInput] = useState("");
 
+  const status = useAutoSave(
+    () => saveSettings({ npc: { enabled, max, interval, patience, models } }).then(onSaved),
+    [enabled, max, interval, patience, models]
+  );
+
   return (
-    <Section
-      title="NPC Customers"
-      description="Walk-in customers that queue at the counter."
-      onSave={async () => { await saveSetting("npc", { enabled, max, interval, patience, models }); onSaved(); }}
-    >
+    <Section title="NPC Customers" description="Walk-in customers that queue at the counter." status={status}>
       <Toggle checked={enabled} onChange={setEnabled} label="Spawn NPC customers" />
       <div className="grid grid-cols-3 gap-3">
         <NumberField label="Max at once" value={max} min={0} onChange={setMax} />
@@ -256,12 +264,12 @@ function Blip({ settings, onSaved }: { settings: any; onSaved: () => void }) {
   const [sprite, setSprite] = useState(Number(b.sprite ?? 93));
   const [color, setColor] = useState(Number(b.color ?? 1));
   const [scale, setScale] = useState(Number(b.scale ?? 0.8));
+  const status = useAutoSave(
+    () => saveSettings({ blip: { enabled, sprite, color, scale } }).then(onSaved),
+    [enabled, sprite, color, scale]
+  );
   return (
-    <Section
-      title="Map Blip"
-      description="Default blip applied to new restaurants."
-      onSave={async () => { await saveSetting("blip", { enabled, sprite, color, scale }); onSaved(); }}
-    >
+    <Section title="Map Blip" description="Default blip applied to new restaurants." status={status}>
       <Toggle checked={enabled} onChange={setEnabled} label="Show blip on the map" />
       <div className="grid grid-cols-3 gap-3">
         <NumberField label="Sprite" value={sprite} min={0} onChange={setSprite} />
@@ -287,11 +295,12 @@ function Drinks({ settings, items, onSaved }: { settings: any; items: Item[]; on
   const update = (i: number, patch: any) => setList((l) => l.map((d, idx) => (idx === i ? { ...d, ...patch } : d)));
   const add = () => setList((l) => [...l, { input: "", output: "", label: "", model: "pickle_drink_container_01", fill_ms: 3000 }]);
   const has = (name: string) => !name || items.some((it) => it.name === name);
+  const status = useAutoSave(() => saveSettings({ drinks: list }).then(onSaved), [list]);
   return (
     <Section
       title="Drinks"
       description="Soda-machine taps: the first six drinks appear left-to-right on the fountain (the middle nozzle always dispenses ice). A cup item is filled at the tap into the drink item."
-      onSave={async () => { await saveSetting("drinks", list); onSaved(); }}
+      status={status}
     >
       <div className="space-y-3">
         {list.map((d, i) => {
@@ -329,11 +338,12 @@ function Assembly({ settings, items, onSaved }: { settings: any; items: Item[]; 
   const update = (i: number, patch: any) => setList((l) => l.map((a, idx) => (idx === i ? { ...a, ...patch } : a)));
   const add = () => setList((l) => [...l, { output: "", label: "", model: "pickle_bread_bun_01", components: [] }]);
   const has = (name: string) => !name || items.some((it) => it.name === name);
+  const status = useAutoSave(() => saveSettings({ assembly: list }).then(onSaved), [list]);
   return (
     <Section
       title="Assembly"
       description="Kitchen-prep recipes: combine component items into a finished item."
-      onSave={async () => { await saveSetting("assembly", list); onSaved(); }}
+      status={status}
     >
       <div className="space-y-3">
         {list.map((a, i) => {

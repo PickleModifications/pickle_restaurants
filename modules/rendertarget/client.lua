@@ -33,11 +33,22 @@
 -- (equal to the model name for these props) and `txn` is the branded texture inside
 -- it. `w`/`h` is the DUI resolution = the aspect the image is cropped to. `key` is
 -- the stable id used by the config (per-texture URL + crop) and the debug commands.
+--
+-- ORIENTATION: some models' UVs run the branded texture rotated or mirrored, so a
+-- correctly-cropped image lands sideways/upside-down/backwards on the prop. Each entry
+-- carries an orientation that brand.html applies to the drawn image (a pure canvas
+-- transform — it does NOT change what the owner crops in the panel):
+--   rot   = 0 | 90 | 180 | 270   clockwise rotation of the image on the texture
+--   flipx = true                 mirror horizontally (fixes a back-facing UV)
+--   flipy = true                 mirror vertically
+-- Omit for "upright" (the default). Tune live with /pickle_brand_orient, then bake the
+-- number in here. rot 90/270 swaps which way the image is fitted, so keep the w/h aspect
+-- as the texture's real pixel aspect and let rot handle the turn.
 local TARGETS = {
-    { key = "pizza_box", txd = "pickle_pizza_box_02",       txn = "pizza_brand",              w = 1024, h = 1024 },
-    { key = "cup",       txd = "pickle_drink_container_01",  txn = "cup_brand",                w = 1024, h = 1792 },
-    { key = "tray",      txd = "pickle_tray_paper_01",       txn = "tray_paper",               w = 1792, h = 1024 },
-    { key = "side",      txd = "pickle_side_container_01",   txn = "side_container_brand_01",  w = 2304, h = 1024 },
+    { key = "pizza_box", txd = "pickle_pizza_box_02",       txn = "pizza_brand",              w = 1024, h = 1024, rot = 0, flipx = false, flipy = false },
+    { key = "cup",       txd = "pickle_drink_container_01",  txn = "cup_brand",                w = 1024, h = 1792, rot = 90, flipx = false, flipy = false },
+    { key = "tray",      txd = "pickle_tray_paper_01",       txn = "tray_paper",               w = 1792, h = 1024, rot = 180, flipx = false, flipy = false },
+    { key = "side",      txd = "pickle_side_container_01",   txn = "side_container_brand_01",  w = 2304, h = 1024, rot = 0, flipx = false, flipy = false },
 }
 local TARGET_BY_KEY = {}
 for _, t in ipairs(TARGETS) do TARGET_BY_KEY[t.key] = t end
@@ -77,9 +88,11 @@ local function pushToDui(t)
     local spec = t.cur
     if not spec then return end
     if spec.calib then
-        SendDuiMessage(t.dui, json.encode({ action = "calibrate", w = t.w, h = t.h, key = t.key }))
+        SendDuiMessage(t.dui, json.encode({ action = "calibrate", w = t.w, h = t.h, key = t.key,
+            rot = t.rot or 0, flipx = t.flipx or false, flipy = t.flipy or false }))
     else
-        SendDuiMessage(t.dui, json.encode({ action = "brand", url = spec.url or "", crop = spec.crop, w = t.w, h = t.h }))
+        SendDuiMessage(t.dui, json.encode({ action = "brand", url = spec.url or "", crop = spec.crop, w = t.w, h = t.h,
+            rot = t.rot or 0, flipx = t.flipx or false, flipy = t.flipy or false }))
     end
 end
 
@@ -236,6 +249,9 @@ end)
 -- /pickle_brand_res [key w h] — with no args, lists every target + its resolution;
 --   with a key + w + h, resizes that texture's DUI live so you can find the number
 --   that makes the calibration circle round, then bake it into TARGETS above.
+-- /pickle_brand_orient [key rot flipx flipy] — with no args, lists each target's
+--   orientation; with a key it sets rot (0/90/180/270) + optional flipx/flipy (0/1)
+--   live so you can turn the calibration "UP" arrow upright, then bake it into TARGETS.
 
 local DEBUG_COORD = vector3(-1190.8749, -891.9343, 14.8598)
 local debugProps  = {}
@@ -314,6 +330,29 @@ RegisterCommand("pickle_brand_res", function(_, args)
     recreateDui(t)
     print(("[brand] %s resized to %d x %d — bake this into TARGETS when it looks right")
         :format(t.key, t.w, t.h))
+end, false)
+
+RegisterCommand("pickle_brand_orient", function(_, args)
+    local key = args[1]
+    if not key then
+        print("[brand] texture orientations (bake the tuned values into TARGETS):")
+        for _, t in ipairs(TARGETS) do
+            print(("  %-10s rot=%-3d flipx=%s flipy=%s"):format(
+                t.key, t.rot or 0, tostring(t.flipx or false), tostring(t.flipy or false)))
+        end
+        print("[brand] usage: /pickle_brand_orient <key> <rot 0|90|180|270> [flipx 0|1] [flipy 0|1]")
+        return
+    end
+    local t = TARGET_BY_KEY[key]
+    if not t then return print(("[brand] unknown texture key '%s'"):format(key)) end
+    local rot = tonumber(args[2])
+    if not rot then return print("[brand] usage: /pickle_brand_orient <key> <rot 0|90|180|270> [flipx 0|1] [flipy 0|1]") end
+    t.rot   = (math.floor(rot / 90 + 0.5) * 90) % 360
+    t.flipx = (args[3] == "1" or args[3] == "true")
+    t.flipy = (args[4] == "1" or args[4] == "true")
+    pushToDui(t) -- w/h unchanged, so no DUI rebuild needed — just repaint
+    print(("[brand] %s orient rot=%d flipx=%s flipy=%s — bake this into TARGETS when the UP arrow points up")
+        :format(t.key, t.rot, tostring(t.flipx), tostring(t.flipy)))
 end, false)
 
 -- ─── teardown ────────────────────────────────────────────────────────────────

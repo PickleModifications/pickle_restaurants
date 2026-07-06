@@ -198,6 +198,7 @@ local function ApplySync(payload)
         Drinks   = payload.settings.drinks or {}
         Assembly = payload.settings.assembly or {}
         Finishes = payload.settings.finishes or {}
+        SideContainerModel = payload.settings.side_container_model or ""
     end
 
     for _, prop in ipairs(payload.props or {}) do

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { Badge } from "@/components/ui/badge";
-import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave, CircleDot, Search, Trash2, ChevronUp, ChevronDown } from "lucide-react";
+import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave, CircleDot, Search, Trash2, ChevronUp, ChevronDown, Timer } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // kind "finish" = a finish tool (frosting): flavors is picked on the card, then the
@@ -36,6 +36,10 @@ type TrayEntry = {
   flavorLabel?: string;
   // a burnt cook output — sorted to the back of the bar and offered the bin
   burnt?: boolean;
+  // freshness: seconds left until this item spoils when the tray was last fetched
+  // (absent = never expires). The card counts it down locally and shows a red timer
+  // in the final minute.
+  expiresIn?: number;
 };
 // A buildable recipe (kitchen prep) with its output + components resolved for the tooltip.
 type RecipeComp = { item: string; label: string; image?: string };
@@ -603,7 +607,35 @@ export default function Cooking({ data }: { data: any }) {
     setDragging(false);
     setDragHint(null);
   });
-  useNuiEvent("cookingTray", (d) => { setTray(d.tray || []); setBarTip(null); });
+  // when the tray was last fetched — the freshness countdown is measured from here
+  const [trayAt, setTrayAt] = useState(() => Date.now());
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useNuiEvent("cookingTray", (d) => { setTray(d.tray || []); setTrayAt(Date.now()); setBarTip(null); });
+  // 1s tick so the red expiry countdown updates while the panel is open
+  useEffect(() => {
+    const t = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  // seconds left before an entry spoils (null = never / already gone). Counts down
+  // locally from expiresIn measured at the last tray fetch.
+  const expirySecs = (e: TrayEntry): number | null => {
+    if (e.expiresIn == null) return null;
+    return Math.max(0, Math.round(e.expiresIn - (nowMs - trayAt) / 1000));
+  };
+  // M:SS for a minute or more, else Ns — a compact live countdown label
+  const fmtExpiry = (s: number): string =>
+    s >= 60 ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}` : `${s}s`;
+  // When a countdown reaches 0, ask the server to re-pull the tray (it purges spoiled
+  // rows on fetch) so the item drops immediately instead of waiting for the sweep.
+  // Throttled so a small client/server clock skew can't spin a tight refetch loop.
+  const lastReapRef = useRef(0);
+  useEffect(() => {
+    const anyExpired = tray.some((e) => { const s = expirySecs(e); return s != null && s <= 0; });
+    if (anyExpired && Date.now() - lastReapRef.current > 2500) {
+      lastReapRef.current = Date.now();
+      fetchNui("cooking:refreshTray");
+    }
+  }, [nowMs, tray, trayAt]);
   useNuiEvent("cookingRecipes", (d) => setRecipes(d.recipes || []));
   useNuiEvent("cookingItems", (d) => {
     const its: ChipItem[] = d.items || [];
@@ -1399,6 +1431,9 @@ export default function Cooking({ data }: { data: any }) {
               const cookHere = canCookHere(e);
               const fromInv = e.source === "inv";
               const cardKey = e.item + "|" + (e.cheese || 0) + "|" + (e.sig || "") + "|" + (e.source || "tray") + "|" + i;
+              // freshness: show a red countdown only in the final minute before it spoils
+              const secs = expirySecs(e);
+              const expiring = secs != null && secs > 0 && secs <= 59;
               return (
               <div
                 key={cardKey}
@@ -1430,11 +1465,6 @@ export default function Cooking({ data }: { data: any }) {
                 {/* hint chips pinned to the card's bottom edge — the actionable
                     buttons (Take / Discard) live on the hover tooltip instead */}
                 <div className="flex w-full flex-col items-center gap-0.5 pb-1.5">
-                  {isPrep && e.meal && (
-                    <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[9px] font-semibold text-primary">
-                      Drag to set down
-                    </span>
-                  )}
                   {cookHere && (
                     <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[9px] font-semibold text-primary">
                       {station === "fryer" ? "Drag into the basket" : "Drag into the oven"}
@@ -1442,8 +1472,20 @@ export default function Cooking({ data }: { data: any }) {
                   )}
                 </div>
                 <Badge variant="secondary" className="absolute right-1 top-1">{e.count}</Badge>
-                {/* origin marker (inventory item) + cheese state */}
+                {/* origin marker (inventory item) + cheese state + freshness countdown.
+                    The timer is always shown for a tray item that can spoil, red only
+                    in its final minute. */}
                 <div className="absolute left-1 top-1 flex items-center gap-0.5">
+                  {secs != null && (
+                    <span className={cn(
+                      "flex items-center gap-0.5 rounded px-1 py-px text-[9px] font-bold tabular-nums",
+                      expiring
+                        ? "bg-red-500/25 text-red-300 ring-1 ring-red-500/40"
+                        : "border border-border bg-background/70 text-muted-foreground"
+                    )}>
+                      <Timer className="h-2.5 w-2.5" />{fmtExpiry(secs)}
+                    </span>
+                  )}
                   {fromInv && (
                     <span className="rounded border border-border bg-background/70 px-1 py-px text-[8px] font-semibold uppercase tracking-wide text-muted-foreground">
                       Item

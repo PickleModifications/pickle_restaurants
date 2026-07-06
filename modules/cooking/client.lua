@@ -145,6 +145,10 @@ end
 -- below while still reading as a flat pizza. Tune in-game if layers look too spaced.
 local STACK_MIN_GAP = 0.008
 local function stackLayerHeight(model)
+    -- The side-serving container (fries box) holds its food at its OWN base — both
+    -- are bottom-origin, so the serving sits INSIDE the box, not stacked on top of
+    -- it. Zero stacking height means the next layer keeps the same base Z.
+    if SideContainerModel and SideContainerModel ~= "" and model == SideContainerModel then return 0.03 end
     return math.max(modelHeight(model), STACK_MIN_GAP)
 end
 
@@ -158,9 +162,11 @@ end
 local STACK_PHYS_MARGIN = 0.04
 local function stackBaseLift(model)
     if not model then return 0.0 end
-    local isContainer = false
-    for _, r in pairs(RecipesByInput or {}) do
-        if r.container_model == model then isContainer = true break end
+    local isContainer = SideContainerModel and SideContainerModel ~= "" and model == SideContainerModel
+    if not isContainer then
+        for _, r in pairs(RecipesByInput or {}) do
+            if r.container_model == model then isContainer = true break end
+        end
     end
     if not isContainer then return 0.0 end
     local mn = GetModelDimensions(EnsureModel(model))
@@ -321,6 +327,9 @@ local SODA = {
     cup_y    = -0.155,
     cup_z    = 1.121,
     tap_dz   = 0.231, -- clickable nozzle point above the cup seat
+    tap_click_r = 0.035, -- click radius (normalised screen) around the push button ONLY —
+                         -- deliberately much tighter than SLOT_SNAP_R so a click registers
+                         -- on the tap/ice button, not anywhere in the cup's vertical column
     pour_dy  = 0.018,   -- dispense mouth Y offset from the cup seat (render origin only)
     pour_dz  = 0.22,  -- dispense mouth height above the cup seat (render origin only)
 }
@@ -938,6 +947,7 @@ local function hoveredTapSlot(propId)
     local cnx = (sw > 0) and (cx / sw) or 0.0
     local cny = (sh > 0) and (cy / sh) or 0.0
     local best, bestD
+    local r = SODA.tap_click_r -- tight: the push button only, not the cup's whole column
     for slot = 1, SODA.slots do
         if sodaSlotLive(slot) then
             local w = sodaSlotWorld(propId, slot, true)
@@ -946,7 +956,7 @@ local function hoveredTapSlot(propId)
                 if on then
                     local dx, dy = sx - cnx, sy - cny
                     local d = dx * dx + dy * dy
-                    if d <= SLOT_SNAP_R * SLOT_SNAP_R and (not bestD or d < bestD) then best, bestD = slot, d end
+                    if d <= r * r and (not bestD or d < bestD) then best, bestD = slot, d end
                 end
             end
         end
@@ -1378,6 +1388,19 @@ local function RefreshTray()
     end
     SendNUIMessage({ action = "cookingTray", tray = tray })
 end
+
+-- the server swept spoiled items from our tray -> re-pull it so the NUI drops them.
+-- Registered here (after RefreshTray is defined) so the local is in scope.
+RegisterNetEvent("pickle_restaurants:cooking:trayDirty", function()
+    if cookingOpen and currentCookProp then RefreshTray() end
+end)
+
+-- the NUI's live countdown hit 0 on an item -> re-pull the tray immediately (getTray
+-- purges spoiled rows server-side) so it drops without waiting for the periodic sweep.
+RegisterNUICallback("cooking:refreshTray", function(_, cb)
+    if cookingOpen and currentCookProp then RefreshTray() end
+    cb({ ok = true })
+end)
 
 -- ─── interactive prep build (free-form stacking) ─────────────────────────────
 
@@ -2055,13 +2078,18 @@ function OpenCookingStation(prop)
                 if part then prepHoverPid = part.pid end
                 setOutline(sid, 255, 180, 40)
                 local stack = sid and PrepStacks[sid]
-                if stack then
+                -- A pile sitting ON a serving tray offers only the tray-level "Make
+                -- Meal", never a per-stack product make — so hovering it shows the
+                -- tray tooltip, not the recipe-make one.
+                local onTrayTid = (stack and stack.tid and PrepTrays[stack.tid]) and stack.tid or nil
+                if stack and not onTrayTid then
                     local on, sx, sy = GetScreenCoordFromWorldCoord(stack.x, stack.y, stackTopZ(stack))
                     prepTip = { sid = sid, onScreen = on, x = sx, y = sy, provides = stackProvides(stack) }
                 end
-                -- No part hovered: the serving tray itself (grab it to move / make the
-                -- meal). Its tooltip counts the items arranged on it.
-                prepHoverTid = (not sid) and pickTray() or nil
+                -- The serving tray's "Make Meal" tooltip: shown when the cursor is over
+                -- the tray itself OR over any pile arranged on it. Counts everything on
+                -- the tray.
+                prepHoverTid = onTrayTid or ((not sid) and pickTray()) or nil
                 setTrayOutline(prepHoverTid, 255, 180, 40)
                 if prepHoverTid then
                     local t = PrepTrays[prepHoverTid]
@@ -2287,8 +2315,14 @@ RegisterNUICallback("cooking:endPlace", function(d, cb)
         payload.x, payload.y, payload.z = p.coords.x, p.coords.y, p.coords.z
     end
     local res = lib.callback.await("pickle_restaurants:cooking:place", false, payload)
-    -- Delete the preview only after the server's synced prop has spawned (same
-    -- model + coords), so they overlap and there's no visible gap.
+    -- Delete the preview only after the server's synced prop has ACTUALLY spawned
+    -- (its spawn event can be dispatched a frame or two after this callback resolves),
+    -- so the preview and the real prop overlap and there's no gap where nothing exists.
+    -- Bounded so a dropped spawn event can't strand the preview forever.
+    if res and res.ok and res.uid then
+        local uid, tries = res.uid, 0
+        while not (CookObjects[uid] or CookDual[uid]) and tries < 60 do Wait(0); tries = tries + 1 end
+    end
     deletePreview(p)
     if res and res.ok then RefreshBar(); RefreshTray() elseif res and res.error then ShowNotification(res.error) end
     cb(res or { ok = false })
@@ -2306,6 +2340,12 @@ RegisterNUICallback("cooking:beginMove", function(d, cb)
     -- same feel as dragging it in — and snap it back into the slot on a world release.
     if CookSlot[uid] then
         local method = CookSlot[uid].method
+        -- An EMPTY soda cup LOCKs to a tap seat (no loose trailing between nozzles) so
+        -- it stays positionable under the ice/flavor buttons. Once it's been POURED
+        -- ("filled"/"capped"), it drags freely on the cursor like any other item — you're
+        -- past pouring and want to pull it to the bar / reposition it, not re-snap taps.
+        local sodaLock = method == "soda"
+            and CookState[uid] ~= "filled" and CookState[uid] ~= "capped"
         local m = { uid = uid, slot = true, hit = false }
         moving = m
         CreateThread(function()
@@ -2313,9 +2353,8 @@ RegisterNUICallback("cooking:beginMove", function(d, cb)
                 if not CookObjects[uid] then break end -- collected / removed mid-drag
                 -- Snap onto the nearest OPEN slot (any other rack), exactly like placing a
                 -- fresh item — release there re-slots it. Otherwise trail the cursor; a
-                -- release off any slot just snaps it back to where it was. Soda cups
-                -- always LOCK to a tap seat (no loose trailing between nozzles).
-                local best = nearestOpenSlot(method, method == "soda", uid)
+                -- release off any slot just snaps it back to where it was.
+                local best = nearestOpenSlot(method, sodaLock, uid)
                 if best then
                     m.hit, m.targetDoor, m.targetSlot = true, best.door, best.slot
                     moveSlotStackTo(uid, best.w.x, best.w.y, best.w.z)

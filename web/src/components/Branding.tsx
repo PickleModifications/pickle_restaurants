@@ -248,7 +248,7 @@ function BrandPhotoModal({
               (trimmed ? "bg-primary text-primary-foreground hover:opacity-90" : "cursor-not-allowed bg-muted text-muted-foreground")
             }
           >
-            Save photo
+            Apply photo
           </button>
         </div>
       </div>

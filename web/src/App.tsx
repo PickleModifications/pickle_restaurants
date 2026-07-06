@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
 import { useNuiEvent, fetchNui } from "@/lib/nui";
+import { isSaving, onSavingChange } from "@/lib/autosave";
 import InteractText from "@/views/InteractText";
 import Cooking from "@/views/Cooking";
 import Admin from "@/views/Admin";
@@ -18,10 +19,27 @@ export default function App() {
     setData(d.data ?? null);
   });
 
-  const close = useCallback(() => {
+  const doClose = useCallback(() => {
     setView("none");
     fetchNui("close");
   }, []);
+
+  // Don't close mid-save: if a debounced setting write is pending/in-flight, keep the
+  // panel open and close as soon as it lands (so no edit is dropped). A fallback timer
+  // guarantees the UI can't get stuck if a save ever hangs.
+  const close = useCallback(() => {
+    if (!isSaving()) { doClose(); return; }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      unsub();
+      window.clearTimeout(fallback);
+      doClose();
+    };
+    const unsub = onSavingChange(() => { if (!isSaving()) finish(); });
+    const fallback = window.setTimeout(finish, 4000);
+  }, [doClose]);
 
   // ESC closes panel views (cooking manages its own escape).
   useEffect(() => {

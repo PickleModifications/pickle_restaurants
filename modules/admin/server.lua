@@ -125,7 +125,9 @@ end)
 -- a server admin can brand any restaurant. Shares SetRestaurantBrand (management).
 lib.callback.register("pickle_restaurants:admin:setBrandImage", function(src, d)
     if not IsPlayerAdmin(src) then return { ok = false } end
-    return SetRestaurantBrand(tonumber(d.id), d.key, d.url, d.crop)
+    local res = SetRestaurantBrand(tonumber(d.id), d.key, d.url, d.crop)
+    if res and res.ok then ShowNotification(src, "Branding saved.") end
+    return res
 end)
 
 -- ─── settings ────────────────────────────────────────────────────────────────
@@ -135,6 +137,21 @@ lib.callback.register("pickle_restaurants:admin:saveSetting", function(src, d)
     if not d.key then return { ok = false } end
     SetSetting(d.key, d.value)
     SyncToClient(-1) -- drinks/assembly/blip may have changed
+    ShowNotification(src, "Settings saved.")
+    return { ok = true }
+end)
+
+-- Batch save (the debounced auto-save writes a whole settings group at once): one DB
+-- write per key, ONE sync, ONE "saved" notification — so an auto-save of a multi-field
+-- group doesn't spam a notification per field.
+lib.callback.register("pickle_restaurants:admin:saveSettings", function(src, d)
+    if not IsPlayerAdmin(src) then return { ok = false } end
+    if type(d.settings) ~= "table" then return { ok = false } end
+    local n = 0
+    for k, v in pairs(d.settings) do SetSetting(k, v); n = n + 1 end
+    if n == 0 then return { ok = false } end
+    SyncToClient(-1)
+    ShowNotification(src, "Settings saved.")
     return { ok = true }
 end)
 
@@ -146,26 +163,33 @@ lib.callback.register("pickle_restaurants:admin:saveRecipe", function(src, r)
     local method = (r.method == "oven" or r.method == "fry") and r.method or "grill"
     -- optional container prop the food cooks in (cake tin…); empty clears it
     local container = (type(r.container_model) == "string" and r.container_model ~= "") and r.container_model or nil
+    -- per-recipe freshness window: blank clears it (NULL = use the global default),
+    -- a number is clamped to >= 0 (0 = never expires)
+    local expire = nil
+    if r.expire_seconds ~= nil and r.expire_seconds ~= "" then
+        expire = math.max(0, math.floor(tonumber(r.expire_seconds) or 0))
+    end
     MySQL.update.await([[
         INSERT INTO pickle_restaurant_recipes
-            (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count, container_model)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count, container_model, expire_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
             station = VALUES(station), raw_model = VALUES(raw_model), cooked_model = VALUES(cooked_model),
             burnt_model = VALUES(burnt_model), output_cooked_item = VALUES(output_cooked_item),
             output_burnt_item = VALUES(output_burnt_item), cook_ms = VALUES(cook_ms), burn_ms = VALUES(burn_ms),
             dual_sided = VALUES(dual_sided), method = VALUES(method), output_count = VALUES(output_count),
-            container_model = VALUES(container_model)
+            container_model = VALUES(container_model), expire_seconds = VALUES(expire_seconds)
     ]], {
         r.input_item, r.station or "fryer", r.raw_model or "", r.cooked_model or "", r.burnt_model or "",
         r.output_cooked_item or "", r.output_burnt_item or "",
         tonumber(r.cook_ms) or 15000, tonumber(r.burn_ms) or 15000,
         (r.dual_sided == true or r.dual_sided == 1) and 1 or 0, method,
         math.max(1, math.floor(tonumber(r.output_count) or 1)),
-        container,
+        container, expire,
     })
     LoadRecipes()
     SyncToClient(-1)
+    ShowNotification(src, "Recipe saved.")
     return { ok = true }
 end)
 
@@ -174,5 +198,6 @@ lib.callback.register("pickle_restaurants:admin:deleteRecipe", function(src, d)
     MySQL.update.await("DELETE FROM pickle_restaurant_recipes WHERE input_item = ?", { d.input_item })
     LoadRecipes()
     SyncToClient(-1)
+    ShowNotification(src, "Recipe deleted.")
     return { ok = true }
 end)
