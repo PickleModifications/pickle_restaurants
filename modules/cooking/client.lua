@@ -184,6 +184,40 @@ local function cookedVariant(model, state)
     return variant("_02") or model
 end
 
+-- Is this model one of a dual-sided (beef patty) recipe's face props? Matched by
+-- the raw / cooked / burnt model of any dual_sided recipe.
+local function dualModelRecipe(model)
+    if type(model) ~= "string" then return nil end
+    for _, r in pairs(RecipesByInput or {}) do
+        if (r.dual_sided == true or tonumber(r.dual_sided) == 1)
+            and (r.raw_model == model or r.cooked_model == model or r.burnt_model == model) then
+            return r
+        end
+    end
+end
+
+-- Expand a bottom-to-top MODEL list into the props that actually render it, so a
+-- dual-sided patty ANYWHERE in a build stack (a pizza topping, a bake) shows the
+-- SAME full two-faced patty as one on the grill instead of a lone half. A normal
+-- model stays one prop; a patty model becomes TWO stacked faces (bottom/grill dome
+-- then the visible dome a hair above, matching orientPair's unflipped patty).
+-- Returns three parallel arrays: models, incremental heights (rise to the next
+-- layer), and per-prop roll in degrees (0 for everything that isn't a patty face).
+-- `state` swaps toppings to their cooked/burnt look, same as before.
+local function expandStackLayers(models, state)
+    local mdls, heights, rolls = {}, {}, {}
+    for _, m0 in ipairs(models or {}) do
+        local m = cookedVariant(m0, state)
+        if dualModelRecipe(m0) then
+            mdls[#mdls + 1] = m; heights[#heights + 1] = DUAL.face_gap;       rolls[#rolls + 1] = DUAL.bottom_roll
+            mdls[#mdls + 1] = m; heights[#heights + 1] = stackLayerHeight(m);  rolls[#rolls + 1] = DUAL.top_roll
+        else
+            mdls[#mdls + 1] = m; heights[#heights + 1] = stackLayerHeight(m);  rolls[#rolls + 1] = 0.0
+        end
+    end
+    return mdls, heights, rolls
+end
+
 -- Spawn one frozen, collision-off local prop — the shape every food / topping /
 -- stack prop needs. Collision off so the cursor ray passes through it. Returns the
 -- entity or nil.
@@ -405,7 +439,7 @@ local function seatSlotItem(uid, fryerZ)
     local st = CookSlotStack[uid]
     if s.method == "oven" then
         if st then
-            if SeatOvenSlotStack then SeatOvenSlotStack(s.propId, s.door, s.slot, st.ents, st.heights, st.baseDz) end
+            if SeatOvenSlotStack then SeatOvenSlotStack(s.propId, s.door, s.slot, st.ents, st.heights, st.baseDz, st.rolls) end
         elseif SeatOvenSlot then SeatOvenSlot(s.propId, s.door, s.slot, ent) end
     else
         local station = GetStationEntity and GetStationEntity(s.propId)
@@ -421,15 +455,19 @@ local function seatSlotItem(uid, fryerZ)
             z = fryerZ or (slotDown(s.propId, s.slot) and FRYER.lowered_z or FRYER.raised_z)
         end
         local sr = GetEntityRotation(station, 2)
-        local function seatAt(e, lift)
+        local function seatAt(e, lift, roll)
             if not (e and DoesEntityExist(e)) then return end
             local pos = GetOffsetFromEntityInWorldCoords(station, o.x, o.y, z + lift)
             SetEntityCoordsNoOffset(e, pos.x, pos.y, pos.z, false, false, false)
-            SetEntityRotation(e, sr.x, sr.y, sr.z, 2, true)
+            -- add the layer's own roll (a patty face's flip) to the station's roll
+            SetEntityRotation(e, sr.x, sr.y + (roll or 0.0), sr.z, 2, true)
         end
         if st then
             local lift = st.baseDz or 0.0
-            for i, e in ipairs(st.ents) do seatAt(e, lift); lift = lift + (st.heights[i] or 0.0) end
+            for i, e in ipairs(st.ents) do
+                seatAt(e, lift, st.rolls and st.rolls[i])
+                lift = lift + (st.heights[i] or 0.0)
+            end
         else
             seatAt(ent, 0.0)
         end
@@ -678,19 +716,21 @@ local function SpawnSlotObject(uid, model, propId, method, door, slot, state, st
     CookSlot[uid]  = { propId = propId, method = method, door = door, slot = slot }
 
     if type(stack) == "table" and #stack > 1 then
-        local ents, heights = {}, {}
-        for _, m in ipairs(stack) do
-            local mdl = cookedVariant(m, state) -- cooked/burnt bakes swap toppings to their cooked look
+        -- expand a dual patty layer into its two faces; cookedVariant already applied
+        local mdls, heights, rolls = expandStackLayers(stack, state)
+        local ents, hs, rl = {}, {}, {}
+        for i, mdl in ipairs(mdls) do
             local e = SpawnProp(mdl, 0.0, 0.0, 0.0)
             if e then
                 ents[#ents + 1] = e
-                heights[#heights + 1] = stackLayerHeight(mdl)
+                hs[#hs + 1] = heights[i]
+                rl[#rl + 1] = rolls[i]
                 CookEntityUid[e] = uid
             end
         end
         if #ents > 0 then
             CookObjects[uid] = ents[1] -- base prop drives the hover chip projection
-            CookSlotStack[uid] = { ents = ents, heights = heights, baseDz = stackBaseLift(stack[1]) }
+            CookSlotStack[uid] = { ents = ents, heights = hs, rolls = rl, baseDz = stackBaseLift(stack[1]) }
             seatSlotItem(uid)
             return
         end
@@ -1148,12 +1188,13 @@ end
 -- Lay an ordered set of props flush bottom-to-top at (x,y,z), all facing `headingZ`
 -- (the station's heading) so the preview, the seated stack, and a dragged-out stack
 -- share one consistent rotation.
-local function layoutPreviewStack(ents, heights, x, y, z, headingZ, baseDz)
+local function layoutPreviewStack(ents, heights, x, y, z, headingZ, baseDz, rolls)
     local lift = baseDz or 0.0
     for i, e in ipairs(ents) do
         if e and DoesEntityExist(e) then
             SetEntityCoordsNoOffset(e, x, y, z + lift, false, false, false)
-            SetEntityRotation(e, 0.0, 0.0, headingZ or 0.0, 2, true)
+            -- a patty face carries its own roll; everything else is flat (0)
+            SetEntityRotation(e, 0.0, (rolls and rolls[i]) or 0.0, headingZ or 0.0, 2, true)
         end
         lift = lift + (heights[i] or 0.0)
     end
@@ -1167,7 +1208,7 @@ local function moveSlotStackTo(uid, x, y, z)
     local headingZ = s and stationHeadingZ(s.propId) or 0.0
     local st = CookSlotStack[uid]
     if st then
-        layoutPreviewStack(st.ents, st.heights, x, y, z, headingZ, st.baseDz)
+        layoutPreviewStack(st.ents, st.heights, x, y, z, headingZ, st.baseDz, st.rolls)
     else
         local ent = CookObjects[uid]
         if ent and DoesEntityExist(ent) then
@@ -1359,19 +1400,22 @@ local function makePart(spec)
         -- (cooked/burnt) swaps each topping to its cooked look, same as the oven.
         -- a container base layer (cake tin) starts the tower at its mesh-bottom
         -- correction so the tin rests ON the table instead of sinking through it
-        local lifts, lift = {}, stackBaseLift(spec.stack[1])
-        for _, m in ipairs(spec.stack) do
-            local mdl = cookedVariant(m, spec.state)
+        -- expand a dual patty layer into its two faces; cookedVariant already applied
+        local mdls, heights, rolls = expandStackLayers(spec.stack, spec.state)
+        local lifts, prolls, lift = {}, {}, stackBaseLift(spec.stack[1])
+        for i, mdl in ipairs(mdls) do
             local e = SpawnProp(mdl, base.x, base.y, base.z)
             if e then
                 part.ents[#part.ents + 1] = e
                 lifts[#lifts + 1] = lift
-                lift = lift + stackLayerHeight(mdl)
+                prolls[#prolls + 1] = rolls[i]
+                lift = lift + heights[i]
             end
         end
         if #part.ents == 0 then return nil end
         part.stacked = true
         part.lifts   = lifts
+        part.rolls   = prolls
         part.height  = lift
         return part
     end
@@ -1428,11 +1472,12 @@ local function orientPart(part, x, y, z, flip)
         return
     end
     if part.stacked then
-        -- a build-stack part lays its layers flush bottom-to-top from the base z
+        -- a build-stack part lays its layers flush bottom-to-top from the base z;
+        -- a patty face in the tower keeps its own roll (the two-faced flip)
         for i, e in ipairs(part.ents) do
             if e and DoesEntityExist(e) then
                 SetEntityCoordsNoOffset(e, x, y, z + (part.lifts[i] or 0.0), false, false, false)
-                SetEntityRotation(e, 0.0, 0.0, yaw, 2, true)
+                SetEntityRotation(e, 0.0, (part.rolls and part.rolls[i]) or 0.0, yaw, 2, true)
             end
         end
         return
@@ -2113,10 +2158,12 @@ RegisterNUICallback("cooking:beginPlace", function(d, cb)
             end
         end
         if stackModels and #stackModels > 1 then
-            local ents, heights = {}, {}
-            for _, m in ipairs(stackModels) do
+            -- expand a dual patty layer into its two faces (uncooked preview → no state)
+            local mdls, hs, rls = expandStackLayers(stackModels, nil)
+            local ents, heights, rolls = {}, {}, {}
+            for i, m in ipairs(mdls) do
                 local e = SpawnProp(m, base.x, base.y, base.z)
-                if e then ents[#ents + 1] = e; heights[#heights + 1] = stackLayerHeight(m) end
+                if e then ents[#ents + 1] = e; heights[#heights + 1] = hs[i]; rolls[#rolls + 1] = rls[i] end
             end
             if #ents == 0 then return cb({ ok = false }) end
             local headingZ = stationHeadingZ(base.id, base)
@@ -2129,11 +2176,11 @@ RegisterNUICallback("cooking:beginPlace", function(d, cb)
                     local best = nearestOpenSlot(method)
                     if best then
                         p.hit, p.door, p.slot = true, best.door, best.slot
-                        layoutPreviewStack(ents, heights, best.w.x, best.w.y, best.w.z, headingZ, baseDz)
+                        layoutPreviewStack(ents, heights, best.w.x, best.w.y, best.w.z, headingZ, baseDz, rolls)
                     else
                         p.hit = false
                         local hit, coords = CursorToWorld()
-                        if hit and coords then layoutPreviewStack(ents, heights, coords.x, coords.y, coords.z, headingZ, baseDz) end
+                        if hit and coords then layoutPreviewStack(ents, heights, coords.x, coords.y, coords.z, headingZ, baseDz, rolls) end
                     end
                     Wait(0)
                 end
@@ -2350,6 +2397,25 @@ RegisterNUICallback("cooking:trayToInventory", function(d, cb)
     if res and res.ok then
         if res.label then ShowNotification(("Took %s"):format(res.label)) end
         RefreshTray(); RefreshBar()
+    elseif res and res.error then
+        ShowNotification(res.error)
+    end
+    cb(res or { ok = false })
+end)
+
+-- throw a tray entry (or, with burnt_only, everything burnt) in the bin
+RegisterNUICallback("cooking:trayDiscard", function(d, cb)
+    local res = lib.callback.await("pickle_restaurants:cooking:trayDiscard", false, {
+        prop_id = currentCookProp and currentCookProp.id, item = d.item, cheese = d.cheese,
+        count = d.count, sig = d.sig, burnt_only = d.burnt_only,
+    })
+    if res and res.ok then
+        if res.label then
+            ShowNotification(("Threw away %s ×%d"):format(res.label, res.count or 1))
+        else
+            ShowNotification(("Threw away %d burnt item%s"):format(res.count or 0, (res.count or 0) == 1 and "" or "s"))
+        end
+        RefreshTray()
     elseif res and res.error then
         ShowNotification(res.error)
     end

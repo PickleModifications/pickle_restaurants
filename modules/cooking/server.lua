@@ -1315,6 +1315,8 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 -- shows the full pizza, not a bare dough base. A containered bake
                 -- (the cake sheet) renders inside its container tray either way.
                 local rout, state = recipeForOutput(e.item)
+                -- burnt outputs are flagged so the NUI can sort them last and offer the bin
+                if state == "burnt" then e.burnt = true end
                 if rout then
                     local models = e.meta and stackModelsFromMeta(e.item, e.meta) or nil
                     if models then
@@ -1377,6 +1379,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                     -- base recipe), crust swapped to its cooked/burnt model, inside
                     -- its container tray when the recipe bakes in one
                     local rout, state = recipeForOutput(item)
+                    if state == "burnt" then entry.burnt = true end
                     if rout then
                         local models = v.meta and stackModelsFromMeta(item, v.meta)
                             or (findAssembly(rout.input_item) and stackModelsFromMeta(rout.input_item, nil))
@@ -1465,6 +1468,38 @@ lib.callback.register("pickle_restaurants:cooking:trayToInventory", function(src
         local meta = TrayTopMeta(rid, id, item, cheese, sig)
         if not RemoveTray(rid, id, item, cheese, 1, sig) then break end
         Inventory.AddItem(src, item, 1, buildInvMeta(cheese, meta))
+    end
+    return { ok = true, item = item, count = count, label = GetItemLabel(item) }
+end)
+
+-- throw a tray entry in the bin — gone for good, nothing refunded. The only way
+-- to get rid of burnt food (it never needs its item installed, unlike
+-- trayToInventory). `burnt_only` sweeps every burnt cook output off the tray.
+lib.callback.register("pickle_restaurants:cooking:trayDiscard", function(src, d)
+    local prop = PropCache[tonumber(d.prop_id)]
+    if not prop then return { ok = false } end
+    local rid = prop.restaurant_id
+    if not HasPerm(rid, src, "cook") then return { ok = false } end
+    local id = GetIdentifier(src)
+    if d.burnt_only then
+        local n = 0
+        for _, e in ipairs(GetTray(rid, id)) do
+            local _, state = recipeForOutput(e.item)
+            if state == "burnt" and e.count > 0 and RemoveTray(rid, id, e.item, e.cheese, e.count, e.sig) then
+                n = n + e.count
+            end
+        end
+        if n == 0 then return { ok = false, error = "Nothing burnt to throw away." } end
+        return { ok = true, count = n }
+    end
+    local item   = d.item
+    local cheese = CheeseVal(d.cheese)
+    local sig    = (type(d.sig) == "string") and d.sig or nil
+    local count  = tonumber(d.count) or 1
+    if not item or count < 1 then return { ok = false } end
+    count = math.min(count, GetTrayCount(rid, id, item, cheese, sig))
+    if count < 1 or not RemoveTray(rid, id, item, cheese, count, sig) then
+        return { ok = false, error = "Not enough." }
     end
     return { ok = true, item = item, count = count, label = GetItemLabel(item) }
 end)

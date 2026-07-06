@@ -2,98 +2,162 @@
 --  modules/rendertarget | client.lua
 --  Runtime brand-texture replacement for food-packaging props.
 --
---  A single DUI renders the active restaurant's brand image (an HTML page,
---  html/brand.html, so the image is drawn full-cover) into a runtime texture.
---  AddReplaceTexture then swaps that texture in for the branded texture on each
---  packaging prop, so a cup / pizza box / tray / side box shows the restaurant's
---  logo.
+--  Each branded packaging texture (cup wrap, pizza box, tray paper, side box) gets
+--  its OWN DUI rendering an HTML page (html/brand.html) into a runtime texture, then
+--  AddReplaceTexture swaps that runtime texture in for the model's branded texture.
 --
---  AddReplaceTexture is GLOBAL (per texture dictionary + texture name), not
---  per-entity — so there is only ever one brand active at a time. We drive it from
---  the NEAREST restaurant that has a brand image configured, swapping the DUI's
---  image as the player moves between restaurants and removing the replacement
---  entirely (restoring the original texture) when none is in range.
+--  Why one DUI PER texture (not one shared square surface):
+--   • Separate image URLs — a restaurant can put a different image on each piece of
+--     packaging (the cup wrap ≠ the pizza-box lid). Each target also falls back to
+--     the restaurant's shared brand image when its own URL is blank.
+--   • Correct framing — every texture has its OWN aspect ratio (its w×h in TARGETS).
+--     The management panel crops the image to that aspect with an adjustable size, and
+--     the resulting crop rectangle is drawn pixel-for-pixel onto this DUI, so what the
+--     owner cropped is exactly what shows on the prop. With no crop set, the image is
+--     just `cover`-cropped to the texture's aspect (centred).
+--
+--  AddReplaceTexture is GLOBAL (per txd + txn), not per-entity — so there is only
+--  ever one brand active at a time. We drive it from the NEAREST restaurant that has
+--  any brand configured, swapping images as the player moves between restaurants and
+--  removing the replacement (restoring the original texture) when none is in range.
+--
+--  Finding a texture's resolution: the numbers in TARGETS below define each texture's
+--  aspect ratio. Run /pickle_brand_debug (no url) to spawn every branded model with a
+--  CALIBRATION grid (a circle + WxH label) drawn on each — a squashed circle means the
+--  aspect is wrong. /pickle_brand_res <key> <w> <h> re-sizes a texture's DUI live so
+--  you can dial it in, then bake the final numbers in here. NOTE: keep these w/h in
+--  sync with BRAND_TEXTURES in web/src/views/Management.tsx (the crop UI's aspects).
 -- =============================================
 
--- Each target = the original texture to replace. `txd` is the model's embedded
--- texture dictionary (which equals the model name for these props) and `txn` is the
--- branded texture inside it. If a replacement doesn't take, verify these two names
--- against the model in OpenIV / CodeWalker and adjust here.
+-- One entry per branded texture. `txd` is the model's embedded texture dictionary
+-- (equal to the model name for these props) and `txn` is the branded texture inside
+-- it. `w`/`h` is the DUI resolution = the aspect the image is cropped to. `key` is
+-- the stable id used by the config (per-texture URL + crop) and the debug commands.
 local TARGETS = {
-    { txd = "pickle_pizza_box_02",       txn = "pizza_brand" },
-    { txd = "pickle_drink_container_01", txn = "cup_brand" },
-    { txd = "pickle_tray_paper_01",      txn = "tray_paper" },
-    { txd = "pickle_side_container_01",  txn = "side_container_brand_01" },
+    { key = "pizza_box", txd = "pickle_pizza_box_02",       txn = "pizza_brand",              w = 1024, h = 1024 },
+    { key = "cup",       txd = "pickle_drink_container_01",  txn = "cup_brand",                w = 1024, h = 1792 },
+    { key = "tray",      txd = "pickle_tray_paper_01",       txn = "tray_paper",               w = 1792, h = 1024 },
+    { key = "side",      txd = "pickle_side_container_01",   txn = "side_container_brand_01",  w = 2304, h = 1024 },
 }
+local TARGET_BY_KEY = {}
+for _, t in ipairs(TARGETS) do TARGET_BY_KEY[t.key] = t end
 
-local RT_TXD   = "pickle_brand_txd" -- runtime texture dictionary name
-local RT_TEX   = "pickle_brand_tex" -- runtime texture name (fed by the DUI)
-local DUI_SIZE = 1024               -- DUI surface (square; each prop's UVs map it)
-local RANGE    = 150.0              -- how near a branded restaurant must be to apply
-local TICK_MS  = 1000               -- how often we re-pick the nearest restaurant
+local RANGE   = 150.0  -- how near a branded restaurant must be to apply
+local TICK_MS = 1000   -- how often we re-pick the nearest restaurant
 
-local dui, duiReady, applied = nil, false, false
-local currentUrl = nil  -- the image currently pushed to the DUI (nil = none)
-local debugUrl   = nil  -- when set, forces this image and pauses the nearest logic
+-- forced state while debugging: a spec shown on EVERY target, pausing the nearest-
+-- restaurant logic. nil = normal production driver.
+local debugForce = nil  -- { url = "..." } | { calib = true } | nil
 
--- ─── DUI + runtime texture ───────────────────────────────────────────────────
+-- ─── per-target DUI + runtime texture ────────────────────────────────────────
 
-local function ensureDui()
-    if dui then return end
-    local url = ("https://cfx-nui-%s/html/brand.html"):format(GetCurrentResourceName())
-    dui = CreateDui(url, DUI_SIZE, DUI_SIZE)
-    -- CreateRuntimeTxd returns the txd HANDLE, which is what
-    -- CreateRuntimeTextureFromDuiHandle needs (AddReplaceTexture uses the txd NAME).
-    local txd = CreateRuntimeTxd(RT_TXD)
-    CreateRuntimeTextureFromDuiHandle(txd, RT_TEX, GetDuiHandle(dui))
-    -- brand.html loads asynchronously; wait for it, then (re)push the current image.
-    CreateThread(function()
-        while dui and not IsDuiAvailable(dui) do Wait(50) end
-        duiReady = true
-        if currentUrl then SendDuiMessage(dui, json.encode({ action = "brand", url = currentUrl })) end
-    end)
+-- Each target carries its live render state on itself:
+--   dui, ready  — the CEF surface + whether brand.html has painted a frame
+--   applied     — is AddReplaceTexture currently active for this target
+--   sig, cur    — the descriptor currently pushed to the DUI (+ a signature for it,
+--                 so we don't re-push an unchanged image every tick)
+--   gen         — bumped on every (re)create so the runtime txd/tex names are fresh,
+--                 avoiding a stale binding when a DUI is destroyed to resize
+local function rtNames(t) return
+    ("pickle_brand_txd_%s_%d"):format(t.key, t.gen or 0),
+    ("pickle_brand_tex_%s_%d"):format(t.key, t.gen or 0)
 end
 
-local function pushImage(url)
-    currentUrl = url
-    if dui and duiReady then SendDuiMessage(dui, json.encode({ action = "brand", url = url or "" })) end
+-- A stable string for a show descriptor, so an unchanged brand isn't re-pushed.
+local function specSig(spec)
+    if not spec then return "nil" end
+    if spec.calib then return "calib" end
+    local c = spec.crop
+    local cs = c and ("%s,%s,%s,%s"):format(c.x or 0, c.y or 0, c.w or 0, c.h or 0) or ""
+    return "b:" .. (spec.url or "") .. "|" .. cs
 end
 
-local function applyReplacements()
-    if applied then return end
-    for _, t in ipairs(TARGETS) do AddReplaceTexture(t.txd, t.txn, RT_TXD, RT_TEX) end
-    applied = true
-end
-
-local function removeReplacements()
-    if not applied then return end
-    for _, t in ipairs(TARGETS) do RemoveReplaceTexture(t.txd, t.txn) end
-    applied = false
-end
-
--- Show `url` on every branded prop, or pass nil to restore the original textures.
-local function setBrand(url)
-    if url and url ~= "" then
-        ensureDui()
-        applyReplacements()
-        if url ~= currentUrl then pushImage(url) end
+local function pushToDui(t)
+    if not (t.dui and t.ready) then return end
+    local spec = t.cur
+    if not spec then return end
+    if spec.calib then
+        SendDuiMessage(t.dui, json.encode({ action = "calibrate", w = t.w, h = t.h, key = t.key }))
     else
-        removeReplacements()
-        currentUrl = nil
+        SendDuiMessage(t.dui, json.encode({ action = "brand", url = spec.url or "", crop = spec.crop, w = t.w, h = t.h }))
     end
 end
 
--- Warm the DUI at resource start: create the surface and let brand.html paint a
+local function ensureDui(t)
+    if t.dui then return end
+    t.gen = (t.gen or 0) + 1
+    t.ready = false
+    local url = ("https://cfx-nui-%s/html/brand.html"):format(GetCurrentResourceName())
+    t.dui = CreateDui(url, t.w, t.h)
+    local txdName, texName = rtNames(t)
+    -- CreateRuntimeTxd returns the txd HANDLE (needed by CreateRuntimeTextureFrom-
+    -- DuiHandle); AddReplaceTexture keys off the txd NAME.
+    local txd = CreateRuntimeTxd(txdName)
+    CreateRuntimeTextureFromDuiHandle(txd, texName, GetDuiHandle(t.dui))
+    -- brand.html loads asynchronously; wait for it, then (re)push the current image.
+    CreateThread(function()
+        local mine = t.gen
+        while t.dui and t.gen == mine and not IsDuiAvailable(t.dui) do Wait(50) end
+        if t.gen ~= mine then return end
+        t.ready = true
+        pushToDui(t)
+    end)
+end
+
+local function applyReplacement(t)
+    if t.applied then return end
+    local txdName, texName = rtNames(t)
+    AddReplaceTexture(t.txd, t.txn, txdName, texName)
+    t.applied = true
+end
+
+local function removeReplacement(t)
+    if not t.applied then return end
+    RemoveReplaceTexture(t.txd, t.txn)
+    t.applied = false
+end
+
+-- Show a spec on this target's packaging, or nil to restore the original texture.
+--   spec = { url = "...", crop = { x, y, w, h }? }  — an image, optionally cropped
+--          | { calib = true }                        — the calibration grid
+local function setTargetBrand(t, spec)
+    if spec ~= nil then
+        ensureDui(t)
+        applyReplacement(t)
+        local sig = specSig(spec)
+        if sig ~= t.sig then
+            t.cur, t.sig = spec, sig
+            pushToDui(t)
+        end
+    else
+        removeReplacement(t)
+        t.cur, t.sig = nil, nil
+    end
+end
+
+-- Destroy + rebuild a target's DUI at its current w/h (used by the live-resize debug
+-- command). Bumps gen so the fresh runtime texture gets fresh names, and re-applies
+-- whatever it was showing.
+local function recreateDui(t)
+    local wasApplied, wasSpec = t.applied, t.cur
+    removeReplacement(t)
+    if t.dui then DestroyDui(t.dui); t.dui = nil end
+    t.ready, t.cur, t.sig = false, nil, nil
+    if wasApplied or wasSpec ~= nil then setTargetBrand(t, wasSpec) end
+end
+
+-- Warm every DUI at resource start: create the surface and let brand.html paint a
 -- frame BEFORE any replacement or model streaming. A COLD DUI (created the instant
--- the replacement registered) was why the first debug run only branded one prop and
--- a second run fixed the rest — the runtime texture wasn't painted yet, so most
--- models' txds bound to nothing. This only creates + paints; it doesn't replace any
--- texture until setBrand() is called.
+-- the replacement registered) branded only one prop on the first run — the runtime
+-- texture wasn't painted yet, so most models' txds bound to nothing. This only
+-- creates + paints a blank frame; it doesn't replace any texture until a brand is set.
 CreateThread(function()
     Wait(500) -- let CEF settle after the resource starts
-    ensureDui()
-    while dui and not IsDuiAvailable(dui) do Wait(50) end
-    pushImage("") -- paint a (white) frame so the runtime texture is warm/valid
+    for _, t in ipairs(TARGETS) do
+        ensureDui(t)
+        t.cur, t.sig = { url = "" }, specSig({ url = "" }) -- paint a blank/white frame
+        pushToDui(t)
+    end
 end)
 
 -- ─── nearest-restaurant driver ───────────────────────────────────────────────
@@ -108,35 +172,70 @@ local function restaurantCoord(r)
     return nil
 end
 
+-- Any brand configured at all (a per-texture url or the shared default)?
+local function hasBrand(r)
+    if r.brand_image and r.brand_image ~= "" then return true end
+    if r.brand_images then
+        for _, o in pairs(r.brand_images) do
+            local u = (type(o) == "table") and o.url or o
+            if u and u ~= "" then return true end
+        end
+    end
+    return false
+end
+
+-- The image + crop a given texture should show for this restaurant: its own
+-- per-texture override when set, else the restaurant's shared brand image (no crop),
+-- else nil (restore original). Returns a spec table or nil.
+local function specForTarget(r, t)
+    if not r then return nil end
+    local o = r.brand_images and r.brand_images[t.key]
+    if type(o) == "table" and o.url and o.url ~= "" then
+        return { url = o.url, crop = o.crop }
+    elseif type(o) == "string" and o ~= "" then
+        return { url = o }
+    end
+    if r.brand_image and r.brand_image ~= "" then return { url = r.brand_image } end
+    return nil
+end
+
+-- Push a restaurant's branding across every target (nil restaurant = clear all).
+local function applyBrand(r)
+    for _, t in ipairs(TARGETS) do setTargetBrand(t, specForTarget(r, t)) end
+end
+
 CreateThread(function()
     while true do
         Wait(TICK_MS)
-        if debugUrl then
-            setBrand(debugUrl)
+        if debugForce then
+            for _, t in ipairs(TARGETS) do setTargetBrand(t, debugForce) end
         else
             local here = GetEntityCoords(PlayerPedId())
-            local bestUrl, bestDist
+            local best, bestDist
             for _, r in pairs(Restaurants or {}) do
-                local url = r.brand_image
-                if url and url ~= "" then
+                if hasBrand(r) then
                     local c = restaurantCoord(r)
                     if c then
                         local dist = #(here - c)
                         if dist <= RANGE and (not bestDist or dist < bestDist) then
-                            bestDist, bestUrl = dist, url
+                            bestDist, best = dist, r
                         end
                     end
                 end
             end
-            setBrand(bestUrl)
+            applyBrand(best)
         end
     end
 end)
 
 -- ─── debug zone ──────────────────────────────────────────────────────────────
--- /pickle_brand_debug [url]  — spawns every branded model in a row at the debug
--- zone with the render target forced on (so you can eyeball all replacements at
--- once), teleports you there, and toggles off on a second call.
+-- /pickle_brand_debug [url]  — spawns every branded model in a row with the render
+--   target forced on, teleports you there, and toggles off on a second call. With
+--   no url each texture shows a CALIBRATION grid (circle + WxH) so you can spot a
+--   wrong aspect ratio per prop; pass a url to preview a real image on all of them.
+-- /pickle_brand_res [key w h] — with no args, lists every target + its resolution;
+--   with a key + w + h, resizes that texture's DUI live so you can find the number
+--   that makes the calibration circle round, then bake it into TARGETS above.
 
 local DEBUG_COORD = vector3(-1190.8749, -891.9343, 14.8598)
 local debugProps  = {}
@@ -161,27 +260,29 @@ local function clearDebug()
         if DoesEntityExist(e) then SetEntityAsMissionEntity(e, true, true); DeleteEntity(e) end
     end
     debugProps = {}
-    debugUrl = nil
+    debugForce = nil
 end
 
 RegisterCommand("pickle_brand_debug", function(_, args)
     if #debugProps > 0 then -- second call: clean up
         clearDebug()
-        setBrand(nil)
+        applyBrand(nil)
         print("[brand] debug zone cleared")
         return
     end
-    debugUrl = (args[1] and args[1] ~= "" and args[1])
-        or "https://placehold.co/512x512/orange/white/png?text=BRAND"
+    -- no url = calibration grid (default); a url previews a real image on every prop
+    debugForce = (args[1] and args[1] ~= "") and { url = args[1] } or { calib = true }
 
-    -- Register the replacement and load the DUI image FIRST — AddReplaceTexture only
-    -- takes on textures streamed *after* it's active, so the models must spawn after.
-    setBrand(debugUrl)
+    -- Register the replacements and load the DUI images FIRST — AddReplaceTexture
+    -- only takes on textures streamed *after* it's active, so the models spawn after.
+    for _, t in ipairs(TARGETS) do setTargetBrand(t, debugForce) end
     SetEntityCoords(PlayerPedId(), DEBUG_COORD.x, DEBUG_COORD.y - 1.5, DEBUG_COORD.z, false, false, false, false)
     CreateThread(function()
         local t0 = GetGameTimer()
-        while dui and not IsDuiAvailable(dui) and GetGameTimer() - t0 < 3000 do Wait(50) end
-        Wait(300) -- let brand.html fetch + paint the image before the props stream in
+        for _, t in ipairs(TARGETS) do
+            while t.dui and not IsDuiAvailable(t.dui) and GetGameTimer() - t0 < 3000 do Wait(50) end
+        end
+        Wait(300) -- let brand.html fetch + paint before the props stream in
         local i = 0
         for _, t in ipairs(TARGETS) do
             -- txd == model name for these props, so it doubles as the model to spawn
@@ -189,16 +290,39 @@ RegisterCommand("pickle_brand_debug", function(_, args)
             if ent then debugProps[#debugProps + 1] = ent end
             i = i + 1
         end
-        print(("[brand] debug zone: spawned %d/%d models with render target -> %s")
-            :format(#debugProps, #TARGETS, debugUrl))
+        print(("[brand] debug zone: spawned %d/%d models -> %s")
+            :format(#debugProps, #TARGETS, debugForce.calib and "calibration grid" or debugForce.url))
     end)
+end, false)
+
+RegisterCommand("pickle_brand_res", function(_, args)
+    local key, w, h = args[1], tonumber(args[2]), tonumber(args[3])
+    if not key then
+        print("[brand] texture resolutions (bake the tuned values into TARGETS):")
+        for _, t in ipairs(TARGETS) do
+            print(("  %-10s %s  ->  %d x %d"):format(t.key, t.txd, t.w, t.h))
+        end
+        print("[brand] usage: /pickle_brand_res <key> <width> <height>")
+        return
+    end
+    local t = TARGET_BY_KEY[key]
+    if not t then return print(("[brand] unknown texture key '%s'"):format(key)) end
+    if not (w and h and w > 0 and h > 0) then
+        return print("[brand] usage: /pickle_brand_res <key> <width> <height>")
+    end
+    t.w, t.h = math.floor(w), math.floor(h)
+    recreateDui(t)
+    print(("[brand] %s resized to %d x %d — bake this into TARGETS when it looks right")
+        :format(t.key, t.w, t.h))
 end, false)
 
 -- ─── teardown ────────────────────────────────────────────────────────────────
 
 AddEventHandler("onResourceStop", function(res)
     if res ~= GetCurrentResourceName() then return end
-    removeReplacements()
+    for _, t in ipairs(TARGETS) do
+        removeReplacement(t)
+        if t.dui then DestroyDui(t.dui); t.dui = nil end
+    end
     clearDebug()
-    if dui then DestroyDui(dui); dui = nil end
 end)

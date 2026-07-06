@@ -1055,8 +1055,11 @@ local function BuildClientRestaurant(r)
         label   = r.label,
         blip    = r.blip,
         counter = r.counter,
-        -- brand image URL (drives the runtime texture replacement on packaging props)
-        brand_image = r.metadata and r.metadata.brand_image or nil,
+        -- brand image URLs (drive the runtime texture replacement on packaging props):
+        -- `brand_image` is the shared default; `brand_images` holds per-texture
+        -- overrides keyed by the rendertarget target key (pizza_box, cup, tray, side).
+        brand_image  = r.metadata and r.metadata.brand_image or nil,
+        brand_images = r.metadata and r.metadata.brand_images or nil,
     }
 end
 

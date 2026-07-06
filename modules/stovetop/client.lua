@@ -98,7 +98,7 @@ end
 -- lifted by the summed height of the parts below it, all aligned to the stove heading.
 -- Renders an uncooked assembled bake (e.g. a topped pizza) as its full build stack
 -- rather than just the base prop.
-function SeatOvenSlotStack(propId, door, slot, ents, heights, baseDz)
+function SeatOvenSlotStack(propId, door, slot, ents, heights, baseDz, rolls)
     local rec = OvenDoors[propId]
     local o = rec and OVEN.slots[door] and OVEN.slots[door][slot]
     if not rec or not o or not DoesEntityExist(rec.stove) then return end
@@ -115,7 +115,8 @@ function SeatOvenSlotStack(propId, door, slot, ents, heights, baseDz)
     for i, ent in ipairs(ents or {}) do
         if ent and DoesEntityExist(ent) then
             SetEntityCoordsNoOffset(ent, base.x, base.y, base.z + lift, false, false, false)
-            SetEntityRotation(ent, 0.0, 0.0, sr.z, 2, true)
+            -- a patty face in the stack carries its own roll (the two-faced flip)
+            SetEntityRotation(ent, 0.0, (rolls and rolls[i]) or 0.0, sr.z, 2, true)
         end
         lift = lift + ((heights and heights[i]) or 0.0)
     end

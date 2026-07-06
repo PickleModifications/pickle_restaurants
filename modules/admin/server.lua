@@ -23,14 +23,16 @@ local function buildAdminData()
             end
         end
         data.restaurants[#data.restaurants + 1] = {
-            id         = r.id,
-            name       = r.name,
-            label      = r.label,
-            owner      = r.owner_identifier,
-            balance    = r.balance,
-            hasCounter = r.counter ~= nil,
-            props      = props,
-            propCount  = #props,
+            id           = r.id,
+            name         = r.name,
+            label        = r.label,
+            owner        = r.owner_identifier,
+            balance      = r.balance,
+            hasCounter   = r.counter ~= nil,
+            props        = props,
+            propCount    = #props,
+            brand_image  = r.metadata and r.metadata.brand_image or nil,
+            brand_images = r.metadata and r.metadata.brand_images or nil,
         }
     end
     for _, src in ipairs(GetPlayers()) do
@@ -117,6 +119,13 @@ lib.callback.register("pickle_restaurants:admin:setOwner", function(src, d)
     MySQL.update.await("UPDATE pickle_restaurants SET owner_identifier = ? WHERE id = ?", { identifier, id })
     RestaurantCache[id].owner_identifier = identifier
     return { ok = true, owner = identifier }
+end)
+
+-- Branding: same per-texture URL + crop config as the boss panel, but admin-gated so
+-- a server admin can brand any restaurant. Shares SetRestaurantBrand (management).
+lib.callback.register("pickle_restaurants:admin:setBrandImage", function(src, d)
+    if not IsPlayerAdmin(src) then return { ok = false } end
+    return SetRestaurantBrand(tonumber(d.id), d.key, d.url, d.crop)
 end)
 
 -- ─── settings ────────────────────────────────────────────────────────────────

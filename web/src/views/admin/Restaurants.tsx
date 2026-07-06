@@ -4,9 +4,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Field } from "@/components/form";
+import Branding from "@/components/Branding";
 import { money } from "@/lib/utils";
 import {
-  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, Store, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair,
+  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, Store, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon,
 } from "lucide-react";
 
 const STATIONS = [
@@ -204,6 +205,19 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
               A seat is an invisible sit point — place it on one of this restaurant's chairs and players get a “Sit” prompt there.
             </p>
           )}
+        </div>
+
+        {/* branding — per-texture packaging photos, same editor as the boss panel */}
+        <div className="rounded-lg border border-border p-3">
+          <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
+            <ImageIcon className="h-4 w-4 text-primary" /> Branding
+          </div>
+          <Branding
+            id={r.id}
+            brand={r.brand_image || ""}
+            brandImages={r.brand_images || {}}
+            event="admin:setBrandImage"
+          />
         </div>
       </div>
     </div>

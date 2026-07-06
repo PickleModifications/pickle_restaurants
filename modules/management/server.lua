@@ -79,7 +79,8 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
     return {
         ok        = true,
         restaurant = { id = r.id, label = r.label, balance = r.balance, owner = r.owner_identifier,
-                       brand_image = r.metadata and r.metadata.brand_image or nil },
+                       brand_image  = r.metadata and r.metadata.brand_image or nil,
+                       brand_images = r.metadata and r.metadata.brand_images or nil },
         perms     = effective,
         roles     = rolesArray(roles),
         employees = buildEmployees(id, roles),
@@ -196,17 +197,50 @@ end)
 
 -- ─── branding ────────────────────────────────────────────────────────────────
 
--- The restaurant's brand image URL, stored in the metadata blob and synced to
--- clients as `brand_image`. The client render-target module draws it onto the
--- food-packaging props (pizza box, cup, tray paper, side container).
+-- The restaurant's brand image URLs, stored in the metadata blob and synced to
+-- clients. The client render-target module draws them onto the food-packaging props
+-- (pizza box, cup, tray paper, side container). Without `key` this sets the SHARED
+-- default (`brand_image`, used by any texture with no override); with a `key` it sets
+-- that one texture's override (`brand_images[key]`). Blank clears the entry.
+local BRAND_KEYS = { pizza_box = true, cup = true, tray = true, side = true }
+
+-- A crop is a normalised SOURCE rectangle { x, y, w, h } (0..1) into the image; the
+-- client draws exactly that region onto the texture. Sanitise to 4 numbers within
+-- bounds with a positive size, else drop it (falls back to a centred cover crop).
+local function sanitizeCrop(c)
+    if type(c) ~= "table" then return nil end
+    local x, y, w, h = tonumber(c.x), tonumber(c.y), tonumber(c.w), tonumber(c.h)
+    if not (x and y and w and h) or w <= 0 or h <= 0 then return nil end
+    local function clamp(v) return math.max(0.0, math.min(1.0, v)) end
+    x, y = clamp(x), clamp(y)
+    w, h = math.min(w, 1.0 - x), math.min(h, 1.0 - y)
+    if w <= 0 or h <= 0 then return nil end
+    return { x = x, y = y, w = w, h = h }
+end
+
+-- Set a restaurant's branding and re-sync. `key` nil/"" sets the shared default image
+-- (`brand_image`); a texture key sets that one texture's { url, crop } override. Blank
+-- url clears the entry. Shared by the boss (management) and admin panels — each gates
+-- its own permission before calling. Returns ok/error.
+function SetRestaurantBrand(id, key, url, crop)
+    local r = GetRestaurant(id); if not r then return { ok = false, error = "No restaurant." } end
+    url = tostring(url or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    r.metadata = r.metadata or {}
+    if key ~= nil and key ~= "" then
+        if not BRAND_KEYS[key] then return { ok = false, error = "Unknown texture." } end
+        r.metadata.brand_images = r.metadata.brand_images or {}
+        r.metadata.brand_images[key] = (url ~= "") and { url = url, crop = sanitizeCrop(crop) } or nil
+        if next(r.metadata.brand_images) == nil then r.metadata.brand_images = nil end
+    else
+        r.metadata.brand_image = (url ~= "") and url or nil
+    end
+    MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), id })
+    SyncToClient(-1) -- push the new branding to every client's render target
+    return { ok = true }
+end
+
 lib.callback.register("pickle_restaurants:management:setBrandImage", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_props") then return { ok = false, error = "No permission." } end
-    local r = GetRestaurant(id); if not r then return { ok = false } end
-    local url = tostring(d.url or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    r.metadata = r.metadata or {}
-    r.metadata.brand_image = (url ~= "") and url or nil
-    MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), id })
-    SyncToClient(-1) -- push the new brand image to every client's render target
-    return { ok = true, url = r.metadata.brand_image }
+    return SetRestaurantBrand(id, d.key, d.url, d.crop)
 end)

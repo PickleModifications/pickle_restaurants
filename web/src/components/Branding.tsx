@@ -1,0 +1,413 @@
+import { useState, useRef, useEffect, useMemo } from "react";
+import { fetchNui } from "@/lib/nui";
+import { Input } from "@/components/ui/input";
+import { Card, CardContent } from "@/components/ui/card";
+import { Image as ImageIcon, RotateCcw, X, Pencil, Plus, Trash2 } from "lucide-react";
+
+// Each branded texture + the aspect its DUI renders at. MUST match `TARGETS` in
+// modules/rendertarget/client.lua — these aspects lock the crop frame's shape.
+const BRAND_TEXTURES: { key: string; label: string; w: number; h: number; hint: string }[] = [
+  { key: "pizza_box", label: "Pizza box", w: 1024, h: 1024, hint: "Lid of the pizza box" },
+  { key: "cup", label: "Drink cup", w: 1024, h: 1792, hint: "Wrap around the cup" },
+  { key: "tray", label: "Tray paper", w: 1792, h: 1024, hint: "Liner on the food tray" },
+  { key: "side", label: "Side box", w: 2304, h: 1024, hint: "Wrap around the side box" },
+];
+
+type Crop = { x: number; y: number; w: number; h: number };
+type Aspect = { w: number; h: number };
+const clampN = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
+
+// The largest normalised rect of the target aspect that fits inside the image
+// (a centred "cover" crop) — the fallback when nothing is positioned.
+function coverRect(nat: { w: number; h: number }, A: number) {
+  const ia = nat.w / nat.h;
+  return ia >= A ? { mw: A / ia, mh: 1 } : { mw: 1, mh: ia / A };
+}
+
+// Draw a crop (or a centred cover, when crop is null) of `img` filling a canvas.
+// Identical math to the DUI (html/brand.html), so previews are WYSIWYG.
+function drawCrop(
+  ctx: CanvasRenderingContext2D, img: HTMLImageElement, crop: Crop | null,
+  cw: number, ch: number, nat: { w: number; h: number }, A: number
+) {
+  ctx.clearRect(0, 0, cw, ch);
+  let sx, sy, sw, sh;
+  if (crop && crop.w > 0 && crop.h > 0) {
+    sx = crop.x * nat.w; sy = crop.y * nat.h; sw = crop.w * nat.w; sh = crop.h * nat.h;
+  } else {
+    const { mw, mh } = coverRect(nat, A);
+    sw = mw * nat.w; sh = mh * nat.h; sx = (nat.w - sw) / 2; sy = (nat.h - sh) / 2;
+  }
+  ctx.drawImage(img, sx, sy, sw, sh, 0, 0, cw, ch);
+}
+
+// Per-restaurant branding editor: a shared default image, then one card per packaging
+// texture. Each texture is set through a "Set/Update photo" dialog (URL → position the
+// crop) and saved only on confirm. `event` is the NUI event to save through —
+// "management:setBrandImage" or "admin:setBrandImage" (both hit SetRestaurantBrand).
+export default function Branding({
+  id, brand, brandImages, event,
+}: {
+  id: number; brand: string; brandImages: Record<string, any>; event: string;
+}) {
+  // local optimistic copy so cards update without a full panel refetch
+  const [images, setImages] = useState<Record<string, { url: string; crop?: Crop | null }>>(
+    () => ({ ...(brandImages || {}) })
+  );
+
+  const saveTexture = (key: string, entry: { url: string; crop?: Crop | null } | null) => {
+    setImages((m) => {
+      const next = { ...m };
+      if (entry && entry.url) next[key] = entry; else delete next[key];
+      return next;
+    });
+    fetchNui(event, { id, key, url: entry?.url || "", crop: entry?.url ? entry.crop || undefined : undefined });
+  };
+
+  return (
+    <div className="space-y-3">
+      <Card>
+        <CardContent className="pt-4">
+          <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold"><ImageIcon className="h-4 w-4" /> Default image</h3>
+          <Input
+            defaultValue={brand}
+            placeholder="https://…/logo.png — used on any packaging without its own photo below"
+            className="h-9"
+            onBlur={(e) => fetchNui(event, { id, url: e.target.value.trim() })}
+          />
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            Direct image URL. Each item without its own photo below shows this, auto-cropped (centred) to fit its shape.
+            Leave blank to reset.
+          </p>
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-2 gap-3">
+        {BRAND_TEXTURES.map((t) => (
+          <BrandTextureCard
+            key={t.key}
+            tex={t}
+            entry={images[t.key]}
+            onSave={(entry) => saveTexture(t.key, entry)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BrandTextureCard({
+  tex, entry, onSave,
+}: {
+  tex: (typeof BRAND_TEXTURES)[number]; entry?: { url: string; crop?: Crop | null }; onSave: (e: { url: string; crop?: Crop | null } | null) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const has = !!entry?.url;
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <h3 className="truncate text-sm font-semibold">{tex.label}</h3>
+          <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">{tex.w}×{tex.h}</span>
+        </div>
+
+        {has ? (
+          <CropThumb url={entry!.url} aspect={tex} crop={entry!.crop || null} />
+        ) : (
+          <div className="flex h-28 items-center justify-center rounded-md border border-dashed border-border bg-muted/30 text-[11px] text-muted-foreground">
+            Uses the default image
+          </div>
+        )}
+
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            onClick={() => setEditing(true)}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-secondary px-2 py-1.5 text-xs font-semibold text-foreground transition hover:bg-accent"
+          >
+            {has ? <><Pencil className="h-3.5 w-3.5" /> Update photo</> : <><Plus className="h-3.5 w-3.5" /> Set photo</>}
+          </button>
+          {has && (
+            <button
+              onClick={() => onSave(null)}
+              title="Remove photo"
+              className="flex items-center justify-center rounded-md border border-border bg-secondary p-1.5 text-muted-foreground transition hover:border-destructive/60 hover:text-destructive"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+        <p className="mt-1.5 text-[11px] text-muted-foreground">{tex.hint}</p>
+
+        {editing && (
+          <BrandPhotoModal
+            tex={tex}
+            initial={entry || null}
+            onClose={() => setEditing(false)}
+            onSave={(e) => { onSave(e); setEditing(false); }}
+          />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// A small static preview of the saved crop, drawn the same way the prop will look.
+// Fixed height, aspect-correct width — so a tall texture (cup) doesn't blow up the card.
+function CropThumb({ url, aspect, crop }: { url: string; aspect: Aspect; crop: Crop | null }) {
+  const A = aspect.w / aspect.h;
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [nat, setNat] = useState<{ w: number; h: number } | null>(null);
+  const [broken, setBroken] = useState(false);
+
+  useEffect(() => {
+    const c = canvasRef.current, im = imgRef.current;
+    if (!c || !im || !nat) return;
+    const ctx = c.getContext("2d");
+    if (ctx) drawCrop(ctx, im, crop, c.width, c.height, nat, A);
+  }, [nat, crop, A, url]);
+
+  const IH = 224; // intrinsic px (2× the 112px display height) for a crisp draw
+  return (
+    <div className="flex h-28 items-center justify-center overflow-hidden rounded-md border border-border bg-black/40">
+      <img ref={imgRef} src={url} alt="" onLoad={(e) => { setBroken(false); setNat({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight }); }} onError={() => { setBroken(true); setNat(null); }} style={{ display: "none" }} />
+      {broken ? (
+        <span className="text-[11px] text-destructive">Bad URL</span>
+      ) : (
+        <canvas ref={canvasRef} width={Math.round(IH * A)} height={IH} className="h-full w-auto" style={{ aspectRatio: A }} />
+      )}
+    </div>
+  );
+}
+
+// The "Set / Update Photo" dialog: enter the URL, then drag + zoom to position the
+// image inside a frame locked to the texture's aspect ratio, then Save. Nothing is
+// written until Save — Cancel discards.
+function BrandPhotoModal({
+  tex, initial, onClose, onSave,
+}: {
+  tex: (typeof BRAND_TEXTURES)[number]; initial: { url: string; crop?: Crop | null } | null;
+  onClose: () => void; onSave: (e: { url: string; crop?: Crop | null } | null) => void;
+}) {
+  const [url, setUrl] = useState(initial?.url || "");
+  const [crop, setCrop] = useState<Crop | null>(initial?.crop || null);
+  const trimmed = url.trim();
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // typing a different URL invalidates the current crop — the cropper reseeds to cover
+  const onUrlChange = (v: string) => {
+    setUrl(v);
+    if (v.trim() !== trimmed) setCrop(null);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
+      onPointerDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="w-full max-w-md rounded-xl border border-border bg-card p-4 shadow-2xl">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold">{tex.label} photo</h3>
+            <p className="text-[11px] text-muted-foreground">{tex.hint} · locked to {tex.w}×{tex.h}</p>
+          </div>
+          <button onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"><X className="h-4 w-4" /></button>
+        </div>
+
+        <label className="text-[11px] font-medium text-muted-foreground">Photo URL</label>
+        <Input
+          autoFocus
+          value={url}
+          onChange={(e) => onUrlChange(e.target.value)}
+          placeholder="https://…/image.png"
+          className="mt-1 h-9"
+        />
+
+        <div className="mt-3">
+          {trimmed ? (
+            <BrandCropper url={trimmed} aspect={tex} crop={crop} onChange={setCrop} />
+          ) : (
+            <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-border text-[11px] text-muted-foreground">
+              Paste an image URL above to position it.
+            </div>
+          )}
+        </div>
+
+        <div className="mt-4 flex items-center justify-end gap-2">
+          <button onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-semibold text-muted-foreground transition hover:bg-accent hover:text-foreground">Cancel</button>
+          <button
+            disabled={!trimmed}
+            onClick={() => onSave(trimmed ? { url: trimmed, crop } : null)}
+            className={
+              "rounded-md px-3 py-1.5 text-xs font-semibold transition " +
+              (trimmed ? "bg-primary text-primary-foreground hover:opacity-90" : "cursor-not-allowed bg-muted text-muted-foreground")
+            }
+          >
+            Save photo
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// A crop rectangle over the full image (like a photo editor's crop tool): the whole
+// image is shown, a movable/resizable frame — locked to the texture's aspect ratio,
+// with a rule-of-thirds grid and the outside dimmed — selects the region. Reports the
+// normalised source rect via onChange as it's adjusted.
+type PxRect = { l: number; t: number; w: number; h: number };
+function BrandCropper({
+  url, aspect, crop, onChange,
+}: {
+  url: string; aspect: Aspect; crop: Crop | null; onChange: (c: Crop) => void;
+}) {
+  const A = aspect.w / aspect.h;
+  const [nat, setNat] = useState<{ w: number; h: number } | null>(null);
+  const [broken, setBroken] = useState(false);
+  const [rect, setRect] = useState<PxRect | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const gesture = useRef<any>(null);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
+  // displayed image size: contain within a bounded box (image shown undistorted, so
+  // display px map uniformly to image px — the crop rect works in display px)
+  const MAXW = 380, MAXH = 260;
+  const disp = useMemo(() => {
+    if (!nat) return { w: MAXW, h: Math.round(MAXW / A) };
+    const ia = nat.w / nat.h;
+    let w = MAXW, h = MAXW / ia;
+    if (h > MAXH) { h = MAXH; w = MAXH * ia; }
+    return { w: Math.round(w), h: Math.round(h) };
+  }, [nat, A]);
+
+  const MIN = 40;
+  const toNorm = (r: PxRect): Crop => ({ x: r.l / disp.w, y: r.t / disp.h, w: r.w / disp.w, h: r.h / disp.h });
+  // the largest A-aspect frame that fits the displayed image, centred
+  const coverPx = (): PxRect => {
+    let w = disp.w, h = w / A;
+    if (h > disp.h) { h = disp.h; w = h * A; }
+    return { l: (disp.w - w) / 2, t: (disp.h - h) / 2, w, h };
+  };
+
+  // seed the frame from the saved crop, else cover, whenever a new image/size lands
+  useEffect(() => {
+    if (!nat) return;
+    if (crop && crop.w > 0 && crop.h > 0) {
+      setRect({ l: crop.x * disp.w, t: crop.y * disp.h, w: crop.w * disp.w, h: crop.h * disp.h });
+    } else {
+      setRect(coverPx());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nat, url, disp.w, disp.h]);
+
+  // report the crop upward whenever the frame moves/resizes
+  useEffect(() => { if (rect) onChangeRef.current(toNorm(rect)); /* eslint-disable-next-line */ }, [rect]);
+
+  // one window-level gesture (move or corner-resize) at a time
+  useEffect(() => {
+    const move = (e: PointerEvent) => {
+      const g = gesture.current;
+      if (!g) return;
+      if (g.type === "move") {
+        const l = clampN(g.r.l + (e.clientX - g.px), 0, disp.w - g.r.w);
+        const t = clampN(g.r.t + (e.clientY - g.py), 0, disp.h - g.r.h);
+        setRect({ ...g.r, l, t });
+      } else {
+        // resize from a corner; the OPPOSITE corner (anchor) stays fixed, aspect locked
+        const ax = g.fixedLeft ? g.r.l : g.r.l + g.r.w;
+        const ay = g.fixedTop ? g.r.t : g.r.t + g.r.h;
+        const box = wrapRef.current!.getBoundingClientRect();
+        const px = e.clientX - box.left;
+        let w = Math.abs(px - ax);
+        const maxW = g.fixedLeft ? disp.w - ax : ax;
+        const maxH = g.fixedTop ? disp.h - ay : ay;
+        w = clampN(w, MIN, Math.min(maxW, maxH * A));
+        const h = w / A;
+        setRect({ l: g.fixedLeft ? ax : ax - w, t: g.fixedTop ? ay : ay - h, w, h });
+      }
+    };
+    const up = () => { gesture.current = null; };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    return () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+  }, [disp.w, disp.h, A]);
+
+  const startMove = (e: React.PointerEvent) => {
+    e.preventDefault();
+    if (rect) gesture.current = { type: "move", px: e.clientX, py: e.clientY, r: rect };
+  };
+  const startResize = (fixedLeft: boolean, fixedTop: boolean) => (e: React.PointerEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    if (rect) gesture.current = { type: "resize", px: e.clientX, py: e.clientY, r: rect, fixedLeft, fixedTop };
+  };
+
+  // corners: [dx,dy for the handle centre, anchor-fixedLeft, anchor-fixedTop, cursor]
+  const corners: [number, number, boolean, boolean, string][] = [
+    [0, 0, false, false, "nwse-resize"], // NW → anchor SE
+    [1, 0, true, false, "nesw-resize"],  // NE → anchor SW
+    [0, 1, false, true, "nesw-resize"],  // SW → anchor NE
+    [1, 1, true, true, "nwse-resize"],   // SE → anchor NW
+  ];
+
+  return (
+    <div>
+      {broken ? (
+        <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-destructive/50 text-[11px] text-destructive">Couldn't load that image URL.</div>
+      ) : !nat ? (
+        <>
+          <img src={url} alt="" onLoad={(e) => { setBroken(false); setNat({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight }); }} onError={() => { setBroken(true); }} style={{ display: "none" }} />
+          <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-border text-[11px] text-muted-foreground">Loading image…</div>
+        </>
+      ) : (
+        <div className="flex flex-col items-center gap-2">
+          <div ref={wrapRef} className="relative select-none" style={{ width: disp.w, height: disp.h, touchAction: "none" }}>
+            <img src={url} alt="" draggable={false} className="block h-full w-full rounded-md" />
+            {rect && (
+              <>
+                {/* dim + grid, clipped to the image so the shadow can't bleed onto the modal */}
+                <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-md">
+                  <div
+                    className="absolute"
+                    style={{ left: rect.l, top: rect.t, width: rect.w, height: rect.h, boxShadow: "0 0 0 9999px rgba(0,0,0,0.55)", outline: "1px solid rgba(255,255,255,0.9)" }}
+                  >
+                    <div className="absolute inset-y-0" style={{ left: "33.333%", borderLeft: "1px solid rgba(255,255,255,0.4)" }} />
+                    <div className="absolute inset-y-0" style={{ left: "66.666%", borderLeft: "1px solid rgba(255,255,255,0.4)" }} />
+                    <div className="absolute inset-x-0" style={{ top: "33.333%", borderTop: "1px solid rgba(255,255,255,0.4)" }} />
+                    <div className="absolute inset-x-0" style={{ top: "66.666%", borderTop: "1px solid rgba(255,255,255,0.4)" }} />
+                  </div>
+                </div>
+                {/* move surface (grab anywhere inside the frame) */}
+                <div
+                  onPointerDown={startMove}
+                  className="absolute cursor-move"
+                  style={{ left: rect.l, top: rect.t, width: rect.w, height: rect.h }}
+                />
+                {/* corner resize handles — outside the clip so they stay visible on edges */}
+                {corners.map(([dx, dy, fl, ft, cur]) => (
+                  <div
+                    key={`${dx}${dy}`}
+                    onPointerDown={startResize(fl, ft)}
+                    className="absolute h-3 w-3 rounded-sm border border-white bg-primary"
+                    style={{ left: rect.l + dx * rect.w - 6, top: rect.t + dy * rect.h - 6, cursor: cur }}
+                  />
+                ))}
+              </>
+            )}
+          </div>
+          <div className="flex w-full items-center justify-between">
+            <p className="text-[11px] text-muted-foreground">Drag the frame · pull a corner to resize.</p>
+            <button onClick={() => setRect(coverPx())} title="Reset" className="flex items-center gap-1 rounded-md border border-border bg-secondary px-2 py-1 text-[11px] font-semibold text-foreground transition hover:bg-accent">
+              <RotateCcw className="h-3 w-3" /> Reset
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { Badge } from "@/components/ui/badge";
-import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave, CircleDot } from "lucide-react";
+import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave, CircleDot, Search, Trash2, ChevronUp, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // kind "finish" = a finish tool (frosting): flavors is picked on the card, then the
@@ -34,6 +34,8 @@ type TrayEntry = {
   meal?: boolean;
   // a finished (frosted…) product's recorded flavor, e.g. "Strawberry"
   flavorLabel?: string;
+  // a burnt cook output — sorted to the back of the bar and offered the bin
+  burnt?: boolean;
 };
 // A buildable recipe (kitchen prep) with its output + components resolved for the tooltip.
 type RecipeComp = { item: string; label: string; image?: string };
@@ -140,11 +142,13 @@ function ToppingsRow({ e }: { e: TrayEntry }) {
 // ── bar-item hover tooltip ────────────────────────────────────────────────────
 // Floats above a hovered tray/ingredient card: what the item is, what it's made
 // of (with icons), its cheese state, and what you can do with it here. Anchored
-// fixed so the bar's horizontal scroll can't clip it.
+// fixed so the bar's horizontal scroll can't clip it. When the entry has actions
+// (Take / Discard) the tooltip is interactive — the cursor can travel onto it and
+// it pins itself open while hovered, like the prep recipe tooltip.
 
 type BarTip = { x: number; y: number; tray?: TrayEntry; ing?: Ingredient; hint?: string };
 
-function BarTooltip({ tip }: { tip: BarTip }) {
+function BarTooltip({ tip, actions, onPin }: { tip: BarTip; actions?: ReactNode; onPin: (pinned: boolean) => void }) {
   const e = tip.tray;
   const ing = tip.ing;
   const label = e ? e.label || e.item : ing?.label || "";
@@ -160,7 +164,12 @@ function BarTooltip({ tip }: { tip: BarTip }) {
       // NOTE: the fade-in animation lives on the INNER card — its keyframes set
       // `transform`, which would override this centering translate mid-animation
       // (the tooltip would start off to the right/below and slide into place)
-      className="pointer-events-none fixed z-50 -translate-x-1/2 -translate-y-[104%]"
+      onPointerEnter={() => actions && onPin(true)}
+      onPointerLeave={() => actions && onPin(false)}
+      className={cn(
+        "fixed z-50 -translate-x-1/2 -translate-y-[104%]",
+        actions ? "pointer-events-auto" : "pointer-events-none"
+      )}
       style={{ left: x, top: tip.y }}
     >
       <div className="relative w-56 animate-fade-in rounded-xl border border-border bg-card p-3 shadow-2xl">
@@ -229,6 +238,7 @@ function BarTooltip({ tip }: { tip: BarTip }) {
             {tip.hint}
           </div>
         )}
+        {actions}
         {/* caret pointing down at the card */}
         <div
           className="absolute top-full h-0 w-0 -translate-x-1/2 border-x-[6px] border-t-[6px] border-x-transparent border-t-card"
@@ -536,6 +546,12 @@ export default function Cooking({ data }: { data: any }) {
   const [view, setView] = useState<string>("stovetop");
   const [tray, setTray] = useState<TrayEntry[]>([]);
   const [tab, setTab] = useState<"ingredients" | "cooked" | "uncooked">("ingredients");
+  // bar organisation: text filter over the cards, one-row strip vs wrapped grid,
+  // and the card whose bin button is waiting for its confirming second click
+  const [query, setQuery] = useState("");
+  const [expanded, setExpanded] = useState(false);
+  const [confirmKey, setConfirmKey] = useState<string | null>(null);
+  const confirmTimer = useRef<number | null>(null);
   // kitchen-prep recipe catalogue + the hovered stack's live tooltip snapshot
   const [recipes, setRecipes] = useState<RecipeCat[]>([]);
   const [tip, setTip] = useState<PrepTip | null>(null);
@@ -551,6 +567,8 @@ export default function Cooking({ data }: { data: any }) {
   // hover tooltip for a bar card (tray item / ingredient): contents + what to do with it
   const [barTip, setBarTip] = useState<BarTip | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
+  const barPinnedRef = useRef(false);          // cursor is over the bar tooltip's actions
+  const barTipTimer = useRef<number | null>(null);
   const tipPinnedRef = useRef(false);           // cursor is over the build tooltip
   const tipHideTimer = useRef<number | null>(null);
   const itemsRef = useRef<ChipItem[]>([]);
@@ -574,6 +592,8 @@ export default function Cooking({ data }: { data: any }) {
     setTab("ingredients");
     setTip(null);
     setTipShow(false);
+    setQuery("");
+    setConfirmKey(null);
   }, [data]);
 
   useNuiEvent("cookingIngredients", (d) => { setIngredients(d.ingredients || []); setBarTip(null); });
@@ -620,7 +640,26 @@ export default function Cooking({ data }: { data: any }) {
   const uncookedItems = tray.filter((e) => e.uncooked);
   const cookedTotal = cookedItems.reduce((n, e) => n + e.count, 0);
   const uncookedTotal = uncookedItems.reduce((n, e) => n + e.count, 0);
-  const trayList = tab === "uncooked" ? uncookedItems : cookedItems;
+  // burnt food actually binnable here — the sweep only reaches the tray store,
+  // never inventory-held ("Item") entries
+  const burntTotal = cookedItems.reduce((n, e) => n + (e.burnt && e.source !== "inv" ? e.count : 0), 0);
+  // text filter (matches the name, flavor, and component/topping names) + a stable
+  // sort: alphabetical, burnt last — so the bin candidates never hide mid-strip
+  const q = query.trim().toLowerCase();
+  const trayMatches = (e: TrayEntry) =>
+    !q ||
+    [e.label || e.item, e.flavorLabel, ...(e.comps || []).map((c) => c.label), ...(e.extras || []).map((c) => c.label)]
+      .some((t) => !!t && t.toLowerCase().includes(q));
+  const sortTray = (list: TrayEntry[]) =>
+    [...list].sort(
+      (a, b) =>
+        Number(!!a.burnt) - Number(!!b.burnt) ||
+        (a.label || a.item).localeCompare(b.label || b.item) ||
+        (a.sig || "").localeCompare(b.sig || "")
+    );
+  const trayListAll = tab === "uncooked" ? uncookedItems : cookedItems;
+  const trayList = sortTray(trayListAll.filter(trayMatches));
+  const shownIngredients = ingredients.filter((ing) => !q || ing.label.toLowerCase().includes(q));
   const switchView = (key: string) => {
     setView(key);
     fetchNui("cooking:setView", { view: key });
@@ -677,6 +716,23 @@ export default function Cooking({ data }: { data: any }) {
     tipPinnedRef.current = false;
   };
 
+  // ── the bin: two clicks to throw away (arm, then confirm within 2.5s) ────────
+  const armConfirm = (key: string) => {
+    setConfirmKey(key);
+    if (confirmTimer.current) clearTimeout(confirmTimer.current);
+    confirmTimer.current = window.setTimeout(() => setConfirmKey(null), 2500);
+  };
+  const discardEntry = (e: TrayEntry, key: string) => {
+    if (confirmKey !== key) return armConfirm(key);
+    setConfirmKey(null);
+    fetchNui("cooking:trayDiscard", { item: e.item, cheese: e.cheese || 0, count: e.count, sig: e.sig || "" });
+  };
+  const discardBurnt = () => {
+    if (confirmKey !== "__burnt__") return armConfirm("__burnt__");
+    setConfirmKey(null);
+    fetchNui("cooking:trayDiscard", { burnt_only: true });
+  };
+
   // ── drag ingredients out of the bar (live in-world placement) ───────────────
   const startPlace = (e: React.PointerEvent, ing: Ingredient) => {
     e.preventDefault();
@@ -697,7 +753,8 @@ export default function Cooking({ data }: { data: any }) {
     if (canCookHere(e)) return station === "fryer" ? "Drag into the fryer basket to cook it." : "Drag into an open oven door to bake it.";
     if (e.uncooked) return `Still raw — cook it at the ${e.cookStation === "fryer" ? "fryer" : "stovetop oven"}.`;
     if (e.source === "inv") return "In your inventory — ready to stock or sell.";
-    return "Use “→ inventory” to take it with you.";
+    if (e.burnt) return "Burnt — discard it below, or keep it in your inventory.";
+    return "Take it into your inventory to stock or sell it.";
   };
   const ingHint = (ing: Ingredient): string => {
     if (ing.kind === "tray") return "Drag onto the table — arrange food on it, then make it a meal.";
@@ -709,9 +766,30 @@ export default function Cooking({ data }: { data: any }) {
     return station === "fryer" ? "Drag into the fryer basket to cook." : "Drag onto the cooktop or into an open oven door.";
   };
   const showBarTip = (ev: React.PointerEvent, tip: Omit<BarTip, "x" | "y">) => {
+    if (barTipTimer.current) { clearTimeout(barTipTimer.current); barTipTimer.current = null; }
+    barPinnedRef.current = false;
     const r = (ev.currentTarget as HTMLElement).getBoundingClientRect();
     setBarTip({ x: r.left + r.width / 2, y: r.top, ...tip });
   };
+  // Leaving a card holds the tooltip briefly so the cursor can travel up onto its
+  // action buttons; while hovered (pinned) it stays until the cursor leaves it.
+  const hideBarTip = () => {
+    if (barTipTimer.current) clearTimeout(barTipTimer.current);
+    barTipTimer.current = window.setTimeout(() => {
+      barTipTimer.current = null;
+      if (!barPinnedRef.current) setBarTip(null);
+    }, 250);
+  };
+  const onBarTipPin = (pinned: boolean) => {
+    barPinnedRef.current = pinned;
+    if (pinned) {
+      if (barTipTimer.current) { clearTimeout(barTipTimer.current); barTipTimer.current = null; }
+    } else {
+      setBarTip(null); // left the tooltip and the card — dismiss
+    }
+  };
+  const takeEntry = (e: TrayEntry, count: number) =>
+    fetchNui("cooking:trayToInventory", { item: e.item, cheese: e.cheese || 0, count, sig: e.sig || "" });
   const startTrayCook = (ev: React.PointerEvent, e: TrayEntry) => {
     ev.preventDefault();
     placingRef.current = true;
@@ -952,9 +1030,16 @@ export default function Cooking({ data }: { data: any }) {
     };
   }, []);
 
+  useEffect(() => () => { if (confirmTimer.current) clearTimeout(confirmTimer.current); }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") fetchNui("cooking:close");
+      if (e.key !== "Escape") return;
+      // Escape inside the search box clears it and leaves the box; the next
+      // Escape closes the station
+      const t = e.target as HTMLElement | null;
+      if (t && t.tagName === "INPUT") { (t as HTMLInputElement).blur(); setQuery(""); return; }
+      fetchNui("cooking:close");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -966,6 +1051,56 @@ export default function Cooking({ data }: { data: any }) {
   const draggable = (ing: Ingredient) =>
     // tray + lid are kitchen equipment, never gated on an item count
     ing.kind === "tray" || ing.kind === "lid" ? true : ing.kind === "assembly" ? !!ing.canMake : (ing.count || 0) > 0;
+
+  // One-row strip by default (wheel scrolls it sideways); expanded — or while
+  // searching — the strip wraps into a scrollable grid. A drag always collapses
+  // back to one row so the bar never covers the kitchen mid-gesture.
+  const gridMode = (expanded || !!q) && !dragging;
+  const rowCls = cn(
+    "min-h-[132px] gap-2 pb-1",
+    gridMode ? "flex max-h-[40vh] flex-wrap content-start overflow-y-auto pr-1" : "flex items-center overflow-x-auto"
+  );
+  const onRowWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (gridMode) return;
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) e.currentTarget.scrollLeft += e.deltaY;
+  };
+
+  // Take / Discard live on the hovered card's tooltip, not the card itself —
+  // tray-held entries only (inventory "Item" entries are already taken).
+  const entryKey = (e: TrayEntry) => e.item + "|" + (e.cheese || 0) + "|" + (e.sig || "") + "|" + (e.source || "tray");
+  const tipEntry = barTip?.tray;
+  const tipKey = tipEntry ? entryKey(tipEntry) : "";
+  const tipActions =
+    tipEntry && tipEntry.source !== "inv" ? (
+      <div className="mt-2.5 flex items-center gap-1.5 border-t border-border/60 pt-2.5">
+        <button
+          onClick={() => takeEntry(tipEntry, 1)}
+          className="rounded-md bg-secondary px-2.5 py-1 text-[11px] font-semibold text-foreground transition hover:bg-accent"
+        >
+          {tipEntry.count > 1 ? "Take 1" : "Take"}
+        </button>
+        {tipEntry.count > 1 && (
+          <button
+            onClick={() => takeEntry(tipEntry, tipEntry.count)}
+            className="rounded-md bg-secondary px-2.5 py-1 text-[11px] font-semibold text-foreground transition hover:bg-accent"
+          >
+            Take All
+          </button>
+        )}
+        <button
+          onClick={() => discardEntry(tipEntry, tipKey)}
+          className={cn(
+            "ml-auto flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition",
+            confirmKey === tipKey
+              ? "bg-red-500/25 text-red-200 ring-1 ring-red-500"
+              : "bg-secondary text-foreground hover:bg-red-500/20 hover:text-red-200"
+          )}
+        >
+          <Trash2 className="h-3 w-3" />
+          {confirmKey === tipKey ? "Confirm?" : "Discard"}
+        </button>
+      </div>
+    ) : null;
 
   return (
     <>
@@ -1019,7 +1154,7 @@ export default function Cooking({ data }: { data: any }) {
       </div>
 
       {/* hover tooltip for a bar card (tray item / ingredient) */}
-      {barTip && !dragging && <BarTooltip tip={barTip} />}
+      {barTip && !dragging && <BarTooltip tip={barTip} actions={tipActions} onPin={onBarTipPin} />}
 
       {/* floating ghost while dragging a topping (cheese) onto a patty */}
       {ghost && (
@@ -1092,8 +1227,9 @@ export default function Cooking({ data }: { data: any }) {
           )}
 
           <div className="min-w-0 flex-1">
-        {/* tabs: raw ingredients · ready cooked items · still-raw uncooked items */}
-        <div className="mb-2 flex gap-1">
+        {/* tabs: raw ingredients · ready cooked items · still-raw uncooked items —
+            plus the bar tools on the right: burnt sweep, search, one-row/grid toggle */}
+        <div className="mb-2 flex items-center gap-1">
           {([
             ["ingredients", "Ingredients", Carrot, 0],
             ["cooked", "Cooked Items", ChefHat, cookedTotal],
@@ -1112,14 +1248,63 @@ export default function Cooking({ data }: { data: any }) {
               {count > 0 ? ` (${count})` : ""}
             </button>
           ))}
+          <div className="ml-auto flex items-center gap-1.5">
+            {tab === "cooked" && burntTotal > 0 && (
+              <button
+                onClick={discardBurnt}
+                className={cn(
+                  "flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold transition",
+                  confirmKey === "__burnt__"
+                    ? "border-red-500 bg-red-500/20 text-red-200"
+                    : "border-border bg-secondary text-foreground hover:border-red-500/60 hover:text-red-200"
+                )}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                {confirmKey === "__burnt__" ? "Click again to confirm" : `Discard burnt (${burntTotal})`}
+              </button>
+            )}
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search…"
+                className="h-[26px] w-40 rounded-md border border-border bg-background pl-7 pr-6 text-xs outline-none placeholder:text-muted-foreground/70 focus:border-primary/60"
+              />
+              {query && (
+                <button
+                  onClick={() => setQuery("")}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+            <button
+              title={expanded ? "Collapse to one row" : "Show everything as a grid"}
+              onClick={() => setExpanded((v) => !v)}
+              className={cn(
+                "flex h-[26px] w-[26px] items-center justify-center rounded-md border transition",
+                expanded
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border bg-secondary text-muted-foreground hover:border-primary/60 hover:text-foreground"
+              )}
+            >
+              {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+            </button>
+          </div>
         </div>
 
         {tab === "ingredients" ? (
-          <div className="flex min-h-[132px] items-center gap-2 overflow-x-auto pb-1">
-            {ingredients.length === 0 && (
-              <div className="text-sm text-muted-foreground">You have no ingredients for this station.</div>
+          <div className={rowCls} onWheel={onRowWheel}>
+            {shownIngredients.length === 0 && (
+              <div className="text-sm text-muted-foreground">
+                {q && ingredients.length > 0
+                  ? `No matches for “${query.trim()}”.`
+                  : "You have no ingredients for this station."}
+              </div>
             )}
-            {ingredients.map((ing, i) => {
+            {shownIngredients.map((ing, i) => {
               const can = draggable(ing);
               const onDown = (e: React.PointerEvent) => {
                 if (!can) return;
@@ -1136,7 +1321,7 @@ export default function Cooking({ data }: { data: any }) {
                   key={ing.item + i}
                   onPointerDown={onDown}
                   onPointerEnter={(ev) => showBarTip(ev, { ing, hint: can ? ingHint(ing) : undefined })}
-                  onPointerLeave={() => setBarTip(null)}
+                  onPointerLeave={hideBarTip}
                   className={cn(
                     "relative flex h-32 shrink-0 touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border text-center text-xs font-medium",
                     ing.kind === "finish" ? "w-32" : "w-28",
@@ -1154,10 +1339,10 @@ export default function Cooking({ data }: { data: any }) {
                   )}
                   <span className="w-full truncate px-1.5 leading-tight">{ing.label}</span>
                   {ing.kind === "tray" && (
-                    <span className="text-[10px] text-muted-foreground">build a meal</span>
+                    <span className="text-[10px] text-muted-foreground">Build a meal</span>
                   )}
                   {ing.kind === "lid" && (
-                    <span className="text-[10px] text-muted-foreground">caps a filled drink</span>
+                    <span className="text-[10px] text-muted-foreground">Caps a filled drink</span>
                   )}
                   {/* finish tool: flavor picked right on the card (colored swatch
                       squares, hover for the flavor name), then drag to apply.
@@ -1193,37 +1378,41 @@ export default function Cooking({ data }: { data: any }) {
                     <Badge variant="secondary" className="absolute right-1 top-1">{ing.count ?? 0}</Badge>
                   )}
                   {ing.kind === "assembly" && !ing.canMake && (
-                    <span className="text-[10px] text-muted-foreground">missing parts</span>
+                    <span className="text-[10px] text-muted-foreground">Missing parts</span>
                   )}
                 </div>
               );
             })}
           </div>
         ) : (
-          <div className="flex min-h-[132px] items-center gap-2 overflow-x-auto pb-1">
+          <div className={rowCls} onWheel={onRowWheel}>
             {trayList.length === 0 && (
               <div className="text-sm text-muted-foreground">
-                {tab === "uncooked"
-                  ? "No uncooked items — assemble one (e.g. a pizza) at the prep table."
-                  : "No cooked items yet — cook something and collect it."}
+                {q && trayListAll.length > 0
+                  ? `No matches for “${query.trim()}”.`
+                  : tab === "uncooked"
+                    ? "No uncooked items — assemble one (e.g. a pizza) at the prep table."
+                    : "No cooked items yet — cook something and collect it."}
               </div>
             )}
             {trayList.map((e, i) => {
               const cookHere = canCookHere(e);
               const fromInv = e.source === "inv";
+              const cardKey = e.item + "|" + (e.cheese || 0) + "|" + (e.sig || "") + "|" + (e.source || "tray") + "|" + i;
               return (
               <div
-                key={e.item + "|" + (e.cheese || 0) + "|" + (e.sig || "") + "|" + (e.source || "tray") + "|" + i}
+                key={cardKey}
                 onPointerDown={(ev) => {
                   setBarTip(null);
                   if (isPrep) startPrepDrag(ev, e.source || "tray", e);
                   else if (cookHere) startTrayCook(ev, e);
                 }}
                 onPointerEnter={(ev) => showBarTip(ev, { tray: e, hint: trayHint(e) })}
-                onPointerLeave={() => setBarTip(null)}
+                onPointerLeave={hideBarTip}
                 className={cn(
-                  "relative flex h-32 w-28 shrink-0 touch-none select-none flex-col items-center rounded-lg border border-border bg-secondary pt-2 text-center text-xs font-medium",
-                  (isPrep || cookHere) ? "cursor-grab hover:border-primary/60 active:cursor-grabbing" : "hover:border-border"
+                  "relative flex h-32 w-28 shrink-0 touch-none select-none flex-col items-center rounded-lg border bg-secondary pt-2 text-center text-xs font-medium",
+                  e.burnt ? "border-red-900/70 bg-red-950/25" : "border-border",
+                  (isPrep || cookHere) ? "cursor-grab hover:border-primary/60 active:cursor-grabbing" : e.burnt ? "hover:border-red-800" : "hover:border-border"
                 )}
               >
                 {/* content block centered in the space above the action row */}
@@ -1238,31 +1427,18 @@ export default function Cooking({ data }: { data: any }) {
                     <ToppingsRow e={e} />
                   )}
                 </div>
-                {/* action row pinned to the card's bottom edge */}
+                {/* hint chips pinned to the card's bottom edge — the actionable
+                    buttons (Take / Discard) live on the hover tooltip instead */}
                 <div className="flex w-full flex-col items-center gap-0.5 pb-1.5">
                   {isPrep && e.meal && (
                     <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[9px] font-semibold text-primary">
-                      drag to set down
-                    </span>
-                  )}
-                  {isPrep && e.decompose && !e.meal && (
-                    <span className="rounded bg-background/60 px-1.5 py-0.5 text-[9px] text-muted-foreground">
-                      drag to take apart
+                      Drag to set down
                     </span>
                   )}
                   {cookHere && (
                     <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[9px] font-semibold text-primary">
-                      {station === "fryer" ? "drag into the basket" : "drag into the oven"}
+                      {station === "fryer" ? "Drag into the basket" : "Drag into the oven"}
                     </span>
-                  )}
-                  {!isPrep && !fromInv && (
-                    <button
-                      onPointerDown={(ev) => ev.stopPropagation()}
-                      onClick={() => fetchNui("cooking:trayToInventory", { item: e.item, cheese: e.cheese || 0, count: 1, sig: e.sig || "" })}
-                      className="rounded bg-background/60 px-1.5 py-0.5 text-[9px] hover:bg-accent"
-                    >
-                      → inventory
-                    </button>
                   )}
                 </div>
                 <Badge variant="secondary" className="absolute right-1 top-1">{e.count}</Badge>
