@@ -13,7 +13,7 @@ PLACEABLE_MODELS = {
 
 function StartPropPlacement(restaurantId, propType)
     local model = PLACEABLE_MODELS[propType]
-    if not model then return ShowNotification("Unknown station type.") end
+    if not model then return ShowNotification(_L("place_unknown_station")) end
     Wait(250) -- let the NUI fully release focus before the gizmo takes input
     local result = StartGizmoEditor({ model = GetHashKey(model), enableCancel = true, deleteEntity = true })
     if not result or not result.position then return end
@@ -25,9 +25,9 @@ function StartPropPlacement(restaurantId, propType)
         heading = (result.rotation and result.rotation.z) or 0.0,
     })
     if res and res.ok then
-        ShowNotification("Station placed.")
+        ShowNotification(_L("place_station_placed"))
     else
-        ShowNotification((res and res.error) or "Failed to place station.")
+        ShowNotification((res and res.error) or _L("place_station_fail"))
     end
 end
 
@@ -48,9 +48,9 @@ function StartSeatPlacement(restaurantId)
         heading = (result.rotation and result.rotation.z) or 0.0,
     })
     if res and res.ok then
-        ShowNotification("Seat placed.")
+        ShowNotification(_L("place_seat_placed"))
     else
-        ShowNotification((res and res.error) or "Failed to place seat.")
+        ShowNotification((res and res.error) or _L("place_seat_fail"))
     end
 end
 
@@ -64,8 +64,8 @@ function StartCounterPlacement(restaurantId)
         heading = (result.rotation and result.rotation.z) or 0.0,
     })
     if res and res.ok then
-        ShowNotification("Counter set.")
+        ShowNotification(_L("place_counter_set"))
     else
-        ShowNotification((res and res.error) or "Failed to set counter.")
+        ShowNotification((res and res.error) or _L("place_counter_fail"))
     end
 end

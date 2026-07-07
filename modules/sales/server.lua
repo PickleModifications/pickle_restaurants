@@ -41,18 +41,18 @@ lib.callback.register("pickle_restaurants:sales:buy", function(src, d)
     local id = tonumber(d.id)
     local r = GetRestaurant(id); if not r then return { ok = false } end
     local row = MySQL.single.await("SELECT item, label, price FROM pickle_restaurant_menu WHERE restaurant_id = ? AND item = ? AND enabled = 1", { id, d.item })
-    if not row then return { ok = false, error = "Not on the menu." } end
-    if GetStockCount(id, row.item) < 1 then return { ok = false, error = "Out of stock." } end
+    if not row then return { ok = false, error = _L("sales_not_on_menu") } end
+    if GetStockCount(id, row.item) < 1 then return { ok = false, error = _L("out_of_stock") } end
     local price = math.floor(tonumber(row.price) or 0)
-    if GetMoney(src, "money") < price then return { ok = false, error = "Not enough cash." } end
+    if GetMoney(src, "money") < price then return { ok = false, error = _L("not_enough_cash") } end
     if not (Inventory.CanCarryItem == nil or Inventory.CanCarryItem(src, row.item, 1)) then
-        return { ok = false, error = "You can't carry that." }
+        return { ok = false, error = _L("sales_cant_carry") }
     end
     RemoveMoney(src, price, "money")
     local ok = RestaurantSell(id, row.item, price, nil, "Walk-in")
     if not ok then
         AddMoney(src, price, "money") -- refund race on stock
-        return { ok = false, error = "Out of stock." }
+        return { ok = false, error = _L("out_of_stock") }
     end
     Inventory.AddItem(src, row.item, 1)
     return { ok = true, item = row.item, label = row.label }
@@ -77,15 +77,15 @@ end
 
 lib.callback.register("pickle_restaurants:sales:getRegister", function(src, d)
     local id = tonumber(d.id)
-    if not HasPerm(id, src, "sell") then return { ok = false, error = "You don't work here." } end
+    if not HasPerm(id, src, "sell") then return { ok = false, error = _L("no_work_here") } end
     return buildRegister(src, id)
 end)
 
 lib.callback.register("pickle_restaurants:sales:stock", function(src, d)
     local id = tonumber(d.id)
-    if not HasPerm(id, src, "sell") then return { ok = false, error = "No permission." } end
+    if not HasPerm(id, src, "sell") then return { ok = false, error = _L("no_permission") } end
     local count = math.max(1, math.floor(tonumber(d.count) or 1))
-    if (Inventory.GetItemCount(src, d.item) or 0) < count then return { ok = false, error = "You don't have that many." } end
+    if (Inventory.GetItemCount(src, d.item) or 0) < count then return { ok = false, error = _L("sales_not_that_many") } end
     Inventory.RemoveItem(src, d.item, count)
     AddStock(id, d.item, count)
     return buildRegister(src, id)

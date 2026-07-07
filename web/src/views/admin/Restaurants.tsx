@@ -7,15 +7,16 @@ import { Field } from "@/components/form";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import Branding from "@/components/Branding";
 import { money } from "@/lib/utils";
+import { _L } from "@/lib/locale";
 import {
   Plus, Trash2, MapPin, ChevronRight, ArrowLeft, Store, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon,
 } from "lucide-react";
 
 const STATIONS = [
-  { key: "soda_machine", label: "Soda Machine", icon: CupSoda },
-  { key: "fryer", label: "Fryer", icon: Flame },
-  { key: "stovetop", label: "Stovetop", icon: CookingPot },
-  { key: "kitchen_prep", label: "Kitchen Prep", icon: Sandwich },
+  { key: "soda_machine", label: _L("admin.station_soda_machine"), icon: CupSoda },
+  { key: "fryer", label: _L("admin.station_fryer"), icon: Flame },
+  { key: "stovetop", label: _L("admin.station_stovetop"), icon: CookingPot },
+  { key: "kitchen_prep", label: _L("admin.station_kitchen_prep"), icon: Sandwich },
 ];
 
 type Props = { restaurants: any[]; players: any[]; refresh: () => void };
@@ -38,15 +39,15 @@ function List({ restaurants, act, onOpen }: { restaurants: any[]; act: (e: strin
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex shrink-0 items-end gap-2 rounded-lg border border-border p-3">
-        <Field label="Internal name" className="flex-1"><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="burgershot" /></Field>
-        <Field label="Display label" className="flex-1"><Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Burger Shot" /></Field>
+        <Field label={_L("admin.internal_name")} className="flex-1"><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="burgershot" /></Field>
+        <Field label={_L("admin.display_label")} className="flex-1"><Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Burger Shot" /></Field>
         <Button onClick={async () => { if (!name) return; await act("admin:create", { name, label: label || name }); setName(""); setLabel(""); }}>
-          <Plus className="h-4 w-4" /> Create
+          <Plus className="h-4 w-4" /> {_L("admin.create")}
         </Button>
       </div>
 
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-        {restaurants.length === 0 && <div className="py-6 text-center text-sm text-muted-foreground">No restaurants yet. Create one above.</div>}
+        {restaurants.length === 0 && <div className="py-6 text-center text-sm text-muted-foreground">{_L("admin.no_restaurants")}</div>}
         {restaurants.map((r) => (
           <button
             key={r.id}
@@ -59,10 +60,10 @@ function List({ restaurants, act, onOpen }: { restaurants: any[]; act: (e: strin
                 <div className="flex items-center gap-2">
                   <span className="truncate font-semibold">{r.label}</span>
                   <Badge variant="secondary">#{r.id}</Badge>
-                  {r.owner ? <Badge>owned</Badge> : <Badge variant="outline">server-owned</Badge>}
+                  {r.owner ? <Badge>{_L("admin.owned")}</Badge> : <Badge variant="outline">{_L("admin.server_owned")}</Badge>}
                 </div>
                 <div className="truncate text-xs text-muted-foreground">
-                  {money(r.balance)} · {r.propCount} stations · {r.hasCounter ? "counter set" : "no counter"}
+                  {_L("admin.restaurant_summary", money(r.balance), r.propCount, r.hasCounter ? _L("admin.counter_set") : _L("admin.no_counter"))}
                 </div>
               </div>
             </div>
@@ -91,37 +92,37 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
               <Badge variant="secondary">#{r.id}</Badge>
               <span className="font-mono text-xs text-muted-foreground">{r.name}</span>
             </div>
-            <p className="text-xs text-muted-foreground">Balance {money(r.balance)}</p>
+            <p className="text-xs text-muted-foreground">{_L("admin.balance", money(r.balance))}</p>
           </div>
         </div>
         {confirmDelete ? (
           <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground">Delete {r.label} and all its data?</span>
-            <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>Cancel</Button>
+            <span className="text-xs text-muted-foreground">{_L("admin.delete_confirm", r.label)}</span>
+            <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(false)}>{_L("admin.cancel")}</Button>
             <Button variant="destructive" size="sm" onClick={() => { act("admin:delete", { id: r.id }); onBack(); }}>
-              <Trash2 className="h-4 w-4" /> Confirm
+              <Trash2 className="h-4 w-4" /> {_L("admin.confirm")}
             </Button>
           </div>
         ) : (
           <Button variant="destructive" size="sm" onClick={() => setConfirmDelete(true)}>
-            <Trash2 className="h-4 w-4" /> Delete
+            <Trash2 className="h-4 w-4" /> {_L("admin.delete")}
           </Button>
         )}
       </div>
 
       <Tabs defaultValue="overview" className="flex min-h-0 flex-1 flex-col">
         <TabsList className="shrink-0">
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="settings">Settings</TabsTrigger>
+          <TabsTrigger value="overview">{_L("admin.tab_overview")}</TabsTrigger>
+          <TabsTrigger value="settings">{_L("admin.tab_settings")}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
         {/* ownership + counter */}
         <div className="grid grid-cols-2 gap-3">
           <div className="rounded-lg border border-border p-3">
-            <div className="mb-2 flex items-center gap-2 text-sm font-semibold"><UserCog className="h-4 w-4 text-primary" /> Ownership</div>
+            <div className="mb-2 flex items-center gap-2 text-sm font-semibold"><UserCog className="h-4 w-4 text-primary" /> {_L("admin.ownership")}</div>
             <div className="mb-2 text-xs text-muted-foreground">
-              {r.owner ? <>Owned by <span className="font-mono">{r.owner}</span></> : "Currently server-owned."}
+              {r.owner ? <>{_L("admin.owned_by", "")}<span className="font-mono">{r.owner}</span></> : _L("admin.currently_server_owned")}
             </div>
             <select
               className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
@@ -133,17 +134,17 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
                 e.target.value = "";
               }}
             >
-              <option value="" disabled>Change owner…</option>
-              <option value="__server__">Set server-owned</option>
+              <option value="" disabled>{_L("admin.change_owner")}</option>
+              <option value="__server__">{_L("admin.set_server_owned")}</option>
               {players.map((p: any) => <option key={p.id} value={p.id}>{p.name} [{p.id}]</option>)}
             </select>
           </div>
           <div className="rounded-lg border border-border p-3">
-            <div className="mb-2 flex items-center gap-2 text-sm font-semibold"><Receipt className="h-4 w-4 text-primary" /> Counter</div>
+            <div className="mb-2 flex items-center gap-2 text-sm font-semibold"><Receipt className="h-4 w-4 text-primary" /> {_L("admin.counter")}</div>
             <div className="flex items-center justify-between">
-              <span className="text-xs text-muted-foreground">{r.hasCounter ? "Counter is placed." : "No counter placed yet."}</span>
+              <span className="text-xs text-muted-foreground">{r.hasCounter ? _L("admin.counter_placed") : _L("admin.no_counter_placed")}</span>
               <Button size="sm" variant="outline" onClick={() => fetchNui("admin:setCounter", { id: r.id })}>
-                <MapPin className="h-3.5 w-3.5" /> {r.hasCounter ? "Reposition" : "Place"}
+                <MapPin className="h-3.5 w-3.5" /> {r.hasCounter ? _L("admin.reposition") : _L("admin.place")}
               </Button>
             </div>
           </div>
@@ -151,7 +152,7 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
 
         {/* stations */}
         <div className="rounded-lg border border-border p-3">
-          <div className="mb-3 text-sm font-semibold">Stations</div>
+          <div className="mb-3 text-sm font-semibold">{_L("admin.stations")}</div>
           <div className="space-y-3">
             {STATIONS.map((s) => {
               const placed = byType(s.key);
@@ -165,7 +166,7 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
                       <Badge variant="secondary">{placed.length}</Badge>
                     </div>
                     <Button size="sm" variant="outline" onClick={() => fetchNui("admin:placeProp", { id: r.id, prop_type: s.key })}>
-                      <Plus className="h-3.5 w-3.5" /> Place
+                      <Plus className="h-3.5 w-3.5" /> {_L("admin.place")}
                     </Button>
                   </div>
                   {placed.length > 0 && (
@@ -183,7 +184,7 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
             })}
           </div>
           <p className="mt-3 text-[11px] text-muted-foreground">
-            Placing a station closes this panel so you can position it in the world. Re-open with the admin command to continue.
+            {_L("admin.stations_hint")}
           </p>
         </div>
 
@@ -191,11 +192,11 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
         <div className="rounded-lg border border-border p-3">
           <div className="mb-1.5 flex items-center justify-between">
             <div className="flex items-center gap-2 text-sm font-semibold">
-              <Armchair className="h-4 w-4 text-muted-foreground" /> Seating
+              <Armchair className="h-4 w-4 text-muted-foreground" /> {_L("admin.seating")}
               <Badge variant="secondary">{byType("seat").length}</Badge>
             </div>
             <Button size="sm" variant="outline" onClick={() => fetchNui("admin:placeSeat", { id: r.id })}>
-              <Plus className="h-3.5 w-3.5" /> Place
+              <Plus className="h-3.5 w-3.5" /> {_L("admin.place")}
             </Button>
           </div>
           {byType("seat").length > 0 ? (
@@ -209,7 +210,7 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
             </div>
           ) : (
             <p className="text-[11px] text-muted-foreground">
-              A seat is an invisible sit point — place it on one of this restaurant's chairs and players get a “Sit” prompt there.
+              {_L("admin.seating_hint")}
             </p>
           )}
         </div>
@@ -222,7 +223,7 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
         <TabsContent value="settings" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
           <div className="rounded-lg border border-border p-3">
             <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
-              <ImageIcon className="h-4 w-4 text-primary" /> Branding
+              <ImageIcon className="h-4 w-4 text-primary" /> {_L("admin.branding")}
             </div>
             <Branding
               id={r.id}

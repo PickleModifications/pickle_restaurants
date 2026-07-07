@@ -10,6 +10,7 @@ import { Field, TextField, NumberField } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
 import Branding from "@/components/Branding";
 import { money } from "@/lib/utils";
+import { _L } from "@/lib/locale";
 import { UserPlus, Trash2, Plus, MapPin, Banknote, TriangleAlert, Armchair } from "lucide-react";
 
 export default function Management({ data, onClose }: { data: any; onClose: () => void }) {
@@ -19,14 +20,14 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
   const items: Item[] = data?.items || [];
 
   return (
-    <Panel title={data?.restaurant?.label || "Management"} subtitle={`Balance ${money(data?.restaurant?.balance)}`} onClose={onClose} width="max-w-4xl">
+    <Panel title={data?.restaurant?.label || _L("mgmt.title")} subtitle={_L("mgmt.balance", money(data?.restaurant?.balance))} onClose={onClose} width="max-w-4xl">
       <Tabs defaultValue={firstTab(perms)} className="flex min-h-0 flex-1 flex-col">
         <TabsList className="shrink-0">
-          {perms.manage_employees && <TabsTrigger value="employees">Employees</TabsTrigger>}
-          {perms.manage_menu && <TabsTrigger value="menu">Menu</TabsTrigger>}
-          {perms.view_finances && <TabsTrigger value="finances">Finances</TabsTrigger>}
-          {perms.manage_props && <TabsTrigger value="stations">Stations</TabsTrigger>}
-          {perms.manage_props && <TabsTrigger value="branding">Branding</TabsTrigger>}
+          {perms.manage_employees && <TabsTrigger value="employees">{_L("mgmt.tab_employees")}</TabsTrigger>}
+          {perms.manage_menu && <TabsTrigger value="menu">{_L("mgmt.tab_menu")}</TabsTrigger>}
+          {perms.view_finances && <TabsTrigger value="finances">{_L("mgmt.tab_finances")}</TabsTrigger>}
+          {perms.manage_props && <TabsTrigger value="stations">{_L("mgmt.tab_stations")}</TabsTrigger>}
+          {perms.manage_props && <TabsTrigger value="branding">{_L("mgmt.tab_branding")}</TabsTrigger>}
         </TabsList>
 
         {perms.manage_employees && (
@@ -74,20 +75,20 @@ function Employees({ id, roles, employees, nearby }: any) {
       <Card>
         <CardContent className="flex items-end gap-2 pt-4">
           <div className="flex-1">
-            <label className="mb-1 block text-xs text-muted-foreground">Nearby player</label>
+            <label className="mb-1 block text-xs text-muted-foreground">{_L("mgmt.nearby_player")}</label>
             <select className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm" value={target} onChange={(e) => setTarget(e.target.value)}>
-              <option value="">Select…</option>
+              <option value="">{_L("mgmt.select")}</option>
               {nearby.map((p: any) => <option key={p.id} value={p.id}>{p.name} [{p.id}]</option>)}
             </select>
           </div>
           <div>
-            <label className="mb-1 block text-xs text-muted-foreground">Grade</label>
+            <label className="mb-1 block text-xs text-muted-foreground">{_L("mgmt.grade")}</label>
             <select className="h-9 rounded-md border border-input bg-background px-2 text-sm" value={grade} onChange={(e) => setGrade(Number(e.target.value))}>
               {roles.map((r: any) => <option key={r.grade} value={r.grade}>{r.label}</option>)}
             </select>
           </div>
           <Button disabled={!target} onClick={() => fetchNui("management:hire", { id, target: Number(target), grade })}>
-            <UserPlus className="h-4 w-4" /> Hire
+            <UserPlus className="h-4 w-4" /> {_L("mgmt.hire")}
           </Button>
         </CardContent>
       </Card>
@@ -123,7 +124,7 @@ function Employees({ id, roles, employees, nearby }: any) {
           </CardContent>
         </Card>
       ))}
-      {employees.length === 0 && <div className="py-4 text-center text-sm text-muted-foreground">No employees yet.</div>}
+      {employees.length === 0 && <div className="py-4 text-center text-sm text-muted-foreground">{_L("mgmt.no_employees")}</div>}
     </div>
   );
 }
@@ -137,16 +138,16 @@ function Menu({ id, menu, items }: { id: number; menu: any[]; items: Item[] }) {
     <div className="space-y-3">
       <div className="rounded-lg border border-border p-3">
         <div className="grid grid-cols-5 items-end gap-2">
-          <Field label="Item" className="col-span-2">
+          <Field label={_L("mgmt.item")} className="col-span-2">
             <ItemPicker items={items} value={form.item} onChange={(v) => set("item", v)} />
           </Field>
-          <TextField label="Label" value={form.label} onChange={(v) => set("label", v)} />
-          <NumberField label="Price" value={form.price} min={0} onChange={(v) => set("price", v)} />
+          <TextField label={_L("mgmt.label")} value={form.label} onChange={(v) => set("label", v)} />
+          <NumberField label={_L("mgmt.price")} value={form.price} min={0} onChange={(v) => set("price", v)} />
           <Button onClick={() => { if (form.item) { fetchNui("management:saveMenuItem", { id, ...form, label: form.label || form.item, enabled: true }); setForm(blank); } }}>
-            <Plus className="h-4 w-4" /> Add
+            <Plus className="h-4 w-4" /> {_L("mgmt.add")}
           </Button>
         </div>
-        <p className="mt-2 text-[11px] text-muted-foreground">Pick the item players receive when they buy this menu entry.</p>
+        <p className="mt-2 text-[11px] text-muted-foreground">{_L("mgmt.menu_hint")}</p>
       </div>
 
       {menu.map((m: any) => (
@@ -155,13 +156,13 @@ function Menu({ id, menu, items }: { id: number; menu: any[]; items: Item[] }) {
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <span className="truncate font-medium">{m.label}</span>
-                {!known(m.item) && <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> unknown item</Badge>}
+                {!known(m.item) && <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("mgmt.unknown_item")}</Badge>}
               </div>
               <span className="text-xs text-muted-foreground">{m.item} · {money(m.price)} · {m.category}</span>
             </div>
             <div className="flex items-center gap-2">
               <Button size="sm" variant="outline" onClick={() => fetchNui("management:saveMenuItem", { id, ...m, enabled: m.enabled ? 0 : 1 })}>
-                {m.enabled ? "Disable" : "Enable"}
+                {m.enabled ? _L("mgmt.disable") : _L("mgmt.enable")}
               </Button>
               <Button size="sm" variant="destructive" onClick={() => fetchNui("management:deleteMenuItem", { id, item: m.item })}>
                 <Trash2 className="h-4 w-4" />
@@ -170,7 +171,7 @@ function Menu({ id, menu, items }: { id: number; menu: any[]; items: Item[] }) {
           </CardContent>
         </Card>
       ))}
-      {menu.length === 0 && <div className="py-4 text-center text-sm text-muted-foreground">No menu items yet.</div>}
+      {menu.length === 0 && <div className="py-4 text-center text-sm text-muted-foreground">{_L("mgmt.no_menu_items")}</div>}
     </div>
   );
 }
@@ -185,15 +186,15 @@ function Finances({ id, balance, ledger, canManage }: any) {
           {canManage && (
             <div className="flex items-center gap-2">
               <Input type="number" className="w-28" value={amount} onChange={(e) => setAmount(Number(e.target.value))} />
-              <Button size="sm" onClick={() => fetchNui("management:deposit", { id, amount })}>Deposit</Button>
-              <Button size="sm" variant="outline" onClick={() => fetchNui("management:withdraw", { id, amount })}>Withdraw</Button>
+              <Button size="sm" onClick={() => fetchNui("management:deposit", { id, amount })}>{_L("mgmt.deposit")}</Button>
+              <Button size="sm" variant="outline" onClick={() => fetchNui("management:withdraw", { id, amount })}>{_L("mgmt.withdraw")}</Button>
             </div>
           )}
         </CardContent>
       </Card>
       <div className="rounded-lg border border-border">
         <div className="grid grid-cols-4 border-b border-border px-3 py-2 text-xs font-semibold text-muted-foreground">
-          <span>Type</span><span>Amount</span><span className="col-span-2">Description</span>
+          <span>{_L("mgmt.col_type")}</span><span>{_L("mgmt.col_amount")}</span><span className="col-span-2">{_L("mgmt.col_description")}</span>
         </div>
         {ledger.map((l: any, i: number) => (
           <div key={i} className="grid grid-cols-4 px-3 py-1.5 text-xs">
@@ -202,7 +203,7 @@ function Finances({ id, balance, ledger, canManage }: any) {
             <span className="col-span-2 truncate text-muted-foreground">{l.description}</span>
           </div>
         ))}
-        {ledger.length === 0 && <div className="px-3 py-3 text-xs text-muted-foreground">No transactions yet.</div>}
+        {ledger.length === 0 && <div className="px-3 py-3 text-xs text-muted-foreground">{_L("mgmt.no_transactions")}</div>}
       </div>
     </div>
   );
@@ -218,11 +219,11 @@ function Stations({ id, props, stock }: any) {
         <CardContent className="flex flex-wrap items-center gap-2 pt-4">
           {STATIONS.map((s) => (
             <Button key={s} variant="outline" size="sm" onClick={() => fetchNui("management:placeProp", { id, prop_type: s })}>
-              <MapPin className="h-3.5 w-3.5" /> place {s.replace("_", " ")}
+              <MapPin className="h-3.5 w-3.5" /> {_L("mgmt.place_station", s.replace("_", " "))}
             </Button>
           ))}
           <Button variant="outline" size="sm" onClick={() => fetchNui("management:setCounter", { id })}>
-            <MapPin className="h-3.5 w-3.5" /> set counter
+            <MapPin className="h-3.5 w-3.5" /> {_L("mgmt.set_counter")}
           </Button>
         </CardContent>
       </Card>
@@ -230,31 +231,31 @@ function Stations({ id, props, stock }: any) {
       <Card>
         <CardContent className="pt-4">
           <div className="mb-2 flex items-center justify-between">
-            <h3 className="flex items-center gap-2 text-sm font-semibold"><Armchair className="h-4 w-4" /> Seating</h3>
+            <h3 className="flex items-center gap-2 text-sm font-semibold"><Armchair className="h-4 w-4" /> {_L("mgmt.seating")}</h3>
             <Button variant="outline" size="sm" onClick={() => fetchNui("management:placeSeat", { id })}>
-              <MapPin className="h-3.5 w-3.5" /> place seat
+              <MapPin className="h-3.5 w-3.5" /> {_L("mgmt.place_seat")}
             </Button>
           </div>
           {seats.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
               {seats.map((p: any) => (
                 <Badge key={p.id} variant="outline" className="gap-1.5">
-                  Seat #{p.id}
+                  {_L("mgmt.seat_num", p.id)}
                   <button onClick={() => fetchNui("management:removeProp", { id, propId: p.id })}><Trash2 className="h-3 w-3" /></button>
                 </Badge>
               ))}
             </div>
           ) : (
-            <div className="text-xs text-muted-foreground">No seats placed. Players sit on your interior's own chairs at the points you place.</div>
+            <div className="text-xs text-muted-foreground">{_L("mgmt.no_seats")}</div>
           )}
-          <p className="mt-2 text-[11px] text-muted-foreground">Placing a seat closes this panel so you can position it in the world.</p>
+          <p className="mt-2 text-[11px] text-muted-foreground">{_L("mgmt.seat_hint")}</p>
         </CardContent>
       </Card>
 
       <div className="grid grid-cols-2 gap-3">
         <Card>
           <CardContent className="pt-4">
-            <h3 className="mb-2 text-sm font-semibold">Stations</h3>
+            <h3 className="mb-2 text-sm font-semibold">{_L("mgmt.stations_heading")}</h3>
             {stationProps.map((p: any) => (
               <div key={p.id} className="flex items-center justify-between py-1 text-sm">
                 <span className="capitalize">{p.prop_type.replace("_", " ")}</span>
@@ -263,19 +264,19 @@ function Stations({ id, props, stock }: any) {
                 </Button>
               </div>
             ))}
-            {stationProps.length === 0 && <div className="text-xs text-muted-foreground">No stations placed.</div>}
+            {stationProps.length === 0 && <div className="text-xs text-muted-foreground">{_L("mgmt.no_stations")}</div>}
           </CardContent>
         </Card>
         <Card>
           <CardContent className="pt-4">
-            <h3 className="mb-2 text-sm font-semibold">Counter stock</h3>
+            <h3 className="mb-2 text-sm font-semibold">{_L("mgmt.counter_stock")}</h3>
             {stock.map((s: any) => (
               <div key={s.item} className="flex items-center justify-between py-1 text-sm">
                 <span>{s.label}</span>
                 <Badge variant="secondary">{s.count}</Badge>
               </div>
             ))}
-            {stock.length === 0 && <div className="text-xs text-muted-foreground">No stock. Cook & stock items at the register.</div>}
+            {stock.length === 0 && <div className="text-xs text-muted-foreground">{_L("mgmt.no_stock")}</div>}
           </CardContent>
         </Card>
       </div>

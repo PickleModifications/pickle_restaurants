@@ -11,11 +11,12 @@ Drinks           = {}    -- soda definitions
 Assembly         = {}    -- kitchen-prep definitions
 Finishes         = {}    -- finish tools (frosting…): tool -> targets -> flavors
 
+-- prop_type → localization key (resolved via _L at interaction-build time)
 local STATION_LABELS = {
-    soda_machine = "Soda Machine",
-    fryer        = "Fryer",
-    stovetop     = "Stovetop",
-    kitchen_prep = "Kitchen Prep",
+    soda_machine = "main_station_soda",
+    fryer        = "main_station_fryer",
+    stovetop     = "main_station_stovetop",
+    kitchen_prep = "main_station_kitchen_prep",
 }
 
 local STATION_ICONS = {
@@ -73,7 +74,7 @@ local function SpawnProp(prop)
     if prop.prop_type == "seat" then
         propInteractions[prop.id] = CreateInteraction({
             coords         = vector3(prop.x, prop.y, prop.z),
-            label          = "Sit",
+            label          = _L("main_sit"),
             icon           = "fa-solid fa-chair",
             radius         = 0.9,
             interactRadius = 1.4,
@@ -120,10 +121,10 @@ local function SpawnProp(prop)
     -- the fryer basket's synced up/down state, now the station entity exists.
     if OnStationSpawned then OnStationSpawned(prop) end
 
-    local label = STATION_LABELS[prop.prop_type] or "Station"
+    local label = _L(STATION_LABELS[prop.prop_type] or "main_station_generic")
     propInteractions[prop.id] = CreateInteraction({
         coords         = vector3(prop.x, prop.y, prop.z),
-        label          = "Use " .. label,
+        label          = _L("main_use_station", label),
         icon           = STATION_ICONS[prop.prop_type] or "fa-solid fa-utensils",
         radius         = 1.2,
         interactRadius = 1.8,
@@ -143,9 +144,9 @@ local function SetupCounter(restaurant)
         interactRadius = 2.0,
         title          = restaurant.label,
         options        = {
-            { label = "Order Food",     icon = "fa-solid fa-burger" },
-            { label = "Staff Register", icon = "fa-solid fa-cash-register" },
-            { label = "Management",     icon = "fa-solid fa-users-gear" },
+            { label = _L("main_order_food"),     icon = "fa-solid fa-burger" },
+            { label = _L("main_staff_register"), icon = "fa-solid fa-cash-register" },
+            { label = _L("main_management"),     icon = "fa-solid fa-users-gear" },
         },
     }, function(selection)
         if selection == 1 then

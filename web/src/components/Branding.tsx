@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { fetchNui } from "@/lib/nui";
+import { _L } from "@/lib/locale";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { Image as ImageIcon, RotateCcw, X, Pencil, Plus, Trash2 } from "lucide-react";
@@ -7,10 +8,10 @@ import { Image as ImageIcon, RotateCcw, X, Pencil, Plus, Trash2 } from "lucide-r
 // Each branded texture + the aspect its DUI renders at. MUST match `TARGETS` in
 // modules/rendertarget/client.lua — these aspects lock the crop frame's shape.
 const BRAND_TEXTURES: { key: string; label: string; w: number; h: number; hint: string }[] = [
-  { key: "pizza_box", label: "Pizza box", w: 1024, h: 1024, hint: "Lid of the pizza box" },
-  { key: "cup", label: "Drink cup", w: 1024, h: 1792, hint: "Wrap around the cup" },
-  { key: "tray", label: "Tray paper", w: 1792, h: 1024, hint: "Liner on the food tray" },
-  { key: "side", label: "Side box", w: 2304, h: 1024, hint: "Wrap around the side box" },
+  { key: "pizza_box", label: _L("branding.tex_pizza_box_label"), w: 1024, h: 1024, hint: _L("branding.tex_pizza_box_hint") },
+  { key: "cup", label: _L("branding.tex_cup_label"), w: 1024, h: 1792, hint: _L("branding.tex_cup_hint") },
+  { key: "tray", label: _L("branding.tex_tray_label"), w: 1792, h: 1024, hint: _L("branding.tex_tray_hint") },
+  { key: "side", label: _L("branding.tex_side_label"), w: 2304, h: 1024, hint: _L("branding.tex_side_hint") },
 ];
 
 type Crop = { x: number; y: number; w: number; h: number };
@@ -68,16 +69,15 @@ export default function Branding({
     <div className="space-y-3">
       <Card>
         <CardContent className="pt-4">
-          <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold"><ImageIcon className="h-4 w-4" /> Default image</h3>
+          <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold"><ImageIcon className="h-4 w-4" /> {_L("branding.default_image")}</h3>
           <Input
             defaultValue={brand}
-            placeholder="https://…/logo.png — used on any packaging without its own photo below"
+            placeholder={_L("branding.default_image_placeholder")}
             className="h-9"
             onBlur={(e) => fetchNui(event, { id, url: e.target.value.trim() })}
           />
           <p className="mt-1.5 text-[11px] text-muted-foreground">
-            Direct image URL. Each item without its own photo below shows this, auto-cropped (centred) to fit its shape.
-            Leave blank to reset.
+            {_L("branding.default_image_hint")}
           </p>
         </CardContent>
       </Card>
@@ -115,7 +115,7 @@ function BrandTextureCard({
           <CropThumb url={entry!.url} aspect={tex} crop={entry!.crop || null} />
         ) : (
           <div className="flex h-28 items-center justify-center rounded-md border border-dashed border-border bg-muted/30 text-[11px] text-muted-foreground">
-            Uses the default image
+            {_L("branding.uses_default_image")}
           </div>
         )}
 
@@ -124,12 +124,12 @@ function BrandTextureCard({
             onClick={() => setEditing(true)}
             className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-secondary px-2 py-1.5 text-xs font-semibold text-foreground transition hover:bg-accent"
           >
-            {has ? <><Pencil className="h-3.5 w-3.5" /> Update photo</> : <><Plus className="h-3.5 w-3.5" /> Set photo</>}
+            {has ? <><Pencil className="h-3.5 w-3.5" /> {_L("branding.update_photo")}</> : <><Plus className="h-3.5 w-3.5" /> {_L("branding.set_photo")}</>}
           </button>
           {has && (
             <button
               onClick={() => onSave(null)}
-              title="Remove photo"
+              title={_L("branding.remove_photo")}
               className="flex items-center justify-center rounded-md border border-border bg-secondary p-1.5 text-muted-foreground transition hover:border-destructive/60 hover:text-destructive"
             >
               <Trash2 className="h-3.5 w-3.5" />
@@ -172,7 +172,7 @@ function CropThumb({ url, aspect, crop }: { url: string; aspect: Aspect; crop: C
     <div className="flex h-28 items-center justify-center overflow-hidden rounded-md border border-border bg-black/40">
       <img ref={imgRef} src={url} alt="" onLoad={(e) => { setBroken(false); setNat({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight }); }} onError={() => { setBroken(true); setNat(null); }} style={{ display: "none" }} />
       {broken ? (
-        <span className="text-[11px] text-destructive">Bad URL</span>
+        <span className="text-[11px] text-destructive">{_L("branding.bad_url")}</span>
       ) : (
         <canvas ref={canvasRef} width={Math.round(IH * A)} height={IH} className="h-full w-auto" style={{ aspectRatio: A }} />
       )}
@@ -213,13 +213,13 @@ function BrandPhotoModal({
       <div className="w-full max-w-md rounded-xl border border-border bg-card p-4 shadow-2xl">
         <div className="mb-3 flex items-center justify-between">
           <div>
-            <h3 className="text-sm font-semibold">{tex.label} photo</h3>
-            <p className="text-[11px] text-muted-foreground">{tex.hint} · locked to {tex.w}×{tex.h}</p>
+            <h3 className="text-sm font-semibold">{_L("branding.photo_title", tex.label)}</h3>
+            <p className="text-[11px] text-muted-foreground">{_L("branding.photo_sub", tex.hint, tex.w, tex.h)}</p>
           </div>
           <button onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"><X className="h-4 w-4" /></button>
         </div>
 
-        <label className="text-[11px] font-medium text-muted-foreground">Photo URL</label>
+        <label className="text-[11px] font-medium text-muted-foreground">{_L("branding.photo_url")}</label>
         <Input
           autoFocus
           value={url}
@@ -233,13 +233,13 @@ function BrandPhotoModal({
             <BrandCropper url={trimmed} aspect={tex} crop={crop} onChange={setCrop} />
           ) : (
             <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-border text-[11px] text-muted-foreground">
-              Paste an image URL above to position it.
+              {_L("branding.paste_url_prompt")}
             </div>
           )}
         </div>
 
         <div className="mt-4 flex items-center justify-end gap-2">
-          <button onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-semibold text-muted-foreground transition hover:bg-accent hover:text-foreground">Cancel</button>
+          <button onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-semibold text-muted-foreground transition hover:bg-accent hover:text-foreground">{_L("branding.cancel")}</button>
           <button
             disabled={!trimmed}
             onClick={() => onSave(trimmed ? { url: trimmed, crop } : null)}
@@ -248,7 +248,7 @@ function BrandPhotoModal({
               (trimmed ? "bg-primary text-primary-foreground hover:opacity-90" : "cursor-not-allowed bg-muted text-muted-foreground")
             }
           >
-            Apply photo
+            {_L("branding.apply_photo")}
           </button>
         </div>
       </div>
@@ -358,11 +358,11 @@ function BrandCropper({
   return (
     <div>
       {broken ? (
-        <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-destructive/50 text-[11px] text-destructive">Couldn't load that image URL.</div>
+        <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-destructive/50 text-[11px] text-destructive">{_L("branding.image_load_failed")}</div>
       ) : !nat ? (
         <>
           <img src={url} alt="" onLoad={(e) => { setBroken(false); setNat({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight }); }} onError={() => { setBroken(true); }} style={{ display: "none" }} />
-          <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-border text-[11px] text-muted-foreground">Loading image…</div>
+          <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-border text-[11px] text-muted-foreground">{_L("branding.loading_image")}</div>
         </>
       ) : (
         <div className="flex flex-col items-center gap-2">
@@ -401,9 +401,9 @@ function BrandCropper({
             )}
           </div>
           <div className="flex w-full items-center justify-between">
-            <p className="text-[11px] text-muted-foreground">Drag the frame · pull a corner to resize.</p>
-            <button onClick={() => setRect(coverPx())} title="Reset" className="flex items-center gap-1 rounded-md border border-border bg-secondary px-2 py-1 text-[11px] font-semibold text-foreground transition hover:bg-accent">
-              <RotateCcw className="h-3 w-3" /> Reset
+            <p className="text-[11px] text-muted-foreground">{_L("branding.cropper_hint")}</p>
+            <button onClick={() => setRect(coverPx())} title={_L("branding.reset")} className="flex items-center gap-1 rounded-md border border-border bg-secondary px-2 py-1 text-[11px] font-semibold text-foreground transition hover:bg-accent">
+              <RotateCcw className="h-3 w-3" /> {_L("branding.reset")}
             </button>
           </div>
         </div>

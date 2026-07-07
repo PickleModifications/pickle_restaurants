@@ -1,4 +1,5 @@
 import { fetchNui } from "@/lib/nui";
+import { _L } from "@/lib/locale";
 import Panel from "@/components/Panel";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import Restaurants from "@/views/admin/Restaurants";
@@ -18,12 +19,12 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
   };
 
   return (
-    <Panel title="Restaurant Administration" subtitle="Server-wide management" onClose={onClose} width="max-w-4xl">
+    <Panel title={_L("admin.title")} subtitle={_L("admin.subtitle")} onClose={onClose} width="max-w-4xl">
       <Tabs defaultValue="restaurants" className="flex min-h-0 flex-1 flex-col">
         <TabsList className="shrink-0">
-          <TabsTrigger value="restaurants">Restaurants</TabsTrigger>
-          <TabsTrigger value="recipes">Recipes</TabsTrigger>
-          <TabsTrigger value="settings">Settings</TabsTrigger>
+          <TabsTrigger value="restaurants">{_L("admin.tab_restaurants")}</TabsTrigger>
+          <TabsTrigger value="recipes">{_L("admin.tab_recipes")}</TabsTrigger>
+          <TabsTrigger value="settings">{_L("admin.tab_settings")}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="restaurants" className="flex min-h-0 flex-1 flex-col">

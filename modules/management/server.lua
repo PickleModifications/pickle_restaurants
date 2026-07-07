@@ -57,7 +57,7 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
     local id = tonumber(d.id)
     local r = GetRestaurant(id); if not r then return { ok = false } end
     local perms, isOwner = ResolvePerms(id, src)
-    if not perms then return { ok = false, error = "You don't work here." } end
+    if not perms then return { ok = false, error = _L("no_work_here") } end
     local effective = isOwner and ALL_PERMS or perms
     local roles = rolesOf(r)
 
@@ -97,13 +97,13 @@ end)
 
 lib.callback.register("pickle_restaurants:management:hire", function(src, d)
     local id = tonumber(d.id)
-    if not HasPerm(id, src, "manage_employees") then return { ok = false, error = "No permission." } end
+    if not HasPerm(id, src, "manage_employees") then return { ok = false, error = _L("no_permission") } end
     local target = tonumber(d.target)
     local identifier = GetIdentifier(target)
-    if not identifier then return { ok = false, error = "Player not found." } end
-    if EmployeeCache[id] and EmployeeCache[id][identifier] then return { ok = false, error = "Already employed." } end
+    if not identifier then return { ok = false, error = _L("mgmt_player_not_found") } end
+    if EmployeeCache[id] and EmployeeCache[id][identifier] then return { ok = false, error = _L("mgmt_already_employed") } end
     local r = GetRestaurant(id)
-    if r.owner_identifier == identifier then return { ok = false, error = "That player owns this place." } end
+    if r.owner_identifier == identifier then return { ok = false, error = _L("mgmt_player_owns") } end
 
     local roles = rolesOf(r)
     local grade = tonumber(d.grade) or 0
@@ -113,13 +113,13 @@ lib.callback.register("pickle_restaurants:management:hire", function(src, d)
         "INSERT INTO pickle_restaurant_employees (restaurant_id, identifier, name, grade, commission_rate) VALUES (?, ?, ?, ?, ?)",
         { id, identifier, name, grade, commission })
     CacheEmployee(id, { restaurant_id = id, identifier = identifier, name = name, grade = grade, commission_rate = commission })
-    ShowNotification(target, ("You were hired at %s."):format(r.label))
+    ShowNotification(target, _L("mgmt_hired_at", r.label))
     return { ok = true }
 end)
 
 lib.callback.register("pickle_restaurants:management:fire", function(src, d)
     local id = tonumber(d.id)
-    if not HasPerm(id, src, "manage_employees") then return { ok = false, error = "No permission." } end
+    if not HasPerm(id, src, "manage_employees") then return { ok = false, error = _L("no_permission") } end
     MySQL.update.await("DELETE FROM pickle_restaurant_employees WHERE restaurant_id = ? AND identifier = ?", { id, d.identifier })
     UncacheEmployee(id, d.identifier)
     return { ok = true }
@@ -127,26 +127,26 @@ end)
 
 lib.callback.register("pickle_restaurants:management:setGrade", function(src, d)
     local id = tonumber(d.id)
-    if not HasPerm(id, src, "manage_employees") then return { ok = false, error = "No permission." } end
+    if not HasPerm(id, src, "manage_employees") then return { ok = false, error = _L("no_permission") } end
     local emp = EmployeeCache[id] and EmployeeCache[id][d.identifier]
     if not emp then return { ok = false } end
     local roles = rolesOf(GetRestaurant(id))
     local grade = math.max(0, math.min(maxGrade(roles), tonumber(d.grade) or 0))
     MySQL.update.await("UPDATE pickle_restaurant_employees SET grade = ? WHERE restaurant_id = ? AND identifier = ?", { grade, id, d.identifier })
     emp.grade = grade
-    ShowNotification(src, "Employee role saved.")
+    ShowNotification(src, _L("mgmt_role_saved"))
     return { ok = true, grade = grade }
 end)
 
 lib.callback.register("pickle_restaurants:management:setCommission", function(src, d)
     local id = tonumber(d.id)
-    if not HasPerm(id, src, "manage_employees") then return { ok = false, error = "No permission." } end
+    if not HasPerm(id, src, "manage_employees") then return { ok = false, error = _L("no_permission") } end
     local emp = EmployeeCache[id] and EmployeeCache[id][d.identifier]
     if not emp then return { ok = false } end
     local rate = math.max(0, math.min(100, tonumber(d.commission) or 0))
     MySQL.update.await("UPDATE pickle_restaurant_employees SET commission_rate = ? WHERE restaurant_id = ? AND identifier = ?", { rate, id, d.identifier })
     emp.commission_rate = rate
-    ShowNotification(src, "Commission saved.")
+    ShowNotification(src, _L("mgmt_commission_saved"))
     return { ok = true }
 end)
 
@@ -154,22 +154,22 @@ end)
 
 lib.callback.register("pickle_restaurants:management:saveMenuItem", function(src, d)
     local id = tonumber(d.id)
-    if not HasPerm(id, src, "manage_menu") then return { ok = false, error = "No permission." } end
-    if not d.item or d.item == "" then return { ok = false, error = "Item required." } end
+    if not HasPerm(id, src, "manage_menu") then return { ok = false, error = _L("no_permission") } end
+    if not d.item or d.item == "" then return { ok = false, error = _L("mgmt_item_required") } end
     MySQL.update.await([[
         INSERT INTO pickle_restaurant_menu (restaurant_id, item, label, price, category, enabled)
         VALUES (?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE label = VALUES(label), price = VALUES(price), category = VALUES(category), enabled = VALUES(enabled)
     ]], { id, d.item, d.label or d.item, tonumber(d.price) or 0, d.category or "food", d.enabled and 1 or 0 })
-    ShowNotification(src, "Menu item saved.")
+    ShowNotification(src, _L("mgmt_menu_saved"))
     return { ok = true }
 end)
 
 lib.callback.register("pickle_restaurants:management:deleteMenuItem", function(src, d)
     local id = tonumber(d.id)
-    if not HasPerm(id, src, "manage_menu") then return { ok = false, error = "No permission." } end
+    if not HasPerm(id, src, "manage_menu") then return { ok = false, error = _L("no_permission") } end
     MySQL.update.await("DELETE FROM pickle_restaurant_menu WHERE restaurant_id = ? AND item = ?", { id, d.item })
-    ShowNotification(src, "Menu item removed.")
+    ShowNotification(src, _L("mgmt_menu_removed"))
     return { ok = true }
 end)
 
@@ -177,10 +177,10 @@ end)
 
 lib.callback.register("pickle_restaurants:management:deposit", function(src, d)
     local id = tonumber(d.id)
-    if not HasPerm(id, src, "manage_balance") then return { ok = false, error = "No permission." } end
+    if not HasPerm(id, src, "manage_balance") then return { ok = false, error = _L("no_permission") } end
     local amount = math.floor(tonumber(d.amount) or 0)
     if amount <= 0 then return { ok = false } end
-    if GetMoney(src, "money") < amount then return { ok = false, error = "Not enough cash." } end
+    if GetMoney(src, "money") < amount then return { ok = false, error = _L("not_enough_cash") } end
     RemoveMoney(src, amount, "money")
     AdjustBalance(id, amount)
     AddLedger(id, "deposit", amount, "Deposit", GetIdentifier(src))
@@ -189,10 +189,10 @@ end)
 
 lib.callback.register("pickle_restaurants:management:withdraw", function(src, d)
     local id = tonumber(d.id)
-    if not HasPerm(id, src, "manage_balance") then return { ok = false, error = "No permission." } end
+    if not HasPerm(id, src, "manage_balance") then return { ok = false, error = _L("no_permission") } end
     local amount = math.floor(tonumber(d.amount) or 0)
     if amount <= 0 then return { ok = false } end
-    if GetRestaurant(id).balance < amount then return { ok = false, error = "Insufficient funds." } end
+    if GetRestaurant(id).balance < amount then return { ok = false, error = _L("mgmt_insufficient_funds") } end
     AdjustBalance(id, -amount)
     AddMoney(src, amount, "money")
     AddLedger(id, "withdraw", -amount, "Withdrawal", GetIdentifier(src))
@@ -227,11 +227,11 @@ end
 -- url clears the entry. Shared by the boss (management) and admin panels — each gates
 -- its own permission before calling. Returns ok/error.
 function SetRestaurantBrand(id, key, url, crop)
-    local r = GetRestaurant(id); if not r then return { ok = false, error = "No restaurant." } end
+    local r = GetRestaurant(id); if not r then return { ok = false, error = _L("mgmt_no_restaurant") } end
     url = tostring(url or ""):gsub("^%s+", ""):gsub("%s+$", "")
     r.metadata = r.metadata or {}
     if key ~= nil and key ~= "" then
-        if not BRAND_KEYS[key] then return { ok = false, error = "Unknown texture." } end
+        if not BRAND_KEYS[key] then return { ok = false, error = _L("mgmt_unknown_texture") } end
         r.metadata.brand_images = r.metadata.brand_images or {}
         r.metadata.brand_images[key] = (url ~= "") and { url = url, crop = sanitizeCrop(crop) } or nil
         if next(r.metadata.brand_images) == nil then r.metadata.brand_images = nil end
@@ -245,8 +245,8 @@ end
 
 lib.callback.register("pickle_restaurants:management:setBrandImage", function(src, d)
     local id = tonumber(d.id)
-    if not HasPerm(id, src, "manage_props") then return { ok = false, error = "No permission." } end
+    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
     local res = SetRestaurantBrand(id, d.key, d.url, d.crop)
-    if res and res.ok then ShowNotification(src, "Branding saved.") end
+    if res and res.ok then ShowNotification(src, _L("branding_saved")) end
     return res
 end)
