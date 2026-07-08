@@ -88,6 +88,7 @@ Language["en"] = {
     ["mgmt_player_not_found"] = "Player not found.",
     ["mgmt_player_owns"] = "That player owns this place.",
     ["mgmt_role_saved"] = "Employee role saved.",
+    ["mgmt_stock_bought"] = "Bought %d x %s into stock.",
     ["mgmt_unknown_texture"] = "Unknown texture.",
     ["no_work_here"] = "You don't work here.",
     ["not_enough_cash"] = "Not enough cash.",

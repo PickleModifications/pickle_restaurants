@@ -23,14 +23,18 @@ local function DrinkItemName() return GetSetting("drink_item", "drink") end
 -- so a price row is keyed (item, variant = flavor key); '' for everything else.
 function BuildSellableCatalog(rid)
     local out, seen = {}, {}
-    local function add(item, variant, label, kind)
+    -- `cost` is the raw ingredient cost of this sellable; the computed default
+    -- menu price is that cost marked up by the global profit margin.
+    local function add(item, variant, label, kind, cost, modifiers)
         variant = variant or ""
         local key = item .. (variant ~= "" and ("::" .. variant) or "")
         if seen[key] then return end
         seen[key] = true
         out[#out + 1] = { key = key, item = item, variant = variant,
                           label = label or GetItemLabel(item), kind = kind,
-                          image = GetItemImage(item) }
+                          image = GetItemImage(item), defaultPrice = MarkupPrice(cost or 0),
+                          -- POS customisations the customer can pick (add cheese, no lettuce…)
+                          modifiers = (type(modifiers) == "table" and #modifiers > 0) and modifiers or nil }
     end
 
     -- components of any assembly recipe are kitchen-internal (patties, buns…)
@@ -39,11 +43,36 @@ function BuildSellableCatalog(rid)
         for _, c in ipairs(a.components or {}) do isComponent[c] = true end
     end
 
+    -- POS modifiers derived from IN-PLACE finishes on a cooked item (a doughnut's
+    -- frosting + sprinkles): each finish tool becomes a single-choice GROUP and
+    -- every flavor a pick-one option (colored swatch). Only finishes that keep the
+    -- SAME item (t.item == t.output — the overlay doughnut finishes) become
+    -- modifiers; a finish that changes the item (cake → decorated_cake) stays its
+    -- own sellable. Ticket instructions only — the cook applies the finish.
+    local function finishModsFor(item)
+        local mods = {}
+        for _, f in ipairs(GetSetting("finishes", {})) do
+            if ItemExists(f.tool) then
+                local groupLabel = GetItemLabel(f.tool)
+                for _, t in ipairs(f.targets or {}) do
+                    if t.item == item and t.output == item then
+                        for _, fl in ipairs(t.flavors or {}) do
+                            mods[#mods + 1] = { id = f.tool .. ":" .. tostring(fl.id),
+                                                label = fl.label or fl.id, group = groupLabel,
+                                                color = fl.color, price = 0 }
+                        end
+                    end
+                end
+            end
+        end
+        return (#mods > 0) and mods or nil
+    end
+
     for _, r in ipairs(RecipeCache) do
         local outItem = r.output_cooked_item
         if IsRecipeValid(r) and RestaurantHasAccess(rid, r.group)
             and ItemExists(outItem) and not isComponent[outItem] then
-            add(outItem, nil, nil, "recipe")
+            add(outItem, nil, nil, "recipe", ResolveItemCost(outItem), finishModsFor(outItem))
         end
     end
 
@@ -55,7 +84,21 @@ function BuildSellableCatalog(rid)
             for _, comp in ipairs(a.components or {}) do
                 if not ItemExists(comp) then ok = false end
             end
-            if ok then add(a.output, nil, a.label, "assembly") end
+            -- enrich each modifier with its item's image + a clean price for the
+            -- POS grid (the raw config price/default/id survive for order pricing)
+            local mods
+            if type(a.modifiers) == "table" and #a.modifiers > 0 then
+                mods = {}
+                for _, m in ipairs(a.modifiers) do
+                    mods[#mods + 1] = {
+                        id = m.id, label = m.label,
+                        price = math.max(0, math.floor(tonumber(m.price) or 0)),
+                        default = (m.default == true or m.default == 1) or nil,
+                        image = (m.item and m.item ~= "") and GetItemImage(m.item) or nil,
+                    }
+                end
+            end
+            if ok then add(a.output, nil, a.label, "assembly", ResolveItemCost(a.output), mods) end
         end
     end
 
@@ -63,7 +106,7 @@ function BuildSellableCatalog(rid)
     if ItemExists(drinkItem) then
         for _, d in ipairs(GetSetting("drinks", {})) do
             if ItemExists(d.input) and RestaurantHasAccess(rid, d.group) then
-                add(drinkItem, d.output, d.label or d.output, "drink")
+                add(drinkItem, d.output, d.label or d.output, "drink", ResolveItemCost(d.input))
             end
         end
     end
@@ -71,7 +114,9 @@ function BuildSellableCatalog(rid)
     for _, f in ipairs(GetSetting("finishes", {})) do
         if ItemExists(f.tool) and RestaurantHasAccess(rid, f.group) then
             for _, t in ipairs(f.targets or {}) do
-                if ItemExists(t.output) then add(t.output, nil, nil, "finish") end
+                if ItemExists(t.output) then
+                    add(t.output, nil, nil, "finish", ResolveItemCost(f.tool) + ResolveItemCost(t.item))
+                end
             end
         end
     end
@@ -94,8 +139,19 @@ function BuildPricedCatalog(rid, pricedOnly)
     local catalog, out = BuildSellableCatalog(rid), {}
     for _, e in ipairs(catalog) do
         local p = priced[e.key]
-        e.price = p and p.price or 0
-        e.enabled = p and p.enabled or false
+        if p then
+            -- explicit per-restaurant row: honoured verbatim (incl. an explicit
+            -- 0/disabled — a boss can deliberately pull an item)
+            e.price = p.price
+            e.enabled = p.enabled
+            e.priceIsDefault = false
+        else
+            -- no row set: fall back to the ingredient-cost default so the item is
+            -- orderable out of the box (a $0 default → not orderable, safe)
+            e.price = e.defaultPrice or 0
+            e.enabled = e.price > 0
+            e.priceIsDefault = true
+        end
         if not pricedOnly or (e.enabled and e.price > 0) then out[#out + 1] = e end
     end
     return out, priced
@@ -157,11 +213,25 @@ local function playersNear(a, b, dist)
     return #(GetEntityCoords(pa) - GetEntityCoords(pb)) <= dist
 end
 
--- One readable "2× Burger, 1× Cola" line for ledger rows & receipt metadata.
+-- A compact modifier string for a line ("+Cheese, no Lettuce"), or "" for none.
+local function modSummary(mods)
+    if type(mods) ~= "table" or #mods == 0 then return "" end
+    local parts = {}
+    for _, m in ipairs(mods) do
+        local label = tostring(m.label or m.id or "?")
+        parts[#parts + 1] = (m.removed and ("no " .. label) or ("+" .. label))
+    end
+    return table.concat(parts, ", ")
+end
+
+-- One readable "2× Burger (+Cheese), 1× Cola" line for ledger rows & receipt metadata.
 local function orderSummary(lines)
     local parts = {}
     for _, l in ipairs(lines) do
-        parts[#parts + 1] = ("%d× %s"):format(l.qty, l.label)
+        local s = ("%d× %s"):format(l.qty, l.label)
+        local m = modSummary(l.mods)
+        if m ~= "" then s = s .. " (" .. m .. ")" end
+        parts[#parts + 1] = s
     end
     return table.concat(parts, ", ")
 end
@@ -190,9 +260,39 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
         local e = type(c) == "table" and byKey[c.key] or nil
         if not e then return { ok = false, error = _L("order_not_priced") } end
         local qty = math.max(1, math.min(10, math.floor(tonumber(c.qty) or 1)))
+
+        -- Resolve the customer's selected modifiers against the entry's allowed
+        -- set (the NUI is untrusted): record only real additions (a non-default
+        -- modifier that's on → +price) and removals (a default that's off). Mods
+        -- are ticket instructions + pricing; the kitchen match is item-only.
+        local unit, mods = e.price, {}
+        if type(e.modifiers) == "table" then
+            local sel, groupTaken = {}, {}
+            if type(c.mods) == "table" then
+                for _, mid in ipairs(c.mods) do sel[tostring(mid)] = true end
+            end
+            for _, m in ipairs(e.modifiers) do
+                local isDefault = m.default == true or m.default == 1
+                local on = sel[tostring(m.id)] == true
+                -- a grouped modifier is single-choice — only the first selected in
+                -- its group counts (the NUI enforces this; re-enforced here)
+                if on and m.group and groupTaken[m.group] then on = false end
+                if on and not isDefault then
+                    if m.group then groupTaken[m.group] = true end
+                    local price = math.max(0, math.floor(tonumber(m.price) or 0))
+                    unit = unit + price
+                    local label = m.group and (tostring(m.group) .. ": " .. tostring(m.label)) or m.label
+                    mods[#mods + 1] = { id = m.id, label = label, price = price, added = true }
+                elseif isDefault and not on then
+                    mods[#mods + 1] = { id = m.id, label = m.label, removed = true }
+                end
+            end
+        end
+
         lines[#lines + 1] = { item = e.item, variant = e.variant, label = e.label,
-                              price = e.price, qty = qty, kind = e.kind }
-        total = total + e.price * qty
+                              price = unit, qty = qty, kind = e.kind,
+                              mods = (#mods > 0) and mods or nil }
+        total = total + unit * qty
     end
     if #lines == 0 then return { ok = false, error = _L("order_nothing_selected") } end
     total = RoundMoney(total)
@@ -221,36 +321,54 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
 
     -- Charge (re-checked after the confirm — money may have moved meanwhile).
     if GetMoney(customerSrc, "money") < total then return { ok = false, error = _L("not_enough_cash") } end
-    RemoveMoney(customerSrc, total, "money")
-    AdjustBalance(id, total)
 
+    -- Create the ticket, charge, and do the bookkeeping under ONE guard. The
+    -- client's register callback has NO timeout — a thrown error anywhere here
+    -- would hang the POS forever with the money already gone ("charged, no
+    -- ticket"). So: create the row FIRST (a create failure never takes money),
+    -- then charge, then best-effort side-effects — and whatever happens, log the
+    -- real error and fall through to returning a fresh register below.
     local customerId = GetIdentifier(customerSrc)
-    local order = CreateOrder(id, {
-        customer_identifier = customerId,
-        customer_name       = GetPlayerCharacterName(customerSrc),
-        cashier_identifier  = GetIdentifier(src),
-        lines               = lines,
-        total               = total,
-    })
-    local summary = orderSummary(lines)
-    AddLedger(id, "sale", total, ("Ticket #%d — %s"):format(order.ticket, summary):sub(1, 255), customerId)
-    payCommission(id, src, total, order.ticket)
-
-    -- Hand the customer their receipt (metadata carries the ticket, so the same
-    -- item verifies the right order at completion). Skipped gracefully when the
-    -- receipt item isn't installed — the ticket alone still drives fulfillment.
-    if ItemExists(ReceiptItem()) then
-        Inventory.AddItem(customerSrc, ReceiptItem(), 1, {
-            order_id      = order.id,
-            restaurant_id = id,
-            ticket        = order.ticket,
-            description   = ("%s — Ticket #%d: %s (%s)"):format(r.label, order.ticket, summary, GetCurrencyString(total)),
+    local ok, err = pcall(function()
+        local order = CreateOrder(id, {
+            customer_identifier = customerId,
+            customer_name       = GetPlayerCharacterName(customerSrc),
+            cashier_identifier  = GetIdentifier(src),
+            lines               = lines,
+            total               = total,
         })
-    end
 
-    ShowNotification(src, _L("order_placed", order.ticket))
-    if customerSrc ~= src then ShowNotification(customerSrc, _L("order_charged", order.ticket, GetCurrencyString(total))) end
-    return buildRegister(src, id)
+        RemoveMoney(customerSrc, total, "money")
+        AdjustBalance(id, total)
+
+        local summary = orderSummary(lines)
+        AddLedger(id, "sale", total, ("Ticket #%d — %s"):format(order.ticket, summary):sub(1, 255), customerId)
+        payCommission(id, src, total, order.ticket)
+
+        -- Hand the customer their receipt (metadata carries the ticket, so the same
+        -- item verifies the right order at completion). Skipped gracefully when the
+        -- receipt item isn't installed — the ticket alone still drives fulfillment.
+        if ItemExists(ReceiptItem()) then
+            Inventory.AddItem(customerSrc, ReceiptItem(), 1, {
+                order_id      = order.id,
+                restaurant_id = id,
+                ticket        = order.ticket,
+                description   = ("%s — Ticket #%d: %s (%s)"):format(r.label, order.ticket, summary, GetCurrencyString(total)),
+            })
+        end
+
+        ShowNotification(src, _L("order_placed", order.ticket))
+        if customerSrc ~= src then ShowNotification(customerSrc, _L("order_charged", order.ticket, GetCurrencyString(total))) end
+    end)
+    if not ok then print(("[pickle_restaurants] createOrder failed: %s"):format(tostring(err))) end
+
+    -- ALWAYS answer the cashier's POS with a fresh register (never hang). A
+    -- created ticket shows immediately; buildRegister is itself guarded so even a
+    -- catalog error still returns the open tickets.
+    local okReg, reg = pcall(buildRegister, src, id)
+    if okReg then return reg end
+    print(("[pickle_restaurants] buildRegister failed: %s"):format(tostring(reg)))
+    return { ok = true, restaurantId = id, tickets = GetOpenOrders(id) }
 end)
 
 -- ─── complete order ──────────────────────────────────────────────────────────

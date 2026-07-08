@@ -78,6 +78,21 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
     local props = {}
     for _, p in pairs(PropCache) do if p.restaurant_id == id then props[#props + 1] = { id = p.id, prop_type = p.prop_type } end end
 
+    -- Supplies: the raw ingredients the restaurant can buy into its shared stock
+    -- pool (the `ingredient_costs` map), each with its per-unit cost and the count
+    -- currently in the larder. Cooking consumes from this pool.
+    local supplies = {}
+    if effective.manage_stock then
+        for item, cost in pairs(GetSetting("ingredient_costs", {})) do
+            supplies[#supplies + 1] = {
+                item = item, label = GetItemLabel(item), image = GetItemImage(item),
+                cost = math.max(0, math.floor(tonumber(cost) or 0)),
+                stock = GetStockCount(id, item), installed = ItemExists(item),
+            }
+        end
+        table.sort(supplies, function(a, b) return (a.label or a.item):lower() < (b.label or b.item):lower() end)
+    end
+
     return {
         ok        = true,
         restaurant = { id = r.id, label = r.label, balance = r.balance, owner = r.owner_identifier,
@@ -89,6 +104,7 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
         ledger    = ledger,
         priceList = priceList,
         stale     = stale,
+        supplies  = supplies,
         props     = props,
         nearby    = effective.manage_employees and NearbyPlayers(src, 10.0) or {},
     }
@@ -183,6 +199,31 @@ lib.callback.register("pickle_restaurants:management:deleteMenuItem", function(s
         { id, item, variant })
     ShowNotification(src, _L("mgmt_menu_removed"))
     return { ok = true }
+end)
+
+-- ─── supplies (shared stock pool) ────────────────────────────────────────────
+-- Buy raw ingredients into the restaurant's shared stock pool, paid out of the
+-- restaurant balance at the configured ingredient cost. Cooking consumes from
+-- this pool, so a restaurant must keep it stocked to keep the kitchen running.
+
+lib.callback.register("pickle_restaurants:management:buyStock", function(src, d)
+    local id = tonumber(d.id)
+    if not HasPerm(id, src, "manage_stock") then return { ok = false, error = _L("no_permission") } end
+    local item = tostring(d.item or "")
+    local costs = GetSetting("ingredient_costs", {})
+    if costs[item] == nil then return { ok = false, error = _L("mgmt_item_required") } end
+    local qty = math.max(1, math.min(1000, math.floor(tonumber(d.qty) or 0)))
+    local unit = math.max(0, math.floor(tonumber(costs[item]) or 0))
+    local total = unit * qty
+    local r = GetRestaurant(id); if not r then return { ok = false } end
+    if (r.balance or 0) < total then return { ok = false, error = _L("mgmt_insufficient_funds") } end
+    if total > 0 then
+        AdjustBalance(id, -total)
+        AddLedger(id, "supply", -total, ("Restock: %d x %s"):format(qty, GetItemLabel(item)), GetIdentifier(src))
+    end
+    AddStock(id, item, qty)
+    ShowNotification(src, _L("mgmt_stock_bought", qty, GetItemLabel(item)))
+    return { ok = true, balance = GetRestaurant(id).balance, stock = GetStockCount(id, item) }
 end)
 
 -- ─── finances ────────────────────────────────────────────────────────────────

@@ -1460,6 +1460,13 @@ RegisterNetEvent("pickle_restaurants:cooking:trayDirty", function()
     if cookingOpen and currentCookProp then RefreshTray() end
 end)
 
+-- The shared restaurant stock pool (raw ingredients) changed — another cook
+-- consumed, a decompose refunded, or a manager restocked. Refresh the bottom
+-- ingredient bar so its counts stay live.
+RegisterNetEvent("pickle_restaurants:cooking:stockDirty", function(_rid)
+    if cookingOpen and currentCookProp then RefreshBar() end
+end)
+
 -- the NUI's live countdown hit 0 on an item -> re-pull the tray immediately (getTray
 -- purges spoiled rows server-side) so it drops without waiting for the periodic sweep.
 RegisterNUICallback("cooking:refreshTray", function(_, cb)

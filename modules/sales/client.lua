@@ -11,9 +11,14 @@ function OpenRegister(restaurantId)
 end
 
 -- Every POS action returns a fresh register payload — re-render it in place.
+-- The await carries a timeout (not `false`): a server-side failure must never
+-- leave the register spinning forever — it returns nil, the NUI un-busies, and
+-- the cashier can retry rather than being stuck mid-charge.
 local function relayOrder(event)
     RegisterNUICallback(event, function(d, cb)
-        local res = lib.callback.await("pickle_restaurants:" .. event, false, d)
+        -- Longer than the server's 35s customer-confirm window so a legitimately
+        -- slow confirm never trips it; short enough to recover from a real hang.
+        local res = lib.callback.await("pickle_restaurants:" .. event, 45000, d)
         if res and res.error then ShowNotification(res.error) end
         if res and res.tickets then
             SendNUIMessage({ action = "setView", view = "register", data = res })

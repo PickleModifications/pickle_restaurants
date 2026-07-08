@@ -2,27 +2,26 @@ import { useState } from "react";
 import { fetchNui } from "@/lib/nui";
 import { useAutoSave, type SaveStatus } from "@/lib/autosave";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Field, TextField, NumberField, Toggle, Select, GroupField } from "@/components/form";
+import { Field, TextField, NumberField, Toggle, Select } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Settings2, Coins, Users, CupSoda, Sandwich, MapPin, Plus, Trash2, Check, Loader2, TriangleAlert,
+  Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2,
 } from "lucide-react";
 
 const PERMISSIONS = [
-  "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance",
+  "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance", "manage_stock",
 ];
 
 type Props = { settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void };
 
+// Drinks + Assembly editors moved to the Menu tab (foods live together there).
 const GROUPS = [
   { key: "general", label: _L("settings.group_general"), icon: Settings2 },
   { key: "economy", label: _L("settings.group_economy"), icon: Coins },
+  { key: "pricing", label: _L("settings.group_pricing"), icon: DollarSign },
   { key: "roles", label: _L("settings.group_roles"), icon: Users },
-  { key: "drinks", label: _L("settings.group_drinks"), icon: CupSoda },
-  { key: "assembly", label: _L("settings.group_assembly"), icon: Sandwich },
   { key: "blip", label: _L("settings.group_blip"), icon: MapPin },
 ];
 
@@ -55,9 +54,8 @@ export default function Settings({ settings, items, groups, onSaved }: Props) {
       <div className="min-w-0 flex-1 overflow-y-auto pr-1">
         {group === "general" && <General settings={settings} onSaved={onSaved} />}
         {group === "economy" && <Economy settings={settings} onSaved={onSaved} />}
+        {group === "pricing" && <Pricing settings={settings} items={items} onSaved={onSaved} />}
         {group === "roles" && <Roles settings={settings} onSaved={onSaved} />}
-        {group === "drinks" && <Drinks settings={settings} items={items} groups={groups} onSaved={onSaved} />}
-        {group === "assembly" && <Assembly settings={settings} items={items} groups={groups} onSaved={onSaved} />}
         {group === "blip" && <Blip settings={settings} onSaved={onSaved} />}
       </div>
     </div>
@@ -123,9 +121,10 @@ function Economy({ settings, onSaved }: { settings: any; onSaved: () => void }) 
   const [currency, setCurrency] = useState(settings.currency ?? "money");
   const [starting, setStarting] = useState(Number(settings.starting_balance ?? 0));
   const [commission, setCommission] = useState(Number(settings.default_commission ?? 10));
+  const [margin, setMargin] = useState(Number(settings.profit_margin ?? 40));
   const status = useAutoSave(
-    () => saveSettings({ currency, starting_balance: starting, default_commission: commission }).then(onSaved),
-    [currency, starting, commission]
+    () => saveSettings({ currency, starting_balance: starting, default_commission: commission, profit_margin: Math.max(0, Math.floor(margin || 0)) }).then(onSaved),
+    [currency, starting, commission, margin]
   );
   return (
     <Section title={_L("settings.economy_title")} description={_L("settings.economy_desc")} status={status}>
@@ -138,6 +137,7 @@ function Economy({ settings, onSaved }: { settings: any; onSaved: () => void }) 
         />
         <NumberField label={_L("settings.starting_balance")} value={starting} min={0} onChange={setStarting} />
         <NumberField label={_L("settings.default_commission")} value={commission} min={0} onChange={setCommission} />
+        <NumberField label={_L("settings.profit_margin")} hint={_L("settings.profit_margin_hint")} value={margin} min={0} onChange={setMargin} />
       </div>
     </Section>
   );
@@ -231,108 +231,36 @@ function Blip({ settings, onSaved }: { settings: any; onSaved: () => void }) {
   );
 }
 
-/** Shared list editor used by Drinks + Assembly — both reference items. */
-function MissingBadge({ missing }: { missing: string[] }) {
-  if (!missing?.length) return null;
-  return (
-    <Badge variant="destructive" className="gap-1">
-      <TriangleAlert className="h-3 w-3" /> {_L("settings.missing")} {missing.join(", ")}
-    </Badge>
+/** Ingredient cost map (raw item -> cost). Drives restock spend and the default
+ * menu price. Stored as an object; edited here as a list of {item, cost} rows. */
+function Pricing({ settings, items, onSaved }: { settings: any; items: Item[]; onSaved: () => void }) {
+  const initial = settings.ingredient_costs && typeof settings.ingredient_costs === "object" ? settings.ingredient_costs : {};
+  const [rows, setRows] = useState<{ item: string; cost: number }[]>(
+    Object.keys(initial).map((k) => ({ item: k, cost: Number(initial[k]) || 0 })).sort((a, b) => a.item.localeCompare(b.item))
   );
-}
+  const update = (i: number, patch: any) => setRows((l) => l.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  const add = () => setRows((l) => [...l, { item: "", cost: 0 }]);
 
-function Drinks({ settings, items, groups, onSaved }: { settings: any; items: Item[]; groups: string[]; onSaved: () => void }) {
-  const [list, setList] = useState<any[]>(Array.isArray(settings.drinks) ? settings.drinks : []);
-  const update = (i: number, patch: any) => setList((l) => l.map((d, idx) => (idx === i ? { ...d, ...patch } : d)));
-  const add = () => setList((l) => [...l, { input: "", output: "", label: "", model: "pickle_drink_container_01", fill_ms: 3000 }]);
-  const has = (name: string) => !name || items.some((it) => it.name === name);
-  const status = useAutoSave(() => saveSettings({ drinks: list }).then(onSaved), [list]);
-  return (
-    <Section
-      title={_L("settings.drinks_title")}
-      description={_L("settings.drinks_desc")}
-      status={status}
-    >
-      <div className="space-y-3">
-        {list.map((d, i) => {
-          const missing = [d.input, d.output].filter((x) => x && !has(x));
-          return (
-            <div key={i} className="rounded-lg border border-border p-3">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="flex items-center gap-2 text-sm font-medium">
-                  {d.label || d.output || _L("settings.new_drink")}
-                  <Badge variant="secondary">{i < 6 ? _L("settings.tap_n", i + 1) : _L("settings.no_tap")}</Badge>
-                </span>
-                <div className="flex items-center gap-2">
-                  <MissingBadge missing={missing} />
-                  <Button size="icon" variant="destructive" onClick={() => setList((l) => l.filter((_, idx) => idx !== i))}><Trash2 className="h-4 w-4" /></Button>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label={_L("settings.cup_input")}><ItemPicker items={items} value={d.input} onChange={(v) => update(i, { input: v })} /></Field>
-                <Field label={_L("settings.filled_output")}><ItemPicker items={items} value={d.output} onChange={(v) => update(i, { output: v })} /></Field>
-                <TextField label={_L("settings.label")} value={d.label} onChange={(v) => update(i, { label: v })} />
-                <TextField label={_L("settings.prop_model")} value={d.model} onChange={(v) => update(i, { model: v })} />
-                <NumberField label={_L("settings.fill_time")} value={Number(d.fill_ms ?? 3000)} min={0} step={500} onChange={(v) => update(i, { fill_ms: v })} />
-                <GroupField label={_L("settings.group_field")} hint={_L("settings.group_field_hint")}
-                  value={d.group || ""} groups={groups} onChange={(v) => update(i, { group: v })} />
-              </div>
-            </div>
-          );
-        })}
-        <Button variant="outline" size="sm" onClick={add}><Plus className="h-4 w-4" /> {_L("settings.add_drink")}</Button>
-      </div>
-    </Section>
-  );
-}
+  const status = useAutoSave(() => {
+    const map: Record<string, number> = {};
+    rows.forEach((r) => { if (r.item) map[r.item] = Math.max(0, Math.floor(r.cost || 0)); });
+    return saveSettings({ ingredient_costs: map }).then(onSaved);
+  }, [rows]);
 
-function Assembly({ settings, items, groups, onSaved }: { settings: any; items: Item[]; groups: string[]; onSaved: () => void }) {
-  const [list, setList] = useState<any[]>(Array.isArray(settings.assembly) ? settings.assembly : []);
-  const update = (i: number, patch: any) => setList((l) => l.map((a, idx) => (idx === i ? { ...a, ...patch } : a)));
-  const add = () => setList((l) => [...l, { output: "", label: "", model: "pickle_bread_bun_01", components: [] }]);
-  const has = (name: string) => !name || items.some((it) => it.name === name);
-  const status = useAutoSave(() => saveSettings({ assembly: list }).then(onSaved), [list]);
   return (
-    <Section
-      title={_L("settings.assembly_title")}
-      description={_L("settings.assembly_desc")}
-      status={status}
-    >
-      <div className="space-y-3">
-        {list.map((a, i) => {
-          const comps: string[] = a.components ?? [];
-          const missing = [a.output, ...comps].filter((x) => x && !has(x));
-          return (
-            <div key={i} className="rounded-lg border border-border p-3">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-sm font-medium">{a.label || a.output || _L("settings.new_recipe")}</span>
-                <div className="flex items-center gap-2">
-                  <MissingBadge missing={missing} />
-                  <Button size="icon" variant="destructive" onClick={() => setList((l) => l.filter((_, idx) => idx !== i))}><Trash2 className="h-4 w-4" /></Button>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label={_L("settings.result_output")}><ItemPicker items={items} value={a.output} onChange={(v) => update(i, { output: v })} /></Field>
-                <TextField label={_L("settings.label")} value={a.label} onChange={(v) => update(i, { label: v })} />
-                <TextField label={_L("settings.prop_model")} value={a.model} onChange={(v) => update(i, { model: v })} />
-                <GroupField label={_L("settings.group_field")} hint={_L("settings.group_field_hint")}
-                  value={a.group || ""} groups={groups} onChange={(v) => update(i, { group: v })} />
-              </div>
-              <Field label={_L("settings.components")} className="mt-3">
-                <div className="space-y-2">
-                  {comps.map((c, ci) => (
-                    <div key={ci} className="flex gap-2">
-                      <ItemPicker className="flex-1" items={items} value={c} onChange={(v) => update(i, { components: comps.map((x, idx) => (idx === ci ? v : x)) })} />
-                      <Button size="icon" variant="ghost" onClick={() => update(i, { components: comps.filter((_, idx) => idx !== ci) })}><Trash2 className="h-4 w-4" /></Button>
-                    </div>
-                  ))}
-                  <Button size="sm" variant="outline" onClick={() => update(i, { components: [...comps, ""] })}><Plus className="h-4 w-4" /> {_L("settings.add_component")}</Button>
-                </div>
-              </Field>
-            </div>
-          );
-        })}
-        <Button variant="outline" size="sm" onClick={add}><Plus className="h-4 w-4" /> {_L("settings.add_recipe")}</Button>
+    <Section title={_L("settings.pricing_title")} description={_L("settings.pricing_desc")} status={status}>
+      <div className="space-y-2">
+        {rows.length === 0 && <div className="py-2 text-xs text-muted-foreground">{_L("settings.no_costs")}</div>}
+        {rows.map((r, i) => (
+          <div key={i} className="flex items-end gap-2">
+            <Field label={_L("settings.ingredient")} className="flex-1">
+              <ItemPicker items={items} value={r.item} onChange={(v) => update(i, { item: v })} />
+            </Field>
+            <NumberField label={_L("settings.cost_value")} className="w-28" value={r.cost} min={0} onChange={(v) => update(i, { cost: v })} />
+            <Button size="icon" variant="destructive" onClick={() => setRows((l) => l.filter((_, idx) => idx !== i))}><Trash2 className="h-4 w-4" /></Button>
+          </div>
+        ))}
+        <Button variant="outline" size="sm" onClick={add}><Plus className="h-4 w-4" /> {_L("settings.add_cost")}</Button>
       </div>
     </Section>
   );

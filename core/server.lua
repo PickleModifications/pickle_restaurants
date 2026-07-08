@@ -11,6 +11,7 @@ RestaurantCache = {}   -- [id]            = row (json fields decoded)
 PropCache       = {}    -- [id]            = prop row
 RecipeCache     = {}    -- array of recipe rows
 RecipeByInput   = {}    -- [input_item]    = recipe
+RecipeByOutput  = {}    -- [output_cooked_item] = recipe (reverse map for cost tracing)
 EmployeeCache   = {}    -- [restaurantId][identifier] = employee row
 StockCache      = {}    -- [restaurantId][item] = count
 TrayCache       = {}    -- [restaurantId][identifier][item.."|"..cheese] = { item, cheese, count, metas } (metas: one build stack — or false — per counted instance; TraySig(meta) addresses a variation)
@@ -18,7 +19,7 @@ SettingsCache   = {}    -- [key]           = decoded value
 OrderCache      = {}    -- [restaurantId][orderId] = open POS ticket row (lines decoded)
 NextTicket      = {}    -- [restaurantId]  = next kitchen ticket number
 
-PERMISSIONS = { "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance" }
+PERMISSIONS = { "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance", "manage_stock" }
 ALL_PERMS   = {}
 for _, p in ipairs(PERMISSIONS) do ALL_PERMS[p] = true end
 
@@ -52,6 +53,24 @@ local DEFAULT_SETTINGS = {
     currency        = "money",
     starting_balance = 0,
     default_commission = 10,
+    -- Menu pricing. A sellable's DEFAULT price is what its ingredients cost the
+    -- restaurant to buy (see ingredient_costs) marked up by this profit margin.
+    -- A boss can still override any price per-restaurant; an unset price falls
+    -- back to this computed default so items are orderable out of the box.
+    profit_margin   = 40, -- percent added on top of ingredient cost
+    -- What each raw ingredient costs the restaurant to buy from the Supplies tab.
+    -- Drives both restocking (money out of the restaurant balance) and the
+    -- computed default menu price. Keyed by raw item; anything not listed costs 0
+    -- (a product made only from unpriced ingredients defaults to $0 = not
+    -- auto-orderable until the boss prices it). Admin-editable in the panel.
+    ingredient_costs = {
+        raw_drumstick = 4, raw_fries = 2, raw_nuggets = 3,
+        raw_beef_patty = 5, raw_chicken_patty = 5,
+        raw_doughnut = 2, raw_cookie = 2, raw_cake = 6,
+        pizza_dough = 3, pizza_sauce = 1, pizza_cheese = 2, pepperoni = 2,
+        bun = 1, cheese = 1, lettuce = 1, tomato = 1, pickle = 1,
+        empty_cup = 1, frosting = 2, sprinkles = 1,
+    },
     cheese_melt_ms  = 8000, -- how long applied cheese takes to melt on a patty
     -- Global default freshness window (seconds) for collected cooked items in the
     -- tray before they spoil and are swept. Default 900 = 15 minutes; 0 = never
@@ -80,7 +99,7 @@ local DEFAULT_SETTINGS = {
         ["1"] = { label = "Cook",    commission = 10, permissions = { cook = true, sell = true } },
         ["2"] = { label = "Manager", commission = 15, permissions = {
             cook = true, sell = true, manage_menu = true, manage_props = true,
-            manage_employees = true, view_finances = true,
+            manage_employees = true, view_finances = true, manage_stock = true,
         } },
     },
     -- Soda machine taps: dragged cup item -> filled drink item. The first SIX
@@ -136,21 +155,35 @@ local DEFAULT_SETTINGS = {
         cooked_nuggets   = "pickle_side_nuggets_02",
         burnt_nuggets    = "pickle_side_nuggets_03",
     },
-    -- Kitchen-prep assembly: combine components -> output item.
+    -- Kitchen-prep assembly: combine components -> output item. ONE base item per
+    -- food family (one-item consolidation rule): a cheeseburger / deluxe burger is
+    -- just a Burger with modifiers, not a separate item. `modifiers` are the POS
+    -- customisations a customer can pick (add cheese, no lettuce…): each has an
+    -- optional `price` delta and an optional `default` (included on the base build,
+    -- so toggling it off reads as "no X"). `item` names the referenced component so
+    -- the kitchen ticket knows what to build; modifiers are ticket instructions +
+    -- pricing, never a completion gate (food orders match by item).
     assembly = {
-        { output = "burger", label = "Burger", model = "pickle_bread_bun_01",
-          components = { "bun", "cooked_beef_patty" } },
-        { output = "cheeseburger", label = "Cheeseburger", model = "pickle_bread_bun_01",
-          components = { "bun", "cooked_beef_patty", "cheese" } },
-        { output = "chicken_sandwich", label = "Chicken Sandwich", model = "pickle_bread_bun_01",
-          components = { "bun", "cooked_chicken_patty" } },
-        -- Veg toppings are whole ingredients (lettuce topping = lettuce, etc.).
-        { output = "deluxe_burger", label = "Deluxe Burger", model = "pickle_bread_bun_01",
-          components = { "bun", "cooked_beef_patty", "cheese", "lettuce", "tomato", "pickle" } },
+        { output = "burger", label = "Burger", model = "pickle_bread_bun_01", group = "Fast Food",
+          components = { "bun", "cooked_beef_patty" },
+          modifiers = {
+            { id = "cheese",  label = "Cheese",  item = "cheese",  price = 2 },
+            { id = "lettuce", label = "Lettuce", item = "lettuce", price = 0 },
+            { id = "tomato",  label = "Tomato",  item = "tomato",  price = 0 },
+            { id = "pickle",  label = "Pickle",  item = "pickle",  price = 0 },
+          } },
+        { output = "chicken_sandwich", label = "Chicken Sandwich", model = "pickle_bread_bun_01", group = "Fast Food",
+          components = { "bun", "cooked_chicken_patty" },
+          modifiers = {
+            { id = "cheese",  label = "Cheese",  item = "cheese",  price = 2 },
+            { id = "lettuce", label = "Lettuce", item = "lettuce", price = 0 },
+            { id = "tomato",  label = "Tomato",  item = "tomato",  price = 0 },
+            { id = "pickle",  label = "Pickle",  item = "pickle",  price = 0 },
+          } },
         -- Pizza: a cheese base (dough + sauce + cheese) assembled at kitchen prep, then
         -- baked in the oven. Pepperoni (and any other prep topping) is optional — add it
         -- on the stack as an alteration; it rides along as a variation.
-        { output = "raw_pizza", label = "Pizza (uncooked)", model = "pickle_pizza_dough_01",
+        { output = "raw_pizza", label = "Pizza (uncooked)", model = "pickle_pizza_dough_01", group = "Pizza",
           components = { "pizza_dough", "pizza_sauce", "pizza_cheese" } },
     },
     -- Gradual "finish tools": an inventory item whose prop the player rubs over a
@@ -164,7 +197,7 @@ local DEFAULT_SETTINGS = {
     --   mode = "overlay": the flavor model stacks on top of the target's prop,
     --          which stays (e.g. frosting coats a doughnut).
     finishes = {
-        { tool = "frosting", tool_model = "pickle_frosting_tube_01", rub_dist = 1.2,
+        { tool = "frosting", tool_model = "pickle_frosting_tube_01", rub_dist = 1.2, group = "Bakery",
           targets = {
             { item = "cooked_cake", output = "decorated_cake", mode = "replace",
               -- color drives the flavor swatch on the NUI card (falls back to a
@@ -197,7 +230,7 @@ local DEFAULT_SETTINGS = {
         -- composes the nested tower from the meta). Output is again `cooked_doughnut`;
         -- the frosting+sprinkles flavors live entirely in build metadata. Variant prop
         -- prefix `pickle_doughnut_sprinkles_NN` — 01 vanilla, 02 chocolate.
-        { tool = "sprinkles", tool_model = "pickle_sprinkles_tube_01", rub_dist = 1.2,
+        { tool = "sprinkles", tool_model = "pickle_sprinkles_tube_01", rub_dist = 1.2, group = "Bakery",
           targets = {
             { item = "cooked_doughnut", output = "cooked_doughnut", mode = "overlay",
               requires_finish = "frosting",
@@ -214,42 +247,44 @@ local DEFAULT_SETTINGS = {
 local DEFAULT_RECIPES = {
     -- The fryer batch models render a basketful, so one fry yields a serving of
     -- individual items (output_count) when collected cooked/burnt.
-    { input = "raw_drumstick", station = "fryer", method = "fry",
+    { input = "raw_drumstick", station = "fryer", method = "fry", group = "Fast Food",
       raw = "pickle_fryer_drumstick_01", cooked = "pickle_fryer_drumstick_02", burnt = "pickle_fryer_drumstick_03",
       out_cooked = "cooked_drumstick", out_burnt = "burnt_drumstick", cook_ms = 15000, burn_ms = 15000,
       output_count = 4 },
-    { input = "raw_fries", station = "fryer", method = "fry",
+    { input = "raw_fries", station = "fryer", method = "fry", group = "Fast Food",
       raw = "pickle_fryer_fries_01", cooked = "pickle_fryer_fries_02", burnt = "pickle_fryer_fries_03",
       out_cooked = "cooked_fries", out_burnt = "burnt_fries", cook_ms = 12000, burn_ms = 12000,
       output_count = 4 },
-    { input = "raw_nuggets", station = "fryer", method = "fry",
+    { input = "raw_nuggets", station = "fryer", method = "fry", group = "Fast Food",
       raw = "pickle_fryer_nuggets_01", cooked = "pickle_fryer_nuggets_02", burnt = "pickle_fryer_nuggets_03",
       out_cooked = "cooked_nuggets", out_burnt = "burnt_nuggets", cook_ms = 12000, burn_ms = 12000,
       output_count = 20 },
-    { input = "raw_beef_patty", station = "stovetop", method = "grill",
+    { input = "raw_beef_patty", station = "stovetop", method = "grill", group = "Fast Food",
       raw = "pickle_patty_beef_01", cooked = "pickle_patty_beef_02", burnt = "pickle_patty_beef_03",
       out_cooked = "cooked_beef_patty", out_burnt = "burnt_beef_patty", cook_ms = 18000, burn_ms = 15000,
       dual_sided = 1 },
-    { input = "raw_chicken_patty", station = "stovetop", method = "grill",
+    -- A fried chicken patty (its model is pickle_patty_friedchicken) — cooks in the
+    -- fryer basket, not on the grill.
+    { input = "raw_chicken_patty", station = "fryer", method = "fry", group = "Fast Food",
       raw = "pickle_patty_friedchicken_01", cooked = "pickle_patty_friedchicken_02", burnt = "pickle_patty_friedchicken_03",
       out_cooked = "cooked_chicken_patty", out_burnt = "burnt_chicken_patty", cook_ms = 18000, burn_ms = 15000 },
     -- Doughnuts are fried.
-    { input = "raw_doughnut", station = "fryer", method = "fry",
+    { input = "raw_doughnut", station = "fryer", method = "fry", group = "Bakery",
       raw = "pickle_doughnut_01", cooked = "pickle_doughnut_02", burnt = "pickle_doughnut_03",
       out_cooked = "cooked_doughnut", out_burnt = "burnt_doughnut", cook_ms = 12000, burn_ms = 12000 },
     -- Cookies + cake bake inside the oven doors (on their own trays).
-    { input = "raw_cookie", station = "stovetop", method = "oven",
+    { input = "raw_cookie", station = "stovetop", method = "oven", group = "Bakery",
       raw = "pickle_cookie_01", cooked = "pickle_cookie_02", burnt = "pickle_cookie_03",
       out_cooked = "cooked_cookie", out_burnt = "burnt_cookie", cook_ms = 20000, burn_ms = 18000 },
     -- Cake batter bakes as a thin sheet inside its container tray (the container
     -- rides along visually, never an item). pickle_cake_01..04 are the four whole
     -- flavored cakes the frosting finish tool produces — not cook states.
-    { input = "raw_cake", station = "stovetop", method = "oven",
+    { input = "raw_cake", station = "stovetop", method = "oven", group = "Bakery",
       raw = "pickle_cake_mix_pour_02", cooked = "pickle_cake_mix_pour_03", burnt = "pickle_cake_mix_pour_04",
       container = "pickle_cake_container_01",
       out_cooked = "cooked_cake", out_burnt = "burnt_cake", cook_ms = 30000, burn_ms = 25000 },
     -- Pizza bakes bare on the oven rack; the raw (topped) pizza is assembled at kitchen prep first.
-    { input = "raw_pizza", station = "stovetop", method = "oven",
+    { input = "raw_pizza", station = "stovetop", method = "oven", group = "Pizza",
       raw = "pickle_pizza_dough_01", cooked = "pickle_pizza_dough_02", burnt = "pickle_pizza_dough_03",
       out_cooked = "cooked_pizza", out_burnt = "burnt_pizza", cook_ms = 25000, burn_ms = 20000 },
 }
@@ -744,6 +779,98 @@ local function LoadSettings()
         end
         SetSetting("pizza_pepperoni_optional", true)
     end
+
+    -- One-time: stamp default access groups onto the seeded assembly + finish
+    -- entries so a fresh menu is organised (Fast Food / Pizza / Bakery). Only sets
+    -- a group on an entry that still has none — an admin's own grouping is kept.
+    if not GetSetting("food_groups_seeded", false) then
+        local wantAsm = { burger = "Fast Food", cheeseburger = "Fast Food",
+                          chicken_sandwich = "Fast Food", deluxe_burger = "Fast Food",
+                          raw_pizza = "Pizza" }
+        local asm = SettingsCache.assembly
+        if type(asm) == "table" then
+            local changed = false
+            for _, a in ipairs(asm) do
+                if (a.group == nil or a.group == "") and wantAsm[a.output] then
+                    a.group = wantAsm[a.output]; changed = true
+                end
+            end
+            if changed then SetSetting("assembly", asm) end
+        end
+        local fs = SettingsCache.finishes
+        if type(fs) == "table" then
+            local changed = false
+            for _, f in ipairs(fs) do
+                if (f.group == nil or f.group == "") and (f.tool == "frosting" or f.tool == "sprinkles") then
+                    f.group = "Bakery"; changed = true
+                end
+            end
+            if changed then SetSetting("finishes", fs) end
+        end
+        SetSetting("food_groups_seeded", true)
+    end
+
+    -- One-time: consolidate the burger family into ONE Burger with modifiers.
+    -- A cheeseburger / deluxe burger that still holds its shipped components is
+    -- retired (its extras are now customer modifiers on the base burger); an admin
+    -- who customised the entry keeps it. The two surviving burger-family bases get
+    -- the default modifier set if they have none.
+    if not GetSetting("burger_consolidated", false) then
+        local asm = SettingsCache.assembly
+        if type(asm) == "table" then
+            local function sameList(a, b)
+                if type(a) ~= "table" or type(b) ~= "table" or #a ~= #b then return false end
+                for i = 1, #a do if a[i] ~= b[i] then return false end end
+                return true
+            end
+            local retire = {
+                cheeseburger  = { "bun", "cooked_beef_patty", "cheese" },
+                deluxe_burger = { "bun", "cooked_beef_patty", "cheese", "lettuce", "tomato", "pickle" },
+            }
+            local defMods
+            for _, a in ipairs(DEFAULT_SETTINGS.assembly) do
+                if a.output == "burger" then defMods = a.modifiers end
+            end
+            local kept, changed = {}, false
+            for _, a in ipairs(asm) do
+                if retire[a.output] and sameList(a.components, retire[a.output]) then
+                    changed = true -- retire the still-default variant item
+                else
+                    kept[#kept + 1] = a
+                    if (a.output == "burger" or a.output == "chicken_sandwich")
+                        and (type(a.modifiers) ~= "table" or #a.modifiers == 0) and defMods then
+                        a.modifiers = dec(json.encode(defMods), nil) -- independent copy
+                        changed = true
+                    end
+                end
+            end
+            if changed then SetSetting("assembly", kept) end
+        end
+        SetSetting("burger_consolidated", true)
+    end
+
+    -- One-time (v2): guarantee the doughnut is ONE item. The v1 collapse only
+    -- repointed the exact old defaults; this repoints ANY frosting/sprinkles target
+    -- on a doughnut (or a legacy frosted_doughnut) to output cooked_doughnut, so no
+    -- separate "Frosted Doughnut" sellable survives.
+    if not GetSetting("doughnut_finish_collapsed_v2", false) then
+        local fs = SettingsCache.finishes
+        if type(fs) == "table" then
+            local changed = false
+            for _, f in ipairs(fs) do
+                if f.tool == "frosting" or f.tool == "sprinkles" then
+                    for _, t in ipairs(f.targets or {}) do
+                        if t.item == "frosted_doughnut" then t.item = "cooked_doughnut"; changed = true end
+                        if (t.item == "cooked_doughnut") and t.output ~= "cooked_doughnut" then
+                            t.output = "cooked_doughnut"; changed = true
+                        end
+                    end
+                end
+            end
+            if changed then SetSetting("finishes", fs) end
+        end
+        SetSetting("doughnut_finish_collapsed_v2", true)
+    end
 end
 
 local function SeedRecipes()
@@ -753,10 +880,24 @@ local function SeedRecipes()
     for _, r in ipairs(DEFAULT_RECIPES) do
         MySQL.insert.await([[
             INSERT INTO pickle_restaurant_recipes
-                (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count, container_model)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count, container_model, `group`)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE input_item = input_item
-        ]], { r.input, r.station, r.raw, r.cooked, r.burnt, r.out_cooked, r.out_burnt, r.cook_ms, r.burn_ms, r.dual_sided or 0, r.method or "grill", r.output_count or 1, r.container })
+        ]], { r.input, r.station, r.raw, r.cooked, r.burnt, r.out_cooked, r.out_burnt, r.cook_ms, r.burn_ms, r.dual_sided or 0, r.method or "grill", r.output_count or 1, r.container, r.group })
+    end
+
+    -- One-time: stamp default access groups (Fast Food / Bakery / Pizza) onto the
+    -- default recipes on servers seeded before recipes were grouped. Only sets a
+    -- group on a row that still has none, so an admin's own grouping is preserved.
+    if not GetSetting("default_groups_seeded", false) then
+        for _, r in ipairs(DEFAULT_RECIPES) do
+            if r.group then
+                MySQL.update.await(
+                    "UPDATE pickle_restaurant_recipes SET `group` = ? WHERE input_item = ? AND (`group` IS NULL OR `group` = '')",
+                    { r.group, r.input })
+            end
+        end
+        SetSetting("default_groups_seeded", true)
     end
 
     -- One-time: turn dual_sided on for the default dual recipes (e.g. beef
@@ -812,14 +953,29 @@ local function SeedRecipes()
         ]], { "pickle_cake_mix_pour_02", "pickle_cake_mix_pour_03", "pickle_cake_mix_pour_04", "pickle_cake_container_01" })
         SetSetting("cake_models_seeded", true)
     end
+
+    -- One-time: the chicken patty is FRIED, so move it from the grill to the fryer
+    -- on servers seeded with the old stovetop/grill default — only while the row
+    -- still holds that exact default, so an admin who re-stationed it keeps theirs.
+    if not GetSetting("chicken_patty_fryer_seeded", false) then
+        MySQL.update.await([[
+            UPDATE pickle_restaurant_recipes
+               SET station = 'fryer', method = 'fry'
+             WHERE input_item = 'raw_chicken_patty' AND station = 'stovetop' AND method = 'grill'
+        ]])
+        SetSetting("chicken_patty_fryer_seeded", true)
+    end
 end
 
 function LoadRecipes()
-    RecipeCache, RecipeByInput = {}, {}
+    RecipeCache, RecipeByInput, RecipeByOutput = {}, {}, {}
     local rows = MySQL.query.await("SELECT * FROM pickle_restaurant_recipes") or {}
     for _, row in ipairs(rows) do
         RecipeCache[#RecipeCache + 1] = row
         RecipeByInput[row.input_item] = row
+        if row.output_cooked_item and row.output_cooked_item ~= "" then
+            RecipeByOutput[row.output_cooked_item] = row
+        end
     end
 end
 
@@ -912,7 +1068,11 @@ function GetRestaurant(id) return RestaurantCache[tonumber(id)] end
 function RestaurantHasAccess(restaurantId, group)
     if group == nil or group == "" then return true end
     local r = GetRestaurant(restaurantId)
-    if not r or type(r.groups) ~= "table" then return false end
+    if not r then return false end
+    -- No groups set on the restaurant = access to EVERYTHING. Groups are an
+    -- opt-in RESTRICTION: leave empty for the full menu, add groups to limit a
+    -- restaurant to only those categories.
+    if type(r.groups) ~= "table" or #r.groups == 0 then return true end
     for _, g in ipairs(r.groups) do
         if g == group then return true end
     end
@@ -935,6 +1095,40 @@ function CollectGroups()
     for _, f in ipairs(GetSetting("finishes", {})) do add(f.group) end
     table.sort(out)
     return out
+end
+
+-- ─── ingredient cost & default pricing ───────────────────────────────────────
+-- A sellable's DEFAULT menu price is what its ingredients cost the restaurant to
+-- buy (the `ingredient_costs` setting) marked up by `profit_margin`. Any item's
+-- cost traces down to raw ingredients: an explicit cost wins; a recipe output
+-- costs its input (divided by the batch output_count → per serving); an assembly
+-- output costs the sum of its components. Recursive, cycle-guarded.
+function ResolveItemCost(item, seen)
+    if not item then return 0 end
+    local costs = GetSetting("ingredient_costs", {})
+    if costs[item] ~= nil then return tonumber(costs[item]) or 0 end
+    seen = seen or {}
+    if seen[item] then return 0 end
+    seen[item] = true
+    local rec = RecipeByOutput[item]
+    if rec then
+        local per = math.max(1, tonumber(rec.output_count) or 1)
+        return ResolveItemCost(rec.input_item, seen) / per
+    end
+    for _, a in ipairs(GetSetting("assembly", {})) do
+        if a.output == item then
+            local sum = 0
+            for _, c in ipairs(a.components or {}) do sum = sum + ResolveItemCost(c, seen) end
+            return sum
+        end
+    end
+    return 0
+end
+
+-- Apply the global profit margin to a raw cost, rounded to whole dollars.
+function MarkupPrice(cost)
+    local margin = tonumber(GetSetting("profit_margin", 0)) or 0
+    return RoundMoney((tonumber(cost) or 0) * (1 + margin / 100))
 end
 
 -- ─── item catalogue / validation ─────────────────────────────────────────────
@@ -1019,17 +1213,24 @@ function AnnotateRecipes()
         local copy = {}
         for k, v in pairs(r) do copy[k] = v end
         copy.valid, copy.missing = #missing == 0, missing
+        copy.defaultPrice = MarkupPrice(ResolveItemCost(r.output_cooked_item))
         out[#out + 1] = copy
     end
     return out
 end
 
 function AnnotateDrinks()
+    -- Every poured drink collects as the ONE generic drink item; if that item
+    -- isn't installed in the framework inventory NO drink can be sold (the POS
+    -- filters them all out), so flag it so the admin panel can say why.
+    local drinkInstalled = ItemExists(GetSetting("drink_item", "drink"))
     local out = {}
     for _, d in ipairs(GetSetting("drinks", {})) do
         local missing = drinkMissing(d)
         local copy = {}; for k, v in pairs(d) do copy[k] = v end
         copy.valid, copy.missing = #missing == 0, missing
+        copy.drink_item_installed = drinkInstalled
+        copy.defaultPrice = MarkupPrice(ResolveItemCost(d.input))
         out[#out + 1] = copy
     end
     return out
@@ -1041,6 +1242,7 @@ function AnnotateAssembly()
         local missing = assemblyMissing(a)
         local copy = {}; for k, v in pairs(a) do copy[k] = v end
         copy.valid, copy.missing = #missing == 0, missing
+        copy.defaultPrice = MarkupPrice(ResolveItemCost(a.output))
         out[#out + 1] = copy
     end
     return out
@@ -1128,11 +1330,20 @@ function GetStockCount(restaurantId, item)
     return (StockCache[restaurantId] and StockCache[restaurantId][item]) or 0
 end
 
+-- Tell cooks their ingredient bar is stale after the shared stock pool changed
+-- (another cook consumed, a decompose refunded, or a manager restocked). Clients
+-- refresh only if they're currently at a station; getIngredients is
+-- restaurant-scoped server-side, so an unnecessary refresh is harmless.
+local function BroadcastStockDirty(restaurantId)
+    TriggerClientEvent("pickle_restaurants:cooking:stockDirty", -1, restaurantId)
+end
+
 function AddStock(restaurantId, item, count)
     StockCache[restaurantId] = StockCache[restaurantId] or {}
     StockCache[restaurantId][item] = (StockCache[restaurantId][item] or 0) + count
     MySQL.update("INSERT INTO pickle_restaurant_stock (restaurant_id, item, count) VALUES (?, ?, ?) "
         .. "ON DUPLICATE KEY UPDATE count = count + VALUES(count)", { restaurantId, item, count })
+    BroadcastStockDirty(restaurantId)
 end
 
 function RemoveStock(restaurantId, item, count)
@@ -1140,6 +1351,7 @@ function RemoveStock(restaurantId, item, count)
     StockCache[restaurantId][item] = StockCache[restaurantId][item] - count
     MySQL.update("UPDATE pickle_restaurant_stock SET count = count - ? WHERE restaurant_id = ? AND item = ?",
         { count, restaurantId, item })
+    BroadcastStockDirty(restaurantId)
     return true
 end
 
@@ -1154,12 +1366,17 @@ function CreateOrder(restaurantId, order)
     order.ticket = NextTicket[restaurantId]
     order.status = "open"
     NextTicket[restaurantId] = order.ticket + 1
+    -- `lines` is a MariaDB reserved keyword — it MUST be backtick-quoted here just
+    -- as it is in CREATE TABLE, or the INSERT is a syntax error and no ticket saves.
     order.id = MySQL.insert.await([[
-        INSERT INTO pickle_restaurant_orders
-            (restaurant_id, ticket, customer_identifier, customer_name, cashier_identifier, lines, total)
+        INSERT INTO `pickle_restaurant_orders`
+            (`restaurant_id`, `ticket`, `customer_identifier`, `customer_name`, `cashier_identifier`, `lines`, `total`)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     ]], { restaurantId, order.ticket, order.customer_identifier, order.customer_name,
           order.cashier_identifier, json.encode(order.lines or {}), order.total or 0 })
+    -- Fall back to the ticket-scoped id if the insert didn't return one, so the
+    -- order is still cached + completable and never indexes the cache with nil.
+    if not order.id then order.id = -order.ticket end
     OrderCache[restaurantId] = OrderCache[restaurantId] or {}
     OrderCache[restaurantId][order.id] = order
     return order

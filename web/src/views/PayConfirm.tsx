@@ -6,7 +6,8 @@ import { money } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { Receipt, Check, X } from "lucide-react";
 
-type Line = { label: string; qty: number; price: number };
+type LineMod = { label: string; added?: boolean; removed?: boolean };
+type Line = { label: string; qty: number; price: number; mods?: LineMod[] };
 
 // The customer-facing charge prompt. The server awaits our answer; a 30s
 // countdown auto-declines so the cashier's register can never hang. Answering
@@ -47,9 +48,16 @@ export default function PayConfirm({ data }: { data: any }) {
 
         <div className="space-y-1.5 px-4 py-3">
           {lines.map((l, i) => (
-            <div key={i} className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">{l.qty}× {l.label}</span>
-              <span>{money(l.price * l.qty)}</span>
+            <div key={i} className="flex items-start justify-between text-sm">
+              <span className="min-w-0 text-muted-foreground">
+                {l.qty}× {l.label}
+                {l.mods && l.mods.length > 0 && (
+                  <span className="ml-1 text-xs text-muted-foreground/70">
+                    ({l.mods.map((m) => (m.removed ? "no " + m.label : "+" + m.label)).join(", ")})
+                  </span>
+                )}
+              </span>
+              <span className="shrink-0">{money(l.price * l.qty)}</span>
             </div>
           ))}
           <div className="mt-2 flex items-center justify-between border-t border-border pt-2 text-sm font-semibold">

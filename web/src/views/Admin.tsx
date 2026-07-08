@@ -3,12 +3,15 @@ import { _L } from "@/lib/locale";
 import Panel from "@/components/Panel";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import Restaurants from "@/views/admin/Restaurants";
-import Recipes from "@/views/admin/Recipes";
+import Menu from "@/views/admin/Menu";
 import Settings from "@/views/admin/Settings";
 
 export default function Admin({ data, onClose }: { data: any; onClose: () => void }) {
   const restaurants = data?.restaurants || [];
   const recipes = data?.recipes || [];
+  const assembly = data?.assembly || [];
+  const drinks = data?.drinks || [];
+  const finishes = data?.finishes || [];
   const settings = data?.settings || {};
   const players = data?.players || [];
   const items = data?.items || [];
@@ -33,7 +36,7 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
         </TabsContent>
 
         <TabsContent value="recipes" className="flex min-h-0 flex-1 flex-col">
-          <Recipes recipes={recipes} items={items} groups={groups} onSaved={refresh} />
+          <Menu recipes={recipes} assembly={assembly} drinks={drinks} finishes={finishes} items={items} groups={groups} onSaved={refresh} />
         </TabsContent>
 
         <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">

@@ -1,6 +1,9 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Check, X } from "lucide-react";
+import { _L } from "@/lib/locale";
 
 /** Labelled field wrapper — keeps every control aligned and consistently spaced. */
 export function Field({
@@ -86,23 +89,74 @@ export function Toggle({
 }
 
 /**
- * Free-text access-group input with suggestions from the groups already in use
- * (recipes/drinks/assembly/finishes). Blank = available to every restaurant.
+ * Access-group dropdown, reused across every food editor so groups are shared.
+ * Lists "All restaurants" (blank = available everywhere), every group already in
+ * use, plus an "Add new group…" option that reveals an inline input. A freshly
+ * typed group is selected immediately and joins the suggestions on the next
+ * refresh (groups exist by being used, not managed).
  */
+const ADD_NEW = "__add_new__";
 export function GroupField({
   label, hint, value, onChange, groups, className,
 }: {
   label: string; hint?: string; value: string; onChange: (v: string) => void; groups: string[]; className?: string;
 }) {
-  const listId = React.useId();
+  const [adding, setAdding] = React.useState(false);
+  const [draft, setDraft] = React.useState("");
+
+  // the currently-selected group is always offered even if it isn't (yet) in the
+  // shared suggestion list (e.g. just-typed, or the only user of that group)
+  const options = React.useMemo(() => {
+    const set = new Set(groups.filter(Boolean));
+    if (value) set.add(value);
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [groups, value]);
+
+  const commit = () => {
+    const v = draft.trim();
+    if (v) onChange(v);
+    setAdding(false);
+    setDraft("");
+  };
+
+  if (adding) {
+    return (
+      <Field label={label} hint={hint} className={className}>
+        <div className="flex items-center gap-2">
+          <Input
+            autoFocus
+            value={draft}
+            placeholder={_L("group.new_placeholder")}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); commit(); }
+              if (e.key === "Escape") { setAdding(false); setDraft(""); }
+            }}
+          />
+          <Button size="icon" variant="outline" onClick={commit}><Check className="h-4 w-4" /></Button>
+          <Button size="icon" variant="ghost" onClick={() => { setAdding(false); setDraft(""); }}><X className="h-4 w-4" /></Button>
+        </div>
+      </Field>
+    );
+  }
+
   return (
     <Field label={label} hint={hint} className={className}>
-      <Input value={value ?? ""} list={listId} onChange={(e) => onChange(e.target.value)} />
-      <datalist id={listId}>
-        {groups.map((g) => (
-          <option key={g} value={g} />
+      <select
+        value={value || ""}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === ADD_NEW) { setDraft(""); setAdding(true); }
+          else onChange(v);
+        }}
+        className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      >
+        <option value="">{_L("group.all")}</option>
+        {options.map((g) => (
+          <option key={g} value={g}>{g}</option>
         ))}
-      </datalist>
+        <option value={ADD_NEW}>{_L("group.add_new")}</option>
+      </select>
     </Field>
   );
 }

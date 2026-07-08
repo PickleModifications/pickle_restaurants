@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchNui } from "@/lib/nui";
 import Panel from "@/components/Panel";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,7 @@ import { type Item } from "@/components/ItemPicker";
 import Branding from "@/components/Branding";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { UserPlus, Trash2, Plus, MapPin, Banknote, Armchair, ImageOff } from "lucide-react";
+import { UserPlus, Trash2, Plus, Minus, MapPin, Banknote, Armchair, ImageOff, PackagePlus } from "lucide-react";
 
 // Inventory thumbnail from a direct nui:// url the server resolved.
 function Thumb({ src, className }: { src?: string; className?: string }) {
@@ -38,6 +38,7 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         <TabsList className="shrink-0">
           {perms.manage_employees && <TabsTrigger value="employees">{_L("mgmt.tab_employees")}</TabsTrigger>}
           {perms.manage_menu && <TabsTrigger value="menu">{_L("mgmt.tab_menu")}</TabsTrigger>}
+          {perms.manage_stock && <TabsTrigger value="supplies">{_L("mgmt.tab_supplies")}</TabsTrigger>}
           {perms.view_finances && <TabsTrigger value="finances">{_L("mgmt.tab_finances")}</TabsTrigger>}
           {perms.manage_props && <TabsTrigger value="stations">{_L("mgmt.tab_stations")}</TabsTrigger>}
           {perms.manage_props && <TabsTrigger value="branding">{_L("mgmt.tab_branding")}</TabsTrigger>}
@@ -51,6 +52,11 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         {perms.manage_menu && (
           <TabsContent value="menu" className="min-h-0 flex-1 overflow-y-auto pr-1">
             <Menu id={id} priceList={data?.priceList || []} stale={data?.stale || []} />
+          </TabsContent>
+        )}
+        {perms.manage_stock && (
+          <TabsContent value="supplies" className="min-h-0 flex-1 overflow-y-auto pr-1">
+            <Supplies id={id} supplies={data?.supplies || []} />
           </TabsContent>
         )}
         {perms.view_finances && (
@@ -177,20 +183,30 @@ function Menu({ id, priceList, stale }: { id: number; priceList: any[]; stale: a
 }
 
 function PriceRow({ id, entry }: { id: number; entry: any }) {
-  const [price, setPrice] = useState<number>(entry.price || 0);
+  const def = Math.max(0, Math.floor(entry.defaultPrice || 0));
+  // The price input is an OVERRIDE: empty = fall back to the ingredient-cost
+  // default. `priceIsDefault` means there's no per-restaurant row yet.
+  const [price, setPrice] = useState<string>(entry.priceIsDefault ? "" : String(entry.price ?? ""));
   const [enabled, setEnabled] = useState<boolean>(!!entry.enabled);
+  const first = useRef(true);
 
-  // Debounced auto-save on any price/toggle change (no Save button). Skips the
-  // initial mount so opening the tab doesn't write every row.
   useEffect(() => {
-    if (price === (entry.price || 0) && enabled === !!entry.enabled) return;
+    if (first.current) { first.current = false; return; }
     const t = setTimeout(() => {
-      fetchNui("management:saveMenuItem", { id, key: entry.key, price: Math.max(0, Math.floor(price || 0)), enabled });
+      const raw = price.trim();
+      const num = raw === "" ? null : Math.max(0, Math.floor(Number(raw) || 0));
+      if (num === null && enabled) {
+        // pure default (blank price, orderable) — remove any override row
+        fetchNui("management:deleteMenuItem", { id, key: entry.key });
+      } else {
+        fetchNui("management:saveMenuItem", { id, key: entry.key, price: num ?? def, enabled });
+      }
     }, 500);
     return () => clearTimeout(t);
   }, [price, enabled]);
 
-  const orderable = enabled && price > 0;
+  const effPrice = price.trim() === "" ? def : Math.max(0, Math.floor(Number(price) || 0));
+  const orderable = enabled && effPrice > 0;
   return (
     <Card>
       <CardContent className="flex items-center gap-3 pt-4 text-sm">
@@ -201,13 +217,57 @@ function PriceRow({ id, entry }: { id: number; entry: any }) {
             <Badge variant="secondary">{_L(KIND_LABEL[entry.kind] || "register.kind_recipe")}</Badge>
             {!orderable && <span className="text-[11px] text-muted-foreground">{_L("mgmt.not_orderable")}</span>}
           </div>
+          {def > 0 && <div className="text-[11px] text-muted-foreground">{_L("mgmt.price_default_hint", def)}</div>}
         </div>
         <div className="flex shrink-0 items-center gap-3">
           <div className="flex items-center gap-1">
             <span className="text-muted-foreground">$</span>
-            <Input type="number" min={0} value={price} onChange={(e) => setPrice(Number(e.target.value))} className="h-8 w-20" />
+            <Input type="number" min={0} value={price} placeholder={String(def)} onChange={(e) => setPrice(e.target.value)} className="h-8 w-20" />
           </div>
           <Toggle checked={enabled} onChange={setEnabled} />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// The Supplies tab: buy raw ingredients into the restaurant's shared stock pool
+// (paid from the restaurant balance). The kitchen cooks from this stock.
+function Supplies({ id, supplies }: { id: number; supplies: any[] }) {
+  return (
+    <div className="space-y-3">
+      <p className="text-[11px] text-muted-foreground">{_L("mgmt.supplies_hint")}</p>
+      {supplies.length === 0 && <div className="py-4 text-center text-sm text-muted-foreground">{_L("mgmt.no_supplies")}</div>}
+      {supplies.map((s) => <SupplyRow key={s.item} id={id} supply={s} />)}
+    </div>
+  );
+}
+
+function SupplyRow({ id, supply }: { id: number; supply: any }) {
+  const [qty, setQty] = useState(5);
+  const [stock, setStock] = useState<number>(supply.stock || 0);
+  const buy = async () => {
+    const res = await fetchNui<any>("management:buyStock", { id, item: supply.item, qty });
+    if (res && res.ok) setStock(res.stock);
+  };
+  return (
+    <Card>
+      <CardContent className="flex items-center gap-3 pt-4 text-sm">
+        <Thumb src={supply.image} className="h-10 w-10 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate font-medium">{supply.label}</span>
+            {!supply.installed && <Badge variant="destructive">{_L("mgmt.not_installed")}</Badge>}
+          </div>
+          <div className="text-[11px] text-muted-foreground">{_L("mgmt.cost_each", money(supply.cost))} · {_L("mgmt.in_stock", stock)}</div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <div className="flex items-center">
+            <Button size="icon" variant="ghost" onClick={() => setQty((q) => Math.max(1, q - 1))}><Minus className="h-3.5 w-3.5" /></Button>
+            <Input type="number" min={1} value={qty} onChange={(e) => setQty(Math.max(1, Math.floor(Number(e.target.value) || 1)))} className="h-8 w-16 text-center" />
+            <Button size="icon" variant="ghost" onClick={() => setQty((q) => q + 1)}><Plus className="h-3.5 w-3.5" /></Button>
+          </div>
+          <Button size="sm" onClick={buy}><PackagePlus className="h-4 w-4" /> {_L("mgmt.buy")} · {money(supply.cost * qty)}</Button>
         </div>
       </CardContent>
     </Card>

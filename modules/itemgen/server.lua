@@ -95,7 +95,10 @@ local TRAY_ONLY = {
 -- Keep exporting their definitions for one release so ox_inventory doesn't PURGE
 -- any legacy stacks players still hold. Drop this set (and their KNOWN rows) once
 -- the grace window has passed.
-local RETAIN = { "frosted_doughnut", "sprinkled_doughnut", "raw_pizza" }
+--   cheeseburger / deluxe_burger: the burger family collapsed into ONE `burger`
+--   item (the extras are customer MODIFIERS now), so these two outputs are no
+--   longer produced or sold — retained one release for legacy stacks.
+local RETAIN = { "frosted_doughnut", "sprinkled_doughnut", "raw_pizza", "cheeseburger", "deluxe_burger" }
 
 -- ─── helpers ──────────────────────────────────────────────────────────────────
 
