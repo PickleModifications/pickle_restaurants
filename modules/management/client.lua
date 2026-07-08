@@ -6,7 +6,7 @@
 function OpenManagement(restaurantId)
     local data = lib.callback.await("pickle_restaurants:management:getData", false, { id = restaurantId })
     if not data or not data.ok then
-        return ShowNotification((data and data.error) or "You can't manage this place.")
+        return ShowNotification((data and data.error) or _L("manage_no_access"))
     end
     data.restaurantId = restaurantId
     OpenNUI("management", data)

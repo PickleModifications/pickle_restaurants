@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Field, TextField, NumberField, Select, Toggle } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
 import { cn } from "@/lib/utils";
+import { _L } from "@/lib/locale";
 import { Plus, Trash2, Pencil, X, TriangleAlert, EyeOff, ImageOff, Boxes, Check, Loader2 } from "lucide-react";
 
 type Recipe = {
@@ -52,10 +53,10 @@ const BLANK: Recipe = {
 
 // The cook methods valid for a station (fryer is always a basket fry).
 const METHODS: Record<string, { value: string; label: string }[]> = {
-  fryer: [{ value: "fry", label: "Fry (basket)" }],
+  fryer: [{ value: "fry", label: _L("recipes.method_fry") }],
   stovetop: [
-    { value: "grill", label: "Grill (cooktop, flip)" },
-    { value: "oven", label: "Oven (bake inside a door)" },
+    { value: "grill", label: _L("recipes.method_grill") },
+    { value: "oven", label: _L("recipes.method_oven") },
   ],
 };
 
@@ -82,10 +83,10 @@ export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex shrink-0 items-center justify-between">
         <p className="text-xs text-muted-foreground">
-          Cookable recipes. Items are picked from the server catalogue — a recipe with a missing item is flagged and hidden in-game until fixed.
+          {_L("recipes.intro")}
         </p>
         {!editing && (
-          <Button size="sm" onClick={() => openEditor({ ...BLANK })}><Plus className="h-4 w-4" /> New recipe</Button>
+          <Button size="sm" onClick={() => openEditor({ ...BLANK })}><Plus className="h-4 w-4" /> {_L("recipes.new_recipe")}</Button>
         )}
       </div>
 
@@ -93,22 +94,22 @@ export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]
         <div className="shrink-0 rounded-lg border border-primary/40 bg-primary/5 p-3">
           <div className="mb-2 flex items-center justify-between">
             <span className="flex items-center gap-2 text-sm font-semibold">
-              {form!.input_item ? "Edit recipe" : "New recipe"}
-              {status === "saving" && <span className="flex items-center gap-1 text-xs font-normal text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> Saving…</span>}
-              {status === "saved" && <span className="flex items-center gap-1 text-xs font-normal text-muted-foreground"><Check className="h-3 w-3 text-primary" /> Saved</span>}
-              {!form!.input_item && <span className="text-xs font-normal text-muted-foreground">— pick an input item to start saving</span>}
+              {form!.input_item ? _L("recipes.edit_recipe") : _L("recipes.new_recipe")}
+              {status === "saving" && <span className="flex items-center gap-1 text-xs font-normal text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> {_L("recipes.saving")}</span>}
+              {status === "saved" && <span className="flex items-center gap-1 text-xs font-normal text-muted-foreground"><Check className="h-3 w-3 text-primary" /> {_L("recipes.saved")}</span>}
+              {!form!.input_item && <span className="text-xs font-normal text-muted-foreground">{_L("recipes.pick_input_hint")}</span>}
             </span>
             <Button size="icon" variant="ghost" onClick={() => setForm(null)}><X className="h-4 w-4" /></Button>
           </div>
           <RecipeForm form={form!} setForm={setForm} items={items} />
           <div className="mt-3 flex justify-end">
-            <Button size="sm" variant="outline" onClick={() => setForm(null)}>Done</Button>
+            <Button size="sm" variant="outline" onClick={() => setForm(null)}>{_L("recipes.done")}</Button>
           </div>
         </div>
       )}
 
       <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-        {recipes.length === 0 && <div className="py-6 text-center text-sm text-muted-foreground">No recipes yet.</div>}
+        {recipes.length === 0 && <div className="py-6 text-center text-sm text-muted-foreground">{_L("recipes.none_yet")}</div>}
         {recipes.map((r) => {
           const badModels = r.invalid_models || [];
           return (
@@ -122,24 +123,24 @@ export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]
                     <span className="truncate font-medium">{labelOf(items, r.output_cooked_item || r.input_item)}</span>
                     <Badge variant="secondary">{r.station}</Badge>
                     {r.valid === false ? (
-                      <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> needs fixing</Badge>
+                      <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("recipes.needs_fixing")}</Badge>
                     ) : null}
                     {badModels.length > 0 ? (
-                      <Badge variant="outline" className="gap-1 border-amber-500/60 text-amber-500"><TriangleAlert className="h-3 w-3" /> invalid model</Badge>
+                      <Badge variant="outline" className="gap-1 border-amber-500/60 text-amber-500"><TriangleAlert className="h-3 w-3" /> {_L("recipes.invalid_model")}</Badge>
                     ) : null}
                   </div>
                   <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                    from {labelOf(items, r.input_item)} · burns to {labelOf(items, r.output_burnt_item)} · {r.cook_ms}/{r.burn_ms}ms
+                    {_L("recipes.from_burns", labelOf(items, r.input_item), labelOf(items, r.output_burnt_item), r.cook_ms, r.burn_ms)}
                   </div>
                   {r.valid === false && (
                     <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-destructive">
-                      <EyeOff className="h-3 w-3" /> hidden in-game — missing items:
+                      <EyeOff className="h-3 w-3" /> {_L("recipes.hidden_missing")}
                       {(r.missing || []).map((m) => <span key={m} className="font-mono">{m}</span>)}
                     </div>
                   )}
                   {badModels.length > 0 && (
                     <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-amber-500">
-                      <Boxes className="h-3 w-3" /> model(s) not found in-game:
+                      <Boxes className="h-3 w-3" /> {_L("recipes.models_not_found")}
                       {badModels.map((m) => <span key={m} className="font-mono">{m}</span>)}
                     </div>
                   )}
@@ -185,7 +186,7 @@ function RecipeForm({ form, setForm, items }: { form: Recipe; setForm: (r: Recip
         <TextField label={label} value={val} onChange={(v) => set(k, v)} />
         {invalid && (
           <div className="mt-1 flex items-center gap-1 text-[11px] text-amber-500">
-            <TriangleAlert className="h-3 w-3" /> not found in-game
+            <TriangleAlert className="h-3 w-3" /> {_L("recipes.not_found")}
           </div>
         )}
       </div>
@@ -194,31 +195,31 @@ function RecipeForm({ form, setForm, items }: { form: Recipe; setForm: (r: Recip
 
   return (
     <div className="grid grid-cols-3 gap-3">
-      {itemField("Input item", "input_item")}
-      <Select label="Station" value={form.station}
+      {itemField(_L("recipes.input_item"), "input_item")}
+      <Select label={_L("recipes.station")} value={form.station}
         onChange={(v) => setForm({ ...form, station: v, method: (METHODS[v] || [])[0]?.value || "grill" })}
-        options={[{ value: "fryer", label: "Fryer" }, { value: "stovetop", label: "Stovetop" }]} />
-      <Select label="Method" value={form.method || (METHODS[form.station] || [])[0]?.value || "grill"}
+        options={[{ value: "fryer", label: _L("recipes.station_fryer") }, { value: "stovetop", label: _L("recipes.station_stovetop") }]} />
+      <Select label={_L("recipes.method")} value={form.method || (METHODS[form.station] || [])[0]?.value || "grill"}
         onChange={(v) => set("method", v)} options={METHODS[form.station] || METHODS.stovetop} />
-      {itemField("Cooked output", "output_cooked_item")}
-      {itemField("Burnt output", "output_burnt_item")}
+      {itemField(_L("recipes.cooked_output"), "output_cooked_item")}
+      {itemField(_L("recipes.burnt_output"), "output_burnt_item")}
       <div />
-      {modelField("Raw model (_01)", "raw_model")}
-      {modelField("Cooked model (_02)", "cooked_model")}
-      {modelField("Burnt model (_03)", "burnt_model")}
-      <NumberField label="Cook time (ms)" value={form.cook_ms} min={0} step={1000} onChange={(v) => set("cook_ms", v)} />
-      <NumberField label="Burn time (ms)" value={form.burn_ms} min={0} step={1000} onChange={(v) => set("burn_ms", v)} />
-      <NumberField label="Output count (per cook)" value={form.output_count ?? 1} min={1} step={1}
+      {modelField(_L("recipes.raw_model"), "raw_model")}
+      {modelField(_L("recipes.cooked_model"), "cooked_model")}
+      {modelField(_L("recipes.burnt_model"), "burnt_model")}
+      <NumberField label={_L("recipes.cook_time")} value={form.cook_ms} min={0} step={1000} onChange={(v) => set("cook_ms", v)} />
+      <NumberField label={_L("recipes.burn_time")} value={form.burn_ms} min={0} step={1000} onChange={(v) => set("burn_ms", v)} />
+      <NumberField label={_L("recipes.output_count")} value={form.output_count ?? 1} min={1} step={1}
         onChange={(v) => set("output_count", v)} />
-      {modelField("Container model (optional — cooks inside it)", "container_model")}
-      <TextField label="Expiry (seconds — blank = default, 0 = never)"
-        hint="How long the cooked item stays fresh in the tray before it spoils."
+      {modelField(_L("recipes.container_model"), "container_model")}
+      <TextField label={_L("recipes.expiry")}
+        hint={_L("recipes.expiry_hint")}
         value={form.expire_seconds == null ? "" : String(form.expire_seconds)}
         onChange={(v) => set("expire_seconds", (v === "" ? null : Number(v)) as never)} />
       {form.station === "stovetop" && (
         <div className="col-span-3">
           <Toggle checked={!!form.dual_sided} onChange={(v) => set("dual_sided", v)}
-            label="Dual-sided (two cookable faces — click to flip; each side cooks independently)" />
+            label={_L("recipes.dual_sided")} />
         </div>
       )}
     </div>

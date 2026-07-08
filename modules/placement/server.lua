@@ -12,9 +12,9 @@ local PLACEABLE_MODELS = {
 
 lib.callback.register("pickle_restaurants:placement:saveProp", function(src, d)
     local id = tonumber(d.restaurant_id)
-    if not GetRestaurant(id) then return { ok = false, error = "No such restaurant" } end
-    if not HasPerm(id, src, "manage_props") then return { ok = false, error = "No permission" } end
-    if PLACEABLE_MODELS[d.prop_type] ~= d.model then return { ok = false, error = "Invalid station" } end
+    if not GetRestaurant(id) then return { ok = false, error = _L("placement_no_restaurant") } end
+    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    if PLACEABLE_MODELS[d.prop_type] ~= d.model then return { ok = false, error = _L("placement_invalid_station") } end
 
     local propId = MySQL.insert.await(
         "INSERT INTO pickle_restaurant_props (restaurant_id, prop_type, model, x, y, z, heading) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -36,8 +36,8 @@ end)
 -- no runtime prop); the placement preview is a ghost ped, position + heading only.
 lib.callback.register("pickle_restaurants:placement:saveSeat", function(src, d)
     local id = tonumber(d.restaurant_id)
-    if not GetRestaurant(id) then return { ok = false, error = "No such restaurant" } end
-    if not HasPerm(id, src, "manage_props") then return { ok = false, error = "No permission" } end
+    if not GetRestaurant(id) then return { ok = false, error = _L("placement_no_restaurant") } end
+    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
 
     local propId = MySQL.insert.await(
         "INSERT INTO pickle_restaurant_props (restaurant_id, prop_type, model, x, y, z, heading) VALUES (?, 'seat', '', ?, ?, ?, ?)",
@@ -55,8 +55,8 @@ end)
 
 lib.callback.register("pickle_restaurants:placement:saveCounter", function(src, d)
     local id = tonumber(d.restaurant_id)
-    if not GetRestaurant(id) then return { ok = false, error = "No such restaurant" } end
-    if not HasPerm(id, src, "manage_props") then return { ok = false, error = "No permission" } end
+    if not GetRestaurant(id) then return { ok = false, error = _L("placement_no_restaurant") } end
+    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
 
     local counter = { x = d.x + 0.0, y = d.y + 0.0, z = d.z + 0.0, heading = (d.heading or 0.0) + 0.0 }
     MySQL.update.await("UPDATE pickle_restaurants SET counter = ? WHERE id = ?", { json.encode(counter), id })
@@ -69,7 +69,7 @@ lib.callback.register("pickle_restaurants:placement:removeProp", function(src, d
     local propId = tonumber(d.id)
     local prop = PropCache[propId]
     if not prop then return { ok = false } end
-    if not HasPerm(prop.restaurant_id, src, "manage_props") then return { ok = false, error = "No permission" } end
+    if not HasPerm(prop.restaurant_id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
     MySQL.update.await("DELETE FROM pickle_restaurant_props WHERE id = ?", { propId })
     PropCache[propId] = nil
     TriggerClientEvent("pickle_restaurants:propRemoved", -1, propId)

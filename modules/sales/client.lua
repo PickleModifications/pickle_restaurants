@@ -5,21 +5,21 @@
 
 function OpenOrderMenu(restaurantId)
     local data = lib.callback.await("pickle_restaurants:sales:getMenu", false, { id = restaurantId })
-    if not data or not data.ok then return ShowNotification("This place isn't serving right now.") end
+    if not data or not data.ok then return ShowNotification(_L("sales_not_serving")) end
     data.restaurantId = restaurantId
     OpenNUI("order", data)
 end
 
 function OpenRegister(restaurantId)
     local data = lib.callback.await("pickle_restaurants:sales:getRegister", false, { id = restaurantId })
-    if not data or not data.ok then return ShowNotification((data and data.error) or "You don't work here.") end
+    if not data or not data.ok then return ShowNotification((data and data.error) or _L("sales_no_work")) end
     OpenNUI("register", data)
 end
 
 RegisterNUICallback("sales:buy", function(d, cb)
     local res = lib.callback.await("pickle_restaurants:sales:buy", false, d)
     if res and res.ok then
-        ShowNotification("Bought " .. (res.label or res.item))
+        ShowNotification(_L("sales_bought", res.label or res.item))
         local data = lib.callback.await("pickle_restaurants:sales:getMenu", false, { id = d.id })
         if data and data.ok then data.restaurantId = d.id; SendNUIMessage({ action = "setView", view = "order", data = data }) end
     elseif res and res.error then
@@ -43,7 +43,7 @@ end)
 RegisterNUICallback("sales:serve", function(d, cb)
     local res = lib.callback.await("pickle_restaurants:npc:serve", false, d)
     if res and res.ok then
-        ShowNotification("Order served (+" .. GetCurrencyString(res.commission or 0) .. ")")
+        ShowNotification(_L("sales_order_served", GetCurrencyString(res.commission or 0)))
     elseif res and res.error then
         ShowNotification(res.error)
     end

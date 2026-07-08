@@ -258,6 +258,6 @@ CreateThread(function()
         local count = GenerateItemFiles()
         local msg = ("[pickle_restaurants] Exported %d items to generated_items/ (ox_inventory.lua, esx_items.sql, qbcore_items.lua)."):format(count)
         print(msg)
-        if src ~= 0 then ShowNotification(src, ("Exported %d items to generated_items/."):format(count)) end
+        if src ~= 0 then ShowNotification(src, _L("items_exported", count)) end
     end, false)
 end)

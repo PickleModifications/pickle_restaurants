@@ -13,9 +13,9 @@ local SeatOccupancy = {} -- [propId] = src currently seated there
 lib.callback.register("pickle_restaurants:seating:sit", function(src, d)
     local propId = tonumber(d and d.id)
     local prop = propId and PropCache[propId]
-    if not prop or prop.prop_type ~= "seat" then return { ok = false, error = "You can't sit there." } end
+    if not prop or prop.prop_type ~= "seat" then return { ok = false, error = _L("seat_cant_sit") } end
     local holder = SeatOccupancy[propId]
-    if holder and holder ~= src then return { ok = false, error = "That seat is taken." } end
+    if holder and holder ~= src then return { ok = false, error = _L("seat_taken") } end
     SeatOccupancy[propId] = src
     return { ok = true }
 end)

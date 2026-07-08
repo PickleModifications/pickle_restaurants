@@ -3,6 +3,7 @@ import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { Badge } from "@/components/ui/badge";
 import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave, CircleDot, Search, Trash2, ChevronUp, ChevronDown, Timer, Package } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { _L } from "@/lib/locale";
 
 // kind "finish" = a finish tool (frosting): flavors is picked on the card, then the
 // tube is rubbed over a cooked target on the prep table until fully coated.
@@ -75,28 +76,28 @@ type ChipItem = {
 // The stovetop's camera views as icon tabs (sidebar left of the item listings):
 // a cooktop for the stovetop, the same oven icon twice with a #1/#2 badge.
 const STOVE_VIEWS: { key: string; label: string; icon: any; num?: number }[] = [
-  { key: "stovetop", label: "Stovetop", icon: Heater },
-  { key: "door1", label: "Oven Door #1", icon: Microwave, num: 1 },
-  { key: "door2", label: "Oven Door #2", icon: Microwave, num: 2 },
+  { key: "stovetop", label: _L("cook.view_stovetop"), icon: Heater },
+  { key: "door1", label: _L("cook.view_oven_door_1"), icon: Microwave, num: 1 },
+  { key: "door2", label: _L("cook.view_oven_door_2"), icon: Microwave, num: 2 },
 ];
 
 const STATION_META: Record<string, { label: string; icon: any; hint: string }> = {
-  fryer: { label: "Fryer", icon: Flame, hint: "Drop food into a basket, then click that basket to lower it into the oil. Click it again to raise it and take the food out." },
-  stovetop: { label: "Stovetop", icon: Flame, hint: "Grill patties on the cooktop (click to flip); open a door to bake cookies, cakes & pizzas inside." },
-  soda_machine: { label: "Soda Machine", icon: CupSoda, hint: "Drag a cup under a tap and click the tap to pour — the middle tap adds ice. Press a lid on, then drag the drink to the bar." },
-  kitchen_prep: { label: "Kitchen Prep", icon: Sandwich, hint: "Stack ingredients on the table, then hover a stack to pick a recipe and make it." },
+  fryer: { label: _L("cook.station_fryer_label"), icon: Flame, hint: _L("cook.station_fryer_hint") },
+  stovetop: { label: _L("cook.station_stovetop_label"), icon: Flame, hint: _L("cook.station_stovetop_hint") },
+  soda_machine: { label: _L("cook.station_soda_label"), icon: CupSoda, hint: _L("cook.station_soda_hint") },
+  kitchen_prep: { label: _L("cook.station_prep_label"), icon: Sandwich, hint: _L("cook.station_prep_hint") },
 };
 
 const STATE_STYLE: Record<string, { label: string; cls: string }> = {
-  raw: { label: "Raw", cls: "bg-rose-500/80 border-rose-300" },
-  filling: { label: "Filling…", cls: "bg-sky-500/80 border-sky-300" },
-  cooked: { label: "Cooked", cls: "bg-emerald-500/80 border-emerald-300" },
-  done: { label: "Ready", cls: "bg-emerald-500/80 border-emerald-300" },
-  burnt: { label: "Burnt", cls: "bg-zinc-800/90 border-zinc-500" },
+  raw: { label: _L("cook.state_raw"), cls: "bg-rose-500/80 border-rose-300" },
+  filling: { label: _L("cook.state_filling"), cls: "bg-sky-500/80 border-sky-300" },
+  cooked: { label: _L("cook.state_cooked"), cls: "bg-emerald-500/80 border-emerald-300" },
+  done: { label: _L("cook.state_ready"), cls: "bg-emerald-500/80 border-emerald-300" },
+  burnt: { label: _L("cook.state_burnt"), cls: "bg-zinc-800/90 border-zinc-500" },
   // soda cups
-  empty: { label: "Empty", cls: "bg-zinc-600/80 border-zinc-400" },
-  filled: { label: "Filled", cls: "bg-emerald-500/80 border-emerald-300" },
-  capped: { label: "Ready", cls: "bg-emerald-500/80 border-emerald-300" },
+  empty: { label: _L("cook.state_empty"), cls: "bg-zinc-600/80 border-zinc-400" },
+  filled: { label: _L("cook.state_filled"), cls: "bg-emerald-500/80 border-emerald-300" },
+  capped: { label: _L("cook.state_ready"), cls: "bg-emerald-500/80 border-emerald-300" },
 };
 
 const stateMeta = (s?: string) => STATE_STYLE[s || "raw"] || STATE_STYLE.raw;
@@ -127,7 +128,7 @@ function ToppingsRow({ e }: { e: TrayEntry }) {
   const units: TrayComp[] = [];
   for (const c of e.extras || []) for (let n = 0; n < c.count; n++) units.push(c);
   if (units.length === 0) {
-    return <div className="flex h-[18px] items-center text-[9px] text-muted-foreground/70">No toppings</div>;
+    return <div className="flex h-[18px] items-center text-[9px] text-muted-foreground/70">{_L("cook.no_toppings")}</div>;
   }
   const shown = units.slice(0, units.length > TOPPING_SLOTS ? TOPPING_SLOTS - 1 : TOPPING_SLOTS);
   const over = units.length - shown.length;
@@ -193,23 +194,23 @@ function BarTooltip({ tip, actions, onPin }: { tip: BarTip; actions?: ReactNode;
               <span className="truncate text-sm font-semibold">{label}</span>
               {e?.source === "inv" && (
                 <span className="shrink-0 rounded border border-border bg-secondary px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  Item
+                  {_L("cook.item_badge")}
                 </span>
               )}
             </div>
             {e &&
               (e.meal ? (
                 <div className="truncate text-[11px] font-medium text-amber-300">
-                  {e.boxed ? "Boxed pizza — sets down as its box" : "Serving-tray meal — sets down as arranged"}
+                  {e.boxed ? _L("cook.boxed_pizza_meal") : _L("cook.serving_tray_meal")}
                 </div>
               ) : e.flavorLabel ? (
                 <div className="truncate text-[11px] font-medium text-pink-300">{e.flavorLabel}</div>
               ) : extrasCount(e) > 0 ? (
                 <div className="truncate text-[11px] font-medium text-amber-300">
-                  + {extrasCount(e)} topping{extrasCount(e) === 1 ? "" : "s"}
+                  {extrasCount(e) === 1 ? _L("cook.topping_one", extrasCount(e)) : _L("cook.toppings_other", extrasCount(e))}
                 </div>
               ) : (
-                <div className="truncate text-[11px] font-medium text-muted-foreground">No toppings</div>
+                <div className="truncate text-[11px] font-medium text-muted-foreground">{_L("cook.no_toppings")}</div>
               ))}
           </div>
           {count != null && (
@@ -221,14 +222,14 @@ function BarTooltip({ tip, actions, onPin }: { tip: BarTip; actions?: ReactNode;
 
         {!!e?.cheese && (
           <div className="mt-2 flex items-center gap-1.5 text-[11px] text-amber-300">
-            🧀 {e.cheese === 2 ? "Cheese melted in" : "Cheese applied"}
+            🧀 {e.cheese === 2 ? _L("cook.cheese_melted_in") : _L("cook.cheese_applied")}
           </div>
         )}
 
         {e?.comps && e.comps.length > 0 && (
           <>
             <div className="mt-2.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              Made with
+              {_L("cook.made_with")}
             </div>
             <div className="mt-1 space-y-1">
               {e.comps.map((c, i) => (
@@ -286,7 +287,7 @@ function SideRow({ name, side }: { name: string; side?: SideInfo }) {
           />
         </div>
         <span className="shrink-0 text-[9px] tabular-nums text-muted-foreground">
-          {done ? "Done" : `${pct}%`}
+          {done ? _L("cook.done") : `${pct}%`}
         </span>
       </div>
     </div>
@@ -302,16 +303,16 @@ function StatusPanel({ c }: { c: ChipItem }) {
       const done = c.state === "burnt";
       const pausedHint = c.method === "soda"
         ? (c.state === "empty"
-            ? "Click a tap to pour — the middle tap adds ice"
+            ? _L("cook.hint_click_tap_pour")
             : c.state === "filled"
-              ? (c.needLid ? "Drag a lid onto the cup to finish it" : "Drag it to the bar to collect")
+              ? (c.needLid ? _L("cook.hint_drag_lid_finish") : _L("cook.hint_drag_bar_collect"))
               : c.state === "capped"
-                ? "Drag it to the bar to collect"
+                ? _L("cook.hint_drag_bar_collect")
                 : null)
         : !c.gate
-          ? (c.method === "oven" ? "Close the door to bake" : "Lower the basket to fry")
+          ? (c.method === "oven" ? _L("cook.hint_close_door_bake") : _L("cook.hint_lower_basket_fry"))
           : c.locked
-            ? "Raise the basket to take it out"
+            ? _L("cook.hint_raise_basket")
             : null;
       return (
         <div className="w-56 rounded-xl border border-border bg-card p-3 shadow-2xl">
@@ -320,7 +321,7 @@ function StatusPanel({ c }: { c: ChipItem }) {
               <ItemThumb src={c.giveImage} alt={c.giveLabel || ""} className="h-9 w-9 object-contain" />
             </div>
             <div className="min-w-0">
-              <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Collect now</div>
+              <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{_L("cook.collect_now")}</div>
               <div className="truncate text-sm font-semibold">{c.giveLabel || "—"}</div>
             </div>
             <span className={cn("ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold text-white", st.cls)}>{st.label}</span>
@@ -333,13 +334,13 @@ function StatusPanel({ c }: { c: ChipItem }) {
                 style={{ width: `${pct}%` }}
               />
             </div>
-            <span className="shrink-0 text-[9px] tabular-nums text-muted-foreground">{done ? "Done" : `${pct}%`}</span>
+            <span className="shrink-0 text-[9px] tabular-nums text-muted-foreground">{done ? _L("cook.done") : `${pct}%`}</span>
           </div>
           {c.burningSoon && !done && (
-            <div className="mt-2 text-[11px] font-semibold text-amber-400">⚠ Burning soon!</div>
+            <div className="mt-2 text-[11px] font-semibold text-amber-400">{_L("cook.burning_soon")}</div>
           )}
           {c.ice && (
-            <div className="mt-2 flex items-center gap-1.5 text-[11px] text-sky-300">❄ Ice added</div>
+            <div className="mt-2 flex items-center gap-1.5 text-[11px] text-sky-300">{_L("cook.ice_added")}</div>
           )}
           {pausedHint && <div className="mt-2 text-[11px] text-muted-foreground">{pausedHint}</div>}
         </div>
@@ -367,13 +368,13 @@ function StatusPanel({ c }: { c: ChipItem }) {
 
       {/* both faces with their own progress; the flame marks the grill side */}
       <div className="mt-2.5 space-y-1.5">
-        <SideRow name="Side 1" side={sides[0]} />
-        <SideRow name="Side 2" side={sides[1]} />
+        <SideRow name={_L("cook.side_1")} side={sides[0]} />
+        <SideRow name={_L("cook.side_2")} side={sides[1]} />
       </div>
 
       {c.cheese && c.cheese !== "none" && (
         <div className="mt-2 flex items-center gap-1.5 text-[11px] text-amber-300">
-          🧀 {c.cheese === "melted" ? "Cheese melted" : "Cheese melting…"}
+          🧀 {c.cheese === "melted" ? _L("cook.cheese_melted") : _L("cook.cheese_melting")}
         </div>
       )}
     </div>
@@ -433,11 +434,11 @@ function BuildTooltip({
       className="w-64 rounded-xl border border-border bg-card p-3 shadow-2xl"
     >
       {ranked.length === 0 ? (
-        <div className="text-xs text-muted-foreground">No matching recipes.</div>
+        <div className="text-xs text-muted-foreground">{_L("cook.no_matching_recipes")}</div>
       ) : (
         <>
           <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-            Recipes — click to compare
+            {_L("cook.recipes_click_compare")}
           </div>
           <div className="flex gap-2">
             {ranked.map((r) => {
@@ -467,11 +468,11 @@ function BuildTooltip({
             <div className="mt-3">
               <div className="truncate text-sm font-semibold">{selected.rec.label}</div>
               {selected.ready ? (
-                <div className="mt-1 text-[11px] font-medium text-emerald-400">Ready to make</div>
+                <div className="mt-1 text-[11px] font-medium text-emerald-400">{_L("cook.ready_to_make")}</div>
               ) : (
                 <>
                   <div className="mt-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                    Still needs
+                    {_L("cook.still_needs")}
                   </div>
                   <div className="mt-1 flex flex-wrap gap-1.5">
                     {selected.missing.map((m) => (
@@ -496,7 +497,7 @@ function BuildTooltip({
                     : "cursor-not-allowed bg-muted text-muted-foreground"
                 )}
               >
-                Make
+                {_L("cook.make")}
               </button>
             </div>
           )}
@@ -524,15 +525,15 @@ function MealTooltip({
   const Icon = box ? Package : UtensilsCrossed;
   const hint = box
     ? boxing
-      ? "Closing the lid…"
+      ? _L("cook.box_closing_hint")
       : count === 0
         ? open
-          ? "Drop a pizza inside — click the box to close the lid."
-          : "Click the box to open the lid, then drop a pizza inside."
-        : "Grab the box to move it — box it up, or take the pizza back out."
+          ? _L("cook.box_empty_open_hint")
+          : _L("cook.box_empty_closed_hint")
+        : _L("cook.box_full_hint")
     : count === 0
-      ? "Drag food onto the tray to arrange a meal. Grab the tray to move it."
-      : "Grab the tray to move it — or drop it on the bar to make the meal.";
+      ? _L("cook.tray_empty_hint")
+      : _L("cook.tray_full_hint");
   const canAct = count > 0 && !boxing;
   return (
     <div
@@ -542,9 +543,15 @@ function MealTooltip({
     >
       <div className="flex items-center gap-2">
         <Icon className="h-4 w-4 shrink-0 text-primary" />
-        <span className="text-sm font-semibold">{box ? "Pizza Box" : "Serving Tray"}</span>
+        <span className="text-sm font-semibold">{box ? _L("cook.pizza_box") : _L("cook.serving_tray")}</span>
         <span className="ml-auto shrink-0 rounded bg-secondary px-1.5 py-0.5 text-[11px] font-semibold tabular-nums">
-          {box ? (count === 0 ? "Empty" : "Pizza inside") : `${count} item${count === 1 ? "" : "s"}`}
+          {box
+            ? count === 0
+              ? _L("cook.box_empty_badge")
+              : _L("cook.box_pizza_inside")
+            : count === 1
+              ? _L("cook.item_one", count)
+              : _L("cook.items_other", count)}
         </span>
       </div>
       <div className="mt-2 text-[11px] leading-snug text-muted-foreground">{hint}</div>
@@ -559,7 +566,7 @@ function MealTooltip({
               : "cursor-not-allowed bg-muted text-muted-foreground"
           )}
         >
-          {box ? (boxing ? "Closing…" : "Box It Up") : "Make Meal"}
+          {box ? (boxing ? _L("cook.box_closing") : _L("cook.box_it_up")) : _L("cook.make_meal")}
         </button>
         {box && count > 0 && (
           <button
@@ -572,7 +579,7 @@ function MealTooltip({
                 : "cursor-not-allowed bg-muted text-muted-foreground"
             )}
           >
-            Take Out
+            {_L("cook.box_take_out")}
           </button>
         )}
       </div>
@@ -859,24 +866,24 @@ export default function Cooking({ data }: { data: any }) {
 
   // one contextual "what can I do with this here" line for the hover tooltip
   const trayHint = (e: TrayEntry): string => {
-    if (isPrep && e.meal) return "Drag onto the table to set the meal down — exactly as it was arranged.";
-    if (isPrep && e.decompose) return "Drag onto the table to take it apart, or stack it as a layer.";
-    if (isPrep) return "Drag onto the table to build with it.";
-    if (canCookHere(e)) return station === "fryer" ? "Drag into the fryer basket to cook it." : "Drag into an open oven door to bake it.";
-    if (e.uncooked) return `Still raw — cook it at the ${e.cookStation === "fryer" ? "fryer" : "stovetop oven"}.`;
-    if (e.source === "inv") return "In your inventory — ready to stock or sell.";
-    if (e.burnt) return "Burnt — discard it below, or keep it in your inventory.";
-    return "Take it into your inventory to stock or sell it.";
+    if (isPrep && e.meal) return _L("cook.trayhint_meal");
+    if (isPrep && e.decompose) return _L("cook.trayhint_decompose");
+    if (isPrep) return _L("cook.trayhint_build");
+    if (canCookHere(e)) return station === "fryer" ? _L("cook.trayhint_cook_fryer") : _L("cook.trayhint_cook_oven");
+    if (e.uncooked) return _L("cook.trayhint_still_raw", e.cookStation === "fryer" ? _L("cook.station_word_fryer") : _L("cook.station_word_stovetop_oven"));
+    if (e.source === "inv") return _L("cook.trayhint_in_inventory");
+    if (e.burnt) return _L("cook.trayhint_burnt");
+    return _L("cook.trayhint_take");
   };
   const ingHint = (ing: Ingredient): string => {
-    if (ing.kind === "tray") return "Drag onto the table — arrange food on it, then make it a meal.";
-    if (ing.kind === "pizzabox") return "Drag onto the table — click the lid to open it, drop a pizza in, then box it up.";
-    if (ing.kind === "topping") return "Drag onto a cooked patty to add it.";
-    if (ing.kind === "finish") return "Pick a flavor, then rub the tube over a cooked item on the table until fully coated.";
-    if (ing.kind === "drink") return "Drag the cup under a tap, then click the tap to pour (middle tap = ice).";
-    if (ing.kind === "lid") return "Drag onto a filled cup to press the lid on.";
-    if (isPrep) return "Drag onto the table — stack parts to build recipes.";
-    return station === "fryer" ? "Drag into the fryer basket to cook." : "Drag onto the cooktop or into an open oven door.";
+    if (ing.kind === "tray") return _L("cook.inghint_tray");
+    if (ing.kind === "pizzabox") return _L("cook.inghint_pizzabox");
+    if (ing.kind === "topping") return _L("cook.inghint_topping");
+    if (ing.kind === "finish") return _L("cook.inghint_finish");
+    if (ing.kind === "drink") return _L("cook.inghint_drink");
+    if (ing.kind === "lid") return _L("cook.inghint_lid");
+    if (isPrep) return _L("cook.inghint_prep");
+    return station === "fryer" ? _L("cook.inghint_fryer") : _L("cook.inghint_stovetop");
   };
   const showBarTip = (ev: React.PointerEvent, tip: Omit<BarTip, "x" | "y">) => {
     if (barTipTimer.current) { clearTimeout(barTipTimer.current); barTipTimer.current = null; }
@@ -916,7 +923,7 @@ export default function Cooking({ data }: { data: any }) {
     e.preventDefault();
     trayPlaceRef.current = true;
     setDragging(true);
-    setDragHint(kind === "box" ? "Drop on the table to set the box down" : "Drop on the table to set the tray down");
+    setDragHint(kind === "box" ? _L("cook.draghint_box_down") : _L("cook.draghint_tray_down"));
     fetchNui("cooking:beginTrayPlace", { kind });
   };
   // the lid (soda machine): dragged as its real 3D prop and released over a
@@ -948,7 +955,7 @@ export default function Cooking({ data }: { data: any }) {
     finishRef.current = ing.item;
     setTab("ingredients");
     setDragging(true);
-    setDragHint("Rub the tube over a cooked item on the table until fully coated");
+    setDragHint(_L("cook.draghint_rub_tube"));
     fetchNui("cooking:beginFinish", { item: ing.item, flavor });
   };
   // at the prep station, drag a tray item / ingredient onto the table to add a
@@ -979,7 +986,7 @@ export default function Cooking({ data }: { data: any }) {
     const fromTab = source === "tray" || entry.sig !== undefined;
     dragSwitchTab(fromTab ? (entry.uncooked ? "uncooked" : "cooked") : "ingredients");
     setDragging(true);
-    setDragHint(decompose ? "Drop on the prep table to take it apart" : "Drop on the prep table — or onto another item to stack");
+    setDragHint(decompose ? _L("cook.draghint_prep_apart") : _L("cook.draghint_prep_stack"));
     if (decompose) {
       // preview the whole component stack (peeked, nothing consumed) under the
       // cursor; source tells the server which store holds it (tray vs inventory)
@@ -1009,7 +1016,7 @@ export default function Cooking({ data }: { data: any }) {
         setDragging(true);
         setWorldDragging(true);
         dragSwitchTab("cooked"); // a placed part is a cooked product
-        setDragHint("Drag onto another item to stack — drop on the bar to remove");
+        setDragHint(_L("cook.draghint_restack"));
         fetchNui("cooking:prepGrab", { puid });
         return;
       }
@@ -1026,7 +1033,7 @@ export default function Cooking({ data }: { data: any }) {
         setDragging(true);
         setWorldDragging(true);
         dragSwitchTab("cooked");
-        setDragHint("Drop on the bar to make it a meal — or set the tray down elsewhere");
+        setDragHint(_L("cook.draghint_tray_meal"));
         fetchNui("cooking:trayGrab", { tid });
       }
       return;
@@ -1230,14 +1237,14 @@ export default function Cooking({ data }: { data: any }) {
           onClick={() => takeEntry(tipEntry, 1)}
           className="rounded-md bg-secondary px-2.5 py-1 text-[11px] font-semibold text-foreground transition hover:bg-accent"
         >
-          {tipEntry.count > 1 ? "Take 1" : "Take"}
+          {tipEntry.count > 1 ? _L("cook.take_1") : _L("cook.take")}
         </button>
         {tipEntry.count > 1 && (
           <button
             onClick={() => takeEntry(tipEntry, tipEntry.count)}
             className="rounded-md bg-secondary px-2.5 py-1 text-[11px] font-semibold text-foreground transition hover:bg-accent"
           >
-            Take All
+            {_L("cook.take_all")}
           </button>
         )}
         <button
@@ -1250,7 +1257,7 @@ export default function Cooking({ data }: { data: any }) {
           )}
         >
           <Trash2 className="h-3 w-3" />
-          {confirmKey === tipKey ? "Confirm?" : "Discard"}
+          {confirmKey === tipKey ? _L("cook.confirm") : _L("cook.discard")}
         </button>
       </div>
     ) : null;
@@ -1347,7 +1354,7 @@ export default function Cooking({ data }: { data: any }) {
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <UtensilsCrossed className="h-3.5 w-3.5" />
-            Drag a cooked item here to collect it
+            {_L("cook.drag_cooked_here")}
             <button onClick={() => fetchNui("cooking:close")} className="ml-2 rounded-md p-1 hover:bg-accent">
               <X className="h-4 w-4" />
             </button>
@@ -1398,9 +1405,9 @@ export default function Cooking({ data }: { data: any }) {
             plus the bar tools on the right: burnt sweep, search, one-row/grid toggle */}
         <div className="mb-2 flex items-center gap-1">
           {([
-            ["ingredients", "Ingredients", Carrot, 0],
-            ["cooked", "Cooked Items", ChefHat, cookedTotal],
-            ["uncooked", "Uncooked Items", CookingPot, uncookedTotal],
+            ["ingredients", _L("cook.tab_ingredients"), Carrot, 0],
+            ["cooked", _L("cook.tab_cooked_items"), ChefHat, cookedTotal],
+            ["uncooked", _L("cook.tab_uncooked_items"), CookingPot, uncookedTotal],
           ] as const).map(([key, label, TabIcon, count]) => (
             <button
               key={key}
@@ -1427,7 +1434,7 @@ export default function Cooking({ data }: { data: any }) {
                 )}
               >
                 <Trash2 className="h-3.5 w-3.5" />
-                {confirmKey === "__burnt__" ? "Click again to confirm" : `Discard burnt (${burntTotal})`}
+                {confirmKey === "__burnt__" ? _L("cook.click_again_confirm") : _L("cook.discard_burnt", burntTotal)}
               </button>
             )}
             <div className="relative">
@@ -1435,7 +1442,7 @@ export default function Cooking({ data }: { data: any }) {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search…"
+                placeholder={_L("cook.search_placeholder")}
                 className="h-[26px] w-40 rounded-md border border-border bg-background pl-7 pr-6 text-xs outline-none placeholder:text-muted-foreground/70 focus:border-primary/60"
               />
               {query && (
@@ -1448,7 +1455,7 @@ export default function Cooking({ data }: { data: any }) {
               )}
             </div>
             <button
-              title={expanded ? "Collapse to one row" : "Show everything as a grid"}
+              title={expanded ? _L("cook.collapse_row") : _L("cook.show_grid")}
               onClick={() => setExpanded((v) => !v)}
               className={cn(
                 "flex h-[26px] w-[26px] items-center justify-center rounded-md border transition",
@@ -1467,8 +1474,8 @@ export default function Cooking({ data }: { data: any }) {
             {shownIngredients.length === 0 && (
               <div className="text-sm text-muted-foreground">
                 {q && ingredients.length > 0
-                  ? `No matches for “${query.trim()}”.`
-                  : "You have no ingredients for this station."}
+                  ? _L("cook.no_matches", query.trim())
+                  : _L("cook.no_ingredients")}
               </div>
             )}
             {shownIngredients.map((ing, i) => {
@@ -1509,13 +1516,13 @@ export default function Cooking({ data }: { data: any }) {
                   )}
                   <span className="w-full truncate px-1.5 leading-tight">{ing.label}</span>
                   {ing.kind === "tray" && (
-                    <span className="text-[10px] text-muted-foreground">Build a meal</span>
+                    <span className="text-[10px] text-muted-foreground">{_L("cook.build_a_meal")}</span>
                   )}
                   {ing.kind === "pizzabox" && (
                     <span className="text-[10px] text-muted-foreground">Boxes a pizza</span>
                   )}
                   {ing.kind === "lid" && (
-                    <span className="text-[10px] text-muted-foreground">Caps a filled drink</span>
+                    <span className="text-[10px] text-muted-foreground">{_L("cook.caps_filled_drink")}</span>
                   )}
                   {/* finish tool: flavor picked right on the card (colored swatch
                       squares, hover for the flavor name), then drag to apply.
@@ -1551,7 +1558,7 @@ export default function Cooking({ data }: { data: any }) {
                     <Badge variant="secondary" className="absolute right-1 top-1">{ing.count ?? 0}</Badge>
                   )}
                   {ing.kind === "assembly" && !ing.canMake && (
-                    <span className="text-[10px] text-muted-foreground">Missing parts</span>
+                    <span className="text-[10px] text-muted-foreground">{_L("cook.missing_parts")}</span>
                   )}
                 </div>
               );
@@ -1588,10 +1595,10 @@ export default function Cooking({ data }: { data: any }) {
             {trayList.length === 0 && (tab !== "cooked" || equipmentCards.length === 0) && (
               <div className="text-sm text-muted-foreground">
                 {q && trayListAll.length > 0
-                  ? `No matches for “${query.trim()}”.`
+                  ? _L("cook.no_matches", query.trim())
                   : tab === "uncooked"
-                    ? "No uncooked items — assemble one (e.g. a pizza) at the prep table."
-                    : "No cooked items yet — cook something and collect it."}
+                    ? _L("cook.no_uncooked_items")
+                    : _L("cook.no_cooked_items")}
               </div>
             )}
             {trayList.map((e, i) => {
@@ -1634,7 +1641,7 @@ export default function Cooking({ data }: { data: any }) {
                 <div className="flex w-full flex-col items-center gap-0.5 pb-1.5">
                   {cookHere && (
                     <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[9px] font-semibold text-primary">
-                      {station === "fryer" ? "Drag into the basket" : "Drag into the oven"}
+                      {station === "fryer" ? _L("cook.drag_into_basket") : _L("cook.drag_into_oven")}
                     </span>
                   )}
                 </div>
@@ -1655,7 +1662,7 @@ export default function Cooking({ data }: { data: any }) {
                   )}
                   {fromInv && (
                     <span className="rounded border border-border bg-background/70 px-1 py-px text-[8px] font-semibold uppercase tracking-wide text-muted-foreground">
-                      Item
+                      {_L("cook.item_badge")}
                     </span>
                   )}
                   {!!e.cheese && <span className="text-sm">🧀</span>}

@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Field, TextField, NumberField, Toggle, Select } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
 import { cn } from "@/lib/utils";
+import { _L } from "@/lib/locale";
 import {
   Settings2, Coins, Users, Bot, CupSoda, Sandwich, MapPin, Plus, Trash2, Check, Loader2, TriangleAlert,
 } from "lucide-react";
@@ -17,13 +18,13 @@ const PERMISSIONS = [
 type Props = { settings: Record<string, any>; items: Item[]; onSaved: () => void };
 
 const GROUPS = [
-  { key: "general", label: "General", icon: Settings2 },
-  { key: "economy", label: "Economy", icon: Coins },
-  { key: "roles", label: "Default Roles", icon: Users },
-  { key: "npc", label: "NPC Customers", icon: Bot },
-  { key: "drinks", label: "Drinks", icon: CupSoda },
-  { key: "assembly", label: "Assembly", icon: Sandwich },
-  { key: "blip", label: "Map Blip", icon: MapPin },
+  { key: "general", label: _L("settings.group_general"), icon: Settings2 },
+  { key: "economy", label: _L("settings.group_economy"), icon: Coins },
+  { key: "roles", label: _L("settings.group_roles"), icon: Users },
+  { key: "npc", label: _L("settings.group_npc"), icon: Bot },
+  { key: "drinks", label: _L("settings.group_drinks"), icon: CupSoda },
+  { key: "assembly", label: _L("settings.group_assembly"), icon: Sandwich },
+  { key: "blip", label: _L("settings.group_blip"), icon: MapPin },
 ];
 
 export default function Settings({ settings, items, onSaved }: Props) {
@@ -87,12 +88,12 @@ function Section({
 }
 
 function SaveStatusHint({ status }: { status?: SaveStatus }) {
-  if (!status || status === "idle") return <span className="text-xs text-muted-foreground/60">Auto-saves</span>;
+  if (!status || status === "idle") return <span className="text-xs text-muted-foreground/60">{_L("settings.auto_saves")}</span>;
   return (
     <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
       {status === "saving"
-        ? <><Loader2 className="h-3 w-3 animate-spin" /> Saving…</>
-        : <><Check className="h-3 w-3 text-primary" /> Saved</>}
+        ? <><Loader2 className="h-3 w-3 animate-spin" /> {_L("settings.saving")}</>
+        : <><Check className="h-3 w-3 text-primary" /> {_L("settings.saved")}</>}
     </span>
   );
 }
@@ -109,11 +110,11 @@ function General({ settings, onSaved }: { settings: any; onSaved: () => void }) 
     [cmd, expire]
   );
   return (
-    <Section title="General" description="Core command and behaviour." status={status}>
-      <TextField label="Admin command" hint="Chat command admins run to open this panel." value={cmd} onChange={setCmd} />
+    <Section title={_L("settings.general_title")} description={_L("settings.general_desc")} status={status}>
+      <TextField label={_L("settings.admin_command")} hint={_L("settings.admin_command_hint")} value={cmd} onChange={setCmd} />
       <NumberField
-        label="Cooked item expiry (seconds)"
-        hint="Default freshness window for collected cooked items before they spoil in the tray. 0 = never. A recipe's own expiry overrides this."
+        label={_L("settings.cooked_expiry")}
+        hint={_L("settings.cooked_expiry_hint")}
         value={expire} min={0} step={10} onChange={setExpire}
       />
     </Section>
@@ -129,16 +130,16 @@ function Economy({ settings, onSaved }: { settings: any; onSaved: () => void }) 
     [currency, starting, commission]
   );
   return (
-    <Section title="Economy" description="Currency, opening balance and the fallback commission rate." status={status}>
+    <Section title={_L("settings.economy_title")} description={_L("settings.economy_desc")} status={status}>
       <div className="grid grid-cols-2 gap-3">
         <Select
-          label="Currency"
+          label={_L("settings.currency")}
           value={currency}
           onChange={setCurrency}
-          options={[{ value: "money", label: "Cash (money)" }, { value: "dirty", label: "Dirty money" }]}
+          options={[{ value: "money", label: _L("settings.currency_cash") }, { value: "dirty", label: _L("settings.currency_dirty") }]}
         />
-        <NumberField label="Starting balance" value={starting} min={0} onChange={setStarting} />
-        <NumberField label="Default commission %" value={commission} min={0} onChange={setCommission} />
+        <NumberField label={_L("settings.starting_balance")} value={starting} min={0} onChange={setStarting} />
+        <NumberField label={_L("settings.default_commission")} value={commission} min={0} onChange={setCommission} />
       </div>
     </Section>
   );
@@ -151,7 +152,7 @@ function Roles({ settings, onSaved }: { settings: any; onSaved: () => void }) {
     Object.keys(initial)
       .map((k) => ({
         grade: k,
-        label: initial[k].label ?? `Grade ${k}`,
+        label: initial[k].label ?? _L("settings.grade_n", k),
         commission: Number(initial[k].commission ?? 0),
         permissions: initial[k].permissions ?? {},
       }))
@@ -163,7 +164,7 @@ function Roles({ settings, onSaved }: { settings: any; onSaved: () => void }) {
     setRoles((rs) => rs.map((r, idx) => (idx === i ? { ...r, permissions: { ...r.permissions, [perm]: !r.permissions[perm] } } : r)));
   const addRole = () => {
     const nextGrade = roles.reduce((m, r) => Math.max(m, Number(r.grade)), -1) + 1;
-    setRoles((rs) => [...rs, { grade: String(nextGrade), label: `Grade ${nextGrade}`, commission: 0, permissions: {} }]);
+    setRoles((rs) => [...rs, { grade: String(nextGrade), label: _L("settings.grade_n", nextGrade), commission: 0, permissions: {} }]);
   };
   const removeRole = (i: number) => setRoles((rs) => rs.filter((_, idx) => idx !== i));
 
@@ -175,17 +176,17 @@ function Roles({ settings, onSaved }: { settings: any; onSaved: () => void }) {
 
   return (
     <Section
-      title="Default Roles"
-      description="The role ladder new restaurants start with. Owners can customise their own later."
+      title={_L("settings.roles_title")}
+      description={_L("settings.roles_desc")}
       status={status}
     >
       <div className="space-y-3">
         {roles.map((r, i) => (
           <div key={i} className="rounded-lg border border-border p-3">
             <div className="flex items-end gap-2">
-              <NumberField label="Grade" className="w-20" value={Number(r.grade)} min={0} onChange={(v) => update(i, { grade: String(v) })} />
-              <TextField label="Label" className="flex-1" value={r.label} onChange={(v) => update(i, { label: v })} />
-              <NumberField label="Commission %" className="w-28" value={r.commission} min={0} onChange={(v) => update(i, { commission: v })} />
+              <NumberField label={_L("settings.grade")} className="w-20" value={Number(r.grade)} min={0} onChange={(v) => update(i, { grade: String(v) })} />
+              <TextField label={_L("settings.label")} className="flex-1" value={r.label} onChange={(v) => update(i, { label: v })} />
+              <NumberField label={_L("settings.commission")} className="w-28" value={r.commission} min={0} onChange={(v) => update(i, { commission: v })} />
               <Button size="icon" variant="destructive" onClick={() => removeRole(i)}><Trash2 className="h-4 w-4" /></Button>
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
@@ -204,7 +205,7 @@ function Roles({ settings, onSaved }: { settings: any; onSaved: () => void }) {
             </div>
           </div>
         ))}
-        <Button variant="outline" size="sm" onClick={addRole}><Plus className="h-4 w-4" /> Add role</Button>
+        <Button variant="outline" size="sm" onClick={addRole}><Plus className="h-4 w-4" /> {_L("settings.add_role")}</Button>
       </div>
     </Section>
   );
@@ -225,14 +226,14 @@ function Npc({ settings, onSaved }: { settings: any; onSaved: () => void }) {
   );
 
   return (
-    <Section title="NPC Customers" description="Walk-in customers that queue at the counter." status={status}>
-      <Toggle checked={enabled} onChange={setEnabled} label="Spawn NPC customers" />
+    <Section title={_L("settings.npc_title")} description={_L("settings.npc_desc")} status={status}>
+      <Toggle checked={enabled} onChange={setEnabled} label={_L("settings.npc_spawn")} />
       <div className="grid grid-cols-3 gap-3">
-        <NumberField label="Max at once" value={max} min={0} onChange={setMax} />
-        <NumberField label="Spawn interval (ms)" value={interval} min={0} step={1000} onChange={setInterval} />
-        <NumberField label="Patience (ms)" value={patience} min={0} step={1000} onChange={setPatience} />
+        <NumberField label={_L("settings.npc_max")} value={max} min={0} onChange={setMax} />
+        <NumberField label={_L("settings.npc_interval")} value={interval} min={0} step={1000} onChange={setInterval} />
+        <NumberField label={_L("settings.npc_patience")} value={patience} min={0} step={1000} onChange={setPatience} />
       </div>
-      <Field label="Ped models" hint="Models picked at random for each customer.">
+      <Field label={_L("settings.npc_models")} hint={_L("settings.npc_models_hint")}>
         <div className="mb-2 flex flex-wrap gap-1.5">
           {models.map((m) => (
             <Badge key={m} variant="secondary" className="gap-1">
@@ -240,7 +241,7 @@ function Npc({ settings, onSaved }: { settings: any; onSaved: () => void }) {
               <button onClick={() => setModels((ms) => ms.filter((x) => x !== m))}><Trash2 className="h-3 w-3" /></button>
             </Badge>
           ))}
-          {models.length === 0 && <span className="text-xs text-muted-foreground">No models — defaults will be used.</span>}
+          {models.length === 0 && <span className="text-xs text-muted-foreground">{_L("settings.npc_no_models")}</span>}
         </div>
         <div className="flex gap-2">
           <input
@@ -250,7 +251,7 @@ function Npc({ settings, onSaved }: { settings: any; onSaved: () => void }) {
             className="h-9 flex-1 rounded-md border border-input bg-background/60 px-3 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
           <Button size="sm" variant="outline" onClick={() => { if (modelInput.trim()) { setModels((ms) => [...new Set([...ms, modelInput.trim()])]); setModelInput(""); } }}>
-            <Plus className="h-4 w-4" /> Add
+            <Plus className="h-4 w-4" /> {_L("settings.add")}
           </Button>
         </div>
       </Field>
@@ -269,12 +270,12 @@ function Blip({ settings, onSaved }: { settings: any; onSaved: () => void }) {
     [enabled, sprite, color, scale]
   );
   return (
-    <Section title="Map Blip" description="Default blip applied to new restaurants." status={status}>
-      <Toggle checked={enabled} onChange={setEnabled} label="Show blip on the map" />
+    <Section title={_L("settings.blip_title")} description={_L("settings.blip_desc")} status={status}>
+      <Toggle checked={enabled} onChange={setEnabled} label={_L("settings.blip_show")} />
       <div className="grid grid-cols-3 gap-3">
-        <NumberField label="Sprite" value={sprite} min={0} onChange={setSprite} />
-        <NumberField label="Colour" value={color} min={0} onChange={setColor} />
-        <NumberField label="Scale" value={scale} min={0} step={0.1} onChange={setScale} />
+        <NumberField label={_L("settings.blip_sprite")} value={sprite} min={0} onChange={setSprite} />
+        <NumberField label={_L("settings.blip_colour")} value={color} min={0} onChange={setColor} />
+        <NumberField label={_L("settings.blip_scale")} value={scale} min={0} step={0.1} onChange={setScale} />
       </div>
     </Section>
   );
@@ -285,7 +286,7 @@ function MissingBadge({ missing }: { missing: string[] }) {
   if (!missing?.length) return null;
   return (
     <Badge variant="destructive" className="gap-1">
-      <TriangleAlert className="h-3 w-3" /> missing: {missing.join(", ")}
+      <TriangleAlert className="h-3 w-3" /> {_L("settings.missing")} {missing.join(", ")}
     </Badge>
   );
 }
@@ -298,8 +299,8 @@ function Drinks({ settings, items, onSaved }: { settings: any; items: Item[]; on
   const status = useAutoSave(() => saveSettings({ drinks: list }).then(onSaved), [list]);
   return (
     <Section
-      title="Drinks"
-      description="Soda-machine taps: the first six drinks appear left-to-right on the fountain (the middle nozzle always dispenses ice). A cup item is filled at the tap into the drink item."
+      title={_L("settings.drinks_title")}
+      description={_L("settings.drinks_desc")}
       status={status}
     >
       <div className="space-y-3">
@@ -309,8 +310,8 @@ function Drinks({ settings, items, onSaved }: { settings: any; items: Item[]; on
             <div key={i} className="rounded-lg border border-border p-3">
               <div className="mb-2 flex items-center justify-between">
                 <span className="flex items-center gap-2 text-sm font-medium">
-                  {d.label || d.output || "New drink"}
-                  <Badge variant="secondary">{i < 6 ? `Tap ${i + 1}` : "no tap"}</Badge>
+                  {d.label || d.output || _L("settings.new_drink")}
+                  <Badge variant="secondary">{i < 6 ? _L("settings.tap_n", i + 1) : _L("settings.no_tap")}</Badge>
                 </span>
                 <div className="flex items-center gap-2">
                   <MissingBadge missing={missing} />
@@ -318,16 +319,16 @@ function Drinks({ settings, items, onSaved }: { settings: any; items: Item[]; on
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Cup item (input)"><ItemPicker items={items} value={d.input} onChange={(v) => update(i, { input: v })} /></Field>
-                <Field label="Filled drink (output)"><ItemPicker items={items} value={d.output} onChange={(v) => update(i, { output: v })} /></Field>
-                <TextField label="Label" value={d.label} onChange={(v) => update(i, { label: v })} />
-                <TextField label="Prop model" value={d.model} onChange={(v) => update(i, { model: v })} />
-                <NumberField label="Fill time (ms)" value={Number(d.fill_ms ?? 3000)} min={0} step={500} onChange={(v) => update(i, { fill_ms: v })} />
+                <Field label={_L("settings.cup_input")}><ItemPicker items={items} value={d.input} onChange={(v) => update(i, { input: v })} /></Field>
+                <Field label={_L("settings.filled_output")}><ItemPicker items={items} value={d.output} onChange={(v) => update(i, { output: v })} /></Field>
+                <TextField label={_L("settings.label")} value={d.label} onChange={(v) => update(i, { label: v })} />
+                <TextField label={_L("settings.prop_model")} value={d.model} onChange={(v) => update(i, { model: v })} />
+                <NumberField label={_L("settings.fill_time")} value={Number(d.fill_ms ?? 3000)} min={0} step={500} onChange={(v) => update(i, { fill_ms: v })} />
               </div>
             </div>
           );
         })}
-        <Button variant="outline" size="sm" onClick={add}><Plus className="h-4 w-4" /> Add drink</Button>
+        <Button variant="outline" size="sm" onClick={add}><Plus className="h-4 w-4" /> {_L("settings.add_drink")}</Button>
       </div>
     </Section>
   );
@@ -341,8 +342,8 @@ function Assembly({ settings, items, onSaved }: { settings: any; items: Item[]; 
   const status = useAutoSave(() => saveSettings({ assembly: list }).then(onSaved), [list]);
   return (
     <Section
-      title="Assembly"
-      description="Kitchen-prep recipes: combine component items into a finished item."
+      title={_L("settings.assembly_title")}
+      description={_L("settings.assembly_desc")}
       status={status}
     >
       <div className="space-y-3">
@@ -352,18 +353,18 @@ function Assembly({ settings, items, onSaved }: { settings: any; items: Item[]; 
           return (
             <div key={i} className="rounded-lg border border-border p-3">
               <div className="mb-2 flex items-center justify-between">
-                <span className="text-sm font-medium">{a.label || a.output || "New recipe"}</span>
+                <span className="text-sm font-medium">{a.label || a.output || _L("settings.new_recipe")}</span>
                 <div className="flex items-center gap-2">
                   <MissingBadge missing={missing} />
                   <Button size="icon" variant="destructive" onClick={() => setList((l) => l.filter((_, idx) => idx !== i))}><Trash2 className="h-4 w-4" /></Button>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Result item (output)"><ItemPicker items={items} value={a.output} onChange={(v) => update(i, { output: v })} /></Field>
-                <TextField label="Label" value={a.label} onChange={(v) => update(i, { label: v })} />
-                <TextField label="Prop model" value={a.model} onChange={(v) => update(i, { model: v })} />
+                <Field label={_L("settings.result_output")}><ItemPicker items={items} value={a.output} onChange={(v) => update(i, { output: v })} /></Field>
+                <TextField label={_L("settings.label")} value={a.label} onChange={(v) => update(i, { label: v })} />
+                <TextField label={_L("settings.prop_model")} value={a.model} onChange={(v) => update(i, { model: v })} />
               </div>
-              <Field label="Components" className="mt-3">
+              <Field label={_L("settings.components")} className="mt-3">
                 <div className="space-y-2">
                   {comps.map((c, ci) => (
                     <div key={ci} className="flex gap-2">
@@ -371,13 +372,13 @@ function Assembly({ settings, items, onSaved }: { settings: any; items: Item[]; 
                       <Button size="icon" variant="ghost" onClick={() => update(i, { components: comps.filter((_, idx) => idx !== ci) })}><Trash2 className="h-4 w-4" /></Button>
                     </div>
                   ))}
-                  <Button size="sm" variant="outline" onClick={() => update(i, { components: [...comps, ""] })}><Plus className="h-4 w-4" /> Add component</Button>
+                  <Button size="sm" variant="outline" onClick={() => update(i, { components: [...comps, ""] })}><Plus className="h-4 w-4" /> {_L("settings.add_component")}</Button>
                 </div>
               </Field>
             </div>
           );
         })}
-        <Button variant="outline" size="sm" onClick={add}><Plus className="h-4 w-4" /> Add recipe</Button>
+        <Button variant="outline" size="sm" onClick={add}><Plus className="h-4 w-4" /> {_L("settings.add_recipe")}</Button>
       </div>
     </Section>
   );

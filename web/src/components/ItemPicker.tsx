@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { _L } from "@/lib/locale";
 import { Check, ChevronsUpDown, Search, TriangleAlert } from "lucide-react";
 
 export type Item = { name: string; label: string; image?: string };
@@ -14,7 +15,7 @@ export default function ItemPicker({
   items,
   value,
   onChange,
-  placeholder = "Select an item…",
+  placeholder = _L("itempicker.select_placeholder"),
   className,
   allowEmpty = false,
 }: {
@@ -82,21 +83,21 @@ export default function ItemPicker({
               ref={inputRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search items…"
+              placeholder={_L("itempicker.search_placeholder")}
               className="h-9 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
             />
           </div>
           <div className="max-h-56 overflow-y-auto py-1">
             {allowEmpty && (
               <Option
-                label="(none)"
+                label={_L("itempicker.none")}
                 sub=""
                 active={!value}
                 onClick={() => { onChange(""); setOpen(false); setQuery(""); }}
               />
             )}
             {filtered.length === 0 && (
-              <div className="px-3 py-3 text-center text-xs text-muted-foreground">No items match “{query}”.</div>
+              <div className="px-3 py-3 text-center text-xs text-muted-foreground">{_L("itempicker.no_match", query)}</div>
             )}
             {filtered.map((i) => (
               <Option

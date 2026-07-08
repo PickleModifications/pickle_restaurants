@@ -2069,7 +2069,7 @@ local function makeMealFromTray(tid, silent)
     if res and res.ok then
         for _, p in ipairs(piles) do removePrepStack(p.sid) end
         removePrepTray(tid)
-        if not silent and res.label then ShowNotification("Made " .. res.label) end
+        if not silent and res.label then ShowNotification(_L("cook_made", res.label)) end
     elseif not silent and res and res.error then
         ShowNotification(res.error)
     end
@@ -2125,7 +2125,7 @@ local function runDragThread(drag)
                     local block
                     if not t.open then block = "Open the box first."
                     elseif trayPileCount(tid) > 0 then block = "There's already a pizza in there."
-                    elseif not partsArePizza(drag.parts) then block = "Only pizza goes in the box."
+                    elseif not partsArePizza(drag.parts) then block = _L("cook_only_pizza_in_box")
                     end
                     if block then
                         drag.hit, drag.targetSid, drag.targetTid = true, nil, nil
@@ -2664,7 +2664,7 @@ RegisterNUICallback("cooking:collect", function(d, cb)
     cancelMove() -- stop the live drag; the server will remove the prop
     local res = lib.callback.await("pickle_restaurants:cooking:collect", false, { uid = d.uid })
     if res and res.ok then
-        if res.label then ShowNotification("Collected " .. res.label) end
+        if res.label then ShowNotification(_L("cook_collected", res.label)) end
         RefreshBar()
         RefreshTray()
     elseif res and res.error then
@@ -2679,7 +2679,7 @@ RegisterNUICallback("cooking:trayToInventory", function(d, cb)
         prop_id = currentCookProp and currentCookProp.id, item = d.item, cheese = d.cheese, count = d.count, sig = d.sig,
     })
     if res and res.ok then
-        if res.label then ShowNotification(("Took %s"):format(res.label)) end
+        if res.label then ShowNotification(_L("cook_took", res.label)) end
         RefreshTray(); RefreshBar()
     elseif res and res.error then
         ShowNotification(res.error)
@@ -2695,9 +2695,9 @@ RegisterNUICallback("cooking:trayDiscard", function(d, cb)
     })
     if res and res.ok then
         if res.label then
-            ShowNotification(("Threw away %s ×%d"):format(res.label, res.count or 1))
+            ShowNotification(_L("cook_threw", res.label, res.count or 1))
         else
-            ShowNotification(("Threw away %d burnt item%s"):format(res.count or 0, (res.count or 0) == 1 and "" or "s"))
+            ShowNotification(_L("cook_threw_burnt", res.count or 0, (res.count or 0) == 1 and "" or "s"))
         end
         RefreshTray()
     elseif res and res.error then
@@ -2964,7 +2964,7 @@ RegisterNUICallback("cooking:prepDrop", function(d, cb)
                 { items = items, box = (drag.trayKind == "box") or nil })
             if res and res.ok then
                 deleteDrag(drag)
-                if res.label then ShowNotification("Made " .. res.label) end
+                if res.label then ShowNotification(_L("cook_made", res.label)) end
                 RefreshTray(); RefreshBar()
                 return cb(res)
             end
@@ -2993,7 +2993,7 @@ RegisterNUICallback("cooking:prepDrop", function(d, cb)
                 local res = lib.callback.await("pickle_restaurants:cooking:prepSaveStack", false, { ids = ids })
                 if res and res.ok then
                     deleteParts(drag.parts)
-                    if res.label then ShowNotification("Saved " .. res.label) end
+                    if res.label then ShowNotification(_L("cook_saved", res.label)) end
                     RefreshTray(); RefreshBar()
                     return cb(res)
                 end
@@ -3091,7 +3091,7 @@ RegisterNUICallback("cooking:prepMakeStack", function(d, cb)
                 end
             end
         end
-        if res.label then ShowNotification("Made " .. res.label) end
+        if res.label then ShowNotification(_L("cook_made", res.label)) end
         RefreshTray(); RefreshBar()
     elseif res and res.error then
         ShowNotification(res.error)
@@ -3187,7 +3187,7 @@ RegisterNUICallback("cooking:prepMakeMeal", function(d, cb)
     if t.kind == "box" then
         if t.boxing then return cb({ ok = false }) end
         if trayPileCount(tid) == 0 then
-            ShowNotification("Nothing in the box.")
+            ShowNotification(_L("cook_box_empty"))
             return cb({ ok = false })
         end
         if t.open then
@@ -3200,7 +3200,7 @@ RegisterNUICallback("cooking:prepMakeMeal", function(d, cb)
     end
     local res = makeMealFromTray(tid, false)
     if not res then
-        ShowNotification(t.kind == "box" and "Nothing in the box." or "Nothing on the tray.")
+        ShowNotification(t.kind == "box" and _L("cook_box_empty") or _L("cook_tray_empty"))
         return cb({ ok = false })
     end
     if res.ok then RefreshTray(); RefreshBar() end
@@ -3491,7 +3491,7 @@ local function applyFinishAt(f, sid, idx, part, _, _)
     setOutline(nil)
     if res and res.ok then
         replacePartWithFinished(sid, idx, res)
-        if res.label then ShowNotification("Made " .. res.label) end
+        if res.label then ShowNotification(_L("cook_made", res.label)) end
         RefreshTray(); RefreshBar()
     elseif res and res.error then
         ShowNotification(res.error)
