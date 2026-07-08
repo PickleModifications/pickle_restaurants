@@ -21,21 +21,9 @@
         },
         consume = 1,
     },
-    ['burnt_beef_patty'] = {
-        label  = 'Burnt Beef Patty',
-        weight = 220,
-        stack  = true,
-        close  = true,
-    },
     ['burnt_cake'] = {
         label  = 'Burnt Cake',
         weight = 400,
-        stack  = true,
-        close  = true,
-    },
-    ['burnt_chicken_patty'] = {
-        label  = 'Burnt Chicken Patty',
-        weight = 220,
         stack  = true,
         close  = true,
     },
@@ -114,17 +102,6 @@
         },
         consume = 1,
     },
-    ['cooked_beef_patty'] = {
-        label  = 'Beef Patty',
-        weight = 220,
-        stack  = true,
-        close  = true,
-        client = {
-            status = { hunger = 100000, },
-            anim = { dict = 'mp_player_inteat@burger', clip = 'mp_player_int_eat_burger' }, usetime = 2500,
-        },
-        consume = 1,
-    },
     ['cooked_cake'] = {
         label  = 'Cake',
         weight = 400,
@@ -132,17 +109,6 @@
         close  = true,
         client = {
             status = { hunger = 200000, },
-            anim = { dict = 'mp_player_inteat@burger', clip = 'mp_player_int_eat_burger' }, usetime = 2500,
-        },
-        consume = 1,
-    },
-    ['cooked_chicken_patty'] = {
-        label  = 'Fried Chicken Patty',
-        weight = 220,
-        stack  = true,
-        close  = true,
-        client = {
-            status = { hunger = 100000, },
             anim = { dict = 'mp_player_inteat@burger', clip = 'mp_player_int_eat_burger' }, usetime = 2500,
         },
         consume = 1,
@@ -212,12 +178,6 @@
             anim = { dict = 'mp_player_inteat@burger', clip = 'mp_player_int_eat_burger' }, usetime = 2500,
         },
         consume = 1,
-    },
-    ['cup_lid'] = {
-        label  = 'Cup Lid',
-        weight = 20,
-        stack  = true,
-        close  = true,
     },
     ['decorated_cake'] = {
         label  = 'Decorated Cake',
@@ -406,6 +366,17 @@
         client = {
             status = { thirst = 200000, },
             anim = { dict = 'mp_player_intdrink', clip = 'loop_bottle' }, usetime = 2500,
+        },
+        consume = 1,
+    },
+    ['sprinkled_doughnut'] = {
+        label  = 'Sprinkled Doughnut',
+        weight = 160,
+        stack  = true,
+        close  = true,
+        client = {
+            status = { hunger = 135000, },
+            anim = { dict = 'mp_player_inteat@burger', clip = 'mp_player_int_eat_burger' }, usetime = 2500,
         },
         consume = 1,
     },

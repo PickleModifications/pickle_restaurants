@@ -95,9 +95,39 @@ local TRAYP = {
     pick_pad  = 0.03,  -- extra grab margin (m) around the tray's footprint
     pick_dz   = 0.4,   -- max height difference between the cursor's surface hit and the tray
 }
-local PrepTrays = {}    -- [tid] = { x, y, z, ents = { trayEnt, paperEnt } }
+-- The PIZZA BOX: the serving tray's sibling (kind "box") — a base + hinged-lid
+-- pair placed on the prep table. Clicking the lid swings it open/closed (a
+-- smooth hinged rotation, never a pop); only a pizza goes inside (the carried
+-- pile's BOTTOM layer must be a pizza crust, any cook state), ONE per box, and
+-- boxing it up makes the same meal item a serving tray does — flagged so it
+-- sets back down as its box.
+local BOXP = {
+    base_model = "pickle_pizza_box_01",
+    lid_model  = "pickle_pizza_box_02",
+    -- the pizza crust at every cook state (raw/cooked/burnt) — what the box accepts
+    dough_models = { "pickle_pizza_dough_01", "pickle_pizza_dough_02", "pickle_pizza_dough_03" },
+    -- Where the pizza SEATS inside the box: height of the pile's base above the
+    -- surface the box sits on. This is THE pizza-in-box offset — raise it if the
+    -- pizza clips the bed, lower it (negative allowed) if it floats/rides the
+    -- rim. Applies to drops, moves, set-down meals and previews alike (all food
+    -- z's come through trayFoodDz). TUNE IN-GAME.
+    food_dz   = 0.0,
+    rim_inset = 0.06,  -- shrink the droppable area vs the model bounds
+    pick_pad  = 0.03,  -- extra grab margin (m) around the box's footprint
+    pick_dz   = 0.4,   -- max height difference between the cursor's surface hit and the box
+    -- Lid: the lid model's ORIGIN is authored on its hinge edge, so it seats a
+    -- fixed step forward of the base's origin (lid_fwd, set ONCE at placement)
+    -- and the whole open/close swing is ROTATION only — the box's heading plus
+    -- the opening pitch. TUNE IN-GAME.
+    open_deg  = 100.0, -- how far the lid swings open (pitch; boxLidSwing negates it)
+    open_ms   = 350,   -- open/close swing duration
+    lid_fwd   = 0.1535,   -- lid origin's forward offset from the base's origin (m)
+}
+local PrepTrays = {}    -- [tid] = { x, y, z, kind, ents, open?, openT?, animSeq? }
+                        -- kind "tray": ents = { trayEnt, paperEnt }; kind "box":
+                        -- ents = { baseEnt, lidEnt } + lid open state/progress
 local prepTid = 0       -- monotonic tray id
-local trayHovered = nil -- tid under the cursor (grab / make-meal tooltip)
+local trayHovered = nil -- tid under the cursor (grab / make-meal tooltip / lid click)
 
 -- ─── world food props (synced for everyone) ──────────────────────────────────
 
@@ -144,7 +174,31 @@ end
 -- sauce). Enforcing a small floor guarantees each layer sits visibly above the one
 -- below while still reading as a flat pizza. Tune in-game if layers look too spaced.
 local STACK_MIN_GAP = 0.008
+
+-- Manual per-model stacking corrections, applied on top of the measured model
+-- heights — modelHeight/stackLayerHeight are ALWAYS the baseline; add an entry
+-- here only when a specific prop needs a nudge. TUNE IN-GAME.
+--   sink = shift THIS layer's seat by this much (negative sinks it into the layer
+--          below); everything stacked on top of it follows it down/up. Clamped so
+--          a layer can never sink to (or below) the seat of the one under it —
+--          a flat topping only rises STACK_MIN_GAP, so keep sinks smaller than
+--          that or the clamp eats the difference.
+--   rise = REPLACE the model's measured layer height (how far the NEXT layer sits
+--          above this one) instead of the computed value.
+local STACK_TWEAKS = {
+    -- the shredded-cheese sheet reads a touch high over the sauce on a pizza
+    ["pickle_pizza_sauce_01"] = { sink = -0.004 },
+    ["pickle_pizza_cheese_01"] = { sink = -0.004 },
+    ["pickle_pizza_cheese_02"] = { sink = -0.004 },
+}
+local function stackSink(model)
+    local t = model and STACK_TWEAKS[model]
+    return (t and t.sink) or 0.0
+end
+
 local function stackLayerHeight(model)
+    local t = model and STACK_TWEAKS[model]
+    if t and t.rise then return t.rise end
     -- The side-serving container (fries box) holds its food at its OWN base — both
     -- are bottom-origin, so the serving sits INSIDE the box, not stacked on top of
     -- it. Zero stacking height means the next layer keeps the same base Z.
@@ -214,6 +268,14 @@ local function expandStackLayers(models, state)
     local mdls, heights, rolls = {}, {}, {}
     for _, m0 in ipairs(models or {}) do
         local m = cookedVariant(m0, state)
+        -- manual seat correction (STACK_TWEAKS.sink): shift this layer — and
+        -- everything riding on it — by folding the offset into the rise below
+        -- it, clamped so the layer never sinks to/below the previous layer's
+        -- seat (a hair of rise always survives — it can't vanish underneath).
+        -- The tower's base layer has nothing below it, so its sink is moot.
+        local s = stackSink(m0)
+        if s == 0.0 then s = stackSink(m) end
+        if s ~= 0.0 and #heights > 0 then heights[#heights] = math.max(heights[#heights] + s, 0.001) end
         if dualModelRecipe(m0) then
             mdls[#mdls + 1] = m; heights[#heights + 1] = DUAL.face_gap;       rolls[#rolls + 1] = DUAL.bottom_roll
             mdls[#mdls + 1] = m; heights[#heights + 1] = stackLayerHeight(m);  rolls[#rolls + 1] = DUAL.top_roll
@@ -233,6 +295,9 @@ local function SpawnProp(model, x, y, z)
     if not ent or not DoesEntityExist(ent) then return nil end
     SetEntityCollision(ent, false, false)
     FreezeEntityPosition(ent, true)
+    -- a branded packaging prop now EXISTS — re-assert its brand texture replacement so
+    -- it actually takes (the replacement is set at startup before any prop exists)
+    if ReassertBrandFor then ReassertBrandFor(model) end
     return ent
 end
 
@@ -1414,7 +1479,8 @@ local function makePart(spec)
     local base = currentCookProp; if not base then return nil end
     prepPid = prepPid + 1
     local part = { pid = prepPid, item = spec.item, half = spec.half,
-                   source = spec.source, cheese = spec.cheese or 0, sig = spec.sig, ents = {} }
+                   source = spec.source, cheese = spec.cheese or 0, sig = spec.sig,
+                   finishTool = spec.finishTool, ents = {} }
 
     if type(spec.stack) == "table" and #spec.stack > 1 then
         -- A product that carries a build stack (e.g. a cooked pizza) is ONE logical
@@ -1471,6 +1537,10 @@ local function makePart(spec)
         part.ents   = { e }
         -- floor near-zero (flat decal) layers so stacked pizza toppings stay visible
         part.height = stackLayerHeight(spec.model)
+        -- manual seat correction: layoutParts shifts this part (and everything
+        -- stacked above it) by this much when it isn't the base of its pile
+        local s = stackSink(spec.model)
+        if s ~= 0.0 then part.sink = s end
     end
     return part
 end
@@ -1519,12 +1589,17 @@ end
 
 -- THE single source of truth for every part's z: walk bottom→top from z0, summing
 -- heights so each part sits flush on the one below. `lone` (stack has one part)
--- makes a top bun render flipped.
+-- makes a top bun render flipped. A part's manual seat correction (part.sink,
+-- from STACK_TWEAKS) shifts it and everything above it.
 local function layoutParts(parts, x, y, z0, lone)
-    local z = z0
-    for _, part in ipairs(parts) do
+    local z, prevSeat = z0, nil
+    for i, part in ipairs(parts) do
+        -- the base part rests on the surface; a sunk part is clamped so it never
+        -- drops to/below the seat of the part under it (it would vanish inside)
+        if i > 1 then z = math.max(z + (part.sink or 0.0), prevSeat + 0.001) end
         local flip = lone and part.item == "bun" and part.half == "top"
         orientPart(part, x, y, z, flip)
+        prevSeat = z
         z = z + (part.height or 0.0)
     end
 end
@@ -1532,11 +1607,35 @@ local function relayout(stack)
     layoutParts(stack.parts, stack.x, stack.y, stack.z0, #stack.parts == 1)
 end
 
--- World z of the top of a stack (where the next part rests) = base + every height.
+-- Walk a stack bottom→top with the EXACT maths layoutParts commits — each part's
+-- height AND its manual sink (STACK_TWEAKS), clamp included — so anything derived
+-- from a stack's top (snap previews, tooltip anchors) matches the placed result.
+-- Returns the top z (where the next part rests) and the top part's actual seat.
+local function stackWalkTop(stack)
+    local z, prevSeat = stack.z0, nil
+    for i, p in ipairs(stack.parts) do
+        if i > 1 then z = math.max(z + (p.sink or 0.0), prevSeat + 0.001) end
+        prevSeat = z
+        z = z + (p.height or 0.0)
+    end
+    return z, prevSeat
+end
+
+-- World z of the top of a stack (where the next part rests).
 local function stackTopZ(stack)
-    local z = stack.z0
-    for _, p in ipairs(stack.parts) do z = z + (p.height or 0.0) end
+    local z = stackWalkTop(stack)
     return z
+end
+
+-- Where a carried pile's FIRST part seats when snapped onto stack `s`: the
+-- stack's (sink-aware) top adjusted by that part's own manual sink, with the same
+-- never-below-the-layer-under-it clamp layoutParts applies on commit — so the
+-- drag preview sits exactly where release puts it, no hop.
+local function stackSnapZ(s, first)
+    local z0, prevSeat = stackWalkTop(s)
+    local sink = first and first.sink or 0.0
+    if sink == 0.0 or not prevSeat then return z0 end
+    return math.max(z0 + sink, prevSeat + 0.001)
 end
 
 -- What a stack provides, as a component multiset (mirrors the server's
@@ -1573,26 +1672,70 @@ local function modelBaseLift(model)
     return v
 end
 
--- Food rests on the paper liner: bed height + a hair so it doesn't z-fight the
--- (near-zero-thickness) sheet.
-local function trayFoodDz()
+-- The serving tray and the pizza box share all the placement/pick machinery —
+-- `kind` ("tray" | "box", nil = "tray") picks which pair of props and which
+-- config drives the footprint maths.
+local function trayCfg(kind)
+    return kind == "box" and BOXP or TRAYP
+end
+local function trayBaseModel(kind)
+    return kind == "box" and BOXP.base_model or TRAYP.tray_model
+end
+
+-- Food rests on the paper liner (tray) / the box bed: bed height + a hair so it
+-- doesn't z-fight the surface under it.
+local function trayFoodDz(kind)
+    if kind == "box" then return BOXP.food_dz end
     return TRAYP.paper_dz + 0.002
 end
 
--- Droppable half-extents from the tray model's bounds, inset past the rim so
--- anchored food reads as ON the paper (drop offsets are clamped into this box).
-local function trayHalfExtents()
-    local mn, mx = GetModelDimensions(EnsureModel(TRAYP.tray_model))
+-- Droppable half-extents from the tray/box model's bounds, inset past the rim so
+-- anchored food reads as ON the paper / INSIDE the box (drop offsets are clamped
+-- into this area).
+local function trayHalfExtents(kind)
+    local mn, mx = GetModelDimensions(EnsureModel(trayBaseModel(kind)))
     if not (mn and mx) then return 0.15, 0.10 end
-    return math.max((mx.x - mn.x) * 0.5 - TRAYP.rim_inset, 0.05),
-           math.max((mx.y - mn.y) * 0.5 - TRAYP.rim_inset, 0.05)
+    local inset = trayCfg(kind).rim_inset
+    return math.max((mx.x - mn.x) * 0.5 - inset, 0.05),
+           math.max((mx.y - mn.y) * 0.5 - inset, 0.05)
 end
 
--- Seat the tray + paper pair at surface point (x, y, z): the tray's mesh bottom
--- rests ON the surface and the paper lies on the tray bed (paper_dz above the
--- base), each corrected for its own origin offset.
-local function layoutTrayAt(ents, x, y, z)
-    local yaw = curYaw() -- the tray faces the prep station, not the world axes
+-- Seat the pizza-box lid's ORIGIN (authored on its hinge edge): a fixed step
+-- forward of the base's origin (BOXP.lid_fwd), along the BASE's yaw-only
+-- forward — never the lid's own forward vector, which tips with its pitch
+-- mid-swing and would drift the hinge. Position is set ONLY here, when the box
+-- is placed/moved; opening and closing never touch it.
+local function boxLidSeat(baseEnt, ent)
+    if not (baseEnt and ent and DoesEntityExist(baseEnt) and DoesEntityExist(ent)) then return end
+    local h = math.rad(GetEntityHeading(baseEnt))
+    local coords = GetEntityCoords(baseEnt) + vector3(-math.sin(h) * BOXP.lid_fwd, math.cos(h) * BOXP.lid_fwd, -0.005)
+    SetEntityCoordsNoOffset(ent, coords.x, coords.y, coords.z, false, false, false)
+end
+
+-- The lid's swing is ROTATION ONLY: the box's heading plus the opening pitch
+-- (-open_deg * openT) about the lid's authored hinge origin.
+local function boxLidSwing(baseEnt, ent, openT)
+    if not (ent and DoesEntityExist(ent)) then return end
+    local yaw = (baseEnt and DoesEntityExist(baseEnt)) and GetEntityHeading(baseEnt) or curYaw()
+    SetEntityRotation(ent, BOXP.open_deg * (openT or 0.0) * -1, 0.0, yaw, 2, true)
+end
+
+-- Seat a tray/box pair at surface point (x, y, z): the base's mesh bottom rests
+-- ON the surface; a tray's paper lies on the tray bed (paper_dz above the base),
+-- a box's lid seats on its hinge anchor and swings to opening fraction openT —
+-- each prop corrected for its own origin offset.
+local function layoutTrayAt(ents, x, y, z, kind, openT)
+    local yaw = curYaw() -- faces the prep station, not the world axes
+    if kind == "box" then
+        local base = ents and ents[1]
+        if base and DoesEntityExist(base) then
+            SetEntityCoordsNoOffset(base, x, y, z + modelBaseLift(BOXP.base_model), false, false, false)
+            SetEntityRotation(base, 0.0, 0.0, yaw, 2, true)
+        end
+        boxLidSeat(base, ents and ents[2])
+        boxLidSwing(base, ents and ents[2], openT)
+        return
+    end
     local zs = {
         z + modelBaseLift(TRAYP.tray_model),
         z + TRAYP.paper_dz + modelBaseLift(TRAYP.paper_model),
@@ -1605,23 +1748,26 @@ local function layoutTrayAt(ents, x, y, z)
     end
 end
 
-local function spawnTrayEnts(x, y, z)
-    local t = SpawnProp(TRAYP.tray_model, x, y, z)
-    local p = SpawnProp(TRAYP.paper_model, x, y, z)
+local function spawnTrayEnts(x, y, z, kind, openT)
+    local m1, m2 = TRAYP.tray_model, TRAYP.paper_model
+    if kind == "box" then m1, m2 = BOXP.base_model, BOXP.lid_model end
+    local t = SpawnProp(m1, x, y, z)
+    local p = SpawnProp(m2, x, y, z)
     if not t or not p then SafeDeleteEntity(t); SafeDeleteEntity(p); return nil end
     local ents = { t, p }
-    layoutTrayAt(ents, x, y, z)
+    layoutTrayAt(ents, x, y, z, kind, openT)
     return ents
 end
 
--- Pickable half-extents: the WHOLE tray incl. the rim (physics margin trimmed),
--- plus a little grab padding — unlike trayHalfExtents, which is the inner
--- droppable area only.
-local function trayPickExtents()
-    local mn, mx = GetModelDimensions(EnsureModel(TRAYP.tray_model))
+-- Pickable half-extents: the WHOLE tray/box incl. the rim (physics margin
+-- trimmed), plus a little grab padding — unlike trayHalfExtents, which is the
+-- inner droppable area only.
+local function trayPickExtents(kind)
+    local mn, mx = GetModelDimensions(EnsureModel(trayBaseModel(kind)))
     if not (mn and mx) then return 0.25, 0.18 end
-    return (mx.x - mn.x) * 0.5 - TRAY_PHYS_MARGIN + TRAYP.pick_pad,
-           (mx.y - mn.y) * 0.5 - TRAY_PHYS_MARGIN + TRAYP.pick_pad
+    local pad = trayCfg(kind).pick_pad
+    return (mx.x - mn.x) * 0.5 - TRAY_PHYS_MARGIN + pad,
+           (mx.y - mn.y) * 0.5 - TRAY_PHYS_MARGIN + pad
 end
 
 -- The tray under the cursor: raycast the cursor to the surface (tray props have
@@ -1638,8 +1784,8 @@ local function pickTray(coords)
     end
     local best, bd
     for tid, t in pairs(PrepTrays) do
-        if math.abs(coords.z - t.z) <= TRAYP.pick_dz then
-            local hx, hy = trayPickExtents()
+        if math.abs(coords.z - t.z) <= trayCfg(t.kind).pick_dz then
+            local hx, hy = trayPickExtents(t.kind)
             local dx, dy = coords.x - t.x, coords.y - t.y
             if math.abs(dx) <= hx and math.abs(dy) <= hy then
                 local d2 = dx * dx + dy * dy
@@ -1696,6 +1842,13 @@ local function partHalfXY(part)
     return r
 end
 
+-- A pile inside a CLOSED pizza box is out of reach — the lid has to swing open
+-- before its contents can be hovered, grabbed, or stacked onto.
+local function stackSealed(stack)
+    local t = stack.tid and PrepTrays[stack.tid]
+    return (t and t.kind == "box" and not t.open) and true or false
+end
+
 -- The placed part under the cursor, by screen proximity to each part's rendered
 -- CENTRE (same projection the stovetop hover uses → lines up with the station
 -- cam), within that part's own projected size. Returns sid, index, part.
@@ -1707,7 +1860,7 @@ local function pickPart(exceptSid)
     local cny = (sh > 0) and (cy / sh) or 0.0
     local bsid, bidx, bpart, bd
     for sid, stack in pairs(PrepStacks) do
-        if sid ~= exceptSid then
+        if sid ~= exceptSid and not stackSealed(stack) then
             local z = stack.z0
             for i, part in ipairs(stack.parts) do
                 local mz = z + (part.height or 0.0) * 0.5
@@ -1768,6 +1921,54 @@ local function removePrepTray(tid)
     PrepTrays[tid] = nil
 end
 
+-- Swing a placed pizza box's lid open/closed: eased hinge rotation over
+-- BOXP.open_ms (never a pop). Re-toggling mid-swing bumps animSeq so the old
+-- thread yields and the new swing picks up from the current angle; grabbing or
+-- removing the box kills the thread via the PrepTrays identity check.
+local function setBoxOpen(tid, open)
+    local t = PrepTrays[tid]
+    if not t or t.kind ~= "box" or t.open == open then return end
+    t.open = open
+    t.animSeq = (t.animSeq or 0) + 1
+    local seq = t.animSeq
+    CreateThread(function()
+        local from = t.openT or (open and 0.0 or 1.0)
+        local to = open and 1.0 or 0.0
+        local t0 = GetGameTimer()
+        while PrepTrays[tid] == t and t.animSeq == seq do
+            local k = math.min((GetGameTimer() - t0) / BOXP.open_ms, 1.0)
+            k = k * k * (3.0 - 2.0 * k) -- smoothstep ease in-out
+            t.openT = from + (to - from) * k
+            boxLidSwing(t.ents and t.ents[1], t.ents and t.ents[2], t.openT)
+            if k >= 1.0 then break end
+            Wait(0)
+        end
+    end)
+end
+
+-- How many parts sit on a tray / inside a box (the tooltip count and the box's
+-- one-pizza occupancy check).
+local function trayPileCount(tid)
+    local n = 0
+    for _, s in pairs(PrepStacks) do if s.tid == tid then n = n + #s.parts end end
+    return n
+end
+
+-- What the pizza box accepts: the carried pile's BOTTOM layer must render a
+-- pizza crust. Matched by MODEL so every cook state qualifies — the raw dough
+-- component, an assembled uncooked pizza, and a cooked/burnt one all base on a
+-- dough_models prop (the server re-validates by item on make).
+local BoxDough = nil
+local function partsArePizza(parts)
+    if not BoxDough then
+        BoxDough = {}
+        for _, m in ipairs(BOXP.dough_models) do BoxDough[GetHashKey(m)] = true end
+    end
+    local p = parts and parts[1]
+    local e = p and p.ents and p.ents[1]
+    return (e and DoesEntityExist(e) and BoxDough[GetEntityModel(e)]) and true or false
+end
+
 -- Delete a prep drag's props — the carried parts plus, for a tray drag (a grabbed
 -- tray / a meal being set down), the tray + paper pair riding along.
 local function deleteDrag(drag)
@@ -1802,24 +2003,28 @@ local function groupPiles(parts)
     return piles
 end
 
--- Lay a carried tray (+ its piles) at a world point — the live preview while a
--- meal / a grabbed tray follows the cursor.
+-- Lay a carried tray/box (+ its piles) at a world point — the live preview while
+-- a meal / a grabbed tray follows the cursor.
 local function layoutTrayGroup(drag, x, y, z)
-    layoutTrayAt(drag.tray, x, y, z)
-    local fz = z + trayFoodDz()
+    layoutTrayAt(drag.tray, x, y, z, drag.trayKind, drag.openT)
+    local fz = z + trayFoodDz(drag.trayKind)
     for _, pile in ipairs(drag.piles or {}) do
         layoutParts(pile.parts, x + pile.dx, y + pile.dy, fz, false)
     end
 end
 
--- Commit a carried tray group: (re)create the tray at (x, y, z) and one stack per
+-- Commit a carried tray/box group: (re)create it at (x, y, z) and one stack per
 -- pile, anchored at its offset. Used by the meal un-make drop and a tray move.
-local function commitTrayGroup(x, y, z, ents, piles)
+local function commitTrayGroup(x, y, z, ents, piles, kind, open)
     prepTid = prepTid + 1
     local tid = prepTid
-    PrepTrays[tid] = { x = x, y = y, z = z, ents = ents }
-    layoutTrayAt(ents, x, y, z)
-    local fz = z + trayFoodDz()
+    kind = kind or "tray"
+    local isBox = kind == "box"
+    PrepTrays[tid] = { x = x, y = y, z = z, kind = kind, ents = ents,
+                       open = isBox and (open and true or false) or nil,
+                       openT = isBox and (open and 1.0 or 0.0) or nil }
+    layoutTrayAt(ents, x, y, z, kind, open and 1.0 or 0.0)
+    local fz = z + trayFoodDz(kind)
     for _, pile in ipairs(piles or {}) do
         prepSid = prepSid + 1
         local stack = { x = x + pile.dx, y = y + pile.dy, z0 = fz,
@@ -1849,15 +2054,18 @@ local function collectTrayPiles(tid)
     return piles
 end
 
--- Turn a placed tray's arrangement into ONE meal item (the server consumes the
--- reserved parts and records each layer's offset). On success the tray and its
--- stacks are torn down. Returns the server result, or nil for an empty tray.
+-- Turn a placed tray's / box's arrangement into ONE meal item (the server
+-- consumes the reserved parts and records each layer's offset; a box flags the
+-- meal so it sets back down as its box). On success the tray and its stacks are
+-- torn down. Returns the server result, or nil for an empty tray.
 local function makeMealFromTray(tid, silent)
+    local t = PrepTrays[tid]; if not t then return nil end
     local piles = collectTrayPiles(tid)
     if #piles == 0 then return nil end
     local items = {}
     for _, p in ipairs(piles) do items[#items + 1] = { ids = p.ids, dx = p.dx, dy = p.dy } end
-    local res = lib.callback.await("pickle_restaurants:cooking:prepMakeMeal", false, { items = items })
+    local res = lib.callback.await("pickle_restaurants:cooking:prepMakeMeal", false,
+        { items = items, box = (t.kind == "box") or nil })
     if res and res.ok then
         for _, p in ipairs(piles) do removePrepStack(p.sid) end
         removePrepTray(tid)
@@ -1900,21 +2108,48 @@ local function runDragThread(drag)
             else
                 local sid = pickPart(nil) -- stack under the cursor (append to its top)
                 local tid = (not sid and hit and coords) and pickTray(coords) or nil
+                drag.boxBlock = nil
                 if sid then
                     local s = PrepStacks[sid]
-                    local z0 = stackTopZ(s)
+                    local z0 = stackSnapZ(s, drag.parts[1]) -- sink applies in the preview too
                     drag.hit, drag.targetSid, drag.targetTid, drag.coords = true, sid, nil, { x = s.x, y = s.y, z = z0 }
                     setOutline(sid, 80, 200, 120)
                     setTrayOutline(nil)
                     layoutParts(drag.parts, s.x, s.y, z0, false)
+                elseif tid and hit and coords and PrepTrays[tid].kind == "box" then
+                    -- over a pizza box: it takes exactly ONE pizza — lid open, box
+                    -- empty, and the carried pile sitting on a pizza crust (any cook
+                    -- state). A qualifying drop seats it in the CENTRE of the box;
+                    -- anything else outlines the box red and refuses on release.
+                    local t = PrepTrays[tid]
+                    local block
+                    if not t.open then block = "Open the box first."
+                    elseif trayPileCount(tid) > 0 then block = "There's already a pizza in there."
+                    elseif not partsArePizza(drag.parts) then block = "Only pizza goes in the box."
+                    end
+                    if block then
+                        drag.hit, drag.targetSid, drag.targetTid = true, nil, nil
+                        drag.coords = { x = coords.x, y = coords.y, z = coords.z }
+                        drag.boxBlock = block
+                        setOutline(nil)
+                        setTrayOutline(tid, 230, 70, 70)
+                        layoutParts(drag.parts, coords.x, coords.y, coords.z, false)
+                    else
+                        local fz = t.z + trayFoodDz("box")
+                        drag.hit, drag.targetSid, drag.targetTid = true, nil, tid
+                        drag.coords = { x = t.x, y = t.y, z = fz, dx = 0.0, dy = 0.0 }
+                        setOutline(nil)
+                        setTrayOutline(tid, 80, 200, 120)
+                        layoutParts(drag.parts, t.x, t.y, fz, false)
+                    end
                 elseif tid and hit and coords then
                     -- over a tray: anchor to the paper where the cursor points, clamped
                     -- inside the rim; release starts a new pile at that exact offset
                     local t = PrepTrays[tid]
-                    local hx, hy = trayHalfExtents()
+                    local hx, hy = trayHalfExtents(t.kind)
                     local dx = math.min(math.max(coords.x - t.x, -hx), hx)
                     local dy = math.min(math.max(coords.y - t.y, -hy), hy)
-                    local fz = t.z + trayFoodDz()
+                    local fz = t.z + trayFoodDz(t.kind)
                     drag.hit, drag.targetSid, drag.targetTid = true, nil, tid
                     drag.coords = { x = t.x + dx, y = t.y + dy, z = fz, dx = dx, dy = dy }
                     setOutline(nil)
@@ -2073,30 +2308,39 @@ function OpenCookingStation(prop)
             local prepHoverPid = nil
             local prepTip = nil
             local prepHoverTid = nil
+            local prepHoverBox = false -- the hovered tray is a pizza box (click = lid toggle)
             if currentCookProp and currentCookProp.prop_type == "kitchen_prep" and not prepDrag and not finishing then
                 local sid, _, part = pickPart(nil)
-                if part then prepHoverPid = part.pid end
-                setOutline(sid, 255, 180, 40)
                 local stack = sid and PrepStacks[sid]
                 -- A pile sitting ON a serving tray offers only the tray-level "Make
                 -- Meal", never a per-stack product make — so hovering it shows the
                 -- tray tooltip, not the recipe-make one.
                 local onTrayTid = (stack and stack.tid and PrepTrays[stack.tid]) and stack.tid or nil
+                -- A pile INSIDE a pizza box belongs to the BOX: hovering it hovers
+                -- the box (click = lid toggle, drag = the whole box; the tooltip's
+                -- Take Out is how the pizza leaves) — so the part-grab is
+                -- suppressed. Serving-tray piles stay directly grabbable.
+                local inBox = onTrayTid and PrepTrays[onTrayTid].kind == "box"
+                if part and not inBox then prepHoverPid = part.pid end
+                setOutline((not inBox) and sid or nil, 255, 180, 40)
                 if stack and not onTrayTid then
                     local on, sx, sy = GetScreenCoordFromWorldCoord(stack.x, stack.y, stackTopZ(stack))
                     prepTip = { sid = sid, onScreen = on, x = sx, y = sy, provides = stackProvides(stack) }
                 end
-                -- The serving tray's "Make Meal" tooltip: shown when the cursor is over
-                -- the tray itself OR over any pile arranged on it. Counts everything on
-                -- the tray.
+                -- The serving tray's "Make Meal" / pizza box's "Box It Up" tooltip:
+                -- shown when the cursor is over the tray/box itself OR over any pile
+                -- arranged on it. Counts everything on/in it; a box also reports its
+                -- lid state (the NUI turns a click on it into a lid toggle).
                 prepHoverTid = onTrayTid or ((not sid) and pickTray()) or nil
                 setTrayOutline(prepHoverTid, 255, 180, 40)
                 if prepHoverTid then
                     local t = PrepTrays[prepHoverTid]
-                    local n = 0
-                    for _, s in pairs(PrepStacks) do if s.tid == prepHoverTid then n = n + #s.parts end end
-                    local on, sx, sy = GetScreenCoordFromWorldCoord(t.x, t.y, t.z + trayFoodDz() + 0.06)
-                    prepTip = { tray = true, tid = prepHoverTid, onScreen = on, x = sx, y = sy, count = n }
+                    local isBox = t.kind == "box"
+                    prepHoverBox = isBox
+                    local on, sx, sy = GetScreenCoordFromWorldCoord(t.x, t.y, t.z + trayFoodDz(t.kind) + 0.06)
+                    prepTip = { tray = true, box = isBox or nil, open = isBox and (t.open and true or false) or nil,
+                                boxing = (isBox and t.boxing) and true or nil,
+                                tid = prepHoverTid, onScreen = on, x = sx, y = sy, count = trayPileCount(prepHoverTid) }
                 end
             end
             prepHovered = prepHoverPid
@@ -2107,7 +2351,8 @@ function OpenCookingStation(prop)
             -- world-side by hoveredTapSlot on worldClick — is all that's needed.)
 
             SendNUIMessage({ action = "cookingItems", items = items, hovered = hoveredUid,
-                             prepHovered = prepHoverPid, prepTrayHovered = prepHoverTid, prepTip = prepTip })
+                             prepHovered = prepHoverPid, prepTrayHovered = prepHoverTid,
+                             prepTrayBox = prepHoverBox, prepTip = prepTip })
 
             -- Stovetop: outline the hovered patty (click flips it); otherwise
             -- highlight the oven door under the cursor (click toggles it).
@@ -2489,7 +2734,7 @@ RegisterNUICallback("cooking:beginPrepPlace", function(d, cb)
         -- the reservation pinned to that exact build variation.
         specs[1] = { item = d.item, model = d.model, source = d.source, half = d.half,
                      dual = dual, cheese = cheeseVal, sig = d.sig,
-                     stack = stack, state = d.state,
+                     stack = stack, state = d.state, finishTool = d.finishTool,
                      cheeseModel = (cheeseOn and dual) and d.cheeseModel or nil }
     end
 
@@ -2512,6 +2757,13 @@ RegisterNUICallback("cooking:endPrepPlace", function(d, cb)
     if not drag then return cb({ ok = false }) end
     if (d and d.cancel) or not drag.hit then
         deleteParts(drag.parts)
+        return cb({ ok = false })
+    end
+    -- released over a pizza box that can't take this (closed / occupied / not a
+    -- pizza): nothing was reserved yet, so it's just a refused drop
+    if drag.boxBlock then
+        deleteParts(drag.parts)
+        ShowNotification(drag.boxBlock)
         return cb({ ok = false })
     end
     -- The authoritative source ("inv"/"tray") arrives on release, so stamp it onto
@@ -2561,7 +2813,7 @@ local function partsFromDecomposeSpecs(specs)
         if spec.item == "bun" and spec.half and BUN[spec.half] then model = BUN[spec.half] end
         local p = makePart({ item = spec.item, model = model, source = spec.source,
                              dual = spec.dual, cheese = spec.cheese, cheeseModel = spec.cheeseModel, half = spec.half,
-                             sig = spec.sig, stack = spec.stack, state = spec.state })
+                             sig = spec.sig, stack = spec.stack, state = spec.state, finishTool = spec.finishTool })
         if p then p.id = spec.id; p.dx, p.dy = spec.dx, spec.dy; parts[#parts + 1] = p end
     end
     return parts
@@ -2581,10 +2833,14 @@ RegisterNUICallback("cooking:beginPrepDecompose", function(d, cb)
     local parts = partsFromDecomposeSpecs(res.parts)
     if #parts == 0 then return cb({ ok = false }) end
     if res.meal then
+        -- a boxed meal previews as its pizza box, lid open so the pizza shows
         local base = currentCookProp
-        local ents = spawnTrayEnts(base.x, base.y, base.z)
+        local kind = res.box and "box" or "tray"
+        local openT = res.box and 1.0 or nil
+        local ents = spawnTrayEnts(base.x, base.y, base.z, kind, openT)
         if not ents then deleteParts(parts); return cb({ ok = false }) end
-        prepDrag = { tray = ents, piles = groupPiles(parts), parts = parts, hit = false, decompose = true, meal = true }
+        prepDrag = { tray = ents, trayKind = kind, open = res.box and true or nil, openT = openT,
+                     piles = groupPiles(parts), parts = parts, hit = false, decompose = true, meal = true }
     else
         prepDrag = { parts = parts, hit = false, decompose = true }
     end
@@ -2599,9 +2855,11 @@ RegisterNUICallback("cooking:endPrepDecompose", function(d, cb)
     setOutline(nil); setTrayOutline(nil)
     if not drag then return cb({ ok = false }) end
     -- capture the drop target, then drop the (non-reserved) preview stack
-    local targetSid, targetTid, coords, hit = drag.targetSid, drag.targetTid, drag.coords, drag.hit
+    local targetSid, targetTid, coords, hit, boxBlock = drag.targetSid, drag.targetTid, drag.coords, drag.hit, drag.boxBlock
     deleteDrag(drag)
     if (d and d.cancel) or not hit then return cb({ ok = false }) end
+    -- refused by a pizza box (closed / occupied / not a pizza): nothing consumed
+    if boxBlock then ShowNotification(boxBlock); return cb({ ok = false }) end
 
     local res = lib.callback.await("pickle_restaurants:cooking:prepDecompose", false, {
         prop_id = currentCookProp and currentCookProp.id, item = d and d.item, sig = d and d.sig, source = d and d.source,
@@ -2614,12 +2872,14 @@ RegisterNUICallback("cooking:endPrepDecompose", function(d, cb)
     local parts = partsFromDecomposeSpecs(res.parts)
     if #parts == 0 then RefreshTray(); RefreshBar(); return cb({ ok = false }) end
 
-    -- A meal sets down as its whole tray: tray + paper recreated at the drop point,
-    -- one editable pile per recorded offset — exactly the arrangement it was made as.
+    -- A meal sets down as its whole tray (or its pizza box, lid open): the pair
+    -- recreated at the drop point, one editable pile per recorded offset —
+    -- exactly the arrangement it was made as.
     if res.meal then
-        local ents = spawnTrayEnts(coords.x, coords.y, coords.z)
+        local kind = res.box and "box" or "tray"
+        local ents = spawnTrayEnts(coords.x, coords.y, coords.z, kind, res.box and 1.0 or nil)
         if ents then
-            commitTrayGroup(coords.x, coords.y, coords.z, ents, groupPiles(parts))
+            commitTrayGroup(coords.x, coords.y, coords.z, ents, groupPiles(parts), kind, res.box and true or false)
             RefreshTray(); RefreshBar()
             return cb(res)
         end
@@ -2681,11 +2941,27 @@ RegisterNUICallback("cooking:prepDrop", function(d, cb)
                 for _, p in ipairs(pile.parts) do if p.id then pids[#pids + 1] = p.id end end
                 if #pids > 0 then items[#items + 1] = { ids = pids, dx = pile.dx, dy = pile.dy } end
             end
-            if #items == 0 then -- empty tray dropped on the bar: just put it away
+            if #items == 0 then -- empty tray/box dropped on the bar: just put it away
                 deleteDrag(drag)
                 return cb({ ok = true })
             end
-            local res = lib.callback.await("pickle_restaurants:cooking:prepMakeMeal", false, { items = items })
+            -- a pizza box closes before it's sent off: swing the carried lid shut
+            -- where it hovers, give it a beat to settle, then make the meal
+            -- (instant when it was carried closed)
+            if drag.trayKind == "box" and drag.open then
+                local t0 = GetGameTimer()
+                while GetGameTimer() - t0 < BOXP.open_ms do
+                    local k = (GetGameTimer() - t0) / BOXP.open_ms
+                    k = k * k * (3.0 - 2.0 * k)
+                    boxLidSwing(drag.tray[1], drag.tray[2], 1.0 - k)
+                    Wait(0)
+                end
+                boxLidSwing(drag.tray[1], drag.tray[2], 0.0)
+                drag.open, drag.openT = false, 0.0
+                Wait(1000)
+            end
+            local res = lib.callback.await("pickle_restaurants:cooking:prepMakeMeal", false,
+                { items = items, box = (drag.trayKind == "box") or nil })
             if res and res.ok then
                 deleteDrag(drag)
                 if res.label then ShowNotification("Made " .. res.label) end
@@ -2696,8 +2972,15 @@ RegisterNUICallback("cooking:prepDrop", function(d, cb)
             -- fall through: put the tray (and everything on it) back down
         end
         local c = (drag.hit and drag.coords) or drag.home
-        commitTrayGroup(c.x, c.y, c.z, drag.tray, drag.piles)
+        commitTrayGroup(c.x, c.y, c.z, drag.tray, drag.piles, drag.trayKind, drag.open)
         return cb({ ok = true })
+    end
+    -- refused by a pizza box (closed / occupied / not a pizza): snap the carried
+    -- parts back to where they came from instead of committing into the box
+    -- (a drop on the bar still wins — that's the remove/save path below)
+    if drag.boxBlock and not (d and d.cancel) then
+        ShowNotification(drag.boxBlock)
+        drag.hit = false
     end
     if d and d.cancel then
         -- A WHOLE stack dragged to the hotbar (grab emptied its source → no fromSid)
@@ -2801,7 +3084,7 @@ RegisterNUICallback("cooking:prepMakeStack", function(d, cb)
                 if #parts > 0 then
                     local t = PrepTrays[tid]
                     prepSid = prepSid + 1
-                    local s = { x = t.x + (dx or 0.0), y = t.y + (dy or 0.0), z0 = t.z + trayFoodDz(),
+                    local s = { x = t.x + (dx or 0.0), y = t.y + (dy or 0.0), z0 = t.z + trayFoodDz(t.kind),
                                 tid = tid, dx = dx, dy = dy, parts = parts }
                     PrepStacks[prepSid] = s
                     relayout(s)
@@ -2816,19 +3099,21 @@ RegisterNUICallback("cooking:prepMakeStack", function(d, cb)
     cb(res or { ok = false })
 end)
 
--- ─── serving tray (kitchen_prep) ─────────────────────────────────────────────
+-- ─── serving tray & pizza box (kitchen_prep) ─────────────────────────────────
 
--- Drag a fresh serving tray out of the bar: tray + paper preview following the
--- cursor; drop on the table places it, ready to arrange food on.
-RegisterNUICallback("cooking:beginTrayPlace", function(_, cb)
+-- Drag a fresh serving tray (or pizza box, kind "box") out of the bar: the prop
+-- pair previews under the cursor; drop on the table places it, ready to arrange
+-- food on (a box places closed — click the lid to swing it open).
+RegisterNUICallback("cooking:beginTrayPlace", function(d, cb)
     cancelPlace(); cancelMove()
     if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
     setOutline(nil); setTrayOutline(nil)
     local base = currentCookProp
     if not base or base.prop_type ~= "kitchen_prep" then return cb({ ok = false }) end
-    local ents = spawnTrayEnts(base.x, base.y, base.z)
+    local kind = (d and d.kind == "box") and "box" or "tray"
+    local ents = spawnTrayEnts(base.x, base.y, base.z, kind, 0.0)
     if not ents then return cb({ ok = false }) end
-    prepDrag = { tray = ents, parts = {}, piles = {}, hit = false }
+    prepDrag = { tray = ents, trayKind = kind, openT = 0.0, parts = {}, piles = {}, hit = false }
     runDragThread(prepDrag)
     cb({ ok = true })
 end)
@@ -2841,7 +3126,17 @@ RegisterNUICallback("cooking:endTrayPlace", function(d, cb)
         deleteDrag(drag)
         return cb({ ok = false })
     end
-    commitTrayGroup(drag.coords.x, drag.coords.y, drag.coords.z, drag.tray, nil)
+    commitTrayGroup(drag.coords.x, drag.coords.y, drag.coords.z, drag.tray, nil, drag.trayKind, false)
+    cb({ ok = true })
+end)
+
+-- Click the pizza box's lid: swing it open / closed (smooth hinge, setBoxOpen).
+-- Locked while the box is closing to be sent off (boxing).
+RegisterNUICallback("cooking:boxToggle", function(d, cb)
+    local tid = tonumber(d and d.tid)
+    local t = tid and PrepTrays[tid]
+    if not t or t.kind ~= "box" or t.boxing then return cb({ ok = false }) end
+    setBoxOpen(tid, not t.open)
     cb({ ok = true })
 end)
 
@@ -2854,6 +3149,7 @@ RegisterNUICallback("cooking:trayGrab", function(d, cb)
     local tid = tonumber(d and d.tid)
     local t = tid and PrepTrays[tid]
     if not t then return cb({ ok = false }) end
+    if t.boxing then return cb({ ok = false }) end -- mid-close, being boxed up
     setOutline(nil); setTrayOutline(nil); trayHovered = nil
     local piles, parts = {}, {}
     for sid, s in pairs(PrepStacks) do
@@ -2869,24 +3165,84 @@ RegisterNUICallback("cooking:trayGrab", function(d, cb)
         return a.dy < b.dy
     end)
     PrepTrays[tid] = nil
-    prepDrag = { tray = t.ents, piles = piles, parts = parts,
+    -- a box carries its lid state along (settled, so a mid-swing grab can't
+    -- freeze the lid half-open) and puts back down in that same state
+    local isBox = t.kind == "box"
+    prepDrag = { tray = t.ents, trayKind = t.kind, open = isBox and (t.open and true or false) or nil,
+                 openT = isBox and (t.open and 1.0 or 0.0) or nil, piles = piles, parts = parts,
                  home = { x = t.x, y = t.y, z = t.z }, hit = false }
     runDragThread(prepDrag)
     cb({ ok = true })
 end)
 
--- The tray tooltip's Make Meal: everything arranged on tray `tid` becomes one
--- meal item, exact layout preserved.
+-- The tray tooltip's Make Meal / the box tooltip's Box It Up: everything arranged
+-- on tray/box `tid` becomes one meal item, exact layout preserved. A pizza box
+-- CLOSES first: the lid swings shut, settles for a second, and only then is the
+-- meal made — instantly when it's already closed. Grabbing/clearing the box
+-- mid-close cancels the send.
 RegisterNUICallback("cooking:prepMakeMeal", function(d, cb)
     local tid = tonumber(d and d.tid)
-    if not tid or not PrepTrays[tid] then return cb({ ok = false }) end
+    local t = tid and PrepTrays[tid]
+    if not t then return cb({ ok = false }) end
+    if t.kind == "box" then
+        if t.boxing then return cb({ ok = false }) end
+        if trayPileCount(tid) == 0 then
+            ShowNotification("Nothing in the box.")
+            return cb({ ok = false })
+        end
+        if t.open then
+            t.boxing = true
+            setBoxOpen(tid, false)
+            Wait(BOXP.open_ms + 1000)
+            if PrepTrays[tid] ~= t then return cb({ ok = false }) end -- grabbed/cleared mid-close
+            t.boxing = nil
+        end
+    end
     local res = makeMealFromTray(tid, false)
     if not res then
-        ShowNotification("Nothing on the tray.")
+        ShowNotification(t.kind == "box" and "Nothing in the box." or "Nothing on the tray.")
         return cb({ ok = false })
     end
     if res.ok then RefreshTray(); RefreshBar() end
     cb(res or { ok = false })
+end)
+
+-- The box tooltip's Take Out: lift the pizza back OUT of the box — the pile
+-- slides from the box bed onto the table beside it (animated, never a pop) and
+-- becomes a free, grabbable stack again. A closed lid swings open first.
+RegisterNUICallback("cooking:boxTakeOut", function(d, cb)
+    local tid = tonumber(d and d.tid)
+    local t = tid and PrepTrays[tid]
+    if not t or t.kind ~= "box" or t.boxing then return cb({ ok = false }) end
+    local sid, stack
+    for id2, s in pairs(PrepStacks) do
+        if s.tid == tid then sid, stack = id2, s break end
+    end
+    if not stack then return cb({ ok = false }) end
+    local wasClosed = not t.open
+    if wasClosed then setBoxOpen(tid, true) end -- can't reach through the lid
+    -- land one box-width to the box's local right, resting on the table surface
+    local mn, mx = GetModelDimensions(EnsureModel(BOXP.base_model))
+    local w = (mn and mx) and math.max((mx.x - mn.x) - TRAY_PHYS_MARGIN * 2, 0.2) or 0.4
+    local off = w * 0.5 + (partHalfXY(stack.parts[1]) or 0.15) + 0.05
+    local hr = math.rad(curYaw())
+    local fx, fy, fz = stack.x, stack.y, stack.z0
+    local tx, ty, tz = t.x + math.cos(hr) * off, t.y + math.sin(hr) * off, t.z
+    stack.tid, stack.dx, stack.dy = nil, nil, nil
+    stack.x, stack.y, stack.z0 = tx, ty, tz
+    CreateThread(function()
+        if wasClosed then Wait(BOXP.open_ms) end -- let the lid clear the opening
+        local t0, dur = GetGameTimer(), 250
+        while true do
+            local k = math.min((GetGameTimer() - t0) / dur, 1.0)
+            k = k * k * (3.0 - 2.0 * k) -- eased slide out
+            if PrepStacks[sid] ~= stack then return end -- re-grabbed/consumed mid-slide
+            layoutParts(stack.parts, fx + (tx - fx) * k, fy + (ty - fy) * k, fz + (tz - fz) * k, #stack.parts == 1)
+            if k >= 1.0 then break end
+            Wait(0)
+        end
+    end)
+    cb({ ok = true })
 end)
 
 -- switch the scripted camera between the cooktop and either oven door
@@ -3074,10 +3430,14 @@ end
 
 -- The (target, flavor) config a hovered part matches for this tool + chosen
 -- flavor. nil when the part isn't a valid target (raw/burnt items are never
--- configured targets) or the flavor doesn't apply to it (glazed on a cake).
-local function finishTargetFor(cfg, item, flavorId)
+-- configured targets), the flavor doesn't apply to it (glazed on a cake), or the
+-- target requires a prior finish the part doesn't carry (sprinkles need frosting —
+-- checked on the part's recorded finishTool, since a frosted doughnut is the same
+-- cooked_doughnut item now). Server re-validates on apply regardless.
+local function finishTargetFor(cfg, part, flavorId)
     for _, t in ipairs(cfg.targets or {}) do
-        if t.item == item then
+        if t.item == part.item then
+            if t.requires_finish and part.finishTool ~= t.requires_finish then return nil end
             for _, fl in ipairs(t.flavors or {}) do
                 if fl.id == flavorId then return t, fl end
             end
@@ -3175,7 +3535,7 @@ RegisterNUICallback("cooking:beginFinish", function(d, cb)
             end
             local target, flavor
             if part and part.id and hit and coords then
-                target, flavor = finishTargetFor(cfg, part.item, f.flavor)
+                target, flavor = finishTargetFor(cfg, part, f.flavor)
             end
             if target then
                 setOutline(sid, 80, 200, 120)

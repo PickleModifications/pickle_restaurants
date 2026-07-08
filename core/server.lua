@@ -62,6 +62,11 @@ local DEFAULT_SETTINGS = {
     -- (itemgen exports it) — never a requirement to use the tray; only moving a
     -- meal into the real inventory needs it installed.
     meal_item       = "meal",
+    -- The inventory item EVERY poured drink becomes ("Restaurant Drink") — one
+    -- item for all flavors, the flavor riding as build-stack metadata (a layer
+    -- holding the drinks[].output key), exactly like the meal item. The per-flavor
+    -- `output` keys below stop being items; itemgen exports only this one.
+    drink_item      = "drink",
     blip            = { sprite = 93, color = 1, scale = 0.8, enabled = true },
     default_roles   = {
         ["0"] = { label = "Trainee", commission = 5,  permissions = { cook = true } },
@@ -170,7 +175,12 @@ local DEFAULT_SETTINGS = {
                 { id = "vanilla",    label = "Vanilla",    model = "pickle_cake_03", color = "#f3e5ab" },
                 { id = "pickle",     label = "Pickle",     model = "pickle_cake_04", color = "#65a30d" },
               } },
-            { item = "cooked_doughnut", output = "frosted_doughnut", mode = "overlay",
+            -- A frosted doughnut is NOT a separate item: it stays `cooked_doughnut`
+            -- and the frosting rides as build-stack metadata (flavor recorded on the
+            -- layer, distinguished by TraySig). Overlay-mode, so the frosting model
+            -- stacks on the fried-doughnut prop. All doughnut variants collapse to
+            -- the one `cooked_doughnut` item.
+            { item = "cooked_doughnut", output = "cooked_doughnut", mode = "overlay",
               flavors = {
                 { id = "strawberry", label = "Strawberry", model = "pickle_doughnut_topping_01", color = "#f472b6" },
                 { id = "chocolate",  label = "Chocolate",  model = "pickle_doughnut_topping_02", color = "#8b5a2b" },
@@ -179,18 +189,21 @@ local DEFAULT_SETTINGS = {
                 { id = "pickle",     label = "Pickle",     model = "pickle_doughnut_topping_05", color = "#65a30d" },
               } },
           } },
-        -- Sprinkles: a second finish tool, DONUTS ONLY, and only AFTER frosting — its
-        -- one target is `frosted_doughnut` (the frosting output), so a plain cooked
-        -- doughnut can't be sprinkled. Overlay-mode, so the sprinkles ride on top of
-        -- the frosted doughnut and the frosting still shows through (finishRender
-        -- composes the nested tower). `sprinkled_doughnut` is the generated output
-        -- item; `pickle_doughnut_sprinkles_01` is a best-guess prop — correct it in
-        -- the finishes setting if your sprinkles model is named differently.
+        -- Sprinkles: a second finish tool, DONUTS ONLY, and only AFTER frosting. It
+        -- also targets `cooked_doughnut` (all doughnuts are one item now), but
+        -- `requires_finish = "frosting"` gates it so it applies ONLY to a doughnut
+        -- whose metadata already carries a frosting layer — a plain fried doughnut is
+        -- rejected. Overlay-mode: the sprinkles stack over the frosting (finishRender
+        -- composes the nested tower from the meta). Output is again `cooked_doughnut`;
+        -- the frosting+sprinkles flavors live entirely in build metadata. Variant prop
+        -- prefix `pickle_doughnut_sprinkles_NN` — 01 vanilla, 02 chocolate.
         { tool = "sprinkles", tool_model = "pickle_sprinkles_tube_01", rub_dist = 1.2,
           targets = {
-            { item = "frosted_doughnut", output = "sprinkled_doughnut", mode = "overlay",
+            { item = "cooked_doughnut", output = "cooked_doughnut", mode = "overlay",
+              requires_finish = "frosting",
               flavors = {
-                { id = "sprinkles", label = "Sprinkles", model = "pickle_doughnut_sprinkles_01", color = "#f472b6" },
+                { id = "vanilla",   label = "Vanilla",   model = "pickle_doughnut_sprinkles_01", color = "#f3e5ab" },
+                { id = "chocolate", label = "Chocolate", model = "pickle_doughnut_sprinkles_02", color = "#8b5a2b" },
               } },
           } },
     },
@@ -595,6 +608,69 @@ local function LoadSettings()
         SetSetting("cooked_expire_default_seeded", true)
     end
 
+    -- One-time: the sprinkles finish shipped with a single generic "Sprinkles"
+    -- flavor; it now offers picker variants (vanilla/chocolate) like frosting. Swap
+    -- the lone legacy flavor on the stored sprinkles entry for the new default set —
+    -- gated, and only when it still holds the old single "sprinkles" flavor, so an
+    -- admin who edited the sprinkle flavors keeps theirs.
+    if not GetSetting("sprinkle_flavors_seeded", false) then
+        local fs = SettingsCache.finishes
+        if type(fs) == "table" then
+            local defFlavors
+            for _, def in ipairs(DEFAULT_SETTINGS.finishes) do
+                if def.tool == "sprinkles" then defFlavors = (def.targets[1] or {}).flavors end
+            end
+            local changed = false
+            if defFlavors then
+                for _, f in ipairs(fs) do
+                    if f.tool == "sprinkles" then
+                        for _, t in ipairs(f.targets or {}) do
+                            local fl = t.flavors or {}
+                            if #fl == 1 and fl[1].id == "sprinkles" then
+                                t.flavors = defFlavors; changed = true
+                            end
+                        end
+                    end
+                end
+            end
+            if changed then SetSetting("finishes", fs) end
+        end
+        SetSetting("sprinkle_flavors_seeded", true)
+    end
+
+    -- One-time: doughnut variants collapsed into the single `cooked_doughnut` item —
+    -- frosting/sprinkles are now build-stack METADATA, not separate output items. On
+    -- a DB seeded with the old finishes config, repoint the frosting-doughnut target
+    -- (output frosted_doughnut → cooked_doughnut) and the sprinkles target (item &
+    -- output frosted_doughnut/sprinkled_doughnut → cooked_doughnut, + requires_finish
+    -- so it still only applies over frosting). Only touches entries still holding the
+    -- exact old defaults, so an admin's customised targets are left alone. The cake
+    -- target (cooked_cake → decorated_cake) is intentionally NOT collapsed.
+    if not GetSetting("doughnut_finish_collapsed", false) then
+        local fs = SettingsCache.finishes
+        if type(fs) == "table" then
+            local changed = false
+            for _, f in ipairs(fs) do
+                if f.tool == "frosting" then
+                    for _, t in ipairs(f.targets or {}) do
+                        if t.item == "cooked_doughnut" and t.output == "frosted_doughnut" then
+                            t.output = "cooked_doughnut"; changed = true
+                        end
+                    end
+                elseif f.tool == "sprinkles" then
+                    for _, t in ipairs(f.targets or {}) do
+                        if t.item == "frosted_doughnut" and t.output == "sprinkled_doughnut" then
+                            t.item, t.output, t.requires_finish = "cooked_doughnut", "cooked_doughnut", "frosting"
+                            changed = true
+                        end
+                    end
+                end
+            end
+            if changed then SetSetting("finishes", fs) end
+        end
+        SetSetting("doughnut_finish_collapsed", true)
+    end
+
     -- One-time: pepperoni became an optional topping rather than a required pizza
     -- component. The merges above never edit an existing recipe, so drop pepperoni
     -- from the stored raw_pizza on servers seeded before this change (gated so it
@@ -813,15 +889,17 @@ function RecipeMethod(r) return (r and r.method) or "grill" end
 
 -- Drinks / assembly entries reference items too; same validity rules apply.
 local function drinkMissing(d)
+    -- only the cup (input) is a real item — the output is a flavor KEY: every
+    -- poured drink collects as the ONE `drink_item` item, flavor as metadata
     local missing = {}
     if not ItemExists(d.input) then missing[#missing + 1] = d.input end
-    if not ItemExists(d.output) then missing[#missing + 1] = d.output end
     return missing
 end
 
 local function assemblyMissing(a)
+    -- the output is a kitchen product (tray-held) — never required to be an
+    -- installed item (raw_pizza isn't one); components are real consumed items
     local missing = {}
-    if not ItemExists(a.output) then missing[#missing + 1] = a.output end
     for _, comp in ipairs(a.components or {}) do
         if not ItemExists(comp) then missing[#missing + 1] = comp end
     end
@@ -869,8 +947,9 @@ function AnnotateFinishes()
         local missing = {}
         if not ItemExists(f.tool) then missing[#missing + 1] = f.tool end
         for _, t in ipairs(f.targets or {}) do
-            if not ItemExists(t.item) then missing[#missing + 1] = t.item end
-            if not ItemExists(t.output) then missing[#missing + 1] = t.output end
+            -- a target/output that's a tray PRODUCT is valid without being installed
+            if not IsProductItem(t.item)   and not ItemExists(t.item)   then missing[#missing + 1] = t.item end
+            if not IsProductItem(t.output) and not ItemExists(t.output) then missing[#missing + 1] = t.output end
         end
         local copy = {}; for k, v in pairs(f) do copy[k] = v end
         copy.valid, copy.missing = #missing == 0, missing
@@ -878,6 +957,30 @@ function AnnotateFinishes()
     end
     return out
 end
+
+-- Diagnostic: a finish tool card only appears on the prep bar when its tool AND
+-- at least one target's (item + output) are all installed inventory items — so a
+-- tool you're carrying still stays hidden if its target/output items are missing.
+-- Prints exactly what each finish tool is missing so a hidden card can be traced
+-- to the item(s) still needing /restaurants_items + install.
+CreateThread(function()
+    while not RestaurantsReady do Wait(200) end
+    RegisterCommand("restaurants_finishes", function(src)
+        if src ~= 0 and not IsPlayerAdmin(src) then return ShowNotification(src, _L("no_permission")) end
+        local function line(s) print(s); if src ~= 0 then ShowNotification(src, s) end end
+        line("[pickle_restaurants] Finish tools:")
+        for _, f in ipairs(GetSetting("finishes", {})) do
+            local toolOk = ItemExists(f.tool)
+            line((" • %s  tool=%s%s"):format(f.tool or "?", tostring(f.tool), toolOk and " ✓" or " ✗ NOT INSTALLED"))
+            for _, t in ipairs(f.targets or {}) do
+                -- a tray PRODUCT (recipe/assembly/finish output) is valid uninstalled
+                local iOk = ItemExists(t.item)   and " ✓" or (IsProductItem(t.item)   and " ✓ (cooked item)" or " ✗ NOT INSTALLED")
+                local oOk = ItemExists(t.output) and " ✓" or (IsProductItem(t.output) and " ✓ (cooked item)" or " ✗ NOT INSTALLED")
+                line(("     target %s%s  ->  %s%s"):format(tostring(t.item), iOk, tostring(t.output), oOk))
+            end
+        end
+    end, false)
+end)
 
 -- ─── permissions ─────────────────────────────────────────────────────────────
 
@@ -967,6 +1070,11 @@ function TraySig(meta)
             if l.dx ~= nil or l.dy ~= nil then
                 part = part .. ("@%.2f,%.2f"):format(tonumber(l.dx) or 0.0, tonumber(l.dy) or 0.0)
             end
+            -- a meal made in a pizza box (flag on the first layer) is a different
+            -- variation from the same pizza arranged on a serving tray
+            if l.box then
+                part = part .. "^box"
+            end
             parts[#parts + 1] = part
         end
     end
@@ -1021,18 +1129,19 @@ function AddTray(rid, identifier, item, cheese, count, meta)
     local key = trayKey(item, cheese)
     local e = TrayCache[rid][identifier][key]
     if not e then
-        -- new row: stamp the freshness clock now. Topping up an existing row PRESERVES
-        -- its clock (the SQL update below leaves cooked_at alone), so a stack still
-        -- expires from when it was first cooked instead of resetting on every add.
         e = { item = item, cheese = cheese, count = 0, metas = {}, cookedAt = os.time() }
         TrayCache[rid][identifier][key] = e
     end
     e.metas = e.metas or {}
     e.count = e.count + count
+    -- EVERY add restamps the row's freshness clock: the newest instance is fresh,
+    -- and the row expires as one unit — so topping a slot up gives the whole stack
+    -- the full window again instead of inheriting the oldest instance's leftovers.
+    e.cookedAt = os.time()
     for _ = 1, count do e.metas[#e.metas + 1] = meta or false end
     MySQL.update("INSERT INTO pickle_restaurant_cooked_items (restaurant_id, identifier, item, cheese, count, metadata, cooked_at) "
-        .. "VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE count = count + VALUES(count), metadata = VALUES(metadata)",
-        { rid, identifier, item, cheese, count, json.encode(e.metas), e.cookedAt or os.time() })
+        .. "VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE count = count + VALUES(count), metadata = VALUES(metadata), cooked_at = VALUES(cooked_at)",
+        { rid, identifier, item, cheese, count, json.encode(e.metas), e.cookedAt })
 end
 
 function RemoveTray(rid, identifier, item, cheese, count, sig)
@@ -1131,6 +1240,34 @@ local function BuildClientRestaurant(r)
     }
 end
 
+-- A "product" is anything the kitchen PRODUCES: a recipe cook output, an assembly
+-- output, or a finish output. Products live in the per-player cooked-items tray,
+-- never the real inventory, so they do NOT need to be installed inventory items to
+-- be valid config — a finish can target/output one (a frosted doughnut) that only
+-- ever exists as a cooked/tray item. Finish targets & outputs are validated with
+-- `ItemExists(x) or IsProductItem(x)` so a tray-only product never hides the tool,
+-- exactly like the beef/chicken patties. (Mirrors the cooking module's isTrayItem,
+-- but global so the sync/annotate here can use it.)
+function IsProductItem(item)
+    if not item or item == "" then return false end
+    for _, r in ipairs(RecipeCache) do
+        if r.output_cooked_item == item or r.output_burnt_item == item then return true end
+    end
+    for _, a in ipairs(GetSetting("assembly", {})) do
+        if a.output == item then return true end
+    end
+    for _, f in ipairs(GetSetting("finishes", {})) do
+        for _, t in ipairs(f.targets or {}) do
+            if t.output == item then return true end
+        end
+    end
+    return false
+end
+
+-- A finish target/output item is usable if it's an installed inventory item OR a
+-- kitchen product (tray item). The tool itself is NOT a product — it must be real.
+local function FinishItemOk(item) return ItemExists(item) or IsProductItem(item) end
+
 function BuildSyncPayload()
     -- Only valid configs are shipped to the game world. A recipe / drink /
     -- assembly that references a missing item is hidden until an admin fixes it
@@ -1141,7 +1278,9 @@ function BuildSyncPayload()
     end
     local drinks = {}
     for i, d in ipairs(GetSetting("drinks", {})) do
-        if ItemExists(d.input) and ItemExists(d.output) then
+        -- only the cup (input) must be an installed item — the output is a flavor
+        -- KEY (poured drinks collect as the one `drink_item` item, flavor in meta)
+        if ItemExists(d.input) then
             -- `tap` = the entry's RAW config position: the fountain tap it holds
             -- (first six only). Stamped on a copy so the cached setting row never
             -- carries the derived field back into the DB.
@@ -1153,18 +1292,23 @@ function BuildSyncPayload()
     end
     local assembly = {}
     for _, a in ipairs(GetSetting("assembly", {})) do
-        local ok = ItemExists(a.output)
+        -- the OUTPUT is a kitchen product (tray-held, IsProductItem) — it works
+        -- without being an installed item (raw_pizza never is; only taking it out
+        -- via trayToInventory would need one). Components are real consumed items.
+        local ok = true
         for _, comp in ipairs(a.components or {}) do if not ItemExists(comp) then ok = false end end
         if ok then assembly[#assembly + 1] = a end
     end
-    -- Finish tools ship with only their valid targets (tool + target + output items
-    -- must all exist); an entry with no surviving targets is dropped entirely.
+    -- Finish tools ship with only their valid targets: the tool must be a real
+    -- (consumed) inventory item, but a target/output may be a tray-only PRODUCT
+    -- (a frosted doughnut is a finish output, never installed) — FinishItemOk. An
+    -- entry with no surviving targets is dropped entirely.
     local finishes = {}
     for _, f in ipairs(GetSetting("finishes", {})) do
         if ItemExists(f.tool) then
             local targets = {}
             for _, t in ipairs(f.targets or {}) do
-                if ItemExists(t.item) and ItemExists(t.output) then targets[#targets + 1] = t end
+                if FinishItemOk(t.item) and FinishItemOk(t.output) then targets[#targets + 1] = t end
             end
             if #targets > 0 then
                 local copy = {}; for k, v in pairs(f) do copy[k] = v end

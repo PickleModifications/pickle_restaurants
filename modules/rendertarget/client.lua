@@ -45,13 +45,13 @@
 -- number in here. rot 90/270 swaps which way the image is fitted, so keep the w/h aspect
 -- as the texture's real pixel aspect and let rot handle the turn.
 local TARGETS = {
-    { key = "pizza_box", txd = "pickle_pizza_box_02",       txn = "pizza_brand",              w = 1024, h = 1024, rot = 0, flipx = false, flipy = false },
+    { key = "pizza_box", txd = "pickle_pizza_box_02",       txn = "pizza_brand",              w = 1024, h = 1024, rot = 270, flipx = false, flipy = false },
     { key = "cup",       txd = "pickle_drink_container_01",  txn = "cup_brand",                w = 1024, h = 1792, rot = 90, flipx = false, flipy = false },
     { key = "tray",      txd = "pickle_tray_paper_01",       txn = "tray_paper",               w = 1792, h = 1024, rot = 180, flipx = false, flipy = false },
     { key = "side",      txd = "pickle_side_container_01",   txn = "side_container_brand_01",  w = 2304, h = 1024, rot = 0, flipx = false, flipy = false },
 }
-local TARGET_BY_KEY = {}
-for _, t in ipairs(TARGETS) do TARGET_BY_KEY[t.key] = t end
+local TARGET_BY_KEY, TARGET_BY_MODEL = {}, {}
+for _, t in ipairs(TARGETS) do TARGET_BY_KEY[t.key] = t; TARGET_BY_MODEL[t.txd] = t end
 
 local RANGE   = 150.0  -- how near a branded restaurant must be to apply
 local TICK_MS = 1000   -- how often we re-pick the nearest restaurant
@@ -83,17 +83,24 @@ local function specSig(spec)
     return "b:" .. (spec.url or "") .. "|" .. cs
 end
 
+-- Returns true only if the image was actually sent. A DUI that isn't ready yet drops
+-- the push — the caller must NOT mark the image as delivered, so the driver keeps
+-- retrying until it lands (the real cause of the blank-on-load: a push made before the
+-- DUI was ready was silently lost and never retried).
 local function pushToDui(t)
-    if not (t.dui and t.ready) then return end
+    if not (t.dui and t.ready) then return false end
     local spec = t.cur
-    if not spec then return end
+    if not spec then return false end
     if spec.calib then
         SendDuiMessage(t.dui, json.encode({ action = "calibrate", w = t.w, h = t.h, key = t.key,
             rot = t.rot or 0, flipx = t.flipx or false, flipy = t.flipy or false }))
     else
         SendDuiMessage(t.dui, json.encode({ action = "brand", url = spec.url or "", crop = spec.crop, w = t.w, h = t.h,
-            rot = t.rot or 0, flipx = t.flipx or false, flipy = t.flipy or false }))
+            rot = t.rot or 0, flipx = t.flipx or false, flipy = t.flipy or false,
+            -- key + res let brand.html POST back the moment it has painted (rt:painted)
+            key = t.key, res = GetCurrentResourceName() }))
     end
+    return true
 end
 
 local function ensureDui(t)
@@ -130,19 +137,55 @@ local function removeReplacement(t)
     t.applied = false
 end
 
+-- Supersede any pending rebind (a newer brand/image, or a clear).
+local function cancelRebind(t) t.rebindSeq = (t.rebindSeq or 0) + 1 end
+
+-- THE fix for the persistent-blank bug: a txd binds to whatever frame the runtime
+-- texture holds AT AddReplaceTexture time. brand.html paints its image ASYNC (the
+-- image is fetched after we SendDuiMessage), so the bind made when the brand is first
+-- applied captures a not-yet-painted (blank/white) surface and the prop stays blank —
+-- forever, because the bind doesn't retroactively pick up a later paint. So after the
+-- image has actually painted we RE-bind (RemoveReplaceTexture + AddReplaceTexture) to
+-- the now-painted surface. Two passes cover an instant local paint and a slower remote
+-- image load. The model still has to STREAM IN after the final rebind (cook/hold the
+-- item) — that's the engine's stream-after constraint, unchanged.
+local function rebindAfterPaint(t)
+    t.rebindSeq = (t.rebindSeq or 0) + 1
+    local mine = t.rebindSeq
+    CreateThread(function()
+        local tries = 0
+        while t.dui and not IsDuiAvailable(t.dui) and tries < 150 do Wait(30); tries = tries + 1 end
+        if not t.dui or t.rebindSeq ~= mine then return end
+        -- One safety re-bind in case the brand.html rt:painted POST is ever missed;
+        -- normally rt:painted has already rebound precisely by now, making this a no-op.
+        Wait(2500)
+        if t.dui and t.rebindSeq == mine and t.applied then
+            removeReplacement(t)
+            applyReplacement(t)
+        end
+    end)
+end
+
 -- Show a spec on this target's packaging, or nil to restore the original texture.
 --   spec = { url = "...", crop = { x, y, w, h }? }  — an image, optionally cropped
 --          | { calib = true }                        — the calibration grid
 local function setTargetBrand(t, spec)
     if spec ~= nil then
+        local firstApply = not t.applied
         ensureDui(t)
         applyReplacement(t)
         local sig = specSig(spec)
-        if sig ~= t.sig then
-            t.cur, t.sig = spec, sig
-            pushToDui(t)
+        local changed = sig ~= t.sig
+        if changed then
+            t.cur = spec
+            -- commit the sig ONLY once the image actually reached the DUI; if the DUI
+            -- wasn't ready the push is dropped and t.sig stays, so the next poll tick
+            -- re-pushes until it lands. This is what fixes the blank-on-load.
+            if pushToDui(t) then t.sig = sig end
         end
+        if firstApply or changed then rebindAfterPaint(t) end
     else
+        cancelRebind(t)
         removeReplacement(t)
         t.cur, t.sig = nil, nil
     end
@@ -217,28 +260,76 @@ local function applyBrand(r)
     for _, t in ipairs(TARGETS) do setTargetBrand(t, specForTarget(r, t)) end
 end
 
+-- One pass of the production driver: force the debug spec on everything, or apply
+-- the nearest branded restaurant (nil = none in range → restore original textures).
+local function driveOnce()
+    if debugForce then
+        for _, t in ipairs(TARGETS) do setTargetBrand(t, debugForce) end
+        return
+    end
+    local here = GetEntityCoords(PlayerPedId())
+    local best, bestDist
+    for _, r in pairs(Restaurants or {}) do
+        if hasBrand(r) then
+            local c = restaurantCoord(r)
+            if c then
+                local dist = #(here - c)
+                if dist <= RANGE and (not bestDist or dist < bestDist) then
+                    bestDist, best = dist, r
+                end
+            end
+        end
+    end
+    applyBrand(best)
+end
+
 CreateThread(function()
     while true do
         Wait(TICK_MS)
-        if debugForce then
-            for _, t in ipairs(TARGETS) do setTargetBrand(t, debugForce) end
-        else
-            local here = GetEntityCoords(PlayerPedId())
-            local best, bestDist
-            for _, r in pairs(Restaurants or {}) do
-                if hasBrand(r) then
-                    local c = restaurantCoord(r)
-                    if c then
-                        local dist = #(here - c)
-                        if dist <= RANGE and (not bestDist or dist < bestDist) then
-                            bestDist, best = dist, r
-                        end
-                    end
-                end
-            end
-            applyBrand(best)
-        end
+        driveOnce()
     end
+end)
+
+-- Re-assert every replacement from scratch, forcing the image to re-push and — via
+-- setTargetBrand → rebindAfterPaint — the txd to re-bind once brand.html has PAINTED
+-- the image (not against the blank surface it would otherwise catch). Runs on the
+-- sync handler the instant brand_images changes, plus /pickle_brand_reload. You still
+-- need the branded model to STREAM IN after the final rebind (cook/hold the item) —
+-- AddReplaceTexture only takes on txds streamed while it's active.
+function RefreshBrands()
+    if debugForce then return end -- don't fight an active debug session
+    for _, t in ipairs(TARGETS) do
+        removeReplacement(t) -- drop the stale binding so setTargetBrand re-binds fresh
+        t.sig = nil          -- force the current image to re-push to the (warm) DUI
+    end
+    driveOnce()
+end
+
+-- Called by the cooking module the instant it spawns a branded prop. AddReplaceTexture
+-- reliably takes when a prop of the model actually EXISTS, so re-assert the matching
+-- target's replacement now (remove + re-add) — this is why a brand only appeared after
+-- you pulled the item out AND reloaded: the reload re-asserted while the prop existed.
+-- No-op unless that target currently has a brand applied.
+function ReassertBrandFor(model)
+    local t = model and TARGET_BY_MODEL[model]
+    if t and t.applied and not debugForce then
+        removeReplacement(t)
+        applyReplacement(t)
+    end
+end
+
+-- brand.html POSTs here the instant it has PAINTED the image into the DUI surface. We
+-- (re)bind the replacement now, against a real frame — the definitive fix for a
+-- pre-configured brand loading blank because the (remote) image finished painting only
+-- AFTER the initial bind caught a blank surface. Only a real image paint fires this
+-- (a blank/calibration frame never does), so t.cur is the active brand. Idempotent.
+RegisterNUICallback("rt:painted", function(d, cb)
+    local t = d and d.key and TARGET_BY_KEY[d.key]
+    if t and t.dui and t.cur and not debugForce then
+        removeReplacement(t)
+        applyReplacement(t)
+    end
+    cb("ok")
 end)
 
 -- ─── debug zone ──────────────────────────────────────────────────────────────
@@ -330,6 +421,14 @@ RegisterCommand("pickle_brand_res", function(_, args)
     recreateDui(t)
     print(("[brand] %s resized to %d x %d — bake this into TARGETS when it looks right")
         :format(t.key, t.w, t.h))
+end, false)
+
+-- /pickle_brand_reload — re-assert the render-target bindings without restarting the
+-- resource (what you used to restart for). Run after editing a brand, then re-stream
+-- the branded model (cook/hold the item) to see the new art.
+RegisterCommand("pickle_brand_reload", function()
+    RefreshBrands()
+    print("[brand] replacements re-asserted — re-spawn/hold the branded item to see it")
 end, false)
 
 RegisterCommand("pickle_brand_orient", function(_, args)

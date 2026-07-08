@@ -159,6 +159,33 @@ the NUI is untrusted.
   editable tray build rendered 1:1. Trays auto-make into meals on station exit, and a
   pile made into a product while sitting on a tray is re-reserved and re-seated in
   place (`prepMakeStack` returns `sig` + a render `spec` for this).
+- **Pizza box.** The serving tray's sibling (`kind = "pizzabox"`; equipment, never an
+  item — both equipment cards ship in the getIngredients payload but the NUI files
+  them under the COOKED ITEMS tab, leading the strip): the same tray machinery keyed by
+  `kind = "box"` — `pickle_pizza_box_01` (base) + `pickle_pizza_box_02` (lid, the
+  `pizza_box` brand target) spawned as a pair, placed closed. The lid is HINGED: a
+  click on the box toggles it (NUI click-vs-drag threshold → `cooking:boxToggle`),
+  swinging smoothly open/closed. The lid model's ORIGIN is authored on its hinge
+  edge: `boxLidSeat` positions it ONCE per placement (a fixed `lid_fwd` step along
+  the BASE's yaw-only forward — never the lid's own forward vector, which tips
+  with its pitch mid-swing), and the open/close anim is `boxLidSwing`, ROTATION
+  only (heading + opening pitch); `BOXP` tunables in `modules/cooking/client.lua`
+  (TUNE IN-GAME).
+  Only a pizza goes in: lid open, box empty, and the carried pile's BOTTOM layer a
+  pizza crust at any cook state (client matches `BOXP.dough_models` by model; the
+  server re-validates in `pizzaBaseLayer` by item / stack base / base recipe) — a
+  qualifying drop seats CENTRED; anything else outlines red and is refused on
+  release. A closed lid seals the contents (`stackSealed`: no hover/grab/stack).
+  A pile INSIDE a box belongs to the BOX: hovering it hovers the box (click =
+  lid, drag = the whole box — the part-grab is suppressed in the hover loop);
+  the pizza leaves via the tooltip's Take Out (`cooking:boxTakeOut`, animated
+  slide onto the table beside the box). Boxing it up CLOSES first: lid swings
+  shut + 1s settle, then the meal is made (instant if already closed; `t.boxing`
+  locks toggle/grab mid-close) — both the tooltip button and the drag-to-bar path.
+  Boxing it up makes the SAME meal item with `box = true` on the first meta layer
+  (`TraySig` appends `^box`), so a boxed pizza is its own variation and sets back
+  down as its box, lid open (`prepDecompose`/`Peek` return `box`; `getTray` flags
+  `boxed`).
 - **Containered bakes.** A recipe's nullable `container_model` column (cake tin
   `pickle_cake_container_01`, future cookie trays) renders the food inside a container
   prop EVERYWHERE — oven slot, drag preview, prep table — by prepending it to the
@@ -172,7 +199,14 @@ the NUI is untrusted.
 - **Soda machine (drinks).** The fountain has SEVEN taps: the middle one dispenses
   ice, the other six map to the first six `drinks` settings entries by RAW config
   position (tap N = entry N — STABLE even when some flavors are invalid; a missing
-  item just leaves its tap dark. BuildSyncPayload stamps each synced drink with its
+  CUP item leaves its tap dark. Only `drinks[].input` must be an installed item:
+  `output` is a flavor KEY, not an item — every poured drink collects as the ONE
+  `drink_item` setting's item ("Restaurant Drink", default `drink`, mirroring
+  `meal_item`) with the flavor riding as build-stack metadata
+  (`{ { item = <output key> } }`, TraySig'd so each flavor is its own variation);
+  `drinkFlavor`/`drinkRender` resolve the label + capped cup+lid render everywhere
+  (getTray both paths, compSpec for drink layers in meals). itemgen exports the
+  generic item and grace-retains the legacy flavor items one release. BuildSyncPayload stamps each synced drink with its
   `tap` index so the client mirrors the server's `flavorForSlot` exactly; the model's
   printed flavor strip matches the default order, and a one-time
   `soda_tap_order_seeded` backfill reorders legacy DBs to it). Cups are slot items
@@ -220,6 +254,29 @@ the NUI is untrusted.
   entries (`BuildSyncPayload` → client `Finishes` global); itemgen collects finish
   tools/targets/outputs + `prep_models` keys. A sprinkles tool is one more config row —
   no code. There is no admin-panel editor for finishes yet (settings table only).
+
+## One-item consolidation rule
+
+Variants NEVER multiply items — they collapse into ONE item with the variation in
+build-stack metadata: all doughnuts are `cooked_doughnut` (frosting/sprinkles =
+finish meta), all drinks are the `drink_item` item (flavor meta), all meals the
+`meal_item` item (layout meta, `^box` for pizza boxes). Assembled-but-uncooked
+INTERMEDIATES (an assembly output that is some recipe's input, e.g. `raw_pizza`)
+are tray-only — never exported by itemgen (grace-retained one release in `RETAIN`),
+never required by sync/annotate validation (`assemblyMissing`/BuildSyncPayload skip
+the output). An assembled input placed to cook with no readable recorded stack gets
+its BASE recipe meta SYNTHESIZED at `place` so the cooked product never comes out
+stackless (getTray/compSpec also fall back to the base stack for legacy stackless
+instances). Follow this pattern for any new food family.
+
+## Stack-height corrections
+
+`STACK_TWEAKS` in `modules/cooking/client.lua` holds per-model MANUAL stacking
+corrections (`sink` = shift a layer's seat, dragging everything above it along;
+`rise` = replace the measured layer height). The measured model heights are always
+the baseline — only add an entry when a specific prop needs a nudge (the pizza
+cheese sheet ships with a small sink). Applied in `expandStackLayers` (product
+towers, oven slots, previews) and `layoutParts` (discrete prep parts). TUNE IN-GAME.
 
 ## Localization
 

@@ -28,6 +28,21 @@
     img.onload = function () { if (last && last.action === "brand") paintBrand(last); };
     img.onerror = function () { if (last && last.action === "brand") fillBlank(last); };
 
+    // Tell the Lua render-target module the instant the image has actually PAINTED, so
+    // it can (re)bind the texture replacement against a real frame instead of the blank
+    // surface it would otherwise catch while the (remote) image was still loading. This
+    // is what makes a pre-configured brand appear on load without a manual reload.
+    function notifyPainted() {
+      if (!last || last.action !== "brand" || !last.res || !last.key) return;
+      try {
+        fetch("https://" + last.res + "/rt:painted", {
+          method: "POST",
+          headers: { "Content-Type": "application/json; charset=UTF-8" },
+          body: JSON.stringify({ key: last.key }),
+        }).catch(function () {});
+      } catch (e) {}
+    }
+
     function sizeCanvas(w, h) {
       w = Math.max(1, Math.round(w || 1024));
       h = Math.max(1, Math.round(h || 1024));
@@ -88,6 +103,7 @@
         }
         ctx.drawImage(img, sx, sy, sw, sh, 0, 0, DW, DH);
       });
+      notifyPainted(); // the image is on the surface now — let Lua bind to it
     }
 
     function drawCalibration(d) {

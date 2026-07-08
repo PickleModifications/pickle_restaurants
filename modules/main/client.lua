@@ -213,6 +213,10 @@ local function ApplySync(payload)
         SetupBlip(r)
         SetupCounter(r)
     end
+    -- Re-assert brand render-target bindings now that brand_images may have changed,
+    -- so a brand edit takes effect after re-streaming the item (no resource restart).
+    -- RefreshBrands is defined in modules/rendertarget/client.lua (same client).
+    if RefreshBrands then RefreshBrands() end
 end
 
 RegisterNetEvent("pickle_restaurants:sync", ApplySync)

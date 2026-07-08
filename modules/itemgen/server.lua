@@ -53,6 +53,7 @@ local KNOWN = {
     frosting             = { label = "Frosting",             weight = 100 },
     sprinkles            = { label = "Sprinkles",            weight = 40  },
     frosted_doughnut     = { label = "Frosted Doughnut",     weight = 160, hunger = 130000 },
+    sprinkled_doughnut   = { label = "Sprinkled Doughnut",   weight = 160, hunger = 135000 },
     decorated_cake       = { label = "Decorated Cake",       weight = 420, hunger = 220000 },
     empty_cup            = { label = "Empty Cup",            weight = 100 },
     soda                 = { label = "Classic Cola",         weight = 300, thirst = 200000 },
@@ -67,9 +68,33 @@ local KNOWN = {
     cheeseburger         = { label = "Cheeseburger",         weight = 380, hunger = 280000 },
     chicken_sandwich     = { label = "Chicken Sandwich",     weight = 350, hunger = 250000 },
     meal                 = { label = "Meal",                 weight = 800, hunger = 400000 },
+    drink                = { label = "Restaurant Drink",     weight = 300, thirst = 200000 },
 }
 
 local DEFAULT_WEIGHT = 200
+
+-- ─── tray-only cook outputs (never real inventory items) ──────────────────────
+-- A few cook outputs are intermediate build components, not standalone food: a
+-- cooked patty only exists to be assembled into a burger/sandwich, so it lives
+-- purely in the per-player "Cooked Items" tray and is deliberately NOT exported
+-- as an inventory item. Their RAW inputs (raw_beef_patty, raw_chicken_patty) stay
+-- real items — you carry those to the grill. (trayToInventory already refuses to
+-- move an un-installed item, so these can never leave the tray.)
+local TRAY_ONLY = {
+    cooked_beef_patty    = true, burnt_beef_patty    = true,
+    cooked_chicken_patty = true, burnt_chicken_patty = true,
+}
+
+-- ─── retired items kept for a grace release ───────────────────────────────────
+-- Doughnut variants collapsed into the single `cooked_doughnut` item (frosting/
+-- sprinkles are metadata now), so nothing references these two outputs anymore.
+-- `raw_pizza` followed: an assembled-but-uncooked INTERMEDIATE (an assembly output
+-- that's some recipe's input) is tray-only now — it lives in the kitchen with its
+-- build metadata until it's baked; the cooked output is the real item.
+-- Keep exporting their definitions for one release so ox_inventory doesn't PURGE
+-- any legacy stacks players still hold. Drop this set (and their KNOWN rows) once
+-- the grace window has passed.
+local RETAIN = { "frosted_doughnut", "sprinkled_doughnut", "raw_pizza" }
 
 -- ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -81,15 +106,29 @@ end
 -- Build a de-duplicated, sorted list of every item the system references.
 local function collectItems()
     local set = {}
-    local function add(n) if n and n ~= "" then set[n] = true end end
+    local function add(n) if n and n ~= "" and not TRAY_ONLY[n] then set[n] = true end end
+    local assembled = {}
+    for _, a in ipairs(GetSetting("assembly", {})) do assembled[a.output] = true end
 
     for _, r in ipairs(RecipeCache) do
-        add(r.input_item); add(r.output_cooked_item); add(r.output_burnt_item)
+        -- an ASSEMBLED cook input (raw_pizza) is tray-only, never an item — you
+        -- build it at prep and bake it; only true raw inputs are carried as items
+        if not assembled[r.input_item] then add(r.input_item) end
+        add(r.output_cooked_item); add(r.output_burnt_item)
     end
+    -- Drinks are ONE generic item (`drink_item`, "Restaurant Drink") — the flavor
+    -- rides as metadata, so per-flavor `output` keys aren't items anymore. Only the
+    -- cup (input) and the generic item export. GRACE: keep exporting the flavor
+    -- outputs one release so legacy stacks players still hold aren't purged — drop
+    -- the `add(d.output)` (and their KNOWN rows) once the window has passed.
     for _, d in ipairs(GetSetting("drinks", {})) do add(d.input); add(d.output) end
+    add(GetSetting("drink_item", "drink"))
     -- (no lid item: the cup lid is kitchen equipment — cups come with lids)
     for _, a in ipairs(GetSetting("assembly", {})) do
-        add(a.output)
+        -- an assembled-but-uncooked INTERMEDIATE (raw_pizza: an assembly output that
+        -- is some recipe's input) is never an item — it stays in the cooked-items
+        -- tray, metadata intact, until it's cooked into the real output item
+        if not RecipeByInput[a.output] then add(a.output) end
         for _, c in ipairs(a.components or {}) do add(c) end
     end
     -- finish tools (frosting…) + their targets/outputs
@@ -104,6 +143,9 @@ local function collectItems()
     for _, m in ipairs(menu) do add(m.item) end
     -- the serving-tray meal item (kitchen prep) isn't a recipe/assembly output
     add(GetSetting("meal_item", "meal"))
+    -- retired doughnut outputs: no longer referenced, exported one more release so
+    -- players' existing stacks aren't purged (see RETAIN above)
+    for _, n in ipairs(RETAIN) do add(n) end
 
     local list = {}
     for name in pairs(set) do
