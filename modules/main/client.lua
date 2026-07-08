@@ -144,16 +144,13 @@ local function SetupCounter(restaurant)
         interactRadius = 2.0,
         title          = restaurant.label,
         options        = {
-            { label = _L("main_order_food"),     icon = "fa-solid fa-burger" },
             { label = _L("main_staff_register"), icon = "fa-solid fa-cash-register" },
             { label = _L("main_management"),     icon = "fa-solid fa-users-gear" },
         },
     }, function(selection)
         if selection == 1 then
-            OpenOrderMenu(restaurant.id)
-        elseif selection == 2 then
             OpenRegister(restaurant.id)
-        elseif selection == 3 then
+        elseif selection == 2 then
             OpenManagement(restaurant.id)
         end
     end)

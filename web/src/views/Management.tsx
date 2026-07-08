@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { fetchNui } from "@/lib/nui";
 import Panel from "@/components/Panel";
 import { Button } from "@/components/ui/button";
@@ -6,12 +6,25 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Field, TextField, NumberField } from "@/components/form";
-import ItemPicker, { type Item } from "@/components/ItemPicker";
+import { Field, TextField, NumberField, Toggle } from "@/components/form";
+import { type Item } from "@/components/ItemPicker";
 import Branding from "@/components/Branding";
-import { money } from "@/lib/utils";
+import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { UserPlus, Trash2, Plus, MapPin, Banknote, TriangleAlert, Armchair } from "lucide-react";
+import { UserPlus, Trash2, Plus, MapPin, Banknote, Armchair, ImageOff } from "lucide-react";
+
+// Inventory thumbnail from a direct nui:// url the server resolved.
+function Thumb({ src, className }: { src?: string; className?: string }) {
+  const [broken, setBroken] = useState(false);
+  if (!src || broken) {
+    return (
+      <div className={cn("flex items-center justify-center rounded bg-muted/60 text-muted-foreground", className)}>
+        <ImageOff className="h-1/2 w-1/2" />
+      </div>
+    );
+  }
+  return <img src={src} onError={() => setBroken(true)} className={cn("rounded bg-muted/40 object-contain", className)} />;
+}
 
 export default function Management({ data, onClose }: { data: any; onClose: () => void }) {
   const id = data?.restaurantId;
@@ -37,7 +50,7 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         )}
         {perms.manage_menu && (
           <TabsContent value="menu" className="min-h-0 flex-1 overflow-y-auto pr-1">
-            <Menu id={id} menu={data?.menu || []} items={items} />
+            <Menu id={id} priceList={data?.priceList || []} stale={data?.stale || []} />
           </TabsContent>
         )}
         {perms.view_finances && (
@@ -47,7 +60,7 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         )}
         {perms.manage_props && (
           <TabsContent value="stations" className="min-h-0 flex-1 overflow-y-auto pr-1">
-            <Stations id={id} props={data?.props || []} stock={data?.stock || []} />
+            <Stations id={id} props={data?.props || []} />
           </TabsContent>
         )}
         {perms.manage_props && (
@@ -129,50 +142,75 @@ function Employees({ id, roles, employees, nearby }: any) {
   );
 }
 
-function Menu({ id, menu, items }: { id: number; menu: any[]; items: Item[] }) {
-  const blank = { item: "", label: "", price: 0, category: "food", enabled: true };
-  const [form, setForm] = useState<any>(blank);
-  const set = (k: string, v: any) => setForm((f: any) => ({ ...f, [k]: v }));
-  const known = (name: string) => !name || items.some((i) => i.name === name);
+const KIND_LABEL: Record<string, string> = {
+  recipe: "register.kind_recipe",
+  assembly: "register.kind_assembly",
+  drink: "register.kind_drink",
+  finish: "register.kind_finish",
+};
+
+// The POS price list: one row per sellable the restaurant can access. A price of
+// 0 or a disabled toggle means the item is NOT orderable at the register. Edits
+// auto-save (debounced per row) — there are no Save buttons anywhere.
+function Menu({ id, priceList, stale }: { id: number; priceList: any[]; stale: any[] }) {
   return (
     <div className="space-y-3">
-      <div className="rounded-lg border border-border p-3">
-        <div className="grid grid-cols-5 items-end gap-2">
-          <Field label={_L("mgmt.item")} className="col-span-2">
-            <ItemPicker items={items} value={form.item} onChange={(v) => set("item", v)} />
-          </Field>
-          <TextField label={_L("mgmt.label")} value={form.label} onChange={(v) => set("label", v)} />
-          <NumberField label={_L("mgmt.price")} value={form.price} min={0} onChange={(v) => set("price", v)} />
-          <Button onClick={() => { if (form.item) { fetchNui("management:saveMenuItem", { id, ...form, label: form.label || form.item, enabled: true }); setForm(blank); } }}>
-            <Plus className="h-4 w-4" /> {_L("mgmt.add")}
-          </Button>
-        </div>
-        <p className="mt-2 text-[11px] text-muted-foreground">{_L("mgmt.menu_hint")}</p>
-      </div>
+      <p className="text-[11px] text-muted-foreground">{_L("mgmt.price_list_hint")}</p>
+      {priceList.length === 0 && <div className="py-4 text-center text-sm text-muted-foreground">{_L("mgmt.no_sellables")}</div>}
+      {priceList.map((e: any) => <PriceRow key={e.key} id={id} entry={e} />)}
 
-      {menu.map((m: any) => (
-        <Card key={m.item}>
-          <CardContent className="flex items-center justify-between pt-4 text-sm">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="truncate font-medium">{m.label}</span>
-                {!known(m.item) && <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("mgmt.unknown_item")}</Badge>}
-              </div>
-              <span className="text-xs text-muted-foreground">{m.item} · {money(m.price)} · {m.category}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button size="sm" variant="outline" onClick={() => fetchNui("management:saveMenuItem", { id, ...m, enabled: m.enabled ? 0 : 1 })}>
-                {m.enabled ? _L("mgmt.disable") : _L("mgmt.enable")}
-              </Button>
-              <Button size="sm" variant="destructive" onClick={() => fetchNui("management:deleteMenuItem", { id, item: m.item })}>
+      {stale.length > 0 && (
+        <div className="mt-4 rounded-lg border border-amber-500/40 p-3">
+          <h3 className="mb-2 text-sm font-semibold">{_L("mgmt.price_stale")}</h3>
+          {stale.map((s: any) => (
+            <div key={s.key} className="flex items-center justify-between py-1 text-sm">
+              <span className="text-muted-foreground">{s.label} · {money(s.price)}</span>
+              <Button size="sm" variant="destructive" onClick={() => fetchNui("management:deleteMenuItem", { id, key: s.key })}>
                 <Trash2 className="h-4 w-4" />
               </Button>
             </div>
-          </CardContent>
-        </Card>
-      ))}
-      {menu.length === 0 && <div className="py-4 text-center text-sm text-muted-foreground">{_L("mgmt.no_menu_items")}</div>}
+          ))}
+        </div>
+      )}
     </div>
+  );
+}
+
+function PriceRow({ id, entry }: { id: number; entry: any }) {
+  const [price, setPrice] = useState<number>(entry.price || 0);
+  const [enabled, setEnabled] = useState<boolean>(!!entry.enabled);
+
+  // Debounced auto-save on any price/toggle change (no Save button). Skips the
+  // initial mount so opening the tab doesn't write every row.
+  useEffect(() => {
+    if (price === (entry.price || 0) && enabled === !!entry.enabled) return;
+    const t = setTimeout(() => {
+      fetchNui("management:saveMenuItem", { id, key: entry.key, price: Math.max(0, Math.floor(price || 0)), enabled });
+    }, 500);
+    return () => clearTimeout(t);
+  }, [price, enabled]);
+
+  const orderable = enabled && price > 0;
+  return (
+    <Card>
+      <CardContent className="flex items-center gap-3 pt-4 text-sm">
+        <Thumb src={entry.image} className="h-10 w-10 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate font-medium">{entry.label}</span>
+            <Badge variant="secondary">{_L(KIND_LABEL[entry.kind] || "register.kind_recipe")}</Badge>
+            {!orderable && <span className="text-[11px] text-muted-foreground">{_L("mgmt.not_orderable")}</span>}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-3">
+          <div className="flex items-center gap-1">
+            <span className="text-muted-foreground">$</span>
+            <Input type="number" min={0} value={price} onChange={(e) => setPrice(Number(e.target.value))} className="h-8 w-20" />
+          </div>
+          <Toggle checked={enabled} onChange={setEnabled} />
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -209,8 +247,13 @@ function Finances({ id, balance, ledger, canManage }: any) {
   );
 }
 
-function Stations({ id, props, stock }: any) {
-  const STATIONS = ["soda_machine", "fryer", "stovetop", "kitchen_prep"];
+function Stations({ id, props }: any) {
+  const STATIONS = [
+    { key: "soda_machine", label: _L("admin.station_soda_machine") },
+    { key: "fryer", label: _L("admin.station_fryer") },
+    { key: "stovetop", label: _L("admin.station_stovetop") },
+    { key: "kitchen_prep", label: _L("admin.station_kitchen_prep") },
+  ];
   const seats = (props as any[]).filter((p) => p.prop_type === "seat");
   const stationProps = (props as any[]).filter((p) => p.prop_type !== "seat");
   return (
@@ -218,8 +261,8 @@ function Stations({ id, props, stock }: any) {
       <Card>
         <CardContent className="flex flex-wrap items-center gap-2 pt-4">
           {STATIONS.map((s) => (
-            <Button key={s} variant="outline" size="sm" onClick={() => fetchNui("management:placeProp", { id, prop_type: s })}>
-              <MapPin className="h-3.5 w-3.5" /> {_L("mgmt.place_station", s.replace("_", " "))}
+            <Button key={s.key} variant="outline" size="sm" onClick={() => fetchNui("management:placeProp", { id, prop_type: s.key })}>
+              <MapPin className="h-3.5 w-3.5" /> {_L("mgmt.place_station", s.label)}
             </Button>
           ))}
           <Button variant="outline" size="sm" onClick={() => fetchNui("management:setCounter", { id })}>
@@ -252,34 +295,20 @@ function Stations({ id, props, stock }: any) {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-2 gap-3">
-        <Card>
-          <CardContent className="pt-4">
-            <h3 className="mb-2 text-sm font-semibold">{_L("mgmt.stations_heading")}</h3>
-            {stationProps.map((p: any) => (
-              <div key={p.id} className="flex items-center justify-between py-1 text-sm">
-                <span className="capitalize">{p.prop_type.replace("_", " ")}</span>
-                <Button size="sm" variant="destructive" onClick={() => fetchNui("management:removeProp", { id, propId: p.id })}>
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
-            ))}
-            {stationProps.length === 0 && <div className="text-xs text-muted-foreground">{_L("mgmt.no_stations")}</div>}
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-4">
-            <h3 className="mb-2 text-sm font-semibold">{_L("mgmt.counter_stock")}</h3>
-            {stock.map((s: any) => (
-              <div key={s.item} className="flex items-center justify-between py-1 text-sm">
-                <span>{s.label}</span>
-                <Badge variant="secondary">{s.count}</Badge>
-              </div>
-            ))}
-            {stock.length === 0 && <div className="text-xs text-muted-foreground">{_L("mgmt.no_stock")}</div>}
-          </CardContent>
-        </Card>
-      </div>
+      <Card>
+        <CardContent className="pt-4">
+          <h3 className="mb-2 text-sm font-semibold">{_L("mgmt.stations_heading")}</h3>
+          {stationProps.map((p: any) => (
+            <div key={p.id} className="flex items-center justify-between py-1 text-sm">
+              <span className="capitalize">{p.prop_type.replace("_", " ")}</span>
+              <Button size="sm" variant="destructive" onClick={() => fetchNui("management:removeProp", { id, propId: p.id })}>
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
+          ))}
+          {stationProps.length === 0 && <div className="text-xs text-muted-foreground">{_L("mgmt.no_stations")}</div>}
+        </CardContent>
+      </Card>
     </div>
   );
 }

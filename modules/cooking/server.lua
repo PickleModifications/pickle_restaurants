@@ -34,22 +34,25 @@ local SODA_ICE_SLOT = 4
 -- positions are STABLE: a flavor whose item isn't installed leaves its tap dark
 -- instead of every flavor sliding down a slot. The client mirrors this via the
 -- `tap` index BuildSyncPayload stamps on each synced drink.
-local function flavorForSlot(slot)
+local function flavorForSlot(slot, rid)
     if slot == SODA_ICE_SLOT then return nil end
     local idx = (slot < SODA_ICE_SLOT) and slot or (slot - 1)
     local d = GetSetting("drinks", {})[idx]
     -- only the cup (input) is a real item — `output` is the flavor KEY (every
     -- poured drink collects as the one `drink_item` item, flavor in metadata)
-    if d and ItemExists(d.input) then return d end
+    -- With `rid`, a flavor whose group this restaurant doesn't carry leaves its
+    -- tap dark, exactly like an uninstalled cup item.
+    if d and ItemExists(d.input) and (rid == nil or RestaurantHasAccess(rid, d.group)) then return d end
 end
 
 -- The valid drinks that actually hold a tap (first six config entries only).
-local function sodaFlavors()
+-- With `rid`, group-inaccessible flavors are skipped (their taps stay dark).
+local function sodaFlavors(rid)
     local out = {}
     local list = GetSetting("drinks", {})
     for i = 1, math.min(#list, SODA_SLOTS - 1) do
         local d = list[i]
-        if ItemExists(d.input) then out[#out + 1] = d end
+        if ItemExists(d.input) and (rid == nil or RestaurantHasAccess(rid, d.group)) then out[#out + 1] = d end
     end
     return out
 end
@@ -915,7 +918,9 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
             -- Recipes that reference a missing item are hidden until fixed. Inputs
             -- that are themselves an assembled product (an uncooked pizza) aren't
             -- raw ingredients — they file under the "Uncooked Items" tab instead.
-            if recipe.station == station and IsRecipeValid(recipe) and not findAssembly(recipe.input_item) then
+            -- A recipe whose group this restaurant doesn't carry is hidden too.
+            if recipe.station == station and IsRecipeValid(recipe) and not findAssembly(recipe.input_item)
+                and RestaurantHasAccess(prop.restaurant_id, recipe.group) then
                 local count = Inventory.GetItemCount(src, recipe.input_item)
                 if count and count > 0 then
                     out[#out + 1] = { kind = "cook", item = recipe.input_item, label = GetItemLabel(recipe.input_item),
@@ -936,7 +941,7 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         -- ONE cup card per distinct cup item across the taps (the default flavors
         -- all share one cup) — the flavor is picked at the tap, not on the bar.
         local seen = {}
-        for _, drink in ipairs(sodaFlavors()) do
+        for _, drink in ipairs(sodaFlavors(prop.restaurant_id)) do
             if not seen[drink.input] then
                 seen[drink.input] = true
                 local count = Inventory.GetItemCount(src, drink.input) or 0
@@ -972,7 +977,7 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         -- per-target validity is enforced while rubbing and again at apply time.
         local finishTools = {}
         for _, f in ipairs(GetSetting("finishes", {})) do
-            if f.tool and ItemExists(f.tool) then
+            if f.tool and ItemExists(f.tool) and RestaurantHasAccess(prop.restaurant_id, f.group) then
                 finishTools[f.tool] = true
                 local count = Inventory.GetItemCount(src, f.tool) or 0
                 if count > 0 then
@@ -1023,7 +1028,9 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
             out[#out + 1] = entry
         end
         for _, asm in ipairs(GetSetting("assembly", {})) do
-            for _, comp in ipairs(asm.components or {}) do addComp(comp) end
+            if RestaurantHasAccess(prop.restaurant_id, asm.group) then
+                for _, comp in ipairs(asm.components or {}) do addComp(comp) end
+            end
         end
         for comp in pairs(GetSetting("prep_models", {})) do addComp(comp) end
     end
@@ -1057,6 +1064,9 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
     if (station == "fryer" or station == "stovetop") and d.kind == "cook" then
         local recipe = RecipeByInput[d.item]
         if not recipe or recipe.station ~= station then return { ok = false, error = _L("cook_cant_cook_here") } end
+        -- group access is re-checked here — the bar never offers an inaccessible
+        -- recipe, but the NUI is untrusted
+        if not RestaurantHasAccess(rid, recipe.group) then return { ok = false, error = _L("cook_cant_cook_here") } end
         local method = RecipeMethod(recipe)
 
         -- Raw cook-inputs can come from the player's inventory OR from the "Uncooked
@@ -1183,7 +1193,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         -- pours yet — the player clicks the tap (middle nozzle = ice) once seated.
         local slot = tonumber(d.slot)
         if not slot or slot < 1 or slot > SODA_SLOTS
-            or (slot ~= SODA_ICE_SLOT and not flavorForSlot(slot)) then
+            or (slot ~= SODA_ICE_SLOT and not flavorForSlot(slot, rid)) then
             return { ok = false, error = _L("cook_cup_under_tap") }
         end
         if not slotFree(prop.id, "soda", nil, slot) then return { ok = false, error = _L("cook_spot_taken") } end
@@ -1195,7 +1205,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
             end
         end
         local cup, model
-        for _, dd in ipairs(sodaFlavors()) do
+        for _, dd in ipairs(sodaFlavors(rid)) do
             if dd.input == d.item then cup, model = dd.input, dd.model break end
         end
         if not cup then return { ok = false, error = _L("cook_unknown_cup") } end
@@ -1212,6 +1222,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
     elseif station == "kitchen_prep" and d.kind == "assembly" then
         local asm = findAssembly(d.item)
         if not asm then return { ok = false, error = _L("cook_unknown_recipe") } end
+        if not RestaurantHasAccess(rid, asm.group) then return { ok = false, error = _L("cook_unknown_recipe") } end
         for _, comp in ipairs(asm.components or {}) do
             if (Inventory.GetItemCount(src, comp) or 0) < 1 then return { ok = false, error = _L("cook_missing_components") } end
         end
@@ -1301,7 +1312,8 @@ lib.callback.register("pickle_restaurants:cooking:sodaTap", function(src, d)
             broadcastSoda(cur)
         end)
     else
-        local drink = flavorForSlot(slot)
+        -- rid-gated: an inaccessible flavor's tap is dark for this restaurant
+        local drink = flavorForSlot(slot, it.rid)
         if not drink then return { ok = false, error = _L("cook_nothing_on_tap") } end
         if it.state ~= "empty" then return { ok = false, error = _L("cook_cup_full") } end
         if drink.input ~= it.input then return { ok = false, error = _L("cook_wrong_cup") } end
@@ -1402,7 +1414,7 @@ lib.callback.register("pickle_restaurants:cooking:reslot", function(src, d)
     -- just re-seat it, as long as nothing is mid-pour.
     if it.method == "soda" then
         local slot = tonumber(d.slot)
-        if not slot or (slot ~= SODA_ICE_SLOT and not flavorForSlot(slot)) then
+        if not slot or (slot ~= SODA_ICE_SLOT and not flavorForSlot(slot, it.rid)) then
             return { ok = false, error = _L("cook_pick_tap") }
         end
         if it.slot == slot then return { ok = false } end -- already there
@@ -1913,6 +1925,7 @@ lib.callback.register("pickle_restaurants:cooking:getRecipes", function(src, d)
     local out = {}
     for _, asm in ipairs(GetSetting("assembly", {})) do
         local valid = ItemExists(asm.output)
+            and RestaurantHasAccess(prop.restaurant_id, asm.group) -- group-gated per restaurant
         local comps = {}
         for _, c in ipairs(asm.components or {}) do
             if not ItemExists(c) then valid = false end
@@ -1955,12 +1968,13 @@ end
 -- The CLOSEST product a stack forms: among every recipe whose required components are
 -- all present (extras = variations), the most specific one (most components). nil if
 -- the stack forms no product at all.
-local function bestAssemblyForLayers(layers)
+local function bestAssemblyForLayers(layers, rid)
     if #layers == 0 then return nil end
     local provides = buildProvides(layers)
     local best, bestScore
     for _, asm in ipairs(GetSetting("assembly", {})) do
-        if stackSatisfies(provides, asm) then
+        -- a recipe whose group this restaurant doesn't carry can't be made here
+        if stackSatisfies(provides, asm) and (rid == nil or RestaurantHasAccess(rid, asm.group)) then
             local score = #(asm.components or {})
             if not bestScore or score > bestScore then best, bestScore = asm, score end
         end
@@ -2121,6 +2135,7 @@ lib.callback.register("pickle_restaurants:cooking:prepMakeStack", function(src, 
     if not HasPerm(b.rid, src, "cook") then return { ok = false } end
     local asm = findAssembly(d and d.output)
     if not asm then return { ok = false, error = _L("cook_unknown_recipe") } end
+    if not RestaurantHasAccess(b.rid, asm.group) then return { ok = false, error = _L("cook_unknown_recipe") } end
     local layers = orderedLayers(b, d.ids)
     if #layers == 0 then return { ok = false, error = _L("cook_nothing_to_build") } end
     if not stackSatisfies(buildProvides(layers), asm) then return { ok = false, error = _L("cook_missing_components") } end
@@ -2149,6 +2164,7 @@ lib.callback.register("pickle_restaurants:cooking:applyFinish", function(src, d)
     -- Only configured (cooked) targets pass; raw/burnt items never match a target.
     local cfg, target, flavor = findFinish(d and d.tool, layer.item, d and d.flavor)
     if not cfg or not target or not flavor then return { ok = false, error = _L("cook_cant_apply") } end
+    if not RestaurantHasAccess(prop.restaurant_id, cfg.group) then return { ok = false, error = _L("cook_cant_apply") } end
     if not ItemExists(cfg.tool) then return { ok = false } end
     if (Inventory.GetItemCount(src, cfg.tool) or 0) < 1 then
         return { ok = false, error = _L("cook_no_tool_left", GetItemLabel(cfg.tool)) }
@@ -2196,7 +2212,7 @@ lib.callback.register("pickle_restaurants:cooking:prepSaveStack", function(src, 
     if not HasPerm(b.rid, src, "cook") then return { ok = false } end
     local layers = orderedLayers(b, d and d.ids)
     if #layers == 0 then return { ok = false } end
-    local asm = bestAssemblyForLayers(layers)
+    local asm = bestAssemblyForLayers(layers, b.rid)
     if not asm then return { ok = false, noMatch = true } end
     return makeStack(src, b, GetIdentifier(src), d.ids, asm)
 end)

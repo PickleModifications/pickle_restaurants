@@ -15,6 +15,8 @@ EmployeeCache   = {}    -- [restaurantId][identifier] = employee row
 StockCache      = {}    -- [restaurantId][item] = count
 TrayCache       = {}    -- [restaurantId][identifier][item.."|"..cheese] = { item, cheese, count, metas } (metas: one build stack — or false — per counted instance; TraySig(meta) addresses a variation)
 SettingsCache   = {}    -- [key]           = decoded value
+OrderCache      = {}    -- [restaurantId][orderId] = open POS ticket row (lines decoded)
+NextTicket      = {}    -- [restaurantId]  = next kitchen ticket number
 
 PERMISSIONS = { "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance" }
 ALL_PERMS   = {}
@@ -67,6 +69,11 @@ local DEFAULT_SETTINGS = {
     -- holding the drinks[].output key), exactly like the meal item. The per-flavor
     -- `output` keys below stop being items; itemgen exports only this one.
     drink_item      = "drink",
+    -- The inventory item a paying customer receives when a POS order is rung up —
+    -- its slot metadata carries the order id/ticket so completion can verify the
+    -- holder. Like meal_item it's what gets GENERATED (itemgen exports it); if the
+    -- item isn't installed the POS still works, just without a physical receipt.
+    receipt_item    = "receipt",
     blip            = { sprite = 93, color = 1, scale = 0.8, enabled = true },
     default_roles   = {
         ["0"] = { label = "Trainee", commission = 5,  permissions = { cook = true } },
@@ -75,13 +82,6 @@ local DEFAULT_SETTINGS = {
             cook = true, sell = true, manage_menu = true, manage_props = true,
             manage_employees = true, view_finances = true,
         } },
-    },
-    npc = {
-        enabled  = true,
-        max      = 2,
-        interval = 45000,
-        patience = 60000,
-        models   = { "a_m_y_business_01", "a_f_y_business_02", "a_m_m_business_01", "a_f_y_hipster_02", "a_m_y_skater_01" },
     },
     -- Soda machine taps: dragged cup item -> filled drink item. The first SIX
     -- valid entries appear left-to-right as the fountain's flavor taps (the
@@ -414,6 +414,27 @@ local function CreateTables()
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
 
+    -- POS kitchen tickets. `lines` snapshots {item, variant, label, price, qty, kind}
+    -- at order time so later price/menu edits never change an open ticket. `ticket`
+    -- is the per-restaurant kitchen number shown to staff & printed on the receipt.
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `pickle_restaurant_orders` (
+            `id`                  INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `restaurant_id`       INT UNSIGNED NOT NULL,
+            `ticket`              INT UNSIGNED NOT NULL DEFAULT 1,
+            `customer_identifier` VARCHAR(80)  NOT NULL,
+            `customer_name`       VARCHAR(100) DEFAULT NULL,
+            `cashier_identifier`  VARCHAR(80)  DEFAULT NULL,
+            `lines`               JSON         NOT NULL,
+            `total`               INT          NOT NULL DEFAULT 0,
+            `status`              VARCHAR(12)  NOT NULL DEFAULT 'open',
+            `created_at`          TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `closed_at`           TIMESTAMP    NULL DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `idx_rest_status` (`restaurant_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
+
     -- Migrations for tables that already exist from an earlier version. When the
     -- dual_sided column is first added, turn it on for the default dual recipes
     -- (e.g. beef patties) so existing servers get the feature without an admin
@@ -498,6 +519,37 @@ local function CreateTables()
     -- items get a fresh window on upgrade instead of an instant spoil (0 = never).
     -- Idempotent: new AddTray rows always store a non-zero cooked_at.
     MySQL.query.await("UPDATE `pickle_restaurant_cooked_items` SET `cooked_at` = UNIX_TIMESTAMP() WHERE `cooked_at` = 0")
+
+    -- Recipe access groups. A recipe's optional `group` ("bakery", "pizza"…) limits
+    -- it to restaurants that carry that group; NULL/'' = every restaurant. `group`
+    -- is a MySQL reserved word — always backtick it in explicit SQL (SELECT * picks
+    -- it up untouched).
+    local gcol = MySQL.query.await("SHOW COLUMNS FROM `pickle_restaurant_recipes` LIKE 'group'")
+    if not gcol or #gcol == 0 then
+        MySQL.query.await(
+            "ALTER TABLE `pickle_restaurant_recipes` ADD COLUMN `group` VARCHAR(40) DEFAULT NULL")
+    end
+
+    -- The restaurant side of recipe access: a JSON array of the group names this
+    -- restaurant carries. NULL/empty = only ungrouped content is available.
+    local rgcol = MySQL.query.await("SHOW COLUMNS FROM `pickle_restaurants` LIKE 'groups'")
+    if not rgcol or #rgcol == 0 then
+        MySQL.query.await(
+            "ALTER TABLE `pickle_restaurants` ADD COLUMN `groups` JSON DEFAULT NULL")
+    end
+
+    -- POS price list variants: drinks are ONE item (`drink_item`) with the flavor as
+    -- metadata, so per-flavor pricing needs a `variant` dimension on the menu key
+    -- (item = the drink item, variant = the drinks[].output flavor key; '' for
+    -- everything else). NOT NULL DEFAULT '' — never NULL — so the widened unique key
+    -- upserts reliably (MySQL treats NULLs in unique keys as distinct).
+    local vcol = MySQL.query.await("SHOW COLUMNS FROM `pickle_restaurant_menu` LIKE 'variant'")
+    if not vcol or #vcol == 0 then
+        MySQL.query.await(
+            "ALTER TABLE `pickle_restaurant_menu` ADD COLUMN `variant` VARCHAR(60) NOT NULL DEFAULT ''")
+        MySQL.query.await(
+            "ALTER TABLE `pickle_restaurant_menu` DROP INDEX `uniq_item`, ADD UNIQUE KEY `uniq_item` (`restaurant_id`, `item`, `variant`)")
+    end
 end
 
 -- ─── loaders ─────────────────────────────────────────────────────────────────
@@ -789,6 +841,24 @@ local function LoadStock()
     end
 end
 
+local function LoadOrders()
+    OrderCache, NextTicket = {}, {}
+    -- Only open tickets live in the cache; completed/cancelled rows stay in the DB
+    -- as history. Ticket numbering continues from the highest ever issued so a
+    -- restart never reuses a number a customer's receipt still shows.
+    local rows = MySQL.query.await("SELECT * FROM pickle_restaurant_orders WHERE status = 'open'") or {}
+    for _, row in ipairs(rows) do
+        row.lines = dec(row.lines, {})
+        OrderCache[row.restaurant_id] = OrderCache[row.restaurant_id] or {}
+        OrderCache[row.restaurant_id][row.id] = row
+    end
+    local maxes = MySQL.query.await(
+        "SELECT restaurant_id, MAX(ticket) AS t FROM pickle_restaurant_orders GROUP BY restaurant_id") or {}
+    for _, m in ipairs(maxes) do
+        NextTicket[m.restaurant_id] = (tonumber(m.t) or 0) + 1
+    end
+end
+
 -- Cheese state on a cooked item: 0 = none, 1 = applied (unmelted), 2 = melted. Kept
 -- distinct through the tray + DB so a collected burger renders at the melt state it
 -- was in; anything > 0 counts as "has cheese" for recipe matching.
@@ -825,12 +895,47 @@ function LoadRestaurants()
         row.blip     = dec(row.blip, nil)
         row.counter  = dec(row.counter, nil)
         row.roles    = dec(row.roles, nil)
+        row.groups   = dec(row.groups, nil)
         row.metadata = dec(row.metadata, {})
         RestaurantCache[row.id] = row
     end
 end
 
 function GetRestaurant(id) return RestaurantCache[tonumber(id)] end
+
+-- ─── recipe groups ───────────────────────────────────────────────────────────
+-- A recipe / assembly / drink / finish entry may carry an optional `group`
+-- ("bakery", "pizza"…). A restaurant carries a `groups` array; it can only cook
+-- and sell content whose group it carries. No group on the content = available
+-- to EVERY restaurant, so a fresh install behaves exactly as before.
+
+function RestaurantHasAccess(restaurantId, group)
+    if group == nil or group == "" then return true end
+    local r = GetRestaurant(restaurantId)
+    if not r or type(r.groups) ~= "table" then return false end
+    for _, g in ipairs(r.groups) do
+        if g == group then return true end
+    end
+    return false
+end
+
+-- Every distinct group name in use across recipes + the grouped settings lists —
+-- the suggestion pool for the admin UIs (groups exist by being used, not managed).
+function CollectGroups()
+    local seen, out = {}, {}
+    local function add(g)
+        if type(g) == "string" and g ~= "" and not seen[g] then
+            seen[g] = true
+            out[#out + 1] = g
+        end
+    end
+    for _, r in ipairs(RecipeCache) do add(r.group) end
+    for _, a in ipairs(GetSetting("assembly", {})) do add(a.group) end
+    for _, d in ipairs(GetSetting("drinks", {})) do add(d.group) end
+    for _, f in ipairs(GetSetting("finishes", {})) do add(f.group) end
+    table.sort(out)
+    return out
+end
 
 -- ─── item catalogue / validation ─────────────────────────────────────────────
 -- The framework bridge populates Inventory.Items (name -> { label }). The NUI
@@ -1036,6 +1141,70 @@ function RemoveStock(restaurantId, item, count)
     MySQL.update("UPDATE pickle_restaurant_stock SET count = count - ? WHERE restaurant_id = ? AND item = ?",
         { count, restaurantId, item })
     return true
+end
+
+-- ─── POS orders (kitchen tickets) ────────────────────────────────────────────
+-- Write-through mutators over OrderCache, same pattern as stock/tray. Only OPEN
+-- tickets are cached; closing removes the row from the cache but keeps the DB
+-- row as history.
+
+function CreateOrder(restaurantId, order)
+    NextTicket[restaurantId] = NextTicket[restaurantId] or 1
+    order.restaurant_id = restaurantId
+    order.ticket = NextTicket[restaurantId]
+    order.status = "open"
+    NextTicket[restaurantId] = order.ticket + 1
+    order.id = MySQL.insert.await([[
+        INSERT INTO pickle_restaurant_orders
+            (restaurant_id, ticket, customer_identifier, customer_name, cashier_identifier, lines, total)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ]], { restaurantId, order.ticket, order.customer_identifier, order.customer_name,
+          order.cashier_identifier, json.encode(order.lines or {}), order.total or 0 })
+    OrderCache[restaurantId] = OrderCache[restaurantId] or {}
+    OrderCache[restaurantId][order.id] = order
+    return order
+end
+
+function CloseOrder(restaurantId, orderId, status)
+    local o = OrderCache[restaurantId] and OrderCache[restaurantId][orderId]
+    if not o then return false end
+    o.status = status
+    MySQL.update("UPDATE pickle_restaurant_orders SET status = ?, closed_at = NOW() WHERE id = ?",
+        { status, orderId })
+    OrderCache[restaurantId][orderId] = nil
+    return true
+end
+
+-- Open tickets for the register NUI, oldest first (kitchen works the queue in order).
+function GetOpenOrders(restaurantId)
+    local list = {}
+    for _, o in pairs(OrderCache[restaurantId] or {}) do
+        list[#list + 1] = {
+            orderId  = o.id,
+            ticket   = o.ticket,
+            customer = o.customer_name,
+            lines    = o.lines,
+            total    = o.total,
+            status   = o.status,
+        }
+    end
+    table.sort(list, function(a, b) return a.ticket < b.ticket end)
+    return list
+end
+
+-- Players within `radius` of `src`, for pickers (hiring, POS customer select).
+function NearbyPlayers(src, radius)
+    local ped = GetPlayerPed(src)
+    local c = GetEntityCoords(ped)
+    local list = {}
+    for _, p in ipairs(GetPlayers()) do
+        p = tonumber(p)
+        if p ~= src then
+            local pc = GetEntityCoords(GetPlayerPed(p))
+            if #(c - pc) < (radius or 10.0) then list[#list + 1] = { id = p, name = GetPlayerCharacterName(p) } end
+        end
+    end
+    return list
 end
 
 -- ─── cooked-items tray (per-player, per-restaurant) ──────────────────────────
@@ -1359,6 +1528,7 @@ CreateThread(function()
         LoadProps()
         LoadEmployees()
         LoadStock()
+        LoadOrders()
         LoadCookedItems()
         RestaurantsReady = true
         debugPrint(("Booted: %d restaurants, %d props, %d recipes."):format(

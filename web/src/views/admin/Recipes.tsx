@@ -3,11 +3,11 @@ import { fetchNui } from "@/lib/nui";
 import { useAutoSave } from "@/lib/autosave";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Field, TextField, NumberField, Select, Toggle } from "@/components/form";
+import { Field, TextField, NumberField, Select, Toggle, GroupField } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { Plus, Trash2, Pencil, X, TriangleAlert, EyeOff, ImageOff, Boxes, Check, Loader2 } from "lucide-react";
+import { Plus, Trash2, Pencil, X, TriangleAlert, EyeOff, ImageOff, Boxes, Check, Loader2, Tags } from "lucide-react";
 
 type Recipe = {
   input_item: string; station: string;
@@ -19,6 +19,7 @@ type Recipe = {
   method?: string; // grill | oven | fry
   container_model?: string; // optional prop the food cooks in (cake tin…), visual only
   expire_seconds?: number | null; // freshness window in the tray; null/blank = global default, 0 = never
+  group?: string | null; // access group ("bakery"…); blank = every restaurant
   valid?: boolean; missing?: string[];
   invalid_models?: string[];
 };
@@ -60,7 +61,7 @@ const METHODS: Record<string, { value: string; label: string }[]> = {
   ],
 };
 
-export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]; items: Item[]; onSaved: () => void }) {
+export default function Recipes({ recipes, items, groups, onSaved }: { recipes: Recipe[]; items: Item[]; groups: string[]; onSaved: () => void }) {
   const [form, setForm] = useState<Recipe | null>(null);
   const editing = !!form;
 
@@ -101,7 +102,7 @@ export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]
             </span>
             <Button size="icon" variant="ghost" onClick={() => setForm(null)}><X className="h-4 w-4" /></Button>
           </div>
-          <RecipeForm form={form!} setForm={setForm} items={items} />
+          <RecipeForm form={form!} setForm={setForm} items={items} groups={groups} />
           <div className="mt-3 flex justify-end">
             <Button size="sm" variant="outline" onClick={() => setForm(null)}>{_L("recipes.done")}</Button>
           </div>
@@ -122,6 +123,9 @@ export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]
                   <div className="flex items-center gap-2">
                     <span className="truncate font-medium">{labelOf(items, r.output_cooked_item || r.input_item)}</span>
                     <Badge variant="secondary">{r.station}</Badge>
+                    {r.group ? (
+                      <Badge variant="outline" className="gap-1"><Tags className="h-3 w-3" /> {r.group}</Badge>
+                    ) : null}
                     {r.valid === false ? (
                       <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("recipes.needs_fixing")}</Badge>
                     ) : null}
@@ -161,7 +165,7 @@ export default function Recipes({ recipes, items, onSaved }: { recipes: Recipe[]
   );
 }
 
-function RecipeForm({ form, setForm, items }: { form: Recipe; setForm: (r: Recipe) => void; items: Item[] }) {
+function RecipeForm({ form, setForm, items, groups }: { form: Recipe; setForm: (r: Recipe) => void; items: Item[]; groups: string[] }) {
   const set = (k: keyof Recipe, v: any) => setForm({ ...form, [k]: v });
   const badModels = new Set(form.invalid_models || []);
 
@@ -216,6 +220,8 @@ function RecipeForm({ form, setForm, items }: { form: Recipe; setForm: (r: Recip
         hint={_L("recipes.expiry_hint")}
         value={form.expire_seconds == null ? "" : String(form.expire_seconds)}
         onChange={(v) => set("expire_seconds", (v === "" ? null : Number(v)) as never)} />
+      <GroupField label={_L("recipes.group")} hint={_L("recipes.group_hint")}
+        value={form.group || ""} groups={groups} onChange={(v) => set("group", v)} />
       {form.station === "stovetop" && (
         <div className="col-span-3">
           <Toggle checked={!!form.dual_sided} onChange={(v) => set("dual_sided", v)}

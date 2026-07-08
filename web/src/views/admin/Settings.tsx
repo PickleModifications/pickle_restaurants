@@ -3,31 +3,30 @@ import { fetchNui } from "@/lib/nui";
 import { useAutoSave, type SaveStatus } from "@/lib/autosave";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Field, TextField, NumberField, Toggle, Select } from "@/components/form";
+import { Field, TextField, NumberField, Toggle, Select, GroupField } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Settings2, Coins, Users, Bot, CupSoda, Sandwich, MapPin, Plus, Trash2, Check, Loader2, TriangleAlert,
+  Settings2, Coins, Users, CupSoda, Sandwich, MapPin, Plus, Trash2, Check, Loader2, TriangleAlert,
 } from "lucide-react";
 
 const PERMISSIONS = [
   "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance",
 ];
 
-type Props = { settings: Record<string, any>; items: Item[]; onSaved: () => void };
+type Props = { settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void };
 
 const GROUPS = [
   { key: "general", label: _L("settings.group_general"), icon: Settings2 },
   { key: "economy", label: _L("settings.group_economy"), icon: Coins },
   { key: "roles", label: _L("settings.group_roles"), icon: Users },
-  { key: "npc", label: _L("settings.group_npc"), icon: Bot },
   { key: "drinks", label: _L("settings.group_drinks"), icon: CupSoda },
   { key: "assembly", label: _L("settings.group_assembly"), icon: Sandwich },
   { key: "blip", label: _L("settings.group_blip"), icon: MapPin },
 ];
 
-export default function Settings({ settings, items, onSaved }: Props) {
+export default function Settings({ settings, items, groups, onSaved }: Props) {
   const [group, setGroup] = useState("general");
 
   return (
@@ -57,9 +56,8 @@ export default function Settings({ settings, items, onSaved }: Props) {
         {group === "general" && <General settings={settings} onSaved={onSaved} />}
         {group === "economy" && <Economy settings={settings} onSaved={onSaved} />}
         {group === "roles" && <Roles settings={settings} onSaved={onSaved} />}
-        {group === "npc" && <Npc settings={settings} onSaved={onSaved} />}
-        {group === "drinks" && <Drinks settings={settings} items={items} onSaved={onSaved} />}
-        {group === "assembly" && <Assembly settings={settings} items={items} onSaved={onSaved} />}
+        {group === "drinks" && <Drinks settings={settings} items={items} groups={groups} onSaved={onSaved} />}
+        {group === "assembly" && <Assembly settings={settings} items={items} groups={groups} onSaved={onSaved} />}
         {group === "blip" && <Blip settings={settings} onSaved={onSaved} />}
       </div>
     </div>
@@ -211,54 +209,6 @@ function Roles({ settings, onSaved }: { settings: any; onSaved: () => void }) {
   );
 }
 
-function Npc({ settings, onSaved }: { settings: any; onSaved: () => void }) {
-  const n = settings.npc ?? {};
-  const [enabled, setEnabled] = useState(n.enabled !== false);
-  const [max, setMax] = useState(Number(n.max ?? 2));
-  const [interval, setInterval] = useState(Number(n.interval ?? 45000));
-  const [patience, setPatience] = useState(Number(n.patience ?? 60000));
-  const [models, setModels] = useState<string[]>(Array.isArray(n.models) ? n.models : []);
-  const [modelInput, setModelInput] = useState("");
-
-  const status = useAutoSave(
-    () => saveSettings({ npc: { enabled, max, interval, patience, models } }).then(onSaved),
-    [enabled, max, interval, patience, models]
-  );
-
-  return (
-    <Section title={_L("settings.npc_title")} description={_L("settings.npc_desc")} status={status}>
-      <Toggle checked={enabled} onChange={setEnabled} label={_L("settings.npc_spawn")} />
-      <div className="grid grid-cols-3 gap-3">
-        <NumberField label={_L("settings.npc_max")} value={max} min={0} onChange={setMax} />
-        <NumberField label={_L("settings.npc_interval")} value={interval} min={0} step={1000} onChange={setInterval} />
-        <NumberField label={_L("settings.npc_patience")} value={patience} min={0} step={1000} onChange={setPatience} />
-      </div>
-      <Field label={_L("settings.npc_models")} hint={_L("settings.npc_models_hint")}>
-        <div className="mb-2 flex flex-wrap gap-1.5">
-          {models.map((m) => (
-            <Badge key={m} variant="secondary" className="gap-1">
-              <span className="font-mono text-[10px]">{m}</span>
-              <button onClick={() => setModels((ms) => ms.filter((x) => x !== m))}><Trash2 className="h-3 w-3" /></button>
-            </Badge>
-          ))}
-          {models.length === 0 && <span className="text-xs text-muted-foreground">{_L("settings.npc_no_models")}</span>}
-        </div>
-        <div className="flex gap-2">
-          <input
-            value={modelInput}
-            onChange={(e) => setModelInput(e.target.value)}
-            placeholder="a_m_y_business_01"
-            className="h-9 flex-1 rounded-md border border-input bg-background/60 px-3 font-mono text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          />
-          <Button size="sm" variant="outline" onClick={() => { if (modelInput.trim()) { setModels((ms) => [...new Set([...ms, modelInput.trim()])]); setModelInput(""); } }}>
-            <Plus className="h-4 w-4" /> {_L("settings.add")}
-          </Button>
-        </div>
-      </Field>
-    </Section>
-  );
-}
-
 function Blip({ settings, onSaved }: { settings: any; onSaved: () => void }) {
   const b = settings.blip ?? {};
   const [enabled, setEnabled] = useState(b.enabled !== false);
@@ -291,7 +241,7 @@ function MissingBadge({ missing }: { missing: string[] }) {
   );
 }
 
-function Drinks({ settings, items, onSaved }: { settings: any; items: Item[]; onSaved: () => void }) {
+function Drinks({ settings, items, groups, onSaved }: { settings: any; items: Item[]; groups: string[]; onSaved: () => void }) {
   const [list, setList] = useState<any[]>(Array.isArray(settings.drinks) ? settings.drinks : []);
   const update = (i: number, patch: any) => setList((l) => l.map((d, idx) => (idx === i ? { ...d, ...patch } : d)));
   const add = () => setList((l) => [...l, { input: "", output: "", label: "", model: "pickle_drink_container_01", fill_ms: 3000 }]);
@@ -324,6 +274,8 @@ function Drinks({ settings, items, onSaved }: { settings: any; items: Item[]; on
                 <TextField label={_L("settings.label")} value={d.label} onChange={(v) => update(i, { label: v })} />
                 <TextField label={_L("settings.prop_model")} value={d.model} onChange={(v) => update(i, { model: v })} />
                 <NumberField label={_L("settings.fill_time")} value={Number(d.fill_ms ?? 3000)} min={0} step={500} onChange={(v) => update(i, { fill_ms: v })} />
+                <GroupField label={_L("settings.group_field")} hint={_L("settings.group_field_hint")}
+                  value={d.group || ""} groups={groups} onChange={(v) => update(i, { group: v })} />
               </div>
             </div>
           );
@@ -334,7 +286,7 @@ function Drinks({ settings, items, onSaved }: { settings: any; items: Item[]; on
   );
 }
 
-function Assembly({ settings, items, onSaved }: { settings: any; items: Item[]; onSaved: () => void }) {
+function Assembly({ settings, items, groups, onSaved }: { settings: any; items: Item[]; groups: string[]; onSaved: () => void }) {
   const [list, setList] = useState<any[]>(Array.isArray(settings.assembly) ? settings.assembly : []);
   const update = (i: number, patch: any) => setList((l) => l.map((a, idx) => (idx === i ? { ...a, ...patch } : a)));
   const add = () => setList((l) => [...l, { output: "", label: "", model: "pickle_bread_bun_01", components: [] }]);
@@ -363,6 +315,8 @@ function Assembly({ settings, items, onSaved }: { settings: any; items: Item[]; 
                 <Field label={_L("settings.result_output")}><ItemPicker items={items} value={a.output} onChange={(v) => update(i, { output: v })} /></Field>
                 <TextField label={_L("settings.label")} value={a.label} onChange={(v) => update(i, { label: v })} />
                 <TextField label={_L("settings.prop_model")} value={a.model} onChange={(v) => update(i, { model: v })} />
+                <GroupField label={_L("settings.group_field")} hint={_L("settings.group_field_hint")}
+                  value={a.group || ""} groups={groups} onChange={(v) => update(i, { group: v })} />
               </div>
               <Field label={_L("settings.components")} className="mt-3">
                 <div className="space-y-2">

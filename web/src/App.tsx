@@ -5,10 +5,10 @@ import InteractText from "@/views/InteractText";
 import Cooking from "@/views/Cooking";
 import Admin from "@/views/Admin";
 import Management from "@/views/Management";
-import Order from "@/views/Order";
 import Register from "@/views/Register";
+import PayConfirm from "@/views/PayConfirm";
 
-type View = "none" | "cooking" | "admin" | "management" | "order" | "register";
+type View = "none" | "cooking" | "admin" | "management" | "register" | "payconfirm";
 
 export default function App() {
   const [view, setView] = useState<View>("none");
@@ -57,8 +57,8 @@ export default function App() {
       {view === "cooking" && <Cooking data={data} />}
       {view === "admin" && <Admin data={data} onClose={close} />}
       {view === "management" && <Management data={data} onClose={close} />}
-      {view === "order" && <Order data={data} onClose={close} />}
       {view === "register" && <Register data={data} onClose={close} />}
+      {view === "payconfirm" && <PayConfirm data={data} />}
     </div>
   );
 }

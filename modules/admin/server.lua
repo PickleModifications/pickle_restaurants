@@ -13,6 +13,7 @@ local function buildAdminData()
         assembly    = AnnotateAssembly(),
         finishes    = AnnotateFinishes(),  -- finish tools (frosting…), flagged too
         items       = BuildItemList(),     -- catalogue for item-pickers
+        groups      = CollectGroups(),     -- every group name in use (UI suggestions)
         players     = {},
     }
     for _, r in pairs(RestaurantCache) do
@@ -29,6 +30,7 @@ local function buildAdminData()
             owner        = r.owner_identifier,
             balance      = r.balance,
             hasCounter   = r.counter ~= nil,
+            groups       = r.groups or {},
             props        = props,
             propCount    = #props,
             brand_image  = r.metadata and r.metadata.brand_image or nil,
@@ -72,6 +74,7 @@ local function reloadRestaurant(id)
     row.blip     = (type(row.blip) == "string") and json.decode(row.blip) or row.blip
     row.counter  = (type(row.counter) == "string") and json.decode(row.counter) or row.counter
     row.roles    = (type(row.roles) == "string") and json.decode(row.roles) or row.roles
+    row.groups   = (type(row.groups) == "string") and json.decode(row.groups) or row.groups
     row.metadata = (type(row.metadata) == "string") and json.decode(row.metadata) or (row.metadata or {})
     RestaurantCache[id] = row
 end
@@ -100,9 +103,11 @@ lib.callback.register("pickle_restaurants:admin:delete", function(src, d)
     MySQL.update.await("DELETE FROM pickle_restaurant_menu WHERE restaurant_id = ?", { id })
     MySQL.update.await("DELETE FROM pickle_restaurant_stock WHERE restaurant_id = ?", { id })
     MySQL.update.await("DELETE FROM pickle_restaurant_ledger WHERE restaurant_id = ?", { id })
+    MySQL.update.await("DELETE FROM pickle_restaurant_orders WHERE restaurant_id = ?", { id })
     RestaurantCache[id] = nil
     EmployeeCache[id] = nil
     StockCache[id] = nil
+    OrderCache[id] = nil
     for _, pid in ipairs(propIds) do PropCache[pid] = nil; TriggerClientEvent("pickle_restaurants:propRemoved", -1, pid) end
     SyncToClient(-1)
     return { ok = true }
@@ -119,6 +124,25 @@ lib.callback.register("pickle_restaurants:admin:setOwner", function(src, d)
     MySQL.update.await("UPDATE pickle_restaurants SET owner_identifier = ? WHERE id = ?", { identifier, id })
     RestaurantCache[id].owner_identifier = identifier
     return { ok = true, owner = identifier }
+end)
+
+-- Recipe groups carried by a restaurant (what it may cook & sell). Groups are
+-- free-form names; content with no group is available to every restaurant.
+lib.callback.register("pickle_restaurants:admin:setGroups", function(src, d)
+    if not IsPlayerAdmin(src) then return { ok = false } end
+    local id = tonumber(d.id); if not GetRestaurant(id) then return { ok = false } end
+    local groups, seen = {}, {}
+    for _, g in ipairs(type(d.groups) == "table" and d.groups or {}) do
+        g = tostring(g):gsub("^%s+", ""):gsub("%s+$", "")
+        if g ~= "" and not seen[g] then
+            seen[g] = true
+            groups[#groups + 1] = g
+        end
+    end
+    MySQL.update.await("UPDATE pickle_restaurants SET `groups` = ? WHERE id = ?",
+        { #groups > 0 and json.encode(groups) or nil, id })
+    RestaurantCache[id].groups = #groups > 0 and groups or nil
+    return { ok = true, groups = groups }
 end)
 
 -- Branding: same per-texture URL + crop config as the boss panel, but admin-gated so
@@ -169,23 +193,26 @@ lib.callback.register("pickle_restaurants:admin:saveRecipe", function(src, r)
     if r.expire_seconds ~= nil and r.expire_seconds ~= "" then
         expire = math.max(0, math.floor(tonumber(r.expire_seconds) or 0))
     end
+    -- optional access group ("bakery"…); blank clears it (NULL = every restaurant)
+    local group = (type(r.group) == "string" and r.group:gsub("^%s+", ""):gsub("%s+$", "") ~= "")
+        and r.group:gsub("^%s+", ""):gsub("%s+$", "") or nil
     MySQL.update.await([[
         INSERT INTO pickle_restaurant_recipes
-            (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count, container_model, expire_seconds)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count, container_model, expire_seconds, `group`)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
             station = VALUES(station), raw_model = VALUES(raw_model), cooked_model = VALUES(cooked_model),
             burnt_model = VALUES(burnt_model), output_cooked_item = VALUES(output_cooked_item),
             output_burnt_item = VALUES(output_burnt_item), cook_ms = VALUES(cook_ms), burn_ms = VALUES(burn_ms),
             dual_sided = VALUES(dual_sided), method = VALUES(method), output_count = VALUES(output_count),
-            container_model = VALUES(container_model), expire_seconds = VALUES(expire_seconds)
+            container_model = VALUES(container_model), expire_seconds = VALUES(expire_seconds), `group` = VALUES(`group`)
     ]], {
         r.input_item, r.station or "fryer", r.raw_model or "", r.cooked_model or "", r.burnt_model or "",
         r.output_cooked_item or "", r.output_burnt_item or "",
         tonumber(r.cook_ms) or 15000, tonumber(r.burn_ms) or 15000,
         (r.dual_sided == true or r.dual_sided == 1) and 1 or 0, method,
         math.max(1, math.floor(tonumber(r.output_count) or 1)),
-        container, expire,
+        container, expire, group,
     })
     LoadRecipes()
     SyncToClient(-1)

@@ -12,6 +12,7 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
   const settings = data?.settings || {};
   const players = data?.players || [];
   const items = data?.items || [];
+  const groups = data?.groups || []; // every access-group name in use (suggestions)
 
   const refresh = async () => {
     const fresh = await fetchNui<any>("admin:getData");
@@ -28,15 +29,15 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
         </TabsList>
 
         <TabsContent value="restaurants" className="flex min-h-0 flex-1 flex-col">
-          <Restaurants restaurants={restaurants} players={players} refresh={refresh} />
+          <Restaurants restaurants={restaurants} players={players} groups={groups} refresh={refresh} />
         </TabsContent>
 
         <TabsContent value="recipes" className="flex min-h-0 flex-1 flex-col">
-          <Recipes recipes={recipes} items={items} onSaved={refresh} />
+          <Recipes recipes={recipes} items={items} groups={groups} onSaved={refresh} />
         </TabsContent>
 
         <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">
-          <Settings settings={settings} items={items} onSaved={refresh} />
+          <Settings settings={settings} items={items} groups={groups} onSaved={refresh} />
         </TabsContent>
       </Tabs>
     </Panel>

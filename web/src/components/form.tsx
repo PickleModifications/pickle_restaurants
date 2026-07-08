@@ -85,6 +85,28 @@ export function Toggle({
   );
 }
 
+/**
+ * Free-text access-group input with suggestions from the groups already in use
+ * (recipes/drinks/assembly/finishes). Blank = available to every restaurant.
+ */
+export function GroupField({
+  label, hint, value, onChange, groups, className,
+}: {
+  label: string; hint?: string; value: string; onChange: (v: string) => void; groups: string[]; className?: string;
+}) {
+  const listId = React.useId();
+  return (
+    <Field label={label} hint={hint} className={className}>
+      <Input value={value ?? ""} list={listId} onChange={(e) => onChange(e.target.value)} />
+      <datalist id={listId}>
+        {groups.map((g) => (
+          <option key={g} value={g} />
+        ))}
+      </datalist>
+    </Field>
+  );
+}
+
 export function Select({
   label, hint, value, onChange, options, className,
 }: {

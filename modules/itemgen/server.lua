@@ -69,6 +69,7 @@ local KNOWN = {
     chicken_sandwich     = { label = "Chicken Sandwich",     weight = 350, hunger = 250000 },
     meal                 = { label = "Meal",                 weight = 800, hunger = 400000 },
     drink                = { label = "Restaurant Drink",     weight = 300, thirst = 200000 },
+    receipt              = { label = "Receipt",              weight = 10 },
 }
 
 local DEFAULT_WEIGHT = 200
@@ -143,6 +144,8 @@ local function collectItems()
     for _, m in ipairs(menu) do add(m.item) end
     -- the serving-tray meal item (kitchen prep) isn't a recipe/assembly output
     add(GetSetting("meal_item", "meal"))
+    -- the POS receipt handed to a paying customer (metadata carries the ticket)
+    add(GetSetting("receipt_item", "receipt"))
     -- retired doughnut outputs: no longer referenced, exported one more release so
     -- players' existing stacks aren't purged (see RETAIN above)
     for _, n in ipairs(RETAIN) do add(n) end

@@ -9,7 +9,7 @@ import Branding from "@/components/Branding";
 import { money } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, Store, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon,
+  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, Store, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X,
 } from "lucide-react";
 
 const STATIONS = [
@@ -19,16 +19,16 @@ const STATIONS = [
   { key: "kitchen_prep", label: _L("admin.station_kitchen_prep"), icon: Sandwich },
 ];
 
-type Props = { restaurants: any[]; players: any[]; refresh: () => void };
+type Props = { restaurants: any[]; players: any[]; groups: string[]; refresh: () => void };
 
-export default function Restaurants({ restaurants, players, refresh }: Props) {
+export default function Restaurants({ restaurants, players, groups, refresh }: Props) {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const selected = restaurants.find((r) => r.id === selectedId) || null;
 
   const act = async (event: string, payload: any) => { await fetchNui(event, payload); await refresh(); };
 
   if (selected) {
-    return <Detail r={selected} players={players} act={act} onBack={() => setSelectedId(null)} />;
+    return <Detail r={selected} players={players} groups={groups} act={act} onBack={() => setSelectedId(null)} />;
   }
   return <List restaurants={restaurants} act={act} onOpen={setSelectedId} />;
 }
@@ -75,7 +75,7 @@ function List({ restaurants, act, onOpen }: { restaurants: any[]; act: (e: strin
   );
 }
 
-function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: string, p: any) => void; onBack: () => void }) {
+function Detail({ r, players, groups, act, onBack }: { r: any; players: any[]; groups: string[]; act: (e: string, p: any) => void; onBack: () => void }) {
   const props: any[] = r.props || [];
   const byType = (t: string) => props.filter((p) => p.prop_type === t);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -221,6 +221,15 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
             editor as the boss panel). Server-wide settings live in the top-level
             Settings tab; this is scoped to THIS restaurant. */}
         <TabsContent value="settings" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+          {/* recipe access groups — what this restaurant may cook & sell */}
+          <div className="rounded-lg border border-border p-3">
+            <div className="mb-1 flex items-center gap-2 text-sm font-semibold">
+              <Tags className="h-4 w-4 text-primary" /> {_L("admin.groups_title")}
+            </div>
+            <p className="mb-3 text-[11px] text-muted-foreground">{_L("admin.groups_hint")}</p>
+            <GroupsEditor r={r} groups={groups} act={act} />
+          </div>
+
           <div className="rounded-lg border border-border p-3">
             <div className="mb-3 flex items-center gap-2 text-sm font-semibold">
               <ImageIcon className="h-4 w-4 text-primary" /> {_L("admin.branding")}
@@ -234,6 +243,53 @@ function Detail({ r, players, act, onBack }: { r: any; players: any[]; act: (e: 
           </div>
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+/**
+ * The restaurant's access-group chips: remove with the chip's ×, add via the
+ * creatable input (suggestions = every group already in use). Each add/remove
+ * saves immediately — a chip edit is a discrete action, no debounce needed.
+ */
+function GroupsEditor({ r, groups, act }: { r: any; groups: string[]; act: (e: string, p: any) => void }) {
+  const [draft, setDraft] = useState("");
+  const current: string[] = r.groups || [];
+  const save = (next: string[]) => act("admin:setGroups", { id: r.id, groups: next });
+  const add = () => {
+    const g = draft.trim();
+    if (!g || current.includes(g)) { setDraft(""); return; }
+    save([...current, g]);
+    setDraft("");
+  };
+  const suggestions = groups.filter((g) => !current.includes(g));
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {current.length === 0 && <span className="text-xs text-muted-foreground">{_L("admin.groups_none")}</span>}
+        {current.map((g) => (
+          <Badge key={g} variant="secondary" className="gap-1.5">
+            {g}
+            <button onClick={() => save(current.filter((x) => x !== g))}><X className="h-3 w-3" /></button>
+          </Badge>
+        ))}
+      </div>
+      <div className="flex items-center gap-2">
+        <Input
+          className="h-8 max-w-56"
+          list={`groups-${r.id}`}
+          placeholder={_L("admin.groups_placeholder")}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") add(); }}
+        />
+        <datalist id={`groups-${r.id}`}>
+          {suggestions.map((g) => <option key={g} value={g} />)}
+        </datalist>
+        <Button size="sm" variant="outline" onClick={add} disabled={!draft.trim()}>
+          <Plus className="h-3.5 w-3.5" /> {_L("admin.groups_add")}
+        </Button>
+      </div>
     </div>
   );
 }

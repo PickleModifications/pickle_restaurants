@@ -37,20 +37,6 @@ local function buildEmployees(rid, roles)
     return list
 end
 
-local function nearbyPlayers(src)
-    local ped = GetPlayerPed(src)
-    local c = GetEntityCoords(ped)
-    local list = {}
-    for _, p in ipairs(GetPlayers()) do
-        p = tonumber(p)
-        if p ~= src then
-            local pc = GetEntityCoords(GetPlayerPed(p))
-            if #(c - pc) < 10.0 then list[#list + 1] = { id = p, name = GetPlayerCharacterName(p) } end
-        end
-    end
-    return list
-end
-
 -- ─── open ────────────────────────────────────────────────────────────────────
 
 lib.callback.register("pickle_restaurants:management:getData", function(src, d)
@@ -61,18 +47,34 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
     local effective = isOwner and ALL_PERMS or perms
     local roles = rolesOf(r)
 
-    local ledger, menu = {}, {}
+    local ledger = {}
     if effective.view_finances then
         ledger = MySQL.query.await(
             "SELECT type, amount, description, identifier, created_at FROM pickle_restaurant_ledger WHERE restaurant_id = ? ORDER BY id DESC LIMIT 50",
             { id }) or {}
     end
-    menu = MySQL.query.await(
-        "SELECT item, label, price, category, enabled FROM pickle_restaurant_menu WHERE restaurant_id = ? ORDER BY category, label",
-        { id }) or {}
 
-    local stock = {}
-    for item, count in pairs(StockCache[id] or {}) do stock[#stock + 1] = { item = item, label = GetItemLabel(item), count = count } end
+    -- The POS price list: every sellable this restaurant can access (group-
+    -- filtered), joined with its price row. Rows priced for something no longer
+    -- in the catalog (item uninstalled / group removed) surface as `stale` so
+    -- the owner can clean them up.
+    local priceList, priced = BuildPricedCatalog(id, false)
+    local stale = {}
+    do
+        local inCatalog = {}
+        for _, e in ipairs(priceList) do inCatalog[e.key] = true end
+        for key, p in pairs(priced) do
+            if not inCatalog[key] then
+                local item, variant = key:match("^(.-)::(.+)$")
+                if not item then item, variant = key, "" end
+                stale[#stale + 1] = { key = key, item = item, variant = variant,
+                                      label = GetItemLabel(item) .. (variant ~= "" and (" (" .. variant .. ")") or ""),
+                                      price = p.price }
+            end
+        end
+        table.sort(stale, function(a, b) return a.key < b.key end)
+    end
+
     local props = {}
     for _, p in pairs(PropCache) do if p.restaurant_id == id then props[#props + 1] = { id = p.id, prop_type = p.prop_type } end end
 
@@ -85,11 +87,10 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
         roles     = rolesArray(roles),
         employees = buildEmployees(id, roles),
         ledger    = ledger,
-        menu      = menu,
-        stock     = stock,
+        priceList = priceList,
+        stale     = stale,
         props     = props,
-        items     = BuildItemList(),  -- catalogue for the menu item-picker
-        nearby    = effective.manage_employees and nearbyPlayers(src) or {},
+        nearby    = effective.manage_employees and NearbyPlayers(src, 10.0) or {},
     }
 end)
 
@@ -150,17 +151,25 @@ lib.callback.register("pickle_restaurants:management:setCommission", function(sr
     return { ok = true }
 end)
 
--- ─── menu ────────────────────────────────────────────────────────────────────
+-- ─── price list (POS menu) ───────────────────────────────────────────────────
+-- Prices are set per catalog entry (`key` = item, or item::flavor for drinks).
+-- The key is resolved against the restaurant's live sellable catalog — a price
+-- can never be written for something the restaurant can't actually make.
 
 lib.callback.register("pickle_restaurants:management:saveMenuItem", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_menu") then return { ok = false, error = _L("no_permission") } end
-    if not d.item or d.item == "" then return { ok = false, error = _L("mgmt_item_required") } end
+    local entry
+    for _, e in ipairs(BuildSellableCatalog(id)) do
+        if e.key == d.key then entry = e break end
+    end
+    if not entry then return { ok = false, error = _L("mgmt_item_required") } end
     MySQL.update.await([[
-        INSERT INTO pickle_restaurant_menu (restaurant_id, item, label, price, category, enabled)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO pickle_restaurant_menu (restaurant_id, item, variant, label, price, category, enabled)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE label = VALUES(label), price = VALUES(price), category = VALUES(category), enabled = VALUES(enabled)
-    ]], { id, d.item, d.label or d.item, tonumber(d.price) or 0, d.category or "food", d.enabled and 1 or 0 })
+    ]], { id, entry.item, entry.variant or "", entry.label, math.max(0, math.floor(tonumber(d.price) or 0)),
+          entry.kind, d.enabled and 1 or 0 })
     ShowNotification(src, _L("mgmt_menu_saved"))
     return { ok = true }
 end)
@@ -168,7 +177,10 @@ end)
 lib.callback.register("pickle_restaurants:management:deleteMenuItem", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_menu") then return { ok = false, error = _L("no_permission") } end
-    MySQL.update.await("DELETE FROM pickle_restaurant_menu WHERE restaurant_id = ? AND item = ?", { id, d.item })
+    local item, variant = tostring(d.key or ""):match("^(.-)::(.+)$")
+    if not item then item, variant = tostring(d.key or ""), "" end
+    MySQL.update.await("DELETE FROM pickle_restaurant_menu WHERE restaurant_id = ? AND item = ? AND variant = ?",
+        { id, item, variant })
     ShowNotification(src, _L("mgmt_menu_removed"))
     return { ok = true }
 end)
