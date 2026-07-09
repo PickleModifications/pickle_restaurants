@@ -3,14 +3,20 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-semibold transition-colors focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50",
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/90",
-        destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
-        outline: "border border-border bg-transparent hover:bg-accent hover:text-accent-foreground",
-        secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+        // interaction states are blends of the brand seed (precomputed OKLab
+        // mixes in lib/theme.ts — --brand-hover/--brand-active/--danger-hover)
+        default:
+          "bg-primary text-primary-foreground shadow-sm hover:bg-[rgb(var(--brand-hover))] active:bg-[rgb(var(--brand-active))]",
+        destructive:
+          "bg-destructive text-destructive-foreground shadow-sm hover:bg-[rgb(var(--danger-hover))]",
+        outline:
+          "border border-border bg-transparent hover:border-primary/50 hover:bg-accent hover:text-accent-foreground",
+        secondary:
+          "bg-secondary text-secondary-foreground hover:bg-accent",
         ghost: "hover:bg-accent hover:text-accent-foreground",
       },
       size: {

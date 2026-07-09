@@ -8,7 +8,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Field, TextField, NumberField, Toggle } from "@/components/form";
 import { type Item } from "@/components/ItemPicker";
-import Branding from "@/components/Branding";
+import Branding, { ThemeEditor } from "@/components/Branding";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { UserPlus, Trash2, Plus, Minus, MapPin, Banknote, Armchair, ImageOff, PackagePlus } from "lucide-react";
@@ -23,7 +23,7 @@ function Thumb({ src, className }: { src?: string; className?: string }) {
       </div>
     );
   }
-  return <img src={src} onError={() => setBroken(true)} className={cn("rounded bg-muted/40 object-contain", className)} />;
+  return <img src={src} onError={() => setBroken(true)} className={cn("rounded object-contain", className)} />;
 }
 
 export default function Management({ data, onClose }: { data: any; onClose: () => void }) {
@@ -73,7 +73,8 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
           </TabsContent>
         )}
         {perms.manage_props && (
-          <TabsContent value="branding" className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <TabsContent value="branding" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+            <ThemeEditor id={id} theme={data?.restaurant?.theme} event="management:setTheme" />
             <Branding id={id} brand={data?.restaurant?.brand_image || ""} brandImages={data?.restaurant?.brand_images || {}} event="management:setBrandImage" />
           </TabsContent>
         )}
@@ -98,14 +99,14 @@ function Employees({ id, roles, employees, nearby }: any) {
         <CardContent className="flex items-end gap-2 pt-4">
           <div className="flex-1">
             <label className="mb-1 block text-xs text-muted-foreground">{_L("mgmt.nearby_player")}</label>
-            <select className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm" value={target} onChange={(e) => setTarget(e.target.value)}>
+            <select className="h-9 w-full rounded-md border border-input bg-muted/50 px-2 text-sm transition-colors focus-visible:border-primary/60 focus-visible:outline-none" value={target} onChange={(e) => setTarget(e.target.value)}>
               <option value="">{_L("mgmt.select")}</option>
               {nearby.map((p: any) => <option key={p.id} value={p.id}>{p.name} [{p.id}]</option>)}
             </select>
           </div>
           <div>
             <label className="mb-1 block text-xs text-muted-foreground">{_L("mgmt.grade")}</label>
-            <select className="h-9 rounded-md border border-input bg-background px-2 text-sm" value={grade} onChange={(e) => setGrade(Number(e.target.value))}>
+            <select className="h-9 rounded-md border border-input bg-muted/50 px-2 text-sm transition-colors focus-visible:border-primary/60 focus-visible:outline-none" value={grade} onChange={(e) => setGrade(Number(e.target.value))}>
               {roles.map((r: any) => <option key={r.grade} value={r.grade}>{r.label}</option>)}
             </select>
           </div>
@@ -124,7 +125,7 @@ function Employees({ id, roles, employees, nearby }: any) {
             </div>
             <div className="flex items-center gap-2">
               <select
-                className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+                className="h-8 rounded-md border border-input bg-muted/50 px-2 text-xs transition-colors focus-visible:border-primary/60 focus-visible:outline-none"
                 value={e.grade}
                 onChange={(ev) => fetchNui("management:setGrade", { id, identifier: e.identifier, grade: Number(ev.target.value) })}
               >
@@ -283,7 +284,13 @@ function Finances({ id, balance, ledger, canManage }: any) {
     <div className="space-y-3">
       <Card>
         <CardContent className="flex items-center justify-between pt-4">
-          <div className="flex items-center gap-2 text-lg font-semibold"><Banknote className="h-5 w-5 text-primary" /> {money(balance)}</div>
+          <div className="flex items-center gap-2.5">
+            <div className="grid h-9 w-9 place-items-center rounded-md bg-primary/15 text-primary"><Banknote className="h-5 w-5" /></div>
+            <div>
+              <div className="tape">{_L("mgmt.balance_label")}</div>
+              <div className="font-mono text-xl font-bold leading-tight tabular-nums">{money(balance)}</div>
+            </div>
+          </div>
           {canManage && (
             <div className="flex items-center gap-2">
               <Input type="number" className="w-28" value={amount} onChange={(e) => setAmount(Number(e.target.value))} />
@@ -293,14 +300,14 @@ function Finances({ id, balance, ledger, canManage }: any) {
           )}
         </CardContent>
       </Card>
-      <div className="rounded-lg border border-border">
-        <div className="grid grid-cols-4 border-b border-border px-3 py-2 text-xs font-semibold text-muted-foreground">
+      <div className="overflow-hidden rounded-lg border border-border bg-card">
+        <div className="tape grid grid-cols-4 border-b border-border px-3 py-2">
           <span>{_L("mgmt.col_type")}</span><span>{_L("mgmt.col_amount")}</span><span className="col-span-2">{_L("mgmt.col_description")}</span>
         </div>
         {ledger.map((l: any, i: number) => (
-          <div key={i} className="grid grid-cols-4 px-3 py-1.5 text-xs">
+          <div key={i} className="grid grid-cols-4 px-3 py-1.5 text-xs odd:bg-muted/30">
             <span className="capitalize">{l.type}</span>
-            <span className={l.amount < 0 ? "text-destructive" : "text-emerald-400"}>{money(l.amount)}</span>
+            <span className={cn("font-mono tabular-nums", l.amount < 0 ? "text-destructive" : "text-ok")}>{money(l.amount)}</span>
             <span className="col-span-2 truncate text-muted-foreground">{l.description}</span>
           </div>
         ))}

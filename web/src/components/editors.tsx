@@ -20,7 +20,7 @@ export function ItemImage({ items, name, className }: { items: Item[]; name: str
       </div>
     );
   }
-  return <img src={img} alt={name} onError={() => setBroken(true)} className={cn("rounded bg-muted/40 object-contain", className)} />;
+  return <img src={img} alt={name} onError={() => setBroken(true)} className={cn("rounded object-contain", className)} />;
 }
 
 // "frosting" / "raw_beef_patty" -> "Frosting" / "Raw Beef Patty". Fallback for a

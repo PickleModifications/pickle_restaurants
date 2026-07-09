@@ -50,6 +50,11 @@ end
 
 local DEFAULT_SETTINGS = {
     admin_command   = "restaurants",
+    -- The admin panel's OWN NUI theme (skins /restaurants itself — distinct from
+    -- any restaurant's franchise theme). Same seed shape as a restaurant theme:
+    -- { primary #rrggbb, mode dark|paper, radius sharp|soft|round }. Edited in
+    -- Settings → Appearance; the whole palette is derived from it on the client.
+    app_theme       = { primary = "#ff7a2e", mode = "dark", radius = "soft" },
     currency        = "money",
     starting_balance = 0,
     default_commission = 10,
@@ -1375,6 +1380,15 @@ end
 -- Write-through mutators over OrderCache, same pattern as stock/tray. Only OPEN
 -- tickets are cached; closing removes the row from the cache but keeps the DB
 -- row as history.
+--
+-- STALENESS FIX — the register's ticket list is kept live by exactly ONE path: the
+-- server broadcasts the full open-order list on every change (see SyncOrders), and
+-- clients apply it unconditionally. FiveM server→client events are reliable AND
+-- ordered per client, so the LAST list the server sends is always the last one a
+-- client applies — no sequence numbers, no reconciliation, no race. The bug this
+-- replaced came from a SECOND path (the acting cashier also updated straight from
+-- its callback reply), which could land out of order against the broadcast and
+-- resurrect a just-cancelled ticket. One ordered path can't disagree with itself.
 
 function CreateOrder(restaurantId, order)
     NextTicket[restaurantId] = NextTicket[restaurantId] or 1
@@ -1408,18 +1422,30 @@ function CloseOrder(restaurantId, orderId, status)
     return true
 end
 
+-- Drop a restaurant's entire order state (used when a restaurant is deleted).
+function ClearOrders(restaurantId)
+    OrderCache[restaurantId] = nil
+    NextTicket[restaurantId] = nil
+end
+
 -- Open tickets for the register NUI, oldest first (kitchen works the queue in order).
+-- Only genuinely-open rows are surfaced: the callbacks hold their transient claim in
+-- o.busy (never o.status), so o.status is always "open" here — but the explicit
+-- filter is a hard guarantee that a row can never render as a phantom the register
+-- shows yet the action guard rejects (the wedged-ticket failure mode).
 function GetOpenOrders(restaurantId)
     local list = {}
     for _, o in pairs(OrderCache[restaurantId] or {}) do
-        list[#list + 1] = {
-            orderId  = o.id,
-            ticket   = o.ticket,
-            customer = o.customer_name,
-            lines    = o.lines,
-            total    = o.total,
-            status   = o.status,
-        }
+        if o.status == "open" then
+            list[#list + 1] = {
+                orderId  = o.id,
+                ticket   = o.ticket,
+                customer = o.customer_name,
+                lines    = o.lines,
+                total    = o.total,
+                status   = o.status,
+            }
+        end
     end
     table.sort(list, function(a, b) return a.ticket < b.ticket end)
     return list
@@ -1639,6 +1665,9 @@ local function BuildClientRestaurant(r)
         -- overrides keyed by the rendertarget target key (pizza_box, cup, tray, side).
         brand_image  = r.metadata and r.metadata.brand_image or nil,
         brand_images = r.metadata and r.metadata.brand_images or nil,
+        -- NUI theme seed { primary, mode, radius } — the client passes it along
+        -- when it opens a panel scoped to this restaurant (cooking stations).
+        theme        = r.metadata and r.metadata.theme or nil,
     }
 end
 

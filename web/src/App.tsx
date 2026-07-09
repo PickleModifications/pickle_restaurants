@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, Component, type ReactNode } from "react";
 import { useNuiEvent, fetchNui } from "@/lib/nui";
 import { isSaving, onSavingChange } from "@/lib/autosave";
+import { applyTheme } from "@/lib/theme";
 import InteractText from "@/views/InteractText";
 import Cooking from "@/views/Cooking";
 import Admin from "@/views/Admin";
@@ -26,8 +27,12 @@ export default function App() {
   const [data, setData] = useState<any>(null);
 
   useNuiEvent("setView", (d) => {
-    setView((d.view || "none") as View);
+    const v = (d.view || "none") as View;
+    setView(v);
     setData(d.data ?? null);
+    // Restaurant-scoped payloads carry the franchise theme seed; closing (or a
+    // payload without one) resets the UI to the default kit.
+    applyTheme(v === "none" ? null : d.data?.theme);
   });
 
   const doClose = useCallback(() => {

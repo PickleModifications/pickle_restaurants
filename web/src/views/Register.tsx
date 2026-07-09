@@ -2,8 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import Panel from "@/components/Panel";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
@@ -34,7 +32,7 @@ function Thumb({ src, className }: { src?: string; className?: string }) {
       </div>
     );
   }
-  return <img src={src} onError={() => setBroken(true)} className={cn("rounded bg-muted/40 object-contain", className)} />;
+  return <img src={src} onError={() => setBroken(true)} className={cn("rounded object-contain", className)} />;
 }
 
 const KIND_LABEL: Record<string, string> = {
@@ -59,21 +57,22 @@ function resolveMods(cat: Cat, sel: string[]) {
 }
 // A single selected-option chip: the modifier's item image (or a flavor colour
 // swatch), captioned by its label on hover. A removed default is dimmed and
-// crossed out so "no lettuce" reads at a glance without any text.
+// crossed out so "no lettuce" reads at a glance without any text. Styled for
+// the receipt paper it always sits on (cart lines, tickets).
 function OptChip({ o, removed }: { o: OptView; removed?: boolean }) {
   return (
     <span
       title={(removed ? _L("register.opt_no") + " " : "") + o.label}
       className={cn(
-        "relative flex h-6 w-6 shrink-0 items-center justify-center rounded border bg-background/60",
-        removed ? "border-destructive/50" : "border-border/60",
+        "relative flex h-6 w-6 shrink-0 items-center justify-center rounded border bg-muted",
+        removed ? "border-destructive/50" : "border-border",
       )}
     >
       {o.image
         ? <Thumb src={o.image} className={cn("h-5 w-5", removed && "opacity-40")} />
         : o.color
           ? <span className={cn("h-4 w-4 rounded-full border border-border", removed && "opacity-40")} style={{ backgroundColor: o.color }} />
-          : <div className={cn("grid h-5 w-5 place-items-center rounded bg-muted/60 text-muted-foreground", removed && "opacity-40")}><ImageOff className="h-3 w-3" /></div>}
+          : <div className={cn("grid h-5 w-5 place-items-center rounded text-muted-foreground", removed && "opacity-40")}><ImageOff className="h-3 w-3" /></div>}
       {removed && (
         <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-destructive"><Ban className="h-4 w-4" /></span>
       )}
@@ -246,13 +245,13 @@ function NewOrder({ id, catalog, nearby }: { id: number; catalog: Cat[]; nearby:
               const customisable = !!(c.modifiers && c.modifiers.length);
               return (
                 <button key={c.key} onClick={() => clickCard(c)}
-                  className="relative flex flex-col items-center gap-1.5 rounded-lg border border-border p-2 text-center transition-colors hover:border-primary/50 hover:bg-accent/50">
+                  className="relative flex flex-col items-center gap-1.5 rounded-lg border border-border/80 bg-card p-2 text-center transition-colors hover:border-primary/50 hover:bg-accent/60 active:bg-accent">
                   {customisable && (
                     <span className="absolute right-1 top-1 text-primary/70" title={_L("register.customisable")}><SlidersHorizontal className="h-3.5 w-3.5" /></span>
                   )}
                   <Thumb src={c.image} className="h-12 w-12" />
                   <span className="line-clamp-2 text-xs font-medium leading-tight">{c.label}</span>
-                  <span className="text-xs text-muted-foreground">{money(c.price)}</span>
+                  <span className="font-mono text-[11px] tabular-nums text-muted-foreground">{money(c.price)}</span>
                 </button>
               );
             })}
@@ -260,37 +259,49 @@ function NewOrder({ id, catalog, nearby }: { id: number; catalog: Cat[]; nearby:
         </div>
       </div>
 
-      {/* cart */}
-      <div className="col-span-2 flex min-h-0 flex-col rounded-lg border border-border">
-        <div className="shrink-0 border-b border-border px-3 py-2 text-sm font-semibold">{_L("register.cart")}</div>
-        <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2">
-          {lines.length === 0 && <div className="py-6 text-center text-xs text-muted-foreground">{_L("register.empty_cart")}</div>}
+      {/* cart — the order prints onto the register tape as it's built (themed
+          receipt surface + a torn bottom edge, matching the tickets) */}
+      <div className="col-span-2 flex min-h-0 flex-col drop-shadow-lg">
+        <div className="receipt shrink-0 rounded-t-sm px-3 pb-1.5 pt-2.5">
+          <div className="flex items-center justify-between">
+            <span className="tape">{_L("register.cart")}</span>
+            <Receipt className="h-3.5 w-3.5 text-muted-foreground" />
+          </div>
+          <div className="receipt-rule mt-2" />
+        </div>
+        <div className="receipt min-h-0 flex-1 space-y-1 overflow-y-auto px-2.5 py-1.5">
+          {lines.length === 0 && (
+            <div className="py-6 text-center font-mono text-[11px] uppercase tracking-widest text-muted-foreground">
+              {_L("register.empty_cart")}
+            </div>
+          )}
           {lines.map((l) => (
-            <div key={l.ck} className="flex items-center gap-2 rounded-md bg-muted/40 p-1.5">
+            <div key={l.ck} className="flex items-center gap-2 rounded-sm bg-muted/50 p-1.5">
               <Thumb src={l.cat.image} className="h-8 w-8 shrink-0" />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-xs font-medium">{l.cat.label}</div>
                 <OptRow added={l.added} removed={l.removed} />
-                <div className="text-[11px] text-muted-foreground">{money(l.price)}</div>
+                <div className="font-mono text-[11px] tabular-nums text-muted-foreground">{money(l.price)}</div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
-                <button onClick={() => changeQty(l.ck, -1)} className="grid h-6 w-6 place-items-center rounded border border-border hover:bg-accent"><Minus className="h-3 w-3" /></button>
-                <span className="w-5 text-center text-xs tabular-nums">{l.qty}</span>
-                <button onClick={() => changeQty(l.ck, 1)} className="grid h-6 w-6 place-items-center rounded border border-border hover:bg-accent"><Plus className="h-3 w-3" /></button>
-                <button onClick={() => removeEntry(l.ck)} className="grid h-6 w-6 place-items-center rounded text-muted-foreground hover:text-destructive"><Trash2 className="h-3 w-3" /></button>
+                <button onClick={() => changeQty(l.ck, -1)} className="grid h-6 w-6 place-items-center rounded border border-border transition-colors hover:bg-accent"><Minus className="h-3 w-3" /></button>
+                <span className="w-5 text-center font-mono text-xs tabular-nums">{l.qty}</span>
+                <button onClick={() => changeQty(l.ck, 1)} className="grid h-6 w-6 place-items-center rounded border border-border transition-colors hover:bg-accent"><Plus className="h-3 w-3" /></button>
+                <button onClick={() => removeEntry(l.ck)} className="grid h-6 w-6 place-items-center rounded text-muted-foreground transition-colors hover:text-destructive"><Trash2 className="h-3 w-3" /></button>
               </div>
             </div>
           ))}
         </div>
-        <div className="shrink-0 space-y-2 border-t border-border p-3">
-          <div className="flex items-center justify-between text-sm font-semibold">
-            <span>{_L("register.total")}</span>
-            <span>{money(total)}</span>
+        <div className="receipt shrink-0 space-y-2 px-3 pb-3 pt-1.5">
+          <div className="receipt-rule" />
+          <div className="flex items-center justify-between pt-1 font-mono text-sm font-bold">
+            <span className="uppercase tracking-widest">{_L("register.total")}</span>
+            <span className="tabular-nums">{money(total)}</span>
           </div>
           <label className="flex items-center gap-2 text-xs text-muted-foreground">
             <User className="h-3.5 w-3.5" />
             <select value={customer} onChange={(e) => setCustomer(Number(e.target.value))}
-              className="h-8 flex-1 rounded-md border border-input bg-background px-2 text-xs text-foreground">
+              className="h-8 flex-1 rounded-md border border-input bg-muted/50 px-2 text-xs text-foreground focus-visible:border-primary/60 focus-visible:outline-none">
               <option value={0}>{_L("register.myself")}</option>
               {nearby.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
@@ -301,6 +312,7 @@ function NewOrder({ id, catalog, nearby }: { id: number; catalog: Cat[]; nearby:
               : <><Receipt className="h-4 w-4" /> {_L("register.charge", money(total))}</>}
           </Button>
         </div>
+        <div className="tear-b shrink-0" />
       </div>
 
       {/* modifier dialog */}
@@ -355,8 +367,8 @@ function NewOrder({ id, catalog, nearby }: { id: number; catalog: Cat[]; nearby:
 function FilterChip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
     <button onClick={onClick}
-      className={cn("rounded-full border px-2.5 py-0.5 text-xs transition-colors",
-        active ? "border-primary/30 bg-primary/15 text-primary" : "border-border text-muted-foreground hover:bg-accent")}>
+      className={cn("rounded-full border px-2.5 py-1 font-mono text-[10px] font-semibold uppercase tracking-wider transition-colors",
+        active ? "border-primary/40 bg-primary/15 text-primary" : "border-border text-muted-foreground hover:bg-accent hover:text-foreground")}>
       {children}
     </button>
   );
@@ -385,28 +397,31 @@ function TicketCard({ id, t }: { id: number; t: Ticket }) {
   };
 
   return (
-    <Card>
-      <CardContent className="pt-4">
+    <div className="drop-shadow-md">
+      <div className="receipt rounded-t-sm px-3.5 pb-3 pt-3">
         <div className="mb-2 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary">{_L("register.ticket_num", t.ticket)}</Badge>
-            <span className="text-sm font-medium">{t.customer}</span>
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="shrink-0 rounded-sm bg-muted px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider tabular-nums">
+              {_L("register.ticket_num", t.ticket)}
+            </span>
+            <span className="truncate text-sm font-medium">{t.customer}</span>
           </div>
-          <span className="text-sm font-semibold">{money(t.total)}</span>
+          <span className="shrink-0 font-mono text-sm font-bold tabular-nums">{money(t.total)}</span>
         </div>
-        <div className="mb-3 space-y-1.5">
+        <div className="receipt-rule mb-2" />
+        <div className="mb-3 space-y-1">
           {t.lines.map((l, i) => {
             const mods = Array.isArray(l.mods) ? l.mods : [];
             const added = mods.filter((m) => !m.removed);
             const removed = mods.filter((m) => m.removed);
             return (
-              <div key={i} className="flex items-center gap-2 rounded-md bg-muted/40 p-1.5">
+              <div key={i} className="flex items-center gap-2 rounded-sm bg-muted/50 p-1.5">
                 <Thumb src={l.image} className="h-9 w-9 shrink-0" />
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-xs font-medium">{l.label}</div>
                   <OptRow added={added} removed={removed} />
                 </div>
-                <span className="shrink-0 rounded bg-background/70 px-1.5 py-0.5 text-xs font-semibold tabular-nums">×{l.qty}</span>
+                <span className="shrink-0 font-mono text-xs font-semibold tabular-nums text-muted-foreground">×{l.qty}</span>
               </div>
             );
           })}
@@ -415,23 +430,30 @@ function TicketCard({ id, t }: { id: number; t: Ticket }) {
           {confirmCancel ? (
             <>
               <span className="mr-auto self-center text-xs text-muted-foreground">{_L("register.confirm_cancel")}</span>
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirmCancel(false)}>{_L("register.keep")}</Button>
-              <Button size="sm" variant="destructive" disabled={busy} onClick={() => act("sales:cancelOrder")}>
-                <X className="h-4 w-4" /> {_L("register.cancel_refund")}
-              </Button>
+              <button disabled={busy} onClick={() => setConfirmCancel(false)}
+                className="rounded-md px-3 py-1.5 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50">
+                {_L("register.keep")}
+              </button>
+              <button disabled={busy} onClick={() => act("sales:cancelOrder")}
+                className="inline-flex items-center gap-1.5 rounded-md bg-destructive px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-[rgb(var(--danger-hover))] disabled:opacity-50">
+                <X className="h-3.5 w-3.5" /> {_L("register.cancel_refund")}
+              </button>
             </>
           ) : (
             <>
-              <Button size="sm" variant="outline" disabled={busy} onClick={() => setConfirmCancel(true)}>
-                <Trash2 className="h-4 w-4" /> {_L("register.cancel")}
-              </Button>
-              <Button size="sm" disabled={busy} onClick={() => act("sales:completeOrder")}>
-                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} {_L("register.complete")}
-              </Button>
+              <button disabled={busy} onClick={() => setConfirmCancel(true)}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-semibold text-foreground transition-colors hover:border-destructive hover:text-destructive disabled:opacity-50">
+                <Trash2 className="h-3.5 w-3.5" /> {_L("register.cancel")}
+              </button>
+              <button disabled={busy} onClick={() => act("sales:completeOrder")}
+                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-[rgb(var(--brand-hover))] disabled:opacity-50">
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />} {_L("register.complete")}
+              </button>
             </>
           )}
         </div>
-      </CardContent>
-    </Card>
+      </div>
+      <div className="tear-b" />
+    </div>
   );
 }

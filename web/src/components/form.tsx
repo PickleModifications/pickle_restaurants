@@ -21,7 +21,7 @@ export function Field({
   // from <button>s, and wrapping those in a <label> hijacks their clicks.
   return (
     <div className={cn("block", className)}>
-      <span className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
+      <span className="tape mb-1 block">{label}</span>
       {children}
       {hint && <span className="mt-1 block text-[11px] text-muted-foreground">{hint}</span>}
     </div>
@@ -72,14 +72,14 @@ export function Toggle({
     >
       <span
         className={cn(
-          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors",
-          checked ? "bg-primary" : "bg-muted"
+          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
+          checked ? "border-primary/50 bg-primary" : "border-border bg-muted"
         )}
       >
         <span
           className={cn(
-            "inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform",
-            checked ? "translate-x-4" : "translate-x-0.5"
+            "inline-block h-3.5 w-3.5 transform rounded-full shadow transition-transform",
+            checked ? "translate-x-[18px] bg-[rgb(var(--brand-ink))]" : "translate-x-1 bg-[rgb(var(--ink-mute))]"
           )}
         />
       </span>
@@ -149,7 +149,7 @@ export function GroupField({
           if (v === ADD_NEW) { setDraft(""); setAdding(true); }
           else onChange(v);
         }}
-        className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="h-9 w-full rounded-md border border-input bg-muted/50 px-2 text-sm transition-colors focus-visible:border-primary/60 focus-visible:outline-none"
       >
         <option value="">{_L("group.all")}</option>
         {options.map((g) => (
@@ -172,7 +172,7 @@ export function Select({
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        className="h-9 w-full rounded-md border border-input bg-muted/50 px-2 text-sm transition-colors focus-visible:border-primary/60 focus-visible:outline-none"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>{o.label}</option>

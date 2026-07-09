@@ -5,11 +5,12 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Field } from "@/components/form";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import Branding from "@/components/Branding";
+import Branding, { ThemeEditor } from "@/components/Branding";
+import { applyTheme, type ThemeConfig } from "@/lib/theme";
 import { money } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, Store, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X,
+  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X,
 } from "lucide-react";
 
 const STATIONS = [
@@ -20,18 +21,35 @@ const STATIONS = [
 ];
 
 type Focus = { restaurant?: number; section?: string };
-type Props = { restaurants: any[]; players: any[]; groups: string[]; refresh: () => void; focus?: Focus };
+type Props = { restaurants: any[]; players: any[]; groups: string[]; refresh: () => void; focus?: Focus; appTheme?: ThemeConfig | null };
 
-export default function Restaurants({ restaurants, players, groups, refresh, focus }: Props) {
+export default function Restaurants({ restaurants, players, groups, refresh, focus, appTheme }: Props) {
   // After a placement reopen, `focus.restaurant` drops us straight back into that
   // restaurant (and `focus.section` scrolls to its stations/seating).
   const [selectedId, setSelectedId] = useState<number | null>(focus?.restaurant ?? null);
-  const selected = restaurants.find((r) => r.id === selectedId) || null;
+  // Optimistic per-restaurant theme edits. The theme editor auto-saves to the DB,
+  // but the open-payload `restaurants` array stays stale; we mirror the live seed
+  // here so leaving and reopening a detail re-applies the CURRENT theme (not the
+  // one the panel opened with). Survives detail unmount — this component stays up.
+  const [themeEdits, setThemeEdits] = useState<Record<number, ThemeConfig>>({});
+  const base = restaurants.find((r) => r.id === selectedId) || null;
+  const selected = base && themeEdits[base.id] ? { ...base, theme: themeEdits[base.id] } : base;
 
   const act = async (event: string, payload: any) => { await fetchNui(event, payload); await refresh(); };
 
   if (selected) {
-    return <Detail r={selected} players={players} groups={groups} act={act} onBack={() => setSelectedId(null)} focusSection={selected.id === focus?.restaurant ? focus?.section : undefined} />;
+    return (
+      <Detail
+        r={selected}
+        players={players}
+        groups={groups}
+        act={act}
+        onBack={() => setSelectedId(null)}
+        focusSection={selected.id === focus?.restaurant ? focus?.section : undefined}
+        appTheme={appTheme}
+        onThemeChange={(t) => setThemeEdits((m) => ({ ...m, [selected.id]: t }))}
+      />
+    );
   }
   return <List restaurants={restaurants} act={act} onOpen={setSelectedId} />;
 }
@@ -55,10 +73,20 @@ function List({ restaurants, act, onOpen }: { restaurants: any[]; act: (e: strin
           <button
             key={r.id}
             onClick={() => onOpen(r.id)}
-            className="flex w-full items-center justify-between gap-3 rounded-lg border border-border p-3 text-left transition-colors hover:border-primary/50 hover:bg-accent/50"
+            className="flex w-full items-center justify-between gap-3 rounded-lg border border-border/80 bg-card p-3 text-left transition-colors hover:border-primary/50 hover:bg-accent/60"
           >
             <div className="flex min-w-0 items-center gap-3">
-              <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-primary/15 text-primary"><Store className="h-5 w-5" /></div>
+              {/* franchise monogram, tinted by ITS theme seed (not the panel's) */}
+              <div
+                className="grid h-10 w-10 shrink-0 place-items-center rounded-md font-display text-lg font-bold"
+                style={{
+                  // "#rrggbb29" = the seed at ~16% alpha (no color-mix in CEF)
+                  backgroundColor: r.theme?.primary ? r.theme.primary + "29" : "rgb(var(--brand) / 0.16)",
+                  color: r.theme?.primary || "rgb(var(--brand))",
+                }}
+              >
+                {(r.label?.trim()[0] || "•").toUpperCase()}
+              </div>
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="truncate font-semibold">{r.label}</span>
@@ -78,7 +106,7 @@ function List({ restaurants, act, onOpen }: { restaurants: any[]; act: (e: strin
   );
 }
 
-function Detail({ r, players, groups, act, onBack, focusSection }: { r: any; players: any[]; groups: string[]; act: (e: string, p: any) => void; onBack: () => void; focusSection?: string }) {
+function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThemeChange }: { r: any; players: any[]; groups: string[]; act: (e: string, p: any) => void; onBack: () => void; focusSection?: string; appTheme?: ThemeConfig | null; onThemeChange?: (t: ThemeConfig) => void }) {
   const props: any[] = r.props || [];
   const byType = (t: string) => props.filter((p) => p.prop_type === t);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -93,6 +121,16 @@ function Detail({ r, players, groups, act, onBack, focusSection }: { r: any; pla
     return () => clearTimeout(t);
   }, [focusSection]);
 
+  // Preview this restaurant's franchise theme while its detail is open; back to
+  // the panel's OWN theme on the way out (the theme editor also applies live). A
+  // ref keeps the cleanup reading the CURRENT app theme, not the one at mount.
+  const appThemeRef = useRef(appTheme);
+  appThemeRef.current = appTheme;
+  useEffect(() => {
+    applyTheme(r.theme);
+    return () => applyTheme(appThemeRef.current);
+  }, [r.id]);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       {/* header */}
@@ -101,7 +139,7 @@ function Detail({ r, players, groups, act, onBack, focusSection }: { r: any; pla
           <Button variant="ghost" size="icon" onClick={onBack}><ArrowLeft className="h-4 w-4" /></Button>
           <div>
             <div className="flex items-center gap-2">
-              <h3 className="text-base font-semibold">{r.label}</h3>
+              <h3 className="font-display text-base font-bold tracking-tight">{r.label}</h3>
               <Badge variant="secondary">#{r.id}</Badge>
               <span className="font-mono text-xs text-muted-foreground">{r.name}</span>
             </div>
@@ -138,7 +176,7 @@ function Detail({ r, players, groups, act, onBack, focusSection }: { r: any; pla
               {r.owner ? <>{_L("admin.owned_by", "")}<span className="font-mono">{r.owner}</span></> : _L("admin.currently_server_owned")}
             </div>
             <select
-              className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+              className="h-9 w-full rounded-md border border-input bg-muted/50 px-2 text-sm transition-colors focus-visible:border-primary/60 focus-visible:outline-none"
               value=""
               onChange={(e) => {
                 const v = e.target.value;
@@ -234,6 +272,8 @@ function Detail({ r, players, groups, act, onBack, focusSection }: { r: any; pla
             editor as the boss panel). Server-wide settings live in the top-level
             Settings tab; this is scoped to THIS restaurant. */}
         <TabsContent value="settings" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+          <ThemeEditor id={r.id} theme={r.theme} event="admin:setTheme" onChange={onThemeChange} />
+
           {/* recipe access groups — what this restaurant may cook & sell */}
           <div className="rounded-lg border border-border p-3">
             <div className="mb-1 flex items-center gap-2 text-sm font-semibold">

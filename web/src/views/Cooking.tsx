@@ -1330,11 +1330,12 @@ export default function Cooking({ data }: { data: any }) {
         </div>
       )}
 
-      {/* full-width bottom bar */}
+      {/* full-width bottom bar — the kitchen rail, wearing the franchise theme */}
       <div
         ref={barRef}
-        className="fixed inset-x-0 bottom-0 animate-fade-in border-t border-border bg-card px-4 py-3 shadow-2xl"
+        className="fixed inset-x-0 bottom-0 animate-fade-in border-t border-border bg-background px-4 py-3 shadow-2xl"
       >
+        <div className="brand-hairline absolute inset-x-0 top-0 h-0.5" />
         {/* dragging a prop FROM the world: a SEPARATE dark overlay laid over the whole
             hotbar, with the dotted drop-zone modal centred on it — the hotbar itself is
             the drop target (drop here to collect / make a meal). */}
@@ -1347,10 +1348,12 @@ export default function Cooking({ data }: { data: any }) {
           </div>
         )}
         <div className="mb-2 flex items-center justify-between">
-          <div className="flex items-center gap-2 text-sm font-semibold">
-            <Icon className="h-4 w-4 text-primary" />
-            {meta.label}
-            <span className="ml-2 text-xs font-normal text-muted-foreground">{meta.hint}</span>
+          <div className="flex min-w-0 items-center gap-2.5">
+            <div className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-primary/15 text-primary">
+              <Icon className="h-4 w-4" />
+            </div>
+            <span className="font-display text-sm font-bold tracking-tight">{meta.label}</span>
+            <span className="truncate text-xs text-muted-foreground">{meta.hint}</span>
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <UtensilsCrossed className="h-3.5 w-3.5" />
@@ -1443,7 +1446,7 @@ export default function Cooking({ data }: { data: any }) {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder={_L("cook.search_placeholder")}
-                className="h-[26px] w-40 rounded-md border border-border bg-background pl-7 pr-6 text-xs outline-none placeholder:text-muted-foreground/70 focus:border-primary/60"
+                className="h-[26px] w-40 rounded-md border border-border bg-muted/50 pl-7 pr-6 text-xs outline-none placeholder:text-muted-foreground/70 focus:border-primary/60"
               />
               {query && (
                 <button
@@ -1501,7 +1504,7 @@ export default function Cooking({ data }: { data: any }) {
                     "relative flex h-32 shrink-0 touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border text-center text-xs font-medium",
                     ing.kind === "finish" ? "w-32" : "w-28",
                     can
-                      ? "cursor-grab border-border bg-secondary hover:border-primary/60 active:cursor-grabbing"
+                      ? "cursor-grab border-border/80 bg-card hover:border-primary/50 hover:bg-accent/60 active:cursor-grabbing"
                       : "cursor-not-allowed border-dashed border-border/60 bg-muted/40 opacity-60"
                   )}
                 >
@@ -1579,7 +1582,7 @@ export default function Cooking({ data }: { data: any }) {
                   }}
                   onPointerEnter={(ev) => showBarTip(ev, { ing, hint: ingHint(ing) })}
                   onPointerLeave={hideBarTip}
-                  className="relative flex h-32 w-28 shrink-0 cursor-grab touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border border-border bg-secondary text-center text-xs font-medium hover:border-primary/60 active:cursor-grabbing"
+                  className="relative flex h-32 w-28 shrink-0 cursor-grab touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border border-border/80 bg-card text-center text-xs font-medium hover:border-primary/50 hover:bg-accent/60 active:cursor-grabbing"
                 >
                   {ing.kind === "tray" ? (
                     <UtensilsCrossed className="h-10 w-10 text-primary/80" />
@@ -1619,9 +1622,9 @@ export default function Cooking({ data }: { data: any }) {
                 onPointerEnter={(ev) => showBarTip(ev, { tray: e, hint: trayHint(e) })}
                 onPointerLeave={hideBarTip}
                 className={cn(
-                  "relative flex h-32 w-28 shrink-0 touch-none select-none flex-col items-center rounded-lg border bg-secondary pt-2 text-center text-xs font-medium",
-                  e.burnt ? "border-red-900/70 bg-red-950/25" : "border-border",
-                  (isPrep || cookHere) ? "cursor-grab hover:border-primary/60 active:cursor-grabbing" : e.burnt ? "hover:border-red-800" : "hover:border-border"
+                  "relative flex h-32 w-28 shrink-0 touch-none select-none flex-col items-center rounded-lg border bg-card pt-2 text-center text-xs font-medium",
+                  e.burnt ? "border-red-900/70 bg-red-950/25" : "border-border/80",
+                  (isPrep || cookHere) ? "cursor-grab hover:border-primary/50 hover:bg-accent/60 active:cursor-grabbing" : e.burnt ? "hover:border-red-800" : "hover:border-border"
                 )}
               >
                 {/* content block centered in the space above the action row */}

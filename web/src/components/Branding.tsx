@@ -1,9 +1,158 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { fetchNui } from "@/lib/nui";
+import { useAutoSave } from "@/lib/autosave";
+import { applyTheme, normalizeTheme, THEME_PRESETS, DEFAULT_THEME, type ThemeConfig } from "@/lib/theme";
+import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
-import { Image as ImageIcon, RotateCcw, X, Pencil, Plus, Trash2 } from "lucide-react";
+import { Image as ImageIcon, RotateCcw, X, Pencil, Plus, Trash2, Palette, Check, Loader2 } from "lucide-react";
+
+// ─── theme editor ─────────────────────────────────────────────────────────────
+// The restaurant's franchise look: one brand color seed + surface mode + corner
+// radius. The entire UI palette is derived from these (CSS relative colors), so
+// every change previews LIVE on the open panel and auto-saves debounced.
+// `event` = "management:setTheme" | "admin:setTheme" (both hit SetRestaurantTheme).
+
+const HEX_OK = /^#[0-9a-f]{6}$/i;
+
+function Segmented<T extends string>({
+  value, onChange, options,
+}: {
+  value: T; onChange: (v: T) => void; options: { value: T; label: string }[];
+}) {
+  return (
+    <div className="inline-flex rounded-md border border-border bg-muted/50 p-0.5">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          onClick={() => onChange(o.value)}
+          className={cn(
+            "rounded-[calc(var(--radius)-6px)] px-3 py-1 text-xs font-semibold transition-colors",
+            value === o.value ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function ThemeEditor({
+  id, theme, event, onChange, heading, blurb,
+}: {
+  id: number; theme?: ThemeConfig | null; event: string;
+  // Fired on every edit with the new seed — lets the parent keep its cached copy
+  // live so remounts (tab switches, leave→return) re-apply the CURRENT theme, not
+  // the stale open-payload one.
+  onChange?: (t: Required<ThemeConfig>) => void;
+  heading?: string; blurb?: string;
+}) {
+  const [cfg, setCfg] = useState(() => normalizeTheme(theme));
+  const [hexDraft, setHexDraft] = useState(cfg.primary);
+
+  const set = (patch: Partial<ThemeConfig>) => {
+    setCfg((c) => {
+      const next = normalizeTheme({ ...c, ...patch });
+      applyTheme(next); // live preview — the open panel IS the preview
+      onChange?.(next); // keep the parent's cached theme in sync
+      return next;
+    });
+  };
+  const setPrimary = (hex: string) => {
+    setHexDraft(hex);
+    if (HEX_OK.test(hex)) set({ primary: hex });
+  };
+
+  const status = useAutoSave(() => fetchNui(event, { id, theme: cfg }), [cfg]);
+
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <Palette className="h-4 w-4 text-primary" /> {heading ?? _L("theme.title")}
+          </h3>
+          <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+            {status === "saving" && <><Loader2 className="h-3 w-3 animate-spin" /> {_L("theme.saving")}</>}
+            {status === "saved" && <><Check className="h-3 w-3 text-primary" /> {_L("theme.saved")}</>}
+            {status === "idle" && _L("theme.live_hint")}
+          </span>
+        </div>
+        <p className="mb-3 text-[11px] text-muted-foreground">{blurb ?? _L("theme.hint")}</p>
+
+        <span className="tape mb-1.5 block">{_L("theme.brand_color")}</span>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {THEME_PRESETS.map((p) => {
+            const active = cfg.primary === p.hex;
+            return (
+              <button
+                key={p.hex}
+                title={p.label}
+                onClick={() => setPrimary(p.hex)}
+                style={{ backgroundColor: p.hex }}
+                className={cn(
+                  "h-7 w-7 rounded-full border transition-transform",
+                  active
+                    ? "scale-110 border-white/90 ring-2 ring-primary"
+                    : "border-black/30 hover:scale-105"
+                )}
+              />
+            );
+          })}
+          {/* custom seed: native picker + hex field */}
+          <label className="relative ml-1 inline-flex h-7 w-7 cursor-pointer overflow-hidden rounded-full border border-dashed border-border">
+            <input
+              type="color"
+              value={HEX_OK.test(hexDraft) ? hexDraft : cfg.primary}
+              onChange={(e) => setPrimary(e.target.value)}
+              className="absolute -inset-2 h-[calc(100%+16px)] w-[calc(100%+16px)] cursor-pointer border-0 p-0"
+            />
+          </label>
+          <Input
+            value={hexDraft}
+            onChange={(e) => setPrimary(e.target.value.startsWith("#") ? e.target.value : "#" + e.target.value)}
+            placeholder="#ff7a2e"
+            className="h-7 w-24 font-mono text-[11px] tabular-nums"
+          />
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-end gap-4">
+          <div>
+            <span className="tape mb-1.5 block">{_L("theme.mode")}</span>
+            <Segmented
+              value={cfg.mode as "dark" | "paper"}
+              onChange={(v) => set({ mode: v })}
+              options={[
+                { value: "dark", label: _L("theme.mode_dark") },
+                { value: "paper", label: _L("theme.mode_paper") },
+              ]}
+            />
+          </div>
+          <div>
+            <span className="tape mb-1.5 block">{_L("theme.radius")}</span>
+            <Segmented
+              value={cfg.radius as "sharp" | "soft" | "round"}
+              onChange={(v) => set({ radius: v })}
+              options={[
+                { value: "sharp", label: _L("theme.radius_sharp") },
+                { value: "soft", label: _L("theme.radius_soft") },
+                { value: "round", label: _L("theme.radius_round") },
+              ]}
+            />
+          </div>
+          <button
+            onClick={() => { setHexDraft(DEFAULT_THEME.primary); set({ ...DEFAULT_THEME }); }}
+            className="ml-auto flex items-center gap-1 rounded-md border border-border bg-secondary px-2 py-1 text-[11px] font-semibold text-muted-foreground transition hover:text-foreground"
+          >
+            <RotateCcw className="h-3 w-3" /> {_L("theme.reset")}
+          </button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 // Each branded texture + the aspect its DUI renders at. MUST match `TARGETS` in
 // modules/rendertarget/client.lua — these aspects lock the crop frame's shape.

@@ -5,7 +5,7 @@
 -- =============================================
 
 -- The restaurant whose register this client currently has open (nil = none). Used
--- to decide whether an incoming live-ticket broadcast applies to us.
+-- to decide whether an incoming live-ticket list applies to us.
 local OpenRid = nil
 
 function OpenRegister(restaurantId)
@@ -16,29 +16,32 @@ function OpenRegister(restaurantId)
 end
 
 -- Live ticket list: the server broadcasts the fresh open-order list whenever it
--- changes (create/cancel/complete, from ANY cashier). We apply it only if this
--- client has that restaurant's register open, and only ever update the ticket
--- LIST — never the whole panel — so the catalog/cart are untouched and nothing
--- flickers. This is the single source of truth for what tickets are shown.
+-- changes (create/cancel/complete, from ANY cashier). We apply it whenever this
+-- client has that restaurant's register open — no sequencing needed: this is the
+-- ONLY thing that updates the list, and FiveM delivers these events reliably and
+-- in order, so the last list sent is always the last shown. We only ever touch the
+-- ticket LIST (never the whole panel) so the catalog/cart are untouched.
 RegisterNetEvent("pickle_restaurants:sales:orders", function(rid, orders)
     if OpenRid == rid and NUIView == "register" then
-        SendNUIMessage({ action = "orders", orders = orders })
+        SendNUIMessage({ action = "orders", orders = orders or {} })
     end
 end)
 
 -- POS actions just report ok/error; the ticket list refreshes itself via the
--- broadcast above. The await carries a timeout (not `false`) so a server-side
--- failure can never leave the register spinning — it returns nil, the NUI
--- un-busies, and the cashier can retry.
+-- broadcast above (which the acting cashier receives too).
+--
+-- The 2nd arg to lib.callback.await is `false` (NOT a timeout). In ox_lib that
+-- argument is a per-EVENT `delay`/cooldown: a positive number blocks the SAME
+-- callback from being sent again for that many ms, returning nil WITHOUT ever
+-- reaching the server. Passing a "timeout" like 45000 here silently rate-limited
+-- each order action to once per 45s — the second create/cancel within the window
+-- died on the client (no server hit), which is exactly the "can't create a new
+-- one / cancel does nothing until restart" bug. `false` = no cooldown; the actual
+-- response timeout is ox_lib's own `ox:callbackTimeout` convar (default 5 min).
 local function relayOrder(event)
     RegisterNUICallback(event, function(d, cb)
-        -- Longer than the server's 35s customer-confirm window so a legitimately
-        -- slow confirm never trips it; short enough to recover from a real hang.
-        local res = lib.callback.await("pickle_restaurants:" .. event, 45000, d)
+        local res = lib.callback.await("pickle_restaurants:" .. event, false, d)
         if res and res.error then ShowNotification(res.error) end
-        -- Update the acting cashier's ticket list straight from the response (the
-        -- broadcast covers coworkers) so the panel never depends on the round-trip.
-        if res and res.tickets then SendNUIMessage({ action = "orders", orders = res.tickets }) end
         -- Re-assert focus after every action: an order flow (receipt add/remove,
         -- the customer confirm) can drop the NUI cursor, and then the NEXT click —
         -- charging a new order, cancelling the next ticket — silently no-ops. Keep

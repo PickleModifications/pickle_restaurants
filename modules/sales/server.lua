@@ -179,16 +179,18 @@ end
 
 local function buildRegister(src, id)
     local emp = EmployeeCache[id] and EmployeeCache[id][GetIdentifier(src)]
+    local r = GetRestaurant(id)
     return {
         ok           = true,
         restaurantId = id,
-        label        = GetRestaurant(id).label,
-        balance      = GetRestaurant(id).balance,
+        label        = r.label,
+        balance      = r.balance,
         commission   = emp and emp.commission_rate or 0,
         catalog      = (BuildPricedCatalog(id, true)),
-        tickets      = GetOpenOrders(id),
+        tickets      = GetOpenOrders(id), -- initial list; kept live thereafter by SyncOrders
         nearby       = NearbyPlayers(src, 6.0),
         receiptOk    = ItemExists(ReceiptItem()),
+        theme        = r.metadata and r.metadata.theme or nil, -- skins the POS panel
     }
 end
 
@@ -198,11 +200,16 @@ lib.callback.register("pickle_restaurants:sales:getRegister", function(src, d)
     return buildRegister(src, id)
 end)
 
--- Push the fresh open-ticket list to every client. Each client applies it only if
--- it has THIS restaurant's register open (checked client-side). This is the ONE
--- refresh path for tickets: create/cancel/complete each call it, so every open
--- register — the acting cashier's and any co-worker's — stays live in sync without
--- re-sending the whole panel (catalog, etc.), which is what used to flicker/break.
+-- Push the fresh open-ticket list to every client. Each client applies it if it has
+-- THIS restaurant's register open (checked client-side). This is the ONE and ONLY
+-- path that mutates an open register's ticket list: create/complete/cancel each call
+-- it after their change, so every open register — the acting cashier's and any
+-- co-worker's — stays live without re-sending the whole panel (catalog, etc.).
+-- Because it's the only path AND FiveM delivers these events reliably and in order,
+-- the last list sent is always the last list shown — it can never go stale. (The
+-- previous bug was a SECOND update path: the acting cashier ALSO refreshed straight
+-- from its callback reply, which could race the broadcast and revive a cancelled
+-- ticket. The callbacks now return ok/error ONLY and never touch the list.)
 function SyncOrders(id)
     TriggerClientEvent("pickle_restaurants:sales:orders", -1, id, GetOpenOrders(id))
 end
@@ -329,6 +336,7 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
             cashier    = GetPlayerCharacterName(src),
             lines      = lines,
             total      = total,
+            theme      = r.metadata and r.metadata.theme or nil, -- skins the customer receipt
         })
         if not okc or accepted ~= true then return { ok = false, error = _L("order_declined") } end
     end
@@ -383,7 +391,10 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
     -- cashier also gets the fresh list back in THIS response (reliable, no
     -- dependence on the broadcast round-trip).
     SyncOrders(id)
-    return { ok = true, tickets = GetOpenOrders(id) }
+    -- Reply ok ONLY — the ticket list refreshes via the SyncOrders broadcast above
+    -- (which the acting cashier receives too). The reply never carries the list, so
+    -- there is no second, racing update path.
+    return { ok = true }
 end)
 
 -- ─── complete order ──────────────────────────────────────────────────────────
@@ -469,12 +480,16 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "sell") then return { ok = false, error = _L("no_work_here") } end
     local o = OrderCache[id] and OrderCache[id][tonumber(d.orderId)]
-    if not o or o.status ~= "open" then return { ok = false, error = _L("order_not_open") } end
-    -- Claim the ticket BEFORE the first yield so a double-click (or two cashiers)
-    -- can't complete it twice; every early return below must release the claim.
-    o.status = "completing"
+    -- `o.busy` is a TRANSIENT in-memory claim (double-click / two-cashier guard),
+    -- deliberately SEPARATE from o.status: the persisted status stays "open" for the
+    -- entire live life of the order. That's the fix for the wedged-ticket bug — a
+    -- failure mid-complete can never strand the order in a non-open state that the
+    -- guard rejects yet GetOpenOrders still shows. The claim is ALWAYS released on
+    -- every failure path below, so the ticket stays actionable without a restart.
+    if not o or o.status ~= "open" or o.busy then return { ok = false, error = _L("order_not_open") } end
+    o.busy = true
     local function fail(err)
-        o.status = "open"
+        o.busy = false
         ShowNotification(src, err)
         return { ok = false, error = err }
     end
@@ -500,18 +515,28 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
             return fail(_L("order_cant_carry", l.label))
         end
     end
-    for _, l in ipairs(o.lines) do
-        if not transferLine(src, customerSrc, l) then
-            return fail(_L("order_missing_items", l.label))
+
+    -- Hand the food over + consume the receipt under ONE guard so a mid-transfer
+    -- ERROR (not just a false return) releases the claim instead of wedging the
+    -- ticket. Every line was verified above, so a failure here is exceptional.
+    local moved, badLine = pcall(function()
+        for _, l in ipairs(o.lines) do
+            if not transferLine(src, customerSrc, l) then error(l.label, 0) end
         end
+        takeReceipt(customerSrc, o, true) -- verified above; best-effort by now
+    end)
+    if not moved then
+        return fail(_L("order_missing_items", tostring(badLine)))
     end
-    takeReceipt(customerSrc, o, true) -- verified above; best-effort by now
 
     CloseOrder(id, o.id, "completed")
     ShowNotification(src, _L("order_completed", o.ticket))
     if customerSrc ~= src then ShowNotification(customerSrc, _L("order_received", o.ticket)) end
     SyncOrders(id)
-    return { ok = true, tickets = GetOpenOrders(id) }
+    -- Reply ok ONLY — the ticket list refreshes via the SyncOrders broadcast above
+    -- (which the acting cashier receives too). The reply never carries the list, so
+    -- there is no second, racing update path.
+    return { ok = true }
 end)
 
 -- ─── cancel order (refund) ───────────────────────────────────────────────────
@@ -520,10 +545,12 @@ lib.callback.register("pickle_restaurants:sales:cancelOrder", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "sell") then return { ok = false, error = _L("no_work_here") } end
     local o = OrderCache[id] and OrderCache[id][tonumber(d.orderId)]
-    if not o or o.status ~= "open" then return { ok = false, error = _L("order_not_open") } end
-    o.status = "cancelling"
+    -- Transient claim, separate from the persisted status (see completeOrder) —
+    -- guarantees the ticket is never wedged in a non-open state by a failure here.
+    if not o or o.status ~= "open" or o.busy then return { ok = false, error = _L("order_not_open") } end
+    o.busy = true
     local function fail(err)
-        o.status = "open"
+        o.busy = false
         ShowNotification(src, err)
         return { ok = false, error = err }
     end
@@ -536,26 +563,31 @@ lib.callback.register("pickle_restaurants:sales:cancelOrder", function(src, d)
     AddMoney(customerSrc, o.total, "money")
     AddLedger(id, "refund", -o.total, ("Ticket #%d cancelled"):format(o.ticket), o.customer_identifier)
 
-    -- Void the receipt if it's still on them (best-effort — a lost receipt
-    -- doesn't block the refund).
-    local item = ReceiptItem()
-    if ItemExists(item) then
-        if Inventory.GetItemSlots then
-            for _, s in ipairs(Inventory.GetItemSlots(customerSrc, item) or {}) do
-                local m = type(s.metadata) == "table" and s.metadata or {}
-                if tonumber(m.order_id) == o.id then
-                    Inventory.RemoveItemSlot(customerSrc, item, 1, s.slot)
-                    break
+    -- Void the receipt if it's still on them — truly best-effort: its OWN guard so
+    -- an inventory hiccup here can never abort (and thus wedge) the cancel.
+    pcall(function()
+        local item = ReceiptItem()
+        if ItemExists(item) then
+            if Inventory.GetItemSlots then
+                for _, s in ipairs(Inventory.GetItemSlots(customerSrc, item) or {}) do
+                    local m = type(s.metadata) == "table" and s.metadata or {}
+                    if tonumber(m.order_id) == o.id then
+                        Inventory.RemoveItemSlot(customerSrc, item, 1, s.slot)
+                        break
+                    end
                 end
+            elseif (Inventory.GetItemCount(customerSrc, item) or 0) >= 1 then
+                Inventory.RemoveItem(customerSrc, item, 1)
             end
-        elseif (Inventory.GetItemCount(customerSrc, item) or 0) >= 1 then
-            Inventory.RemoveItem(customerSrc, item, 1)
         end
-    end
+    end)
 
     CloseOrder(id, o.id, "cancelled")
     ShowNotification(src, _L("order_cancelled", o.ticket))
     if customerSrc ~= src then ShowNotification(customerSrc, _L("order_refunded", o.ticket, GetCurrencyString(o.total))) end
     SyncOrders(id)
-    return { ok = true, tickets = GetOpenOrders(id) }
+    -- Reply ok ONLY — the ticket list refreshes via the SyncOrders broadcast above
+    -- (which the acting cashier receives too). The reply never carries the list, so
+    -- there is no second, racing update path.
+    return { ok = true }
 end)

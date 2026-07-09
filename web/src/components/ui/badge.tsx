@@ -1,6 +1,8 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
+// Register-tape stamp: mono, uppercase, square-ish. Counts, ticket numbers and
+// status tags all read as machine-printed labels.
 export function Badge({
   className,
   variant = "default",
@@ -15,7 +17,7 @@ export function Badge({
   return (
     <div
       className={cn(
-        "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium",
+        "inline-flex items-center rounded-sm border px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider tabular-nums",
         variants[variant],
         className
       )}

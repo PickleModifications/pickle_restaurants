@@ -58,7 +58,7 @@ export default function ItemPicker({
         type="button"
         onClick={() => setOpen((o) => !o)}
         className={cn(
-          "flex h-9 w-full items-center justify-between gap-2 rounded-md border bg-background/60 px-3 text-left text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          "flex h-9 w-full items-center justify-between gap-2 rounded-md border bg-muted/50 px-3 text-left text-sm transition-colors focus-visible:border-primary/60 focus-visible:outline-none",
           missing ? "border-destructive text-destructive" : "border-input"
         )}
       >
@@ -76,7 +76,7 @@ export default function ItemPicker({
       </button>
 
       {open && (
-        <div className="absolute z-50 mt-1 w-full overflow-hidden rounded-md border border-border bg-card shadow-xl">
+        <div className="absolute z-50 mt-1 w-full overflow-hidden rounded-md border border-border bg-popover shadow-xl">
           <div className="flex items-center gap-2 border-b border-border px-2.5">
             <Search className="h-3.5 w-3.5 text-muted-foreground" />
             <input

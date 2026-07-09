@@ -97,7 +97,9 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
         ok        = true,
         restaurant = { id = r.id, label = r.label, balance = r.balance, owner = r.owner_identifier,
                        brand_image  = r.metadata and r.metadata.brand_image or nil,
-                       brand_images = r.metadata and r.metadata.brand_images or nil },
+                       brand_images = r.metadata and r.metadata.brand_images or nil,
+                       theme        = r.metadata and r.metadata.theme or nil },
+        theme     = r.metadata and r.metadata.theme or nil, -- App-level: skins the open panel
         perms     = effective,
         roles     = rolesArray(roles),
         employees = buildEmployees(id, roles),
@@ -301,5 +303,47 @@ lib.callback.register("pickle_restaurants:management:setBrandImage", function(sr
     if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
     local res = SetRestaurantBrand(id, d.key, d.url, d.crop)
     if res and res.ok then ShowNotification(src, _L("branding_saved")) end
+    return res
+end)
+
+-- ─── theme ───────────────────────────────────────────────────────────────────
+
+-- The restaurant's NUI theme seed, stored in the metadata blob and synced to
+-- clients. The whole panel palette is DERIVED from these three values on the
+-- React side (CSS relative colors), so this is the entire theme config:
+-- primary #rrggbb, mode dark|paper, radius sharp|soft|round.
+local THEME_MODES = { dark = true, paper = true }
+local THEME_RADII = { sharp = true, soft = true, round = true }
+
+-- Global so the admin panel's app-theme callback can reuse it (the NUI is
+-- untrusted; only whitelisted seed values are ever stored).
+function SanitizeTheme(t)
+    if type(t) ~= "table" then return nil end
+    local out = {}
+    local p = tostring(t.primary or ""):lower()
+    if p:match("^#%x%x%x%x%x%x$") then out.primary = p end
+    if THEME_MODES[t.mode] then out.mode = t.mode end
+    if THEME_RADII[t.radius] then out.radius = t.radius end
+    if next(out) == nil then return nil end
+    return out
+end
+
+-- Set a restaurant's theme seed and re-sync. `theme` nil/empty clears it back to
+-- the default kit. Shared by the boss (management) and admin panels — each gates
+-- its own permission before calling.
+function SetRestaurantTheme(id, theme)
+    local r = GetRestaurant(id); if not r then return { ok = false, error = _L("mgmt_no_restaurant") } end
+    r.metadata = r.metadata or {}
+    r.metadata.theme = SanitizeTheme(theme)
+    MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), id })
+    SyncToClient(-1) -- the theme rides the restaurant sync payload
+    return { ok = true }
+end
+
+lib.callback.register("pickle_restaurants:management:setTheme", function(src, d)
+    local id = tonumber(d.id)
+    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    local res = SetRestaurantTheme(id, d.theme)
+    if res and res.ok then ShowNotification(src, _L("theme_saved")) end
     return res
 end)

@@ -4,28 +4,34 @@ import { useAutoSave, type SaveStatus } from "@/lib/autosave";
 import { Button } from "@/components/ui/button";
 import { Field, TextField, NumberField, Toggle, Select } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
+import { ThemeEditor } from "@/components/Branding";
+import { type ThemeConfig } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2, RotateCcw,
+  Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2, RotateCcw, Palette,
 } from "lucide-react";
 
 const PERMISSIONS = [
   "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance", "manage_stock",
 ];
 
-type Props = { settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void };
+type Props = {
+  settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void;
+  appTheme?: ThemeConfig | null; onAppTheme?: (t: ThemeConfig) => void;
+};
 
 // Drinks + Assembly editors moved to the Menu tab (foods live together there).
 const GROUPS = [
   { key: "general", label: _L("settings.group_general"), icon: Settings2 },
+  { key: "appearance", label: _L("settings.group_appearance"), icon: Palette },
   { key: "economy", label: _L("settings.group_economy"), icon: Coins },
   { key: "pricing", label: _L("settings.group_pricing"), icon: DollarSign },
   { key: "roles", label: _L("settings.group_roles"), icon: Users },
   { key: "blip", label: _L("settings.group_blip"), icon: MapPin },
 ];
 
-export default function Settings({ settings, items, groups, onSaved }: Props) {
+export default function Settings({ settings, items, groups, onSaved, appTheme, onAppTheme }: Props) {
   const [group, setGroup] = useState("general");
 
   return (
@@ -53,6 +59,7 @@ export default function Settings({ settings, items, groups, onSaved }: Props) {
       {/* group form */}
       <div className="min-w-0 flex-1 overflow-y-auto pr-1">
         {group === "general" && <General settings={settings} onSaved={onSaved} />}
+        {group === "appearance" && <Appearance appTheme={appTheme} onAppTheme={onAppTheme} />}
         {group === "economy" && <Economy settings={settings} onSaved={onSaved} />}
         {group === "pricing" && <Pricing settings={settings} items={items} onSaved={onSaved} />}
         {group === "roles" && <Roles settings={settings} onSaved={onSaved} />}
@@ -115,6 +122,24 @@ function General({ settings, onSaved }: { settings: any; onSaved: () => void }) 
       />
       <ResetRecipes onSaved={onSaved} />
     </Section>
+  );
+}
+
+/** The admin panel's OWN look — a franchise-independent theme that skins
+ * /restaurants itself (list, settings, menu editor). Separate from any single
+ * restaurant's theme; saved as the `app_theme` setting. Previews live and keeps
+ * the parent's copy in sync so opening a restaurant detail and closing it again
+ * returns to the CURRENT panel theme. */
+function Appearance({ appTheme, onAppTheme }: { appTheme?: ThemeConfig | null; onAppTheme?: (t: ThemeConfig) => void }) {
+  return (
+    <ThemeEditor
+      id={0}
+      theme={appTheme}
+      event="admin:setAppTheme"
+      onChange={onAppTheme}
+      heading={_L("theme.app_title")}
+      blurb={_L("theme.app_hint")}
+    />
   );
 }
 

@@ -2217,7 +2217,8 @@ function OpenCookingStation(prop)
     cookingOpen = true
     StartStationCamera(prop)
     local ing = lib.callback.await("pickle_restaurants:cooking:getIngredients", false, { prop_id = prop.id })
-    OpenNUI("cooking", { station = prop.prop_type, ingredients = ing })
+    local rest = Restaurants[prop.restaurant_id]
+    OpenNUI("cooking", { station = prop.prop_type, ingredients = ing, theme = rest and rest.theme or nil })
     RefreshTray()
 
     -- The prep tooltip ranks the player's stacks against the full recipe

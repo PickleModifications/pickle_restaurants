@@ -49,6 +49,13 @@ RegisterNUICallback("management:setBrandImage", function(d, cb)
     cb(res or {})
 end)
 
+-- Theme saves also skip the refresh — the NUI already applied the theme live.
+RegisterNUICallback("management:setTheme", function(d, cb)
+    local res = lib.callback.await("pickle_restaurants:management:setTheme", false, d)
+    if res and res.error then ShowNotification(res.error) end
+    cb(res or {})
+end)
+
 RegisterNUICallback("management:removeProp", function(d, cb)
     local res = lib.callback.await("pickle_restaurants:placement:removeProp", false, { id = d.propId })
     if res and res.error then ShowNotification(res.error) end

@@ -14,6 +14,7 @@ Language["en"] = {
     ["admin_recipes_reset"] = "All recipes reset to defaults.",
     ["admin_settings_saved"] = "Settings saved.",
     ["branding_saved"] = "Branding saved.",
+    ["theme_saved"] = "Theme saved.",
     ["cook_already_cheese"] = "Already has cheese.",
     ["cook_already_cup"] = "There's already a cup on the machine.",
     ["cook_already_ice"] = "Already has ice.",

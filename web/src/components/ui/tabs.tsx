@@ -30,9 +30,11 @@ export function Tabs({
   );
 }
 
+// Underlined tab rail — labels sit on a shared baseline rule, the active one
+// carries a brand underline (an order-ticket rail rather than pill chips).
 export function TabsList({ className, children }: { className?: string; children: React.ReactNode }) {
   return (
-    <div className={cn("inline-flex h-9 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground", className)}>
+    <div className={cn("flex items-end gap-1 border-b border-border/80", className)}>
       {children}
     </div>
   );
@@ -45,11 +47,17 @@ export function TabsTrigger({ value, children }: { value: string; children: Reac
     <button
       onClick={() => ctx.setValue(value)}
       className={cn(
-        "inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium transition-all",
-        active ? "bg-background text-foreground shadow" : "hover:text-foreground"
+        "relative -mb-px inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-t-md px-3 pb-2 pt-1.5 text-sm font-medium transition-colors",
+        active ? "text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
       )}
     >
       {children}
+      <span
+        className={cn(
+          "pointer-events-none absolute inset-x-2 bottom-0 h-0.5 rounded-full transition-colors",
+          active ? "bg-primary" : "bg-transparent"
+        )}
+      />
     </button>
   );
 }

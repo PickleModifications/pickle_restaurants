@@ -7,6 +7,7 @@
 local function buildAdminData()
     local data = {
         restaurants = {},
+        theme       = GetSetting("app_theme", nil), -- App-level: skins /restaurants itself
         settings    = SettingsCache,
         recipes     = AnnotateRecipes(),   -- each row flagged valid/missing
         drinks      = AnnotateDrinks(),
@@ -35,6 +36,7 @@ local function buildAdminData()
             propCount    = #props,
             brand_image  = r.metadata and r.metadata.brand_image or nil,
             brand_images = r.metadata and r.metadata.brand_images or nil,
+            theme        = r.metadata and r.metadata.theme or nil,
         }
     end
     for _, src in ipairs(GetPlayers()) do
@@ -107,7 +109,7 @@ lib.callback.register("pickle_restaurants:admin:delete", function(src, d)
     RestaurantCache[id] = nil
     EmployeeCache[id] = nil
     StockCache[id] = nil
-    OrderCache[id] = nil
+    ClearOrders(id) -- drops OrderCache/NextTicket + bumps the rev so a stale register can't re-apply
     for _, pid in ipairs(propIds) do PropCache[pid] = nil; TriggerClientEvent("pickle_restaurants:propRemoved", -1, pid) end
     SyncToClient(-1)
     return { ok = true }
@@ -152,6 +154,24 @@ lib.callback.register("pickle_restaurants:admin:setBrandImage", function(src, d)
     local res = SetRestaurantBrand(tonumber(d.id), d.key, d.url, d.crop)
     if res and res.ok then ShowNotification(src, _L("branding_saved")) end
     return res
+end)
+
+-- Theme: same seed config as the boss panel, admin-gated. Shares
+-- SetRestaurantTheme (management).
+lib.callback.register("pickle_restaurants:admin:setTheme", function(src, d)
+    if not IsPlayerAdmin(src) then return { ok = false } end
+    local res = SetRestaurantTheme(tonumber(d.id), d.theme)
+    if res and res.ok then ShowNotification(src, _L("theme_saved")) end
+    return res
+end)
+
+-- App-level theme: skins the /restaurants admin panel itself, stored as the
+-- `app_theme` setting (not per-restaurant). Client-render-only — no world sync.
+lib.callback.register("pickle_restaurants:admin:setAppTheme", function(src, d)
+    if not IsPlayerAdmin(src) then return { ok = false } end
+    SetSetting("app_theme", SanitizeTheme(d.theme))
+    ShowNotification(src, _L("theme_saved"))
+    return { ok = true }
 end)
 
 -- ─── settings ────────────────────────────────────────────────────────────────

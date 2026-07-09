@@ -1,21 +1,36 @@
 /** @type {import('tailwindcss').Config} */
+
+// Tokens are "R G B" triplet custom properties (set by lib/theme.ts) consumed
+// as rgb(var(--x) / alpha) — plain CSS Color 4 syntax that FiveM's CEF supports
+// (it predates color-mix()/relative colors, so no modern color functions here).
+const token = (v) => `rgb(${v} / <alpha-value>)`;
+
 export default {
   darkMode: ["class"],
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
-        border: "hsl(var(--border))",
-        input: "hsl(var(--input))",
-        ring: "hsl(var(--ring))",
-        background: "hsl(var(--background))",
-        foreground: "hsl(var(--foreground))",
-        primary: { DEFAULT: "hsl(var(--primary))", foreground: "hsl(var(--primary-foreground))" },
-        secondary: { DEFAULT: "hsl(var(--secondary))", foreground: "hsl(var(--secondary-foreground))" },
-        destructive: { DEFAULT: "hsl(var(--destructive))", foreground: "hsl(var(--destructive-foreground))" },
-        muted: { DEFAULT: "hsl(var(--muted))", foreground: "hsl(var(--muted-foreground))" },
-        accent: { DEFAULT: "hsl(var(--accent))", foreground: "hsl(var(--accent-foreground))" },
-        card: { DEFAULT: "hsl(var(--card))", foreground: "hsl(var(--card-foreground))" },
+        border: token("var(--line)"),
+        input: token("var(--line)"),
+        ring: token("var(--brand)"),
+        background: token("var(--bg)"),
+        foreground: token("var(--ink)"),
+        primary: { DEFAULT: token("var(--brand)"), foreground: token("var(--brand-ink)") },
+        secondary: { DEFAULT: token("var(--card-2)"), foreground: token("var(--ink)") },
+        destructive: { DEFAULT: token("var(--danger)"), foreground: "#fff7f5" },
+        muted: { DEFAULT: token("var(--sunk)"), foreground: token("var(--ink-mute)") },
+        accent: { DEFAULT: token("var(--wash)"), foreground: token("var(--ink)") },
+        card: { DEFAULT: token("var(--card)"), foreground: token("var(--ink)") },
+        popover: { DEFAULT: token("var(--card-2)"), foreground: token("var(--ink)") },
+        ok: token("var(--ok)"),
+        warn: token("var(--warn)"),
+        paper: { DEFAULT: token("var(--paper)"), foreground: token("var(--paper-ink)"), muted: token("var(--paper-mute)") },
+      },
+      fontFamily: {
+        sans: ['"Figtree Variable"', "ui-sans-serif", "system-ui", "sans-serif"],
+        display: ['"Bricolage Grotesque Variable"', '"Figtree Variable"', "ui-sans-serif", "sans-serif"],
+        mono: ['"Spline Sans Mono Variable"', "ui-monospace", "SFMono-Regular", "monospace"],
       },
       borderRadius: {
         lg: "var(--radius)",
@@ -24,8 +39,15 @@ export default {
       },
       keyframes: {
         "fade-in": { from: { opacity: "0", transform: "translateY(8px)" }, to: { opacity: "1", transform: "translateY(0)" } },
+        "pop-in": { from: { opacity: "0", transform: "scale(0.975)" }, to: { opacity: "1", transform: "scale(1)" } },
+        // a receipt sliding out of the printer
+        "print": { from: { opacity: "0", transform: "translateY(-14px)" }, to: { opacity: "1", transform: "translateY(0)" } },
       },
-      animation: { "fade-in": "fade-in 0.18s ease-out" },
+      animation: {
+        "fade-in": "fade-in 0.18s ease-out",
+        "pop-in": "pop-in 0.16s ease-out",
+        "print": "print 0.28s cubic-bezier(0.2, 0.9, 0.3, 1)",
+      },
     },
   },
   plugins: [],

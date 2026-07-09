@@ -30,6 +30,50 @@ game — editing `nui/assets/*` directly is pointless (they're generated bundles
 
 There is no build step for the Lua; FiveM loads it directly per `fxmanifest.lua`.
 
+### NUI design system & per-restaurant theming
+
+The whole UI derives from ONE seed. A restaurant's `metadata.theme` holds
+`{ primary = "#rrggbb", mode = "dark"|"paper", radius = "sharp"|"soft"|"round" }`
+(sanitized by `SetRestaurantTheme` in `modules/management/server.lua`; edited live
+in the Brand tab of both boss + admin panels via `ThemeEditor` in
+`web/src/components/Branding.tsx`; auto-saved like all settings). Every
+restaurant-scoped view payload (management, register, cooking, payconfirm — and
+`BuildClientRestaurant` for the client sync) carries `theme`; `App.tsx` applies it
+via `applyTheme()` (`web/src/lib/theme.ts`) which only plants `--brand` /
+`--brand-ink` + `data-mode` / `data-radius` on `<html>`.
+
+There are TWO theme scopes. A **restaurant's** `metadata.theme` skins its own
+scoped panels (register, cooking, management, payconfirm). The **admin panel**
+(`/restaurants`) has its own franchise-independent seed, the `app_theme` SETTING
+(`SanitizeTheme` in `modules/management/server.lua`, default in `DEFAULT_SETTINGS`),
+edited in Settings → Appearance and carried as `theme` at the top of `buildAdminData`.
+`Admin.tsx` holds it in state so the editor previews live and a restaurant detail
+restores it on close (not `null`); per-restaurant edits inside the admin panel are
+mirrored optimistically in `Restaurants` (`themeEdits`) so leaving and reopening a
+detail re-applies the CURRENT seed, not the stale open-payload one. `ThemeEditor`'s
+`onChange` is what keeps those parent caches live.
+
+The signature receipt paper (`.receipt`, always light) is reserved for things that
+represent a PRINTED slip — finished tickets and the customer PayConfirm. The
+new-order BUILD cart is a normal themed working surface (`bg-card`, follows the
+mode); `OptChip`/`OptRow` take a `paper` flag (default true) so the shared chip
+reads correctly on either surface.
+
+Everything else is DERIVED by `applyTheme()` itself: surfaces take the seed's
+hue in OKLCH, washes/status/hover colors are OKLab blends — all computed in JS
+and emitted as plain `"R G B"` triplet custom properties (`--bg`, `--card`,
+`--line`, `--brand-hover`, …; static defaults in `index.css`). CRITICAL: FiveM's
+CEF predates `color-mix()` and CSS relative color syntax — never use them (or
+any modern color function) in CSS/classes; consume tokens as
+`rgb(var(--x) / alpha)`, which is exactly what the Tailwind color map does, so
+`/opacity` modifiers work. Style with tokens (`bg-card`, `text-primary`, …),
+never hardcoded colors, and any new UI themes for free. Fonts: Bricolage
+Grotesque (display), Figtree (body), Spline Sans Mono (money/counts/timers — the
+"receipt voice"). Signature components: `.receipt` / `.receipt-rule` / `.tear-t` /
+`.tear-b` (thermal-receipt paper — POS tickets and PayConfirm; NOT the build cart)
+and `.tape` (mono uppercase eyebrow labels). NEVER use `backdrop-filter` — CEF
+composites it as an opaque black rectangle on transparent NUI pages.
+
 ## Runtime architecture
 
 **Database is the source of truth.** `core/server.lua` is the spine: on `MySQL.ready` it
