@@ -16,6 +16,7 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
   const players = data?.players || [];
   const items = data?.items || [];
   const groups = data?.groups || []; // every access-group name in use (suggestions)
+  const focus = data?.focus; // { restaurant, section } — set after a placement reopen
 
   const refresh = async () => {
     const fresh = await fetchNui<any>("admin:getData");
@@ -32,11 +33,11 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
         </TabsList>
 
         <TabsContent value="restaurants" className="flex min-h-0 flex-1 flex-col">
-          <Restaurants restaurants={restaurants} players={players} groups={groups} refresh={refresh} />
+          <Restaurants restaurants={restaurants} players={players} groups={groups} refresh={refresh} focus={focus} />
         </TabsContent>
 
         <TabsContent value="recipes" className="flex min-h-0 flex-1 flex-col">
-          <Menu recipes={recipes} assembly={assembly} drinks={drinks} finishes={finishes} items={items} groups={groups} onSaved={refresh} />
+          <Menu recipes={recipes} assembly={assembly} drinks={drinks} finishes={finishes} settings={settings} items={items} groups={groups} onSaved={refresh} />
         </TabsContent>
 
         <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">

@@ -4,26 +4,50 @@
 --  customer-side payment confirm (a server-awaited prompt that ALWAYS answers).
 -- =============================================
 
+-- The restaurant whose register this client currently has open (nil = none). Used
+-- to decide whether an incoming live-ticket broadcast applies to us.
+local OpenRid = nil
+
 function OpenRegister(restaurantId)
     local data = lib.callback.await("pickle_restaurants:sales:getRegister", false, { id = restaurantId })
     if not data or not data.ok then return ShowNotification((data and data.error) or _L("sales_no_work")) end
+    OpenRid = restaurantId
     OpenNUI("register", data)
 end
 
--- Every POS action returns a fresh register payload — re-render it in place.
--- The await carries a timeout (not `false`): a server-side failure must never
--- leave the register spinning forever — it returns nil, the NUI un-busies, and
--- the cashier can retry rather than being stuck mid-charge.
+-- Live ticket list: the server broadcasts the fresh open-order list whenever it
+-- changes (create/cancel/complete, from ANY cashier). We apply it only if this
+-- client has that restaurant's register open, and only ever update the ticket
+-- LIST — never the whole panel — so the catalog/cart are untouched and nothing
+-- flickers. This is the single source of truth for what tickets are shown.
+RegisterNetEvent("pickle_restaurants:sales:orders", function(rid, orders)
+    if OpenRid == rid and NUIView == "register" then
+        SendNUIMessage({ action = "orders", orders = orders })
+    end
+end)
+
+-- POS actions just report ok/error; the ticket list refreshes itself via the
+-- broadcast above. The await carries a timeout (not `false`) so a server-side
+-- failure can never leave the register spinning — it returns nil, the NUI
+-- un-busies, and the cashier can retry.
 local function relayOrder(event)
     RegisterNUICallback(event, function(d, cb)
         -- Longer than the server's 35s customer-confirm window so a legitimately
         -- slow confirm never trips it; short enough to recover from a real hang.
         local res = lib.callback.await("pickle_restaurants:" .. event, 45000, d)
         if res and res.error then ShowNotification(res.error) end
-        if res and res.tickets then
-            SendNUIMessage({ action = "setView", view = "register", data = res })
+        -- Update the acting cashier's ticket list straight from the response (the
+        -- broadcast covers coworkers) so the panel never depends on the round-trip.
+        if res and res.tickets then SendNUIMessage({ action = "orders", orders = res.tickets }) end
+        -- Re-assert focus after every action: an order flow (receipt add/remove,
+        -- the customer confirm) can drop the NUI cursor, and then the NEXT click —
+        -- charging a new order, cancelling the next ticket — silently no-ops. Keep
+        -- the panel clickable so back-to-back create/cancel/create always works.
+        if NUIView == "register" then
+            SetNuiFocus(true, true)
+            SetNuiFocusKeepInput(false)
         end
-        cb(res or {})
+        cb(res or { ok = false })
     end)
 end
 relayOrder("sales:createOrder")

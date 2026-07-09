@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { type Item } from "@/components/ItemPicker";
 import {
   ItemImage, labelOf, type Recipe, BLANK_RECIPE, STATION_LABEL,
-  RecipeForm, DrinkFields, AssemblyFields,
+  RecipeForm, DrinkFields, AssemblyFields, FinishFields,
 } from "@/components/editors";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
@@ -14,7 +14,7 @@ import { Plus, Trash2, Pencil, X, TriangleAlert, EyeOff, Check, Loader2, Tags, C
 
 type Props = {
   recipes: Recipe[]; assembly: any[]; drinks: any[]; finishes: any[];
-  items: Item[]; groups: string[]; onSaved: () => void;
+  settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void;
 };
 
 const KIND_LABEL: Record<string, string> = {
@@ -26,17 +26,25 @@ const KIND_LABEL: Record<string, string> = {
 // local state for display; removed only on the way out to the server.
 const clean = (e: any) => { const { valid, missing, defaultPrice, ...rest } = e; return rest; };
 
-export default function Menu({ recipes, assembly, drinks, finishes, items, groups, onSaved }: Props) {
+export default function Menu({ recipes, assembly, drinks, finishes, settings, items, groups, onSaved }: Props) {
   // Assembly + drinks live in the `settings` blob and save as a whole array.
   const [asm, setAsm] = useState<any[]>(() => (Array.isArray(assembly) ? assembly : []));
   const [drinkList, setDrinkList] = useState<any[]>(() => (Array.isArray(drinks) ? drinks : []));
+  // Finishes are authored in Settings; here only their group is editable (saved as
+  // the whole finishes array) and their stock/ingredient cost (the ingredient_costs
+  // map, keyed by the finish tool — saved whole so other costs aren't clobbered).
+  const [finishList, setFinishList] = useState<any[]>(() => (Array.isArray(finishes) ? finishes : []));
+  const [costs, setCosts] = useState<Record<string, number>>(() => ({ ...(settings?.ingredient_costs || {}) }));
   const asmStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { assembly: asm.map(clean) } }).then(onSaved), [asm]);
   const drinkStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { drinks: drinkList.map(clean) } }).then(onSaved), [drinkList]);
-  const listStatus = asmStatus === "saving" || drinkStatus === "saving" ? "saving"
-    : asmStatus === "saved" || drinkStatus === "saved" ? "saved" : "idle";
+  const finishStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { finishes: finishList.map(clean) } }).then(onSaved), [finishList]);
+  const costStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { ingredient_costs: costs } }).then(onSaved), [costs]);
+  const listStatus = [asmStatus, drinkStatus, finishStatus, costStatus].includes("saving") ? "saving"
+    : [asmStatus, drinkStatus, finishStatus, costStatus].includes("saved") ? "saved" : "idle";
 
   const updateAsm = (i: number, patch: any) => setAsm((l) => l.map((a, idx) => (idx === i ? { ...a, ...patch } : a)));
   const updateDrink = (i: number, patch: any) => setDrinkList((l) => l.map((d, idx) => (idx === i ? { ...d, ...patch } : d)));
+  const updateFinish = (i: number, patch: any) => setFinishList((l) => l.map((f, idx) => (idx === i ? { ...f, ...patch } : f)));
 
   // One row is expanded/edited at a time. `editKey` = which; recipes edit a
   // working copy (`draft`) auto-saved per-row, assembly/drinks edit the array.
@@ -73,7 +81,7 @@ export default function Menu({ recipes, assembly, drinks, finishes, items, group
     recipes.forEach((r) => rows.push({ kind: "recipe", key: `recipe:${r.input_item}`, group: (r.group as string) || "", sortLabel: labelOf(items, r.output_cooked_item || r.input_item), data: r }));
     asm.forEach((a, i) => rows.push({ kind: "assembly", key: `assembly:${i}`, group: a.group || "", sortLabel: a.label || a.output || "", index: i, data: a }));
     drinkList.forEach((d, i) => rows.push({ kind: "drink", key: `drink:${i}`, group: d.group || "", sortLabel: d.label || d.output || "", index: i, data: d }));
-    (finishes || []).forEach((f, i) => rows.push({ kind: "finish", key: `finish:${i}`, group: f.group || "", sortLabel: f.tool || "", data: f }));
+    finishList.forEach((f, i) => rows.push({ kind: "finish", key: `finish:${i}`, group: f.group || "", sortLabel: f.tool ? labelOf(items, f.tool) : "", index: i, data: f }));
 
     const by: Record<string, Row[]> = {};
     rows.forEach((r) => { (by[r.group] ||= []).push(r); });
@@ -83,7 +91,7 @@ export default function Menu({ recipes, assembly, drinks, finishes, items, group
       name: g,
       rows: by[g].sort((a, b) => (order.indexOf(a.kind) - order.indexOf(b.kind)) || a.sortLabel.localeCompare(b.sortLabel)),
     }));
-  }, [recipes, asm, drinkList, finishes, items]);
+  }, [recipes, asm, drinkList, finishList, items]);
 
   const imgItem = (row: any) =>
     row.kind === "recipe" ? row.data.output_cooked_item || row.data.input_item
@@ -163,20 +171,17 @@ export default function Menu({ recipes, assembly, drinks, finishes, items, group
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
-                      {row.kind === "finish" ? (
-                        <span className="text-[11px] text-muted-foreground">{_L("menu.finish_readonly")}</span>
-                      ) : (
-                        <>
-                          <Button size="sm" variant={isEditing ? "secondary" : "outline"} onClick={() => {
-                            if (isEditing) { close(); return; }
-                            if (row.kind === "recipe") openRecipe(d, row.key); else setEditKey(row.key);
-                          }}><Pencil className="h-4 w-4" /></Button>
-                          <Button size="sm" variant="destructive" onClick={async () => {
-                            if (row.kind === "recipe") { await fetchNui("admin:deleteRecipe", { input_item: d.input_item }); onSaved(); }
-                            else if (row.kind === "assembly") { close(); setAsm((l) => l.filter((_, i) => i !== row.index)); }
-                            else if (row.kind === "drink") { close(); setDrinkList((l) => l.filter((_, i) => i !== row.index)); }
-                          }}><Trash2 className="h-4 w-4" /></Button>
-                        </>
+                      <Button size="sm" variant={isEditing ? "secondary" : "outline"} onClick={() => {
+                        if (isEditing) { close(); return; }
+                        if (row.kind === "recipe") openRecipe(d, row.key); else setEditKey(row.key);
+                      }}><Pencil className="h-4 w-4" /></Button>
+                      {/* Finishes are defined in Settings — editable (cost/group) but not deletable here. */}
+                      {row.kind !== "finish" && (
+                        <Button size="sm" variant="destructive" onClick={async () => {
+                          if (row.kind === "recipe") { await fetchNui("admin:deleteRecipe", { input_item: d.input_item }); onSaved(); }
+                          else if (row.kind === "assembly") { close(); setAsm((l) => l.filter((_, i) => i !== row.index)); }
+                          else if (row.kind === "drink") { close(); setDrinkList((l) => l.filter((_, i) => i !== row.index)); }
+                        }}><Trash2 className="h-4 w-4" /></Button>
                       )}
                     </div>
                   </div>
@@ -186,6 +191,15 @@ export default function Menu({ recipes, assembly, drinks, finishes, items, group
                       {row.kind === "recipe" && draft && <RecipeForm form={draft} setForm={setDraft} items={items} groups={groups} />}
                       {row.kind === "assembly" && row.index !== undefined && <AssemblyFields asm={asm[row.index]} onChange={(p) => updateAsm(row.index!, p)} items={items} groups={groups} />}
                       {row.kind === "drink" && row.index !== undefined && <DrinkFields drink={drinkList[row.index]} onChange={(p) => updateDrink(row.index!, p)} items={items} groups={groups} />}
+                      {row.kind === "finish" && row.index !== undefined && (
+                        <FinishFields
+                          finish={finishList[row.index]}
+                          cost={Number(costs[finishList[row.index].tool] ?? 0)}
+                          onChangeFinish={(p) => updateFinish(row.index!, p)}
+                          onChangeCost={(v) => setCosts((c) => ({ ...c, [finishList[row.index!].tool]: Math.max(0, Math.floor(v || 0)) }))}
+                          groups={groups}
+                        />
+                      )}
                       <div className="mt-3 flex justify-end">
                         <Button size="sm" variant="outline" onClick={close}>{_L("recipes.done")}</Button>
                       </div>

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, Component, type ReactNode } from "react";
 import { useNuiEvent, fetchNui } from "@/lib/nui";
 import { isSaving, onSavingChange } from "@/lib/autosave";
 import InteractText from "@/views/InteractText";
@@ -9,6 +9,17 @@ import Register from "@/views/Register";
 import PayConfirm from "@/views/PayConfirm";
 
 type View = "none" | "cooking" | "admin" | "management" | "register" | "payconfirm";
+
+// Contains a render error in any single view (e.g. a malformed payload) so it
+// can't white-screen the whole NUI — the panel closes and control returns to the
+// game instead of leaving a dead, focus-stealing overlay. Resets when the view
+// changes (keyed by `view`), so reopening a panel is a clean mount.
+class ViewErrorBoundary extends Component<{ children: ReactNode; onError: () => void }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(err: unknown) { console.error("[pickle_restaurants] view crashed:", err); this.props.onError(); }
+  render() { return this.state.failed ? null : this.props.children; }
+}
 
 export default function App() {
   const [view, setView] = useState<View>("none");
@@ -54,11 +65,15 @@ export default function App() {
     <div className="h-full w-full">
       {view === "none" && <InteractText />}
 
-      {view === "cooking" && <Cooking data={data} />}
-      {view === "admin" && <Admin data={data} onClose={close} />}
-      {view === "management" && <Management data={data} onClose={close} />}
-      {view === "register" && <Register data={data} onClose={close} />}
-      {view === "payconfirm" && <PayConfirm data={data} />}
+      {view !== "none" && (
+        <ViewErrorBoundary key={view} onError={doClose}>
+          {view === "cooking" && <Cooking data={data} />}
+          {view === "admin" && <Admin data={data} onClose={close} />}
+          {view === "management" && <Management data={data} onClose={close} />}
+          {view === "register" && <Register data={data} onClose={close} />}
+          {view === "payconfirm" && <PayConfirm data={data} />}
+        </ViewErrorBoundary>
+      )}
     </div>
   );
 }

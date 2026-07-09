@@ -44,6 +44,10 @@ function StartMovement(prop, data)
     local rotationOffset = data.rotationOffset or vector3(0.0, 0.0, 0.0)
     while true do
         local speedMode = 1
+        -- keep a seated-preview ped in its pose if moving it dropped the scenario
+        if data.scenario and DoesEntityExist(prop) and not IsPedUsingScenario(prop, data.scenario) then
+            TaskStartScenarioInPlace(prop, data.scenario, 0, false)
+        end
         local hit, hitCoords, entity = GetDirectionCoords()
         if hit and hitCoords then 
             if not isFrozen then
@@ -114,7 +118,9 @@ function StartMovement(prop, data)
                 coords = coords - forwardVector * ((GetDisabledControlNormal(0, 2) * 0.02) * speedMode)
                 coords = coords + rightVector * ((GetDisabledControlNormal(0, 1) * 0.02) * speedMode)
             end
-            SetEntityCoords(prop, coords.x + coordsOffset.x, coords.y + coordsOffset.y, coords.z + coordsOffset.z)
+            -- z already carries coordsOffset.z (baked into `coords` in the non-frozen
+            -- branch); don't add it twice or a seated preview drops an extra offset.
+            SetEntityCoords(prop, coords.x + coordsOffset.x, coords.y + coordsOffset.y, coords.z)
             -- if IsControlPressed(1, 172) then
             --     coords = coords + forwardVector * (0.005 * speedMode)
             --     SetEntityCoords(prop, coords.x, coords.y, coords.z)
@@ -264,8 +270,12 @@ function StartGizmoEditor(data)
     else
         if data.isPed then
             gizmoEntity = CreateGizmoPed(data.model, coords, rotation)
+            -- A seated preview: play the sit scenario (no enter anim so re-arming
+            -- while the ped follows the cursor stays seamless).
+            if gizmoEntity and data.scenario then
+                TaskStartScenarioInPlace(gizmoEntity, data.scenario, 0, false)
+            end
         else
-            print("A")
             gizmoEntity = CreateProp(data.model, coords.x, coords.y, coords.z, false, false, false)
         end
         if not gizmoEntity or not DoesEntityExist(gizmoEntity) then

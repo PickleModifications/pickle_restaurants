@@ -228,3 +228,12 @@ lib.callback.register("pickle_restaurants:admin:deleteRecipe", function(src, d)
     ShowNotification(src, _L("admin_recipe_deleted"))
     return { ok = true }
 end)
+
+-- Wipe all recipes and restore the built-in defaults (Settings → General).
+lib.callback.register("pickle_restaurants:admin:resetRecipes", function(src)
+    if not IsPlayerAdmin(src) then return { ok = false } end
+    ResetRecipesToDefault()
+    SyncToClient(-1)
+    ShowNotification(src, _L("admin_recipes_reset"))
+    return { ok = true }
+end)

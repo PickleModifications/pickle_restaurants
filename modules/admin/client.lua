@@ -23,8 +23,7 @@ local function modelInvalid(model)
     return not IsModelInCdimage(GetHashKey(model))
 end
 
-RegisterNUICallback("admin:getData", function(d, cb)
-    local res = lib.callback.await("pickle_restaurants:admin:getData", false, d)
+local function annotateModels(res)
     if type(res) == "table" and type(res.recipes) == "table" then
         for _, r in ipairs(res.recipes) do
             local bad = {}
@@ -34,7 +33,24 @@ RegisterNUICallback("admin:getData", function(d, cb)
             r.invalid_models = bad
         end
     end
-    cb(res or {})
+    return res
+end
+
+-- Re-fetch the admin dataset and reopen the panel — used after a placement/gizmo
+-- flow hands control back, so the admin lands back in the menu (with the just-
+-- placed prop/seat already in the fresh data) instead of a closed screen. `focus`
+-- (restaurant id + section) tells the NUI to reopen that restaurant and scroll to
+-- its stations/seating so another can be placed immediately.
+local function ReopenAdmin(restaurantId, section)
+    local res = annotateModels(lib.callback.await("pickle_restaurants:admin:getData", false, {}))
+    if type(res) == "table" and res.ok ~= false then
+        if restaurantId then res.focus = { restaurant = restaurantId, section = section } end
+        OpenNUI("admin", res)
+    end
+end
+
+RegisterNUICallback("admin:getData", function(d, cb)
+    cb(annotateModels(lib.callback.await("pickle_restaurants:admin:getData", false, d)) or {})
 end)
 RegisterNUICallback("admin:create",       relay("pickle_restaurants:admin:create"))
 RegisterNUICallback("admin:delete",       relay("pickle_restaurants:admin:delete"))
@@ -44,6 +60,7 @@ RegisterNUICallback("admin:saveSetting",  relay("pickle_restaurants:admin:saveSe
 RegisterNUICallback("admin:saveSettings", relay("pickle_restaurants:admin:saveSettings"))
 RegisterNUICallback("admin:saveRecipe",   relay("pickle_restaurants:admin:saveRecipe"))
 RegisterNUICallback("admin:deleteRecipe", relay("pickle_restaurants:admin:deleteRecipe"))
+RegisterNUICallback("admin:resetRecipes", relay("pickle_restaurants:admin:resetRecipes"))
 
 -- Admins resolve to full permissions, so the placement remove callback accepts
 -- them; this keeps the panel open and lets the React side refresh in place.
@@ -52,21 +69,26 @@ RegisterNUICallback("admin:removeProp", function(d, cb)
     cb(res or {})
 end)
 
--- These close the NUI and hand off to the gizmo placement flow.
+-- These close the NUI and hand off to the (blocking) gizmo placement flow, then
+-- reopen the admin panel with fresh data so another entity can be placed without
+-- reopening the menu by hand — on both a successful placement and a cancel.
 RegisterNUICallback("admin:placeProp", function(d, cb)
     CloseNUI()
     cb({})
     StartPropPlacement(d.id, d.prop_type)
+    ReopenAdmin(d.id, "stations")
 end)
 
 RegisterNUICallback("admin:setCounter", function(d, cb)
     CloseNUI()
     cb({})
     StartCounterPlacement(d.id)
+    ReopenAdmin(d.id, "stations")
 end)
 
 RegisterNUICallback("admin:placeSeat", function(d, cb)
     CloseNUI()
     cb({})
     StartSeatPlacement(d.id)
+    ReopenAdmin(d.id, "seating")
 end)

@@ -108,6 +108,13 @@ function toupper(str) return string.upper(str) end
 
 function GetCurrencyString(amount) return NumberWithCommas(amount) end
 
+-- "raw_beef_patty" / "frosting" -> "Raw Beef Patty" / "Frosting". Used as the
+-- display fallback when an item isn't in the inventory catalogue (e.g. a finish
+-- tool that hasn't been installed yet), so codenames never show up lowercase.
+function PrettyItemName(name)
+    return (tostring(name):gsub("[_%-]+", " "):gsub("(%a)([%w]*)", function(a, b) return a:upper() .. b:lower() end))
+end
+
 function GetItemLabel(name)
     if not name then return "Unknown" end
     if Inventory and Inventory.Items and Inventory.Items[name] then
@@ -115,7 +122,7 @@ function GetItemLabel(name)
     elseif Inventory and Inventory.Items and Inventory.Items[toupper(name)] then
         return Inventory.Items[toupper(name)].label
     end
-    return name
+    return PrettyItemName(name)
 end
 
 function WeightedRandom(weights)

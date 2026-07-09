@@ -31,10 +31,13 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
   const perms = data?.perms || {};
   const roles: any[] = data?.roles || [];
   const items: Item[] = data?.items || [];
+  const focus = data?.focus; // { section } — set after a placement reopen
+  // A placement reopen lands on the Stations tab (if allowed) instead of the default.
+  const initialTab = (focus?.section && perms.manage_props) ? "stations" : firstTab(perms);
 
   return (
     <Panel title={data?.restaurant?.label || _L("mgmt.title")} subtitle={_L("mgmt.balance", money(data?.restaurant?.balance))} onClose={onClose} width="max-w-4xl">
-      <Tabs defaultValue={firstTab(perms)} className="flex min-h-0 flex-1 flex-col">
+      <Tabs defaultValue={initialTab} className="flex min-h-0 flex-1 flex-col">
         <TabsList className="shrink-0">
           {perms.manage_employees && <TabsTrigger value="employees">{_L("mgmt.tab_employees")}</TabsTrigger>}
           {perms.manage_menu && <TabsTrigger value="menu">{_L("mgmt.tab_menu")}</TabsTrigger>}
@@ -66,7 +69,7 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         )}
         {perms.manage_props && (
           <TabsContent value="stations" className="min-h-0 flex-1 overflow-y-auto pr-1">
-            <Stations id={id} props={data?.props || []} />
+            <Stations id={id} props={data?.props || []} focusSection={focus?.section} />
           </TabsContent>
         )}
         {perms.manage_props && (
@@ -307,7 +310,7 @@ function Finances({ id, balance, ledger, canManage }: any) {
   );
 }
 
-function Stations({ id, props }: any) {
+function Stations({ id, props, focusSection }: any) {
   const STATIONS = [
     { key: "soda_machine", label: _L("admin.station_soda_machine") },
     { key: "fryer", label: _L("admin.station_fryer") },
@@ -316,9 +319,20 @@ function Stations({ id, props }: any) {
   ];
   const seats = (props as any[]).filter((p) => p.prop_type === "seat");
   const stationProps = (props as any[]).filter((p) => p.prop_type !== "seat");
+  const stationsRef = useRef<HTMLDivElement>(null);
+  const seatingRef = useRef<HTMLDivElement>(null);
+
+  // Scroll the just-used section into view when reopened from a placement flow.
+  useEffect(() => {
+    if (!focusSection) return;
+    const el = focusSection === "seating" ? seatingRef.current : stationsRef.current;
+    const t = setTimeout(() => el?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+    return () => clearTimeout(t);
+  }, [focusSection]);
+
   return (
     <div className="space-y-3">
-      <Card>
+      <Card ref={stationsRef}>
         <CardContent className="flex flex-wrap items-center gap-2 pt-4">
           {STATIONS.map((s) => (
             <Button key={s.key} variant="outline" size="sm" onClick={() => fetchNui("management:placeProp", { id, prop_type: s.key })}>
@@ -331,7 +345,7 @@ function Stations({ id, props }: any) {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card ref={seatingRef}>
         <CardContent className="pt-4">
           <div className="mb-2 flex items-center justify-between">
             <h3 className="flex items-center gap-2 text-sm font-semibold"><Armchair className="h-4 w-4" /> {_L("mgmt.seating")}</h3>

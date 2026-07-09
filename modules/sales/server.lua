@@ -198,6 +198,15 @@ lib.callback.register("pickle_restaurants:sales:getRegister", function(src, d)
     return buildRegister(src, id)
 end)
 
+-- Push the fresh open-ticket list to every client. Each client applies it only if
+-- it has THIS restaurant's register open (checked client-side). This is the ONE
+-- refresh path for tickets: create/cancel/complete each call it, so every open
+-- register — the acting cashier's and any co-worker's — stays live in sync without
+-- re-sending the whole panel (catalog, etc.), which is what used to flicker/break.
+function SyncOrders(id)
+    TriggerClientEvent("pickle_restaurants:sales:orders", -1, id, GetOpenOrders(id))
+end
+
 -- ─── order helpers ───────────────────────────────────────────────────────────
 
 local function findPlayerByIdentifier(identifier)
@@ -282,14 +291,19 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
                     local price = math.max(0, math.floor(tonumber(m.price) or 0))
                     unit = unit + price
                     local label = m.group and (tostring(m.group) .. ": " .. tostring(m.label)) or m.label
-                    mods[#mods + 1] = { id = m.id, label = label, price = price, added = true }
+                    -- carry the modifier's icon (item image, or flavor colour swatch)
+                    -- so the kitchen ticket can render it as an image, not just text
+                    mods[#mods + 1] = { id = m.id, label = label, price = price, added = true,
+                                        image = m.image, color = m.color }
                 elseif isDefault and not on then
-                    mods[#mods + 1] = { id = m.id, label = m.label, removed = true }
+                    mods[#mods + 1] = { id = m.id, label = m.label, removed = true,
+                                        image = m.image, color = m.color }
                 end
             end
         end
 
         lines[#lines + 1] = { item = e.item, variant = e.variant, label = e.label,
+                              image = e.image or GetItemImage(e.item),
                               price = unit, qty = qty, kind = e.kind,
                               mods = (#mods > 0) and mods or nil }
         total = total + unit * qty
@@ -360,15 +374,16 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
         ShowNotification(src, _L("order_placed", order.ticket))
         if customerSrc ~= src then ShowNotification(customerSrc, _L("order_charged", order.ticket, GetCurrencyString(total))) end
     end)
-    if not ok then print(("[pickle_restaurants] createOrder failed: %s"):format(tostring(err))) end
+    if not ok then
+        print(("[pickle_restaurants] createOrder failed: %s"):format(tostring(err)))
+        return { ok = false, error = _L("order_failed") }
+    end
 
-    -- ALWAYS answer the cashier's POS with a fresh register (never hang). A
-    -- created ticket shows immediately; buildRegister is itself guarded so even a
-    -- catalog error still returns the open tickets.
-    local okReg, reg = pcall(buildRegister, src, id)
-    if okReg then return reg end
-    print(("[pickle_restaurants] buildRegister failed: %s"):format(tostring(reg)))
-    return { ok = true, restaurantId = id, tickets = GetOpenOrders(id) }
+    -- Broadcast the new ticket to every open register (coworkers'); the acting
+    -- cashier also gets the fresh list back in THIS response (reliable, no
+    -- dependence on the broadcast round-trip).
+    SyncOrders(id)
+    return { ok = true, tickets = GetOpenOrders(id) }
 end)
 
 -- ─── complete order ──────────────────────────────────────────────────────────
@@ -460,9 +475,8 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
     o.status = "completing"
     local function fail(err)
         o.status = "open"
-        local res = buildRegister(src, id)
-        res.ok, res.error = false, err
-        return res
+        ShowNotification(src, err)
+        return { ok = false, error = err }
     end
 
     local customerSrc = findPlayerByIdentifier(o.customer_identifier)
@@ -496,7 +510,8 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
     CloseOrder(id, o.id, "completed")
     ShowNotification(src, _L("order_completed", o.ticket))
     if customerSrc ~= src then ShowNotification(customerSrc, _L("order_received", o.ticket)) end
-    return buildRegister(src, id)
+    SyncOrders(id)
+    return { ok = true, tickets = GetOpenOrders(id) }
 end)
 
 -- ─── cancel order (refund) ───────────────────────────────────────────────────
@@ -509,9 +524,8 @@ lib.callback.register("pickle_restaurants:sales:cancelOrder", function(src, d)
     o.status = "cancelling"
     local function fail(err)
         o.status = "open"
-        local res = buildRegister(src, id)
-        res.ok, res.error = false, err
-        return res
+        ShowNotification(src, err)
+        return { ok = false, error = err }
     end
 
     -- Refunding needs a live player to hand the money back to.
@@ -542,5 +556,6 @@ lib.callback.register("pickle_restaurants:sales:cancelOrder", function(src, d)
     CloseOrder(id, o.id, "cancelled")
     ShowNotification(src, _L("order_cancelled", o.ticket))
     if customerSrc ~= src then ShowNotification(customerSrc, _L("order_refunded", o.ticket, GetCurrencyString(o.total))) end
-    return buildRegister(src, id)
+    SyncOrders(id)
+    return { ok = true, tickets = GetOpenOrders(id) }
 end)

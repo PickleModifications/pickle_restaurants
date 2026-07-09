@@ -72,12 +72,17 @@ local function SpawnProp(prop)
     -- (the seating module plays the pose). Cleaned up via propInteractions like any
     -- other placed prop (ClearWorld / propRemoved).
     if prop.prop_type == "seat" then
+        -- Generous reach: the anchor sits at the seated pose (often up on a chair),
+        -- so a tight radius reads as "too far" even standing right at it. These are
+        -- forgiving enough to sit from beside the chair in both target and
+        -- keypress interaction modes.
         propInteractions[prop.id] = CreateInteraction({
             coords         = vector3(prop.x, prop.y, prop.z),
             label          = _L("main_sit"),
             icon           = "fa-solid fa-chair",
-            radius         = 0.9,
-            interactRadius = 1.4,
+            radius         = 1.2,
+            interactRadius = 2.5,
+            distance       = 2.5,
         }, function()
             if SitOnSeat then SitOnSeat(prop) end
         end)

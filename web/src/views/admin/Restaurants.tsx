@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchNui } from "@/lib/nui";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,16 +19,19 @@ const STATIONS = [
   { key: "kitchen_prep", label: _L("admin.station_kitchen_prep"), icon: Sandwich },
 ];
 
-type Props = { restaurants: any[]; players: any[]; groups: string[]; refresh: () => void };
+type Focus = { restaurant?: number; section?: string };
+type Props = { restaurants: any[]; players: any[]; groups: string[]; refresh: () => void; focus?: Focus };
 
-export default function Restaurants({ restaurants, players, groups, refresh }: Props) {
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+export default function Restaurants({ restaurants, players, groups, refresh, focus }: Props) {
+  // After a placement reopen, `focus.restaurant` drops us straight back into that
+  // restaurant (and `focus.section` scrolls to its stations/seating).
+  const [selectedId, setSelectedId] = useState<number | null>(focus?.restaurant ?? null);
   const selected = restaurants.find((r) => r.id === selectedId) || null;
 
   const act = async (event: string, payload: any) => { await fetchNui(event, payload); await refresh(); };
 
   if (selected) {
-    return <Detail r={selected} players={players} groups={groups} act={act} onBack={() => setSelectedId(null)} />;
+    return <Detail r={selected} players={players} groups={groups} act={act} onBack={() => setSelectedId(null)} focusSection={selected.id === focus?.restaurant ? focus?.section : undefined} />;
   }
   return <List restaurants={restaurants} act={act} onOpen={setSelectedId} />;
 }
@@ -75,10 +78,20 @@ function List({ restaurants, act, onOpen }: { restaurants: any[]; act: (e: strin
   );
 }
 
-function Detail({ r, players, groups, act, onBack }: { r: any; players: any[]; groups: string[]; act: (e: string, p: any) => void; onBack: () => void }) {
+function Detail({ r, players, groups, act, onBack, focusSection }: { r: any; players: any[]; groups: string[]; act: (e: string, p: any) => void; onBack: () => void; focusSection?: string }) {
   const props: any[] = r.props || [];
   const byType = (t: string) => props.filter((p) => p.prop_type === t);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const stationsRef = useRef<HTMLDivElement>(null);
+  const seatingRef = useRef<HTMLDivElement>(null);
+
+  // Scroll the just-used section into view when reopened from a placement flow.
+  useEffect(() => {
+    if (!focusSection) return;
+    const el = focusSection === "seating" ? seatingRef.current : stationsRef.current;
+    const t = setTimeout(() => el?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+    return () => clearTimeout(t);
+  }, [focusSection]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -151,7 +164,7 @@ function Detail({ r, players, groups, act, onBack }: { r: any; players: any[]; g
         </div>
 
         {/* stations */}
-        <div className="rounded-lg border border-border p-3">
+        <div ref={stationsRef} className="rounded-lg border border-border p-3">
           <div className="mb-3 text-sm font-semibold">{_L("admin.stations")}</div>
           <div className="space-y-3">
             {STATIONS.map((s) => {
@@ -189,7 +202,7 @@ function Detail({ r, players, groups, act, onBack }: { r: any; players: any[]; g
         </div>
 
         {/* seating — invisible sit anchors; players sit on existing furniture */}
-        <div className="rounded-lg border border-border p-3">
+        <div ref={seatingRef} className="rounded-lg border border-border p-3">
           <div className="mb-1.5 flex items-center justify-between">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <Armchair className="h-4 w-4 text-muted-foreground" /> {_L("admin.seating")}

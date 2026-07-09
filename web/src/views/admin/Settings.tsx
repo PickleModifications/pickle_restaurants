@@ -7,7 +7,7 @@ import ItemPicker, { type Item } from "@/components/ItemPicker";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2,
+  Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2, RotateCcw,
 } from "lucide-react";
 
 const PERMISSIONS = [
@@ -113,7 +113,48 @@ function General({ settings, onSaved }: { settings: any; onSaved: () => void }) 
         hint={_L("settings.cooked_expiry_hint")}
         value={expire} min={0} step={10} onChange={setExpire}
       />
+      <ResetRecipes onSaved={onSaved} />
     </Section>
+  );
+}
+
+/** Destructive maintenance action: wipe every recipe and reseed the built-in
+ * defaults. Two-step confirm (no accidental resets); refreshes the panel after. */
+function ResetRecipes({ onSaved }: { onSaved: () => void }) {
+  const [confirm, setConfirm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const reset = async () => {
+    setBusy(true);
+    await fetchNui("admin:resetRecipes");
+    setBusy(false);
+    setConfirm(false);
+    onSaved();
+  };
+  return (
+    <div className="mt-2 rounded-lg border border-destructive/40 bg-destructive/5 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium">{_L("settings.reset_recipes")}</div>
+          <p className="text-xs text-muted-foreground">{_L("settings.reset_recipes_desc")}</p>
+        </div>
+        {!confirm && (
+          <Button variant="destructive" size="sm" className="shrink-0" onClick={() => setConfirm(true)}>
+            <RotateCcw className="h-4 w-4" /> {_L("settings.reset_recipes_btn")}
+          </Button>
+        )}
+      </div>
+      {confirm && (
+        <div className="mt-3 flex items-center justify-between gap-2">
+          <span className="text-xs text-destructive">{_L("settings.reset_recipes_confirm")}</span>
+          <div className="flex shrink-0 gap-2">
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => setConfirm(false)}>{_L("settings.reset_recipes_cancel")}</Button>
+            <Button variant="destructive" size="sm" disabled={busy} onClick={reset}>
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />} {_L("settings.reset_recipes_confirm_btn")}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

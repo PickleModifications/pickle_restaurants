@@ -967,6 +967,22 @@ local function SeedRecipes()
     end
 end
 
+-- Wipe every recipe and re-insert the built-in defaults verbatim (the admin
+-- "Reset all recipes" action). Unlike SeedRecipes (which only fills gaps), this
+-- deliberately discards customisations. DEFAULT_RECIPES already holds the
+-- corrected cake/chicken models, so no post-insert backfills are needed.
+function ResetRecipesToDefault()
+    MySQL.query.await("DELETE FROM pickle_restaurant_recipes")
+    for _, r in ipairs(DEFAULT_RECIPES) do
+        MySQL.insert.await([[
+            INSERT INTO pickle_restaurant_recipes
+                (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count, container_model, `group`)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ]], { r.input, r.station, r.raw, r.cooked, r.burnt, r.out_cooked, r.out_burnt, r.cook_ms, r.burn_ms, r.dual_sided or 0, r.method or "grill", r.output_count or 1, r.container, r.group })
+    end
+    LoadRecipes()
+end
+
 function LoadRecipes()
     RecipeCache, RecipeByInput, RecipeByOutput = {}, {}, {}
     local rows = MySQL.query.await("SELECT * FROM pickle_restaurant_recipes") or {}

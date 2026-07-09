@@ -3,12 +3,15 @@
 --  Opens the management NUI and relays its actions to the server.
 -- =============================================
 
-function OpenManagement(restaurantId)
+-- `section` (optional) tells the NUI to open a specific tab and scroll to it —
+-- used after a placement flow so the boss lands back on Stations/Seating.
+function OpenManagement(restaurantId, section)
     local data = lib.callback.await("pickle_restaurants:management:getData", false, { id = restaurantId })
     if not data or not data.ok then
         return ShowNotification((data and data.error) or _L("manage_no_access"))
     end
     data.restaurantId = restaurantId
+    if section then data.focus = { section = section } end
     OpenNUI("management", data)
 end
 
@@ -59,20 +62,27 @@ RegisterNUICallback("management:removeProp", function(d, cb)
     cb(res or {})
 end)
 
+-- These close the NUI and hand off to the (blocking) gizmo placement flow, then
+-- reopen the management panel with fresh data so another entity can be placed
+-- without reopening the menu by hand — on both a successful placement and a cancel.
+-- OpenManagement re-fetches getData, so the reopened panel is never stale.
 RegisterNUICallback("management:placeProp", function(d, cb)
     CloseNUI()
     cb({})
     StartPropPlacement(d.id, d.prop_type)
+    OpenManagement(d.id, "stations")
 end)
 
 RegisterNUICallback("management:setCounter", function(d, cb)
     CloseNUI()
     cb({})
     StartCounterPlacement(d.id)
+    OpenManagement(d.id, "stations")
 end)
 
 RegisterNUICallback("management:placeSeat", function(d, cb)
     CloseNUI()
     cb({})
     StartSeatPlacement(d.id)
+    OpenManagement(d.id, "seating")
 end)

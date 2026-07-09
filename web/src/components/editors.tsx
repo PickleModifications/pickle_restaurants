@@ -23,9 +23,15 @@ export function ItemImage({ items, name, className }: { items: Item[]; name: str
   return <img src={img} alt={name} onError={() => setBroken(true)} className={cn("rounded bg-muted/40 object-contain", className)} />;
 }
 
+// "frosting" / "raw_beef_patty" -> "Frosting" / "Raw Beef Patty". Fallback for a
+// codename with no catalogue label, so names never render lowercase.
+export function prettyName(name: string) {
+  return name.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 export function labelOf(items: Item[], name: string) {
   if (!name) return "—";
-  return items.find((i) => i.name === name)?.label ?? name;
+  return items.find((i) => i.name === name)?.label ?? prettyName(name);
 }
 
 // ─── cooked recipe ─────────────────────────────────────────────────────────────
@@ -100,13 +106,13 @@ export function RecipeForm({ form, setForm, items, groups }: { form: Recipe; set
   return (
     <div className="grid grid-cols-3 gap-3">
       {itemField(_L("recipes.input_item"), "input_item")}
+      {itemField(_L("recipes.cooked_output"), "output_cooked_item")}
+      <div />
       <Select label={_L("recipes.station")} value={form.station}
         onChange={(v) => setForm({ ...form, station: v, method: (METHODS[v] || [])[0]?.value || "grill" })}
         options={[{ value: "fryer", label: _L("recipes.station_fryer") }, { value: "stovetop", label: _L("recipes.station_stovetop") }]} />
       <Select label={_L("recipes.method")} value={form.method || (METHODS[form.station] || [])[0]?.value || "grill"}
         onChange={(v) => set("method", v)} options={METHODS[form.station] || METHODS.stovetop} />
-      {itemField(_L("recipes.cooked_output"), "output_cooked_item")}
-      {itemField(_L("recipes.burnt_output"), "output_burnt_item")}
       <div />
       {modelField(_L("recipes.raw_model"), "raw_model")}
       {modelField(_L("recipes.cooked_model"), "cooked_model")}
@@ -146,6 +152,24 @@ export function DrinkFields({ drink, onChange, items, groups }: { drink: any; on
       <NumberField label={_L("settings.fill_time")} value={Number(drink.fill_ms ?? 3000)} min={0} step={500} onChange={(v) => onChange({ fill_ms: v })} />
       <GroupField label={_L("settings.group_field")} hint={_L("settings.group_field_hint")}
         value={drink.group || ""} groups={groups} onChange={(v) => onChange({ group: v })} />
+    </div>
+  );
+}
+
+// ─── finish (frosting/sprinkles) ────────────────────────────────────────────────
+// A finish's full config (tool, targets, flavors, models) is authored in the
+// settings table — the panel exposes only the two things a boss tunes day-to-day:
+// its stock/ingredient cost (drives the buy price in Supplies AND the default menu
+// price) and the access group. There is deliberately no delete here.
+
+export function FinishFields({ finish, cost, onChangeFinish, onChangeCost, groups }:
+  { finish: any; cost: number; onChangeFinish: (patch: any) => void; onChangeCost: (v: number) => void; groups: string[] }) {
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <NumberField label={_L("settings.finish_cost")} hint={_L("settings.finish_cost_hint")}
+        value={cost} min={0} onChange={onChangeCost} />
+      <GroupField label={_L("settings.group_field")} hint={_L("settings.group_field_hint")}
+        value={finish.group || ""} groups={groups} onChange={(v) => onChangeFinish({ group: v })} />
     </div>
   );
 }

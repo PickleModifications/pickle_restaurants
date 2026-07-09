@@ -15,6 +15,12 @@ local SIT_SCENARIO = "PROP_HUMAN_SEAT_CHAIR_FOOD"
 local SIT_OFFSET_Z = 0.5
 local SIT_CONTROL  = 51 -- INPUT_CONTEXT (E) — same key sits and stands
 
+-- Exposed so the placement gizmo can preview the SEATED pose (not a standing ped)
+-- at exactly where a player will sit — the same scenario + z-offset the real sit
+-- uses, so what the admin positions is what they get.
+function SeatPreviewScenario() return SIT_SCENARIO end
+function SeatSitOffsetZ() return SIT_OFFSET_Z end
+
 local seatedSeat = nil -- the seat prop we're currently sitting on (nil = standing)
 
 function IsSeated() return seatedSeat ~= nil end

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { fetchNui } from "@/lib/nui";
+import { fetchNui, useNuiEvent } from "@/lib/nui";
 import Panel from "@/components/Panel";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -8,13 +8,15 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  ShoppingCart, Plus, Minus, Trash2, User, Receipt, Check, X, Loader2, ImageOff, ClipboardList, SlidersHorizontal,
+  ShoppingCart, Plus, Minus, Trash2, User, Receipt, Check, X, Loader2, ImageOff, ClipboardList, SlidersHorizontal, Ban,
 } from "lucide-react";
 
 type Mod = { id: string; label: string; item?: string; price?: number; default?: boolean; image?: string; group?: string; color?: string };
 type Cat = { key: string; item: string; variant: string; label: string; kind: string; price: number; image?: string; modifiers?: Mod[] };
-type LineMod = { id?: string; label: string; price?: number; added?: boolean; removed?: boolean };
-type Line = { item: string; variant: string; label: string; price: number; qty: number; kind: string; mods?: LineMod[] };
+type LineMod = { id?: string; label: string; price?: number; added?: boolean; removed?: boolean; image?: string; color?: string };
+type Line = { item: string; variant: string; label: string; price: number; qty: number; kind: string; image?: string; mods?: LineMod[] };
+// A selected option to render as an image chip (added extra, or a removed default).
+type OptView = { label: string; image?: string; color?: string };
 type Ticket = { orderId: number; ticket: number; customer: string; lines: Line[]; total: number };
 type Near = { id: number; name: string };
 // A cart entry: which catalog item, how many, and the selected modifier ids.
@@ -55,9 +57,41 @@ function resolveMods(cat: Cat, sel: string[]) {
   }
   return { added, removed, extra };
 }
-const modText = (added: Mod[], removed: Mod[]) =>
-  [...added.map((m) => (m.group ? m.group + ": " + m.label : "+" + m.label)),
-   ...removed.map((m) => "no " + m.label)].join(", ");
+// A single selected-option chip: the modifier's item image (or a flavor colour
+// swatch), captioned by its label on hover. A removed default is dimmed and
+// crossed out so "no lettuce" reads at a glance without any text.
+function OptChip({ o, removed }: { o: OptView; removed?: boolean }) {
+  return (
+    <span
+      title={(removed ? _L("register.opt_no") + " " : "") + o.label}
+      className={cn(
+        "relative flex h-6 w-6 shrink-0 items-center justify-center rounded border bg-background/60",
+        removed ? "border-destructive/50" : "border-border/60",
+      )}
+    >
+      {o.image
+        ? <Thumb src={o.image} className={cn("h-5 w-5", removed && "opacity-40")} />
+        : o.color
+          ? <span className={cn("h-4 w-4 rounded-full border border-border", removed && "opacity-40")} style={{ backgroundColor: o.color }} />
+          : <div className={cn("grid h-5 w-5 place-items-center rounded bg-muted/60 text-muted-foreground", removed && "opacity-40")}><ImageOff className="h-3 w-3" /></div>}
+      {removed && (
+        <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-destructive"><Ban className="h-4 w-4" /></span>
+      )}
+    </span>
+  );
+}
+
+// The secondary row of an item line: its selected options rendered as image
+// chips (added extras first, then crossed-out removed defaults). Empty = nothing.
+function OptRow({ added, removed }: { added: OptView[]; removed: OptView[] }) {
+  if (added.length === 0 && removed.length === 0) return null;
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1">
+      {added.map((o, i) => <OptChip key={"a" + i} o={o} />)}
+      {removed.map((o, i) => <OptChip key={"r" + i} o={o} removed />)}
+    </div>
+  );
+}
 
 // A single modifier tile: item image, or a flavor colour swatch, or a fallback.
 function ModTile({ m, on, onClick }: { m: Mod; on: boolean; onClick: () => void }) {
@@ -84,10 +118,26 @@ function ModTile({ m, on, onClick }: { m: Mod; on: boolean; onClick: () => void 
   );
 }
 
+// Coerce a server list to a real array. Lua/JSON encodes an EMPTY list as `{}`
+// (an object, not `[]`), so a plain `x || []` would keep that `{}` and any
+// `.map`/`.filter` on it would throw and take the whole panel down.
+const arr = <T,>(x: unknown): T[] => (Array.isArray(x) ? (x as T[]) : []);
+
 export default function Register({ data, onClose }: { data: any; onClose: () => void }) {
   const id = data?.restaurantId;
-  const catalog: Cat[] = data?.catalog || [];
-  const tickets: Ticket[] = data?.tickets || [];
+  // Catalog + nearby come from the initial open payload (they don't churn while
+  // the panel is up).
+  const catalog: Cat[] = arr<Cat>(data?.catalog);
+  const nearby: Near[] = arr<Near>(data?.nearby);
+
+  // The ticket list is LIVE: seeded from the open payload, then kept in sync by
+  // the server's `orders` broadcast (fired on any create/cancel/complete, from
+  // any cashier). This is the only thing that mutates while the panel is open, so
+  // updating just this state — never the whole panel — is flicker-free and can't
+  // race a full re-render. Re-seed if the panel is reopened with fresh `data`.
+  const [tickets, setTickets] = useState<Ticket[]>(() => arr<Ticket>(data?.tickets));
+  useEffect(() => { setTickets(arr<Ticket>(data?.tickets)); }, [data]);
+  useNuiEvent("orders", (d) => setTickets(arr<Ticket>(d?.orders)));
 
   return (
     <Panel
@@ -103,7 +153,7 @@ export default function Register({ data, onClose }: { data: any; onClose: () => 
         </TabsList>
 
         <TabsContent value="new" className="min-h-0 flex-1">
-          <NewOrder id={id} catalog={catalog} nearby={data?.nearby || []} />
+          <NewOrder id={id} catalog={catalog} nearby={nearby} />
         </TabsContent>
 
         <TabsContent value="tickets" className="min-h-0 flex-1 overflow-y-auto pr-1">
@@ -174,7 +224,7 @@ function NewOrder({ id, catalog, nearby }: { id: number; catalog: Cat[]; nearby:
     const cartArr = Object.values(cart).map((e) => ({ key: e.catKey, qty: e.qty, mods: e.sel }));
     const res: any = await fetchNui("sales:createOrder", { id, customer, cart: cartArr });
     setBusy(false);
-    if (res && res.tickets) setCart({}); // success returns a fresh register payload
+    if (res && res.ok) setCart({}); // the new ticket arrives via the `orders` broadcast
   };
 
   const modExtra = modFor ? resolveMods(modFor, modSel).extra : 0;
@@ -220,9 +270,7 @@ function NewOrder({ id, catalog, nearby }: { id: number; catalog: Cat[]; nearby:
               <Thumb src={l.cat.image} className="h-8 w-8 shrink-0" />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-xs font-medium">{l.cat.label}</div>
-                {(l.added.length > 0 || l.removed.length > 0) && (
-                  <div className="truncate text-[10px] text-muted-foreground">{modText(l.added, l.removed)}</div>
-                )}
+                <OptRow added={l.added} removed={l.removed} />
                 <div className="text-[11px] text-muted-foreground">{money(l.price)}</div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
@@ -327,6 +375,9 @@ function TicketCard({ id, t }: { id: number; t: Ticket }) {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [busy, setBusy] = useState(false);
 
+  // Fire the action; the ticket drops out of the list when the server's `orders`
+  // broadcast lands (near-instant). On failure the server notifies and the list
+  // is unchanged, so we just un-busy.
   const act = async (event: string) => {
     setBusy(true);
     await fetchNui(event, { id, orderId: t.orderId });
@@ -343,17 +394,22 @@ function TicketCard({ id, t }: { id: number; t: Ticket }) {
           </div>
           <span className="text-sm font-semibold">{money(t.total)}</span>
         </div>
-        <div className="mb-3 flex flex-wrap gap-1.5">
-          {t.lines.map((l, i) => (
-            <Badge key={i} variant="outline" className="font-normal">
-              {l.qty}× {l.label}
-              {l.mods && l.mods.length > 0 && (
-                <span className="ml-1 text-muted-foreground">
-                  ({l.mods.map((m) => (m.removed ? "no " + m.label : "+" + m.label)).join(", ")})
-                </span>
-              )}
-            </Badge>
-          ))}
+        <div className="mb-3 space-y-1.5">
+          {t.lines.map((l, i) => {
+            const mods = Array.isArray(l.mods) ? l.mods : [];
+            const added = mods.filter((m) => !m.removed);
+            const removed = mods.filter((m) => m.removed);
+            return (
+              <div key={i} className="flex items-center gap-2 rounded-md bg-muted/40 p-1.5">
+                <Thumb src={l.image} className="h-9 w-9 shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-medium">{l.label}</div>
+                  <OptRow added={added} removed={removed} />
+                </div>
+                <span className="shrink-0 rounded bg-background/70 px-1.5 py-0.5 text-xs font-semibold tabular-nums">×{l.qty}</span>
+              </div>
+            );
+          })}
         </div>
         <div className="flex justify-end gap-2">
           {confirmCancel ? (

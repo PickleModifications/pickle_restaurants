@@ -40,7 +40,18 @@ local SEAT_PREVIEW_PED = "a_m_y_business_01"
 -- restaurant's existing furniture here.
 function StartSeatPlacement(restaurantId)
     Wait(250)
-    local result = StartGizmoEditor({ isPed = true, model = SEAT_PREVIEW_PED, enableCancel = true, deleteEntity = true })
+    -- Preview the ghost ped in the SEATED pose at exactly where they'll sit: the
+    -- gizmo plays the sit scenario and drops the ped by the sit z-offset, while the
+    -- SAVED anchor stays the ground point the seating code expects (result.position
+    -- adds the offset back). WYSIWYG placement.
+    local result = StartGizmoEditor({
+        isPed        = true,
+        model        = SEAT_PREVIEW_PED,
+        scenario     = SeatPreviewScenario(),
+        coordsOffset = vector3(0.0, 0.0, -SeatSitOffsetZ()),
+        enableCancel = true,
+        deleteEntity = true,
+    })
     if not result or not result.position then return end
     local res = lib.callback.await("pickle_restaurants:placement:saveSeat", false, {
         restaurant_id = restaurantId,
