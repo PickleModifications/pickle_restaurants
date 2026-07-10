@@ -41,13 +41,14 @@ local SEAT_PREVIEW_PED = "a_m_y_business_01"
 function StartSeatPlacement(restaurantId)
     Wait(250)
     -- Preview the ghost ped in the SEATED pose at exactly where they'll sit: the
-    -- gizmo plays the sit scenario and drops the ped by the sit z-offset, while the
-    -- SAVED anchor stays the ground point the seating code expects (result.position
-    -- adds the offset back). WYSIWYG placement.
+    -- gizmo plays the same looping sit animation the real sit uses and drops the ped
+    -- by the sit z-offset, while the SAVED anchor stays the ground point the seating
+    -- code expects (result.position adds the offset back). WYSIWYG placement.
+    local sitDict, sitAnim = SeatPreviewAnim()
     local result = StartGizmoEditor({
         isPed        = true,
         model        = SEAT_PREVIEW_PED,
-        scenario     = SeatPreviewScenario(),
+        anim         = { dict = sitDict, name = sitAnim },
         coordsOffset = vector3(0.0, 0.0, -SeatSitOffsetZ()),
         enableCancel = true,
         deleteEntity = true,

@@ -32,6 +32,18 @@ local function CreateGizmoPed(model, coords, rotation)
     return ped
 end
 
+-- Play a looping animation on a preview ped (seated seat placement). Streams the
+-- dict in first; flag 1 = looping so it holds while the ped follows the cursor.
+function PlayGizmoAnim(ped, anim)
+    if not (ped and DoesEntityExist(ped) and anim and anim.dict and anim.name) then return end
+    if not HasAnimDictLoaded(anim.dict) then
+        RequestAnimDict(anim.dict)
+        local t = GetGameTimer()
+        while not HasAnimDictLoaded(anim.dict) and GetGameTimer() - t < 2000 do Wait(0) end
+    end
+    TaskPlayAnim(ped, anim.dict, anim.name, 8.0, -8.0, -1, 1, 0.0, false, false, false)
+end
+
 function StartMovement(prop, data)
     local coords = GetEntityCoords(PlayerPedId())
     local heading = 0.0
@@ -44,8 +56,13 @@ function StartMovement(prop, data)
     local rotationOffset = data.rotationOffset or vector3(0.0, 0.0, 0.0)
     while true do
         local speedMode = 1
-        -- keep a seated-preview ped in its pose if moving it dropped the scenario
-        if data.scenario and DoesEntityExist(prop) and not IsPedUsingScenario(prop, data.scenario) then
+        -- keep a seated-preview ped in its pose if moving it dropped the animation.
+        -- Re-assert without re-streaming (dict already loaded), so a missing clip
+        -- can never stall the placement loop.
+        if data.anim and DoesEntityExist(prop) and HasAnimDictLoaded(data.anim.dict)
+            and not IsEntityPlayingAnim(prop, data.anim.dict, data.anim.name, 3) then
+            TaskPlayAnim(prop, data.anim.dict, data.anim.name, 8.0, -8.0, -1, 1, 0.0, false, false, false)
+        elseif data.scenario and DoesEntityExist(prop) and not IsPedUsingScenario(prop, data.scenario) then
             TaskStartScenarioInPlace(prop, data.scenario, 0, false)
         end
         local hit, hitCoords, entity = GetDirectionCoords()
@@ -270,9 +287,11 @@ function StartGizmoEditor(data)
     else
         if data.isPed then
             gizmoEntity = CreateGizmoPed(data.model, coords, rotation)
-            -- A seated preview: play the sit scenario (no enter anim so re-arming
-            -- while the ped follows the cursor stays seamless).
-            if gizmoEntity and data.scenario then
+            -- A seated preview: play the looping sit animation (matching the real
+            -- sit) so the ghost shows the exact pose the player will get.
+            if gizmoEntity and data.anim then
+                PlayGizmoAnim(gizmoEntity, data.anim)
+            elseif gizmoEntity and data.scenario then
                 TaskStartScenarioInPlace(gizmoEntity, data.scenario, 0, false)
             end
         else
