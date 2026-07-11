@@ -18,6 +18,7 @@ TrayCache       = {}    -- [restaurantId][identifier][item.."|"..cheese] = { ite
 SettingsCache   = {}    -- [key]           = decoded value
 OrderCache      = {}    -- [restaurantId][orderId] = open POS ticket row (lines decoded)
 NextTicket      = {}    -- [restaurantId]  = next kitchen ticket number
+OrdersDirty     = {}    -- [restaurantId]  = true when the pool changed → register needs a live SyncOrders (coalesced flusher in modules/sales)
 
 PERMISSIONS = { "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance", "manage_stock" }
 ALL_PERMS   = {}
@@ -204,7 +205,12 @@ local DEFAULT_SETTINGS = {
     finishes = {
         { tool = "frosting", tool_model = "pickle_frosting_tube_01", rub_dist = 1.2, group = "Bakery",
           targets = {
-            { item = "cooked_cake", output = "decorated_cake", mode = "replace",
+            -- A decorated cake is NOT a separate item (same collapse as doughnuts):
+            -- it stays `cooked_cake` and the frosting flavor rides as build-stack
+            -- metadata (distinguished by TraySig), so the ordering terminal shows
+            -- ONE "Cake" with a pick-one frosting flavor (finishModsFor). Replace-mode:
+            -- the chosen whole-cake model IS the finished product.
+            { item = "cooked_cake", output = "cooked_cake", mode = "replace",
               -- color drives the flavor swatch on the NUI card (falls back to a
               -- built-in palette by flavor id when omitted)
               flavors = {
@@ -244,6 +250,31 @@ local DEFAULT_SETTINGS = {
                 { id = "chocolate", label = "Chocolate", model = "pickle_doughnut_sprinkles_02", color = "#8b5a2b" },
               } },
           } },
+    },
+    -- NPC customers. AI customers walk up to a restaurant's counter, queue, place a
+    -- REAL POS ticket (a random pick off the restaurant's priced menu), wait for staff
+    -- to cook + serve them at the register, pay into the balance, and walk away — a
+    -- living stream of business for a manned restaurant. Edited in the admin panel's
+    -- Customers tab (a single map setting like blip/prep_models). modules/npc_customers
+    -- reads it through NpcConfig() which clamps every value, so a bad NUI write can
+    -- never break the world (the "validate on read" pattern drinks/finishes use).
+    npc_customers = {
+        enabled          = true,   -- master on/off for the whole system
+        require_staff    = true,   -- only spawn while a sell/cook player is near the counter
+        staff_radius     = 30.0,   -- how near a staff member must be to count as present
+        spawn_interval   = 45,     -- seconds between spawn attempts per restaurant
+        max_queue        = 4,      -- concurrent NPC customers per restaurant
+        patience_seconds = 240,    -- how long an NPC waits before leaving unserved
+        min_items        = 1,      -- fewest line items an NPC orders
+        max_items        = 2,      -- most line items an NPC orders
+        tip_chance       = 25,     -- % of served orders that leave a tip
+        tip_max_percent  = 15,     -- tip is 0..this% of the order total
+        counter_offset   = 1.0,    -- front NPC's distance in front of the counter (TUNE IN-GAME)
+        queue_spacing    = 0.85,   -- lateral gap between queued NPCs (TUNE IN-GAME)
+        spawn_distance   = 6.0,    -- how far back NPCs appear before walking up (TUNE IN-GAME)
+        -- Ped models an NPC customer may spawn as (picked at random, server-authoritative).
+        models = { "a_m_y_business_01", "a_f_y_business_02", "a_m_m_business_01",
+                   "a_f_y_hipster_02", "a_m_y_hipster_01", "a_f_m_business_02" },
     },
 }
 
@@ -635,6 +666,11 @@ local function LoadSettings()
         if changed then SetSetting(key, map) end
     end
     mergeMapDefaults("prep_models")
+    -- Back-fill any newly-added npc_customers sub-key (a new tunable in a later
+    -- release) without clobbering an admin's edits. `models` is a list value inside
+    -- the map — mergeMapDefaults only adds it if the whole key is missing, which is
+    -- correct (an admin who edited the list keeps theirs).
+    mergeMapDefaults("npc_customers")
 
     -- One-time: the soda machine grew per-tap flavors; the original single default
     -- drink ("Soda") becomes the Classic Cola tap. Only relabels an entry still
@@ -736,8 +772,8 @@ local function LoadSettings()
     -- (output frosted_doughnut → cooked_doughnut) and the sprinkles target (item &
     -- output frosted_doughnut/sprinkled_doughnut → cooked_doughnut, + requires_finish
     -- so it still only applies over frosting). Only touches entries still holding the
-    -- exact old defaults, so an admin's customised targets are left alone. The cake
-    -- target (cooked_cake → decorated_cake) is intentionally NOT collapsed.
+    -- exact old defaults, so an admin's customised targets are left alone. (The cake
+    -- target collapses the same way — see cake_finish_collapsed below.)
     if not GetSetting("doughnut_finish_collapsed", false) then
         local fs = SettingsCache.finishes
         if type(fs) == "table" then
@@ -875,6 +911,30 @@ local function LoadSettings()
             if changed then SetSetting("finishes", fs) end
         end
         SetSetting("doughnut_finish_collapsed_v2", true)
+    end
+
+    -- One-time: collapse the cake the same way the doughnut collapsed — a frosted
+    -- ("decorated") cake is NOT a separate item; it stays `cooked_cake` with the
+    -- frosting flavor as build-stack metadata, so the ordering terminal lists ONE
+    -- "Cake" with a pick-one frosting flavor. Repoint any frosting target on a cake
+    -- (output decorated_cake → cooked_cake) so no separate "Decorated Cake" sellable
+    -- survives; an admin who repointed it elsewhere keeps theirs.
+    if not GetSetting("cake_finish_collapsed", false) then
+        local fs = SettingsCache.finishes
+        if type(fs) == "table" then
+            local changed = false
+            for _, f in ipairs(fs) do
+                if f.tool == "frosting" then
+                    for _, t in ipairs(f.targets or {}) do
+                        if t.item == "cooked_cake" and t.output == "decorated_cake" then
+                            t.output = "cooked_cake"; changed = true
+                        end
+                    end
+                end
+            end
+            if changed then SetSetting("finishes", fs) end
+        end
+        SetSetting("cake_finish_collapsed", true)
     end
 end
 
@@ -1489,6 +1549,11 @@ end
 
 -- ─── cooked-items tray (per-player, per-restaurant) ──────────────────────────
 
+-- Flag a restaurant's pool as changed so an open register re-computes ticket
+-- fulfillability. Coalesced and flushed via SyncOrders by a thread in modules/sales
+-- (the tray mutates in tight loops — a per-op broadcast would spam clients).
+function MarkOrdersDirty(rid) if rid then OrdersDirty[rid] = true end end
+
 local function trayKey(item, cheese) return item .. "|" .. CheeseVal(cheese) end
 
 -- Canonical signature of one instance's build stack: its ordered layers as
@@ -1591,6 +1656,7 @@ function AddTray(rid, identifier, item, cheese, count, meta)
     MySQL.update("INSERT INTO pickle_restaurant_cooked_items (restaurant_id, identifier, item, cheese, count, metadata, cooked_at) "
         .. "VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE count = count + VALUES(count), metadata = VALUES(metadata), cooked_at = VALUES(cooked_at)",
         { rid, identifier, item, cheese, count, json.encode(e.metas), e.cookedAt })
+    MarkOrdersDirty(rid)
 end
 
 function RemoveTray(rid, identifier, item, cheese, count, sig)
@@ -1619,6 +1685,7 @@ function RemoveTray(rid, identifier, item, cheese, count, sig)
         MySQL.update("UPDATE pickle_restaurant_cooked_items SET count = count - ?, metadata = ? WHERE restaurant_id = ? AND identifier = ? AND item = ? AND cheese = ?",
             { count, json.encode(e.metas), rid, identifier, item, cheese })
     end
+    MarkOrdersDirty(rid)
     return true
 end
 
@@ -1653,6 +1720,149 @@ function GetTray(rid, identifier)
         end
     end
     return out
+end
+
+-- ─── restaurant-wide pool (read/consume across every cook's tray) ─────────────
+-- The tray stays per-player; the POS register fulfils from the UNION of a
+-- restaurant's trays so cooks don't have to double as cashiers. `matchSig` (nil =
+-- any) filters to one build variation exactly as the per-player tray functions do;
+-- item matching spans every cheese state (a plain "burger" line is satisfied by a
+-- cheesed burger too — item-name matching, same as the old inventory path).
+
+-- Total count of `item` across all identifiers + cheese states matching `matchSig`.
+function PoolCount(rid, item, matchSig)
+    local byId = TrayCache[rid]
+    if not byId then return 0 end
+    local n = 0
+    for identifier, byKey in pairs(byId) do
+        for _, e in pairs(byKey) do
+            if e.item == item then
+                n = n + GetTrayCount(rid, identifier, item, e.cheese, matchSig)
+            end
+        end
+    end
+    return n
+end
+
+-- The build stack of some pool instance of `item` matching `matchSig` (any cook),
+-- or nil. Read-only — used to compute a meal's coverage before deciding to consume.
+function PoolTopMeta(rid, item, matchSig)
+    local byId = TrayCache[rid]
+    if not byId then return nil end
+    for identifier, byKey in pairs(byId) do
+        for _, e in pairs(byKey) do
+            if e.item == item then
+                local m = TrayTopMeta(rid, identifier, item, e.cheese, matchSig)
+                if m ~= nil then return m end
+            end
+        end
+    end
+    return nil
+end
+
+-- Distinct build variations of `item` in the pool, merged across cooks:
+-- { { sig, meta, count, label }, … }. For the register's meal picker.
+function PoolVariations(rid, item)
+    local out, idx = {}, {}
+    local byId = TrayCache[rid]
+    if not byId then return out end
+    for identifier in pairs(byId) do
+        for _, e in ipairs(GetTray(rid, identifier)) do
+            if e.item == item then
+                local k = e.sig or ""
+                if not idx[k] then
+                    idx[k] = { sig = e.sig, meta = e.meta, count = 0, label = e.label }
+                    out[#out + 1] = idx[k]
+                end
+                idx[k].count = idx[k].count + e.count
+            end
+        end
+    end
+    return out
+end
+
+-- Consume up to `count` matching instances of `item` from the pool (any identifier,
+-- any cheese, LIFO within each row). Returns a list of { cheese, meta } for every
+-- consumed instance (meta read BEFORE its RemoveTray, like trayToInventory), or nil
+-- if the pool can't cover `count` — in which case nothing is consumed.
+function PoolConsume(rid, item, matchSig, count)
+    count = count or 1
+    if PoolCount(rid, item, matchSig) < count then return nil end
+    local taken = {}
+    local byId = TrayCache[rid] or {}
+    for identifier, byKey in pairs(byId) do
+        for _, e in pairs(byKey) do
+            if e.item == item then
+                local cheese = e.cheese
+                while #taken < count and GetTrayCount(rid, identifier, item, cheese, matchSig) > 0 do
+                    local meta = TrayTopMeta(rid, identifier, item, cheese, matchSig)
+                    if not RemoveTray(rid, identifier, item, cheese, 1, matchSig) then break end
+                    taken[#taken + 1] = { cheese = cheese, meta = meta }
+                end
+            end
+            if #taken >= count then break end
+        end
+        if #taken >= count then break end
+    end
+    return taken
+end
+
+-- Pool count/consume with a CUSTOM instance matcher `match(meta) -> bool` (meta is
+-- one instance's build stack, or nil for a plain/legacy instance). The sales
+-- fulfillment planner matches by VARIATION (a cheeseburger ≠ a plain burger, a
+-- strawberry cake ≠ a plain one) rather than by the raw TraySig, so it can't use
+-- the sig-keyed PoolCount/PoolConsume — it hands the semantics in as a predicate.
+function PoolCountMatch(rid, item, match)
+    local byId = TrayCache[rid]
+    if not byId then return 0 end
+    local n = 0
+    for _, byKey in pairs(byId) do
+        for _, e in pairs(byKey) do
+            if e.item == item then
+                for i = 1, e.count or 0 do
+                    local m = e.metas and e.metas[i]
+                    if match((type(m) == "table") and m or nil) then n = n + 1 end
+                end
+            end
+        end
+    end
+    return n
+end
+
+-- Consume up to `count` instances of `item` for which match(meta) is true (any
+-- identifier/cheese, LIFO within each row). Returns { {cheese, meta}, … } for every
+-- consumed instance (meta read BEFORE its removal), or nil if the pool can't cover
+-- `count` — in which case nothing is consumed. Removal pins the instance's EXACT sig
+-- so a broader variation match never pops the wrong stack.
+function PoolConsumeMatch(rid, item, match, count)
+    count = count or 1
+    if PoolCountMatch(rid, item, match) < count then return nil end
+    local taken = {}
+    local byId = TrayCache[rid] or {}
+    for identifier, byKey in pairs(byId) do
+        for _, e in pairs(byKey) do
+            if e.item == item then
+                local cheese = e.cheese
+                local i = e.count or 0
+                while #taken < count and i >= 1 do
+                    local m = e.metas and e.metas[i]
+                    local mt = (type(m) == "table") and m or nil
+                    if match(mt) then
+                        local sig = traySigAt(e, i)
+                        if RemoveTray(rid, identifier, item, cheese, 1, sig) then
+                            taken[#taken + 1] = { cheese = cheese, meta = mt }
+                        end
+                        i = e.count or 0 -- the row shrank; rescan from the (new) top
+                    else
+                        i = i - 1
+                    end
+                end
+            end
+            if #taken >= count then break end
+        end
+        if #taken >= count then break end
+    end
+    return taken
 end
 
 -- ─── employee cache mutators (used by management module) ──────────────────────

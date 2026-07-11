@@ -15,15 +15,43 @@ function OpenRegister(restaurantId)
     OpenNUI("register", data)
 end
 
+-- The restaurant whose corner "Tickets" widget is currently shown (nil = none).
+-- Set/cleared by OpenNUI/CloseNUI for restaurant-scoped experiences.
+TicketWidgetRid = nil
+
+-- Show the read-only "Tickets" widget for `rid` (cooking / management / virtual).
+-- Seeds it once from a lightweight callback (non-blocking so it can't stall the
+-- open flow), then it stays live off the `orders` broadcast below.
+function ShowTicketWidget(rid, theme)
+    TicketWidgetRid = rid
+    SendNUIMessage({ action = "ticketWidget", show = true, theme = theme })
+    CreateThread(function()
+        local res = lib.callback.await("pickle_restaurants:sales:getTickets", false, { id = rid })
+        if TicketWidgetRid == rid then
+            SendNUIMessage({ action = "ticketWidget", show = true, tickets = (res and res.tickets) or {}, theme = theme })
+        end
+    end)
+end
+
+function HideTicketWidget()
+    TicketWidgetRid = nil
+    SendNUIMessage({ action = "ticketWidget", show = false })
+end
+
 -- Live ticket list: the server broadcasts the fresh open-order list whenever it
--- changes (create/cancel/complete, from ANY cashier). We apply it whenever this
--- client has that restaurant's register open — no sequencing needed: this is the
--- ONLY thing that updates the list, and FiveM delivers these events reliably and
--- in order, so the last list sent is always the last shown. We only ever touch the
--- ticket LIST (never the whole panel) so the catalog/cart are untouched.
+-- changes (create/cancel/complete, from ANY cashier) or the pool changes. We apply
+-- it whenever this client has that restaurant's register open — no sequencing
+-- needed: this is the ONLY thing that updates the list, and FiveM delivers these
+-- events reliably and in order, so the last list sent is always the last shown. We
+-- only ever touch the ticket LIST (never the whole panel) so the catalog/cart are
+-- untouched. The same broadcast also keeps the corner Tickets widget live.
 RegisterNetEvent("pickle_restaurants:sales:orders", function(rid, orders)
+    orders = orders or {}
     if OpenRid == rid and NUIView == "register" then
-        SendNUIMessage({ action = "orders", orders = orders or {} })
+        SendNUIMessage({ action = "orders", orders = orders })
+    end
+    if TicketWidgetRid == rid then
+        SendNUIMessage({ action = "ticketWidget", show = true, tickets = orders })
     end
 end)
 

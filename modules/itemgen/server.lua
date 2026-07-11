@@ -98,7 +98,10 @@ local TRAY_ONLY = {
 --   cheeseburger / deluxe_burger: the burger family collapsed into ONE `burger`
 --   item (the extras are customer MODIFIERS now), so these two outputs are no
 --   longer produced or sold — retained one release for legacy stacks.
-local RETAIN = { "frosted_doughnut", "sprinkled_doughnut", "raw_pizza", "cheeseburger", "deluxe_burger" }
+--   decorated_cake: the cake collapsed into ONE `cooked_cake` item (frosting flavor
+--   is a customer MODIFIER / build metadata now), so this output is no longer
+--   produced or sold — retained one release for legacy stacks.
+local RETAIN = { "frosted_doughnut", "sprinkled_doughnut", "raw_pizza", "cheeseburger", "deluxe_burger", "decorated_cake" }
 
 -- ─── helpers ──────────────────────────────────────────────────────────────────
 

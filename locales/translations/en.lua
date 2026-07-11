@@ -113,6 +113,7 @@ Language["en"] = {
     ["order_customer_offline"] = "The customer is offline — can't refund.",
     ["order_no_receipt"] = "The customer has no receipt for this order.",
     ["order_missing_items"] = "Missing: %s.",
+    ["order_meal_gone"] = "that meal",
     ["order_cant_carry"] = "The customer can't carry the %s.",
     ["order_completed"] = "Ticket #%d completed.",
     ["order_received"] = "Your order (Ticket #%d) is ready!",

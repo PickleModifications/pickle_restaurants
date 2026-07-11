@@ -11,12 +11,23 @@ function OpenNUI(view, data)
     SetNuiFocus(true, true)
     SetNuiFocusKeepInput(false)
     SendNUIMessage({ action = "setView", view = view, data = data })
+    -- The read-only corner "Tickets" widget rides along in restaurant-scoped
+    -- experiences where staff can't reach the POS ticket tab (the kitchen station
+    -- and the boss panel). The register has its own Tickets tab, and the admin
+    -- panel is franchise-wide with no single restaurant — both skip the widget.
+    local rid = data and (data.restaurantId or data.restaurant_id)
+    if rid and ShowTicketWidget and (view == "cooking" or view == "management") then
+        ShowTicketWidget(rid, data.theme)
+    elseif HideTicketWidget then
+        HideTicketWidget()
+    end
 end
 
 function CloseNUI()
     NUIView = "none"
     SetNuiFocus(false, false)
     SendNUIMessage({ action = "setView", view = "none" })
+    if HideTicketWidget then HideTicketWidget() end
 end
 
 RegisterNUICallback("close", function(_, cb)

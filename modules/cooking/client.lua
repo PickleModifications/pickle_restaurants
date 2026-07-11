@@ -135,11 +135,41 @@ local trayHovered = nil -- tid under the cursor (grab / make-meal tooltip / lid 
 -- false, false, false)). DeleteEntity silently no-ops on those unless we first
 -- take ownership by flagging them as a mission entity, otherwise removed/
 -- collected food lingers in the world.
+--
+-- Even after that, DeleteEntity can STILL no-op on a handle that was created only a
+-- moment ago and hasn't finished streaming in / become script-controlled yet — the
+-- object lingers visibly with nothing referencing its handle. That's how a flipped
+-- patty could leave "half" behind: RebuildDual deletes a face and immediately
+-- overwrites its table slot, so a failed delete orphans the old handle forever. To
+-- cover it, any handle we can't confirm gone is queued and retried until it dies.
+local PendingDelete = {}
 local function SafeDeleteEntity(ent)
     if not ent or not DoesEntityExist(ent) then return end
     SetEntityAsMissionEntity(ent, true, true)
     DeleteEntity(ent)
+    if DoesEntityExist(ent) then PendingDelete[#PendingDelete + 1] = { ent = ent, tries = 0 } end
 end
+
+-- Reaper for handles whose first delete didn't take (see SafeDeleteEntity). Retries
+-- each — re-asserting ownership — until it's gone or we give up (~5s), so an orphan
+-- can never outlive its session even when the caller has already dropped the handle.
+CreateThread(function()
+    while true do
+        if #PendingDelete > 0 then
+            local keep = {}
+            for _, d in ipairs(PendingDelete) do
+                if DoesEntityExist(d.ent) then
+                    SetEntityAsMissionEntity(d.ent, true, true)
+                    DeleteEntity(d.ent)
+                    d.tries = d.tries + 1
+                    if DoesEntityExist(d.ent) and d.tries < 50 then keep[#keep + 1] = d end
+                end
+            end
+            PendingDelete = keep
+        end
+        Wait(100)
+    end
+end)
 
 -- ─── shared prop primitives (every station + the prep table go through these) ──
 
@@ -2314,7 +2344,7 @@ function OpenCookingStation(prop)
     StartStationCamera(prop)
     local ing = lib.callback.await("pickle_restaurants:cooking:getIngredients", false, { prop_id = prop.id })
     local rest = Restaurants[prop.restaurant_id]
-    OpenNUI("cooking", { station = prop.prop_type, ingredients = ing, theme = rest and rest.theme or nil })
+    OpenNUI("cooking", { station = prop.prop_type, restaurantId = prop.restaurant_id, ingredients = ing, theme = rest and rest.theme or nil })
     RefreshTray()
 
     -- The prep tooltip ranks the player's stacks against the full recipe
@@ -3374,8 +3404,42 @@ RegisterNUICallback("cooking:flip", function(d, cb)
     cb({ ok = true })
 end)
 
+-- The dual patty under the cursor that can still take a cheese slice (none yet),
+-- within the slot snap radius — so a dragged slice previews seated on its face,
+-- exactly like the soda lid snapping onto a cup. Screen-projects each patty's cheese
+-- seat and picks the nearest; restricted to patties at the station being worked so a
+-- second grill's patties can't steal the snap.
+local function cheeseSnapPatty()
+    local prop = currentCookProp; if not prop then return nil end
+    local cxp, cyp = GetNuiCursorPosition()
+    local sw, sh = GetActiveScreenResolution()
+    local curx = (sw > 0) and (cxp / sw) or 0.0
+    local cury = (sh > 0) and (cyp / sh) or 0.0
+    local bestUid, bestD
+    for uid, rec in pairs(CookDual) do
+        local c = CookCoords[uid]
+        if c and rec and not rec.cheeseEnt then
+            local dx0, dy0 = c.x - prop.x, c.y - prop.y
+            if dx0 * dx0 + dy0 * dy0 <= 6.25 then -- within ~2.5m of the station
+                local sz = c.z + DUAL.base_lift + DUAL.face_gap + CHEESE.z
+                local on, sx, sy = GetScreenCoordFromWorldCoord(c.x, c.y, sz)
+                if on then
+                    local dx, dy = sx - curx, sy - cury
+                    local d2 = dx * dx + dy * dy
+                    if d2 <= SLOT_SNAP_R * SLOT_SNAP_R and (not bestD or d2 < bestD) then
+                        bestD, bestUid = d2, uid
+                    end
+                end
+            end
+        end
+    end
+    return bestUid
+end
+
 -- begin dragging a cheese slice: spawn the real slice prop and follow the cursor
--- in 3D (no 2D pill), exactly like placing a patty. Release over a patty applies.
+-- in 3D (no 2D pill), exactly like placing a patty. TARGETING a patty snaps the
+-- slice onto its visible face right away (previews seated, not only on release),
+-- matching the soda lid. Release over the snapped patty applies it.
 RegisterNUICallback("cooking:beginTopping", function(d, cb)
     cancelPlace()
     cancelMove()
@@ -3388,12 +3452,22 @@ RegisterNUICallback("cooking:beginTopping", function(d, cb)
     placing = p
     CreateThread(function()
         while placing == p do
-            local hit, coords = CursorToWorld()
-            if hit and coords then
-                p.hit, p.coords = true, coords
-                SetEntityCoordsNoOffset(ent, coords.x, coords.y, coords.z, false, false, false)
+            local uid = cheeseSnapPatty()
+            if uid then
+                -- hovering a cheese-able patty: seat the slice on its face exactly
+                -- where the melted cheese renders (placeCheeseAt), so it previews on top
+                p.hit, p.snapUid = true, uid
+                local c = CookCoords[uid]
+                placeCheeseAt(ent, c.x, c.y, c.z, CookYaw[uid])
             else
-                p.hit = false
+                p.snapUid = nil
+                local hit, coords = CursorToWorld()
+                if hit and coords then
+                    p.hit, p.coords = true, coords
+                    SetEntityCoordsNoOffset(ent, coords.x, coords.y, coords.z, false, false, false)
+                else
+                    p.hit = false
+                end
             end
             Wait(0)
         end
@@ -3401,12 +3475,13 @@ RegisterNUICallback("cooking:beginTopping", function(d, cb)
     cb({ ok = true })
 end)
 
--- release a cheese drag: drop the preview slice and, if over a patty, apply it
--- (the server spawns the stuck-on slice). Otherwise just cancel.
+-- release a cheese drag: drop the preview slice and, if it was snapped onto a patty
+-- (or the NUI reports one hovered), apply it — the server spawns the stuck-on slice.
+-- The client's snapped patty wins so the apply matches exactly what previewed.
 RegisterNUICallback("cooking:endTopping", function(d, cb)
     local p = placing; placing = nil
     deletePreview(p)
-    local uid = d and d.uid
+    local uid = (p and p.snapUid) or (d and d.uid)
     if not (d and d.cancel) and uid and CookDual[uid] then
         local res = lib.callback.await("pickle_restaurants:cooking:applyCheese", false, { uid = uid })
         if res and res.error then ShowNotification(res.error) end

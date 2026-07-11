@@ -229,9 +229,18 @@ CreateThread(function()
 
     Inventory.CanCarryItem = function(source, name, count)
         local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
-        local weight = QBCore.Player.GetTotalWeight(xPlayer.PlayerData.items)
+        if not xPlayer or not xPlayer.PlayerData then return true end
+        -- Be defensive: GetTotalWeight can return nil, the item may be unknown, and
+        -- an item can lack a weight field. Any missing piece → assume it fits (the
+        -- real AddItem still enforces capacity) rather than erroring out the caller
+        -- (e.g. a whole order fulfillment) on an arithmetic-on-nil.
+        local ok, weight = pcall(QBCore.Player.GetTotalWeight, xPlayer.PlayerData.items)
+        if not ok or type(weight) ~= "number" then return true end
         local item = QBCore.Shared.Items[name:lower()]
-        return ((weight + (item.weight * count)) <= QBCore.Config.Player.MaxWeight)
+        if not item or type(item.weight) ~= "number" then return true end
+        local max = QBCore.Config and QBCore.Config.Player and QBCore.Config.Player.MaxWeight
+        if type(max) ~= "number" then return true end
+        return (weight + (item.weight * count)) <= max
     end
 
     Inventory.GetInventory = function(source)

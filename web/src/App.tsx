@@ -3,6 +3,7 @@ import { useNuiEvent, fetchNui } from "@/lib/nui";
 import { isSaving, onSavingChange } from "@/lib/autosave";
 import { applyTheme } from "@/lib/theme";
 import InteractText from "@/views/InteractText";
+import TicketsWidget from "@/views/TicketsWidget";
 import Cooking from "@/views/Cooking";
 import Admin from "@/views/Admin";
 import Management from "@/views/Management";
@@ -69,6 +70,11 @@ export default function App() {
   return (
     <div className="h-full w-full">
       {view === "none" && <InteractText />}
+
+      {/* Persistent read-only ticket board — self-gates on its own `ticketWidget`
+          message, so it survives view switches and lives outside the per-view
+          error boundary. */}
+      <TicketsWidget />
 
       {view !== "none" && (
         <ViewErrorBoundary key={view} onError={doClose}>

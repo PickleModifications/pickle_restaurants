@@ -6,7 +6,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  ShoppingCart, Plus, Minus, Trash2, User, Receipt, Check, X, Loader2, ImageOff, ClipboardList, SlidersHorizontal, Ban,
+  ShoppingCart, Plus, Minus, Trash2, User, Receipt, Check, X, Loader2, ImageOff, ClipboardList, SlidersHorizontal, Ban, UtensilsCrossed,
 } from "lucide-react";
 
 type Mod = { id: string; label: string; item?: string; price?: number; default?: boolean; image?: string; group?: string; color?: string };
@@ -15,7 +15,18 @@ type LineMod = { id?: string; label: string; price?: number; added?: boolean; re
 type Line = { item: string; variant: string; label: string; price: number; qty: number; kind: string; image?: string; mods?: LineMod[] };
 // A selected option to render as an image chip (added extra, or a removed default).
 type OptView = { label: string; image?: string; color?: string };
-type Ticket = { orderId: number; ticket: number; customer: string; lines: Line[]; total: number };
+// One layer of a meal, spelled out for the in-depth picker: the item's label +
+// image, plus its toppings (cheese/lettuce as item images, frosting/sprinkles as
+// coloured swatches).
+type MealItem = { item: string; label: string; image?: string; mods?: OptView[] };
+// A meal in the shared pool that (with single items) would complete the whole
+// order — offered as a fulfillment option. `items` is its full contents.
+type MealOption = { sig: string; label: string; items?: MealItem[] };
+// Per-ticket fulfillment state from the shared cooked-items pool (server-computed).
+// `ok` = completable with single items alone; `mealOptions` = meals that complete it;
+// `missing` = the single-item shortfall shown when nothing can complete it.
+type Fulfill = { ok: boolean; mealOptions?: MealOption[]; missing?: string[] };
+type Ticket = { orderId: number; ticket: number; customer: string; lines: Line[]; total: number; fulfill?: Fulfill };
 type Near = { id: number; name: string };
 // A cart entry: which catalog item, how many, and the selected modifier ids.
 type CartEntry = { catKey: string; qty: number; sel: string[] };
@@ -155,7 +166,9 @@ export default function Register({ data, onClose }: { data: any; onClose: () => 
           <NewOrder id={id} catalog={catalog} nearby={nearby} />
         </TabsContent>
 
-        <TabsContent value="tickets" className="min-h-0 flex-1 overflow-y-auto pr-1">
+        {/* not overflow-scrolled here — Tickets owns its own scroll so the meal
+            picker can overlay (and dim) just the ticket area, not the whole panel */}
+        <TabsContent value="tickets" className="min-h-0 flex-1">
           <Tickets id={id} tickets={tickets} />
         </TabsContent>
       </Tabs>
@@ -375,24 +388,53 @@ function FilterChip({ active, onClick, children }: { active: boolean; onClick: (
 }
 
 function Tickets({ id, tickets }: { id: number; tickets: Ticket[] }) {
+  // The meal picker is owned here (not per-card) so it overlays the ticket LIST
+  // area only — dimming the content, not the panel header — and centres in it.
+  const [picker, setPicker] = useState<{ orderId: number; meals: MealOption[] } | null>(null);
+  const [busy, setBusy] = useState(false);
+  // Drop the picker if its ticket left the list (completed/cancelled elsewhere).
+  useEffect(() => {
+    if (picker && !tickets.some((t) => t.orderId === picker.orderId)) setPicker(null);
+  }, [tickets]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const fulfillMeal = async (sig: string) => {
+    if (!picker) return;
+    setBusy(true);
+    await fetchNui("sales:completeOrder", { id, orderId: picker.orderId, mealSig: sig });
+    setBusy(false);
+    setPicker(null); // (also clears via the `orders` broadcast on success)
+  };
+
   if (tickets.length === 0) return <div className="py-8 text-center text-sm text-muted-foreground">{_L("register.no_tickets")}</div>;
   return (
-    <div className="space-y-2">
-      {tickets.map((t) => <TicketCard key={t.orderId} id={id} t={t} />)}
+    <div className="relative h-full">
+      <div className="h-full space-y-2 overflow-y-auto pr-1">
+        {tickets.map((t) => (
+          <TicketCard key={t.orderId} id={id} t={t}
+            onOpenPicker={(meals) => setPicker({ orderId: t.orderId, meals })} />
+        ))}
+      </div>
+      {picker && (
+        <MealPicker meals={picker.meals} busy={busy} onFulfill={fulfillMeal} onClose={() => setPicker(null)} />
+      )}
     </div>
   );
 }
 
-function TicketCard({ id, t }: { id: number; t: Ticket }) {
+function TicketCard({ id, t, onOpenPicker }: { id: number; t: Ticket; onOpenPicker: (meals: MealOption[]) => void }) {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  const f = t.fulfill;
+  const mealOptions = arr<MealOption>(f?.mealOptions);
+  const missing = arr<string>(f?.missing);
 
   // Fire the action; the ticket drops out of the list when the server's `orders`
   // broadcast lands (near-instant). On failure the server notifies and the list
   // is unchanged, so we just un-busy.
-  const act = async (event: string) => {
+  const act = async (event: string, extra?: Record<string, unknown>) => {
     setBusy(true);
-    await fetchNui(event, { id, orderId: t.orderId });
+    await fetchNui(event, { id, orderId: t.orderId, ...extra });
     setBusy(false);
   };
 
@@ -426,6 +468,12 @@ function TicketCard({ id, t }: { id: number; t: Ticket }) {
             );
           })}
         </div>
+        {/* nothing in the pool can complete this order yet (no singles, no meal) */}
+        {!f?.ok && mealOptions.length === 0 && missing.length > 0 && (
+          <div className="mb-2.5 rounded-sm bg-destructive/10 px-2 py-1.5 text-[11px] font-medium text-destructive">
+            {_L("register.missing", missing.join(", "))}
+          </div>
+        )}
         <div className="flex justify-end gap-2">
           {confirmCancel ? (
             <>
@@ -445,15 +493,103 @@ function TicketCard({ id, t }: { id: number; t: Ticket }) {
                 className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-semibold text-foreground transition-colors hover:border-destructive hover:text-destructive disabled:opacity-50">
                 <Trash2 className="h-3.5 w-3.5" /> {_L("register.cancel")}
               </button>
-              <button disabled={busy} onClick={() => act("sales:completeOrder")}
-                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-[rgb(var(--brand-hover))] disabled:opacity-50">
-                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />} {_L("register.complete")}
-              </button>
+              {/* a meal (with any single items) can complete this order — open the
+                  in-depth picker to review the contents and hand one over */}
+              {mealOptions.length > 0 && (
+                <button disabled={busy} onClick={() => onOpenPicker(mealOptions)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-primary/50 bg-primary/10 px-3 py-1.5 text-xs font-semibold text-primary shadow-sm transition-colors hover:bg-primary/20 disabled:opacity-50">
+                  <UtensilsCrossed className="h-3.5 w-3.5" /> {_L("register.fulfill_with_meal", mealOptions.length)}
+                </button>
+              )}
+              {f?.ok ? (
+                <button disabled={busy} onClick={() => act("sales:completeOrder")}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-[rgb(var(--brand-hover))] disabled:opacity-50">
+                  {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />} {_L("register.complete")}
+                </button>
+              ) : mealOptions.length === 0 ? (
+                <button disabled title={missing.length ? _L("register.missing", missing.join(", ")) : undefined}
+                  className="inline-flex cursor-not-allowed items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-semibold text-muted-foreground opacity-70">
+                  <Ban className="h-3.5 w-3.5" /> {_L("register.not_complete")}
+                </button>
+              ) : null}
             </>
           )}
         </div>
       </div>
       <div className="tear-b" />
+    </div>
+  );
+}
+
+// The in-depth meal fulfillment picker: a modal listing every pool meal that (with
+// single items) completes this order, each shown with its FULL contents — item
+// images + toppings (item images / colour swatches) + names — so the cashier reviews
+// exactly what they're handing over before fulfilling with it. Rendered as an
+// ABSOLUTE overlay so it dims + centres over the ticket LIST only (never the panel
+// header), and fades its backdrop + card in on mount and out on close.
+function MealPicker({ meals, busy, onFulfill, onClose }: {
+  meals: MealOption[]; busy: boolean; onFulfill: (sig: string) => void; onClose: () => void;
+}) {
+  const [visible, setVisible] = useState(false);
+  // fade in on mount (next frame so the transition has a 0→1 to animate)
+  useEffect(() => { const r = requestAnimationFrame(() => setVisible(true)); return () => cancelAnimationFrame(r); }, []);
+  // fade out, then unmount via the parent's onClose
+  const close = () => { setVisible(false); window.setTimeout(onClose, 180); };
+  const fulfill = (sig: string) => { setVisible(false); window.setTimeout(() => onFulfill(sig), 160); };
+  return (
+    <div
+      className={cn("absolute inset-0 z-30 flex items-center justify-center p-4 transition-opacity duration-200",
+        visible ? "opacity-100" : "opacity-0")}
+      onClick={close}
+    >
+      <div className="absolute inset-0 bg-black/50" />
+      <div
+        className={cn("relative flex max-h-full w-full max-w-md flex-col rounded-lg border border-border bg-card shadow-2xl transition-transform duration-200",
+          visible ? "scale-100" : "scale-95")}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 border-b border-border px-4 py-3">
+          <UtensilsCrossed className="h-4 w-4 text-primary" />
+          <span className="font-semibold">{_L("register.meal_picker_title")}</span>
+          <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] font-bold tabular-nums text-muted-foreground">{meals.length}</span>
+          <button onClick={close} className="ml-auto text-muted-foreground transition-colors hover:text-foreground"><X className="h-4 w-4" /></button>
+        </div>
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+          {meals.map((m, mi) => {
+            const items = arr<MealItem>(m.items);
+            return (
+              <div key={m.sig} className="rounded-lg border border-border bg-muted/30 p-3">
+                <div className="tape mb-2 text-muted-foreground">{_L("register.meal_n", mi + 1)}</div>
+                <div className="space-y-2">
+                  {items.map((it, i) => (
+                    <div key={i} className="flex items-start gap-2.5 rounded-sm bg-card/60 p-1.5">
+                      <Thumb src={it.image} className="h-11 w-11 shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium">{it.label}</div>
+                        {arr<OptView>(it.mods).length > 0 && (
+                          <div className="mt-1 space-y-0.5">
+                            {arr<OptView>(it.mods).map((o, j) => (
+                              <div key={j} className="flex items-center gap-1.5">
+                                {o.image
+                                  ? <Thumb src={o.image} className="h-4 w-4" />
+                                  : <span className="h-3 w-3 shrink-0 rounded-full border border-border" style={{ backgroundColor: o.color || "transparent" }} />}
+                                <span className="truncate text-[11px] text-muted-foreground">{o.label}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <Button className="mt-3 w-full" size="sm" disabled={busy} onClick={() => fulfill(m.sig)}>
+                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} {_L("register.fulfill_this_meal")}
+                </Button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }

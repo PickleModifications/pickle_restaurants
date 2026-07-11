@@ -66,15 +66,21 @@ function StartSeatPlacement(restaurantId)
     end
 end
 
--- Place an invisible virtual point anchor: the gizmo previews the STATION the
--- point will open (WYSIWYG for reach/facing), but only the point + heading are
--- saved — at runtime the anchor is interaction-only, and the station itself
--- spawns inside the restaurant's kitchen shell when the point is used.
+-- The small marker prop used to position a virtual point. A virtual point is an
+-- invisible, interaction-only anchor (the station spawns in the kitchen shell at
+-- runtime), so previewing the whole station prop just buries the spot — a tennis
+-- ball marks the exact anchor without hiding what's under it.
+local VIRTUAL_PLACE_MODEL = "prop_tennis_ball"
+
+-- Place an invisible virtual point anchor: the gizmo previews a small ball at the
+-- anchor (NOT the whole station), and only the point + heading are saved — at
+-- runtime the anchor is interaction-only, and the station itself spawns inside the
+-- restaurant's kitchen shell when the point is used.
 function StartVirtualPointPlacement(restaurantId, target)
     local model = PLACEABLE_MODELS[target]
     if not model then return ShowNotification(_L("place_unknown_station")) end
     Wait(250)
-    local result = StartGizmoEditor({ model = GetHashKey(model), enableCancel = true, deleteEntity = true })
+    local result = StartGizmoEditor({ model = GetHashKey(VIRTUAL_PLACE_MODEL), enableCancel = true, deleteEntity = true })
     if not result or not result.position then return end
     local res = lib.callback.await("pickle_restaurants:placement:saveVirtualPoint", false, {
         restaurant_id = restaurantId,

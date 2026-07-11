@@ -125,6 +125,8 @@ end
 local LEGACY_FINISH_OUTPUTS = {
     frosted_doughnut   = { tool = "frosting",  item = "cooked_doughnut" },
     sprinkled_doughnut = { tool = "sprinkles", item = "cooked_doughnut" },
+    -- the cake collapse (decorated_cake → cooked_cake) retired this output too
+    decorated_cake     = { tool = "frosting",  item = "cooked_cake" },
 }
 
 -- The finish target an OUTPUT item came from (first match), for rendering and
@@ -573,12 +575,23 @@ end
 -- when it has no recorded stack). nil when it resolves to fewer than two props
 -- (nothing to stack; the base model suffices). Shared by the oven/fryer placement
 -- and the tray payload so the drag preview and the placed prop render the same stack.
+-- A bun is ONE item rendered as two crown HALVES (top/bottom) so a burger sits
+-- bottom-bun → fillings → top-bun. itemModel("bun") only knows the single prep model
+-- (the top crown), so the render stack must pick the half-specific model here or a
+-- burger comes out with two identical crowns. These MUST match the client's `BUN`
+-- table in modules/cooking/client.lua.
+local BUN_HALF_MODELS = { bottom = "pickle_bread_bun_02", top = "pickle_bread_bun_01" }
+local function layerModel(c)
+    if c.item == "bun" and c.half and BUN_HALF_MODELS[c.half] then return BUN_HALF_MODELS[c.half] end
+    return itemModel(c.item)
+end
+
 local function stackModelsFromMeta(item, meta)
     local asm = findAssembly(item)
     if not asm and not (type(meta) == "table" and #meta > 0) then return nil end
     local models = {}
     for _, c in ipairs(compsFromMeta(asm or { components = {} }, meta)) do
-        local m = itemModel(c.item)
+        local m = layerModel(c)
         if m then models[#models + 1] = m end
     end
     return (#models > 1) and models or nil
@@ -1847,13 +1860,16 @@ end)
 -- (so the variation survives) + a readable description, and the cheese state. Returns
 -- nil for a plain item with nothing to preserve (keeps stacks clean). Frameworks
 -- without slot metadata (ESX) ignore whatever we pass.
-local function buildInvMeta(cheese, meta)
+-- Global so the POS register (modules/sales) can hand pool-fulfilled cooked
+-- instances to the customer with the same slot metadata a cook gets on cash-out.
+function BuildInvMeta(cheese, meta)
     if type(meta) == "table" and #meta > 0 then
         return { stack = meta, cheese = cheese, description = stackDescription(meta) }
     end
     if cheese and cheese >= 1 then return { cheese = cheese } end
     return nil
 end
+local buildInvMeta = BuildInvMeta
 
 -- cash a tray item out into the real inventory (so it can be stocked/sold)
 lib.callback.register("pickle_restaurants:cooking:trayToInventory", function(src, d)
@@ -2216,27 +2232,45 @@ lib.callback.register("pickle_restaurants:cooking:prepMakeMeal", function(src, d
     -- box = the arrangement was made in a pizza box, not on a serving tray. The
     -- client gates the drop too, but the NUI is untrusted — re-check every pile.
     local boxed = (d and d.box) and true or false
-    local layers = {}
+    -- Keep the piles grouped (each is one thing dropped on the tray) AND a flat list
+    -- of every layer to consume. A pile whose raw parts form a recipe (a bun + patty
+    -- the cook never pressed "Make" on) is auto-assembled into that product below, so
+    -- the meal records ONE burger layer — not loose bun + patty. Each pile also
+    -- remembers its best assembly so we don't re-run the match after consumption.
+    local piles, layers = {}, {}
     for _, pile in ipairs((d and d.items) or {}) do
         local dx, dy = quantOffset(pile.dx), quantOffset(pile.dy)
         local ordered = orderedLayers(b, pile.ids)
         if boxed and not pizzaBaseLayer(ordered[1]) then
             return { ok = false, error = _L("cook_only_pizza_in_box") }
         end
-        for _, l in ipairs(ordered) do
-            l.mealDx, l.mealDy = dx, dy
-            layers[#layers + 1] = l
-        end
+        piles[#piles + 1] = { ordered = ordered, dx = dx, dy = dy,
+                              asm = bestAssemblyForLayers(ordered, b.rid) }
+        for _, l in ipairs(ordered) do layers[#layers + 1] = l end
     end
     if #layers == 0 then return { ok = false, error = boxed and _L("cook_nothing_in_box") or _L("cook_nothing_on_tray") } end
+    -- consumeLayers pins each product layer's nested stack onto l.stack (read below).
     local ok, err = consumeLayers(src, b, id, layers)
     if not ok then return { ok = false, error = err } end
     dropLayerReservations(src, b, layers)
 
     local meta = {}
-    for _, l in ipairs(layers) do
-        meta[#meta + 1] = { item = l.item, cheese = l.cheese or 0, half = l.half,
-                            stack = l.stack, dx = l.mealDx, dy = l.mealDy }
+    for _, pile in ipairs(piles) do
+        if pile.asm then
+            -- the pile satisfies a recipe → emit the assembled product as ONE meal
+            -- layer, its components nested (exactly like makeStack's stackMeta), so a
+            -- built-but-unmade burger is indistinguishable from a pre-made one
+            local compStack = {}
+            for _, l in ipairs(pile.ordered) do
+                compStack[#compStack + 1] = { item = l.item, cheese = l.cheese or 0, half = l.half, stack = l.stack }
+            end
+            meta[#meta + 1] = { item = pile.asm.output, cheese = 0, stack = compStack, dx = pile.dx, dy = pile.dy }
+        else
+            for _, l in ipairs(pile.ordered) do
+                meta[#meta + 1] = { item = l.item, cheese = l.cheese or 0, half = l.half,
+                                    stack = l.stack, dx = pile.dx, dy = pile.dy }
+            end
+        end
     end
     -- the box flag rides the FIRST layer (layer tables are dicts, so it's JSON-safe;
     -- TraySig appends ^box) — that's what makes it set back down as its box

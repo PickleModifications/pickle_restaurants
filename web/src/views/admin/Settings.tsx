@@ -3,13 +3,14 @@ import { fetchNui } from "@/lib/nui";
 import { useAutoSave, type SaveStatus } from "@/lib/autosave";
 import { Button } from "@/components/ui/button";
 import { Field, TextField, NumberField, Toggle, Select } from "@/components/form";
+import { Input } from "@/components/ui/input";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
 import { ThemeEditor } from "@/components/Branding";
 import { type ThemeConfig } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2, RotateCcw, Palette,
+  Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2, RotateCcw, Palette, PersonStanding,
 } from "lucide-react";
 
 const PERMISSIONS = [
@@ -28,6 +29,7 @@ const GROUPS = [
   { key: "economy", label: _L("settings.group_economy"), icon: Coins },
   { key: "pricing", label: _L("settings.group_pricing"), icon: DollarSign },
   { key: "roles", label: _L("settings.group_roles"), icon: Users },
+  { key: "npc_customers", label: _L("settings.group_npc"), icon: PersonStanding },
   { key: "blip", label: _L("settings.group_blip"), icon: MapPin },
 ];
 
@@ -63,6 +65,7 @@ export default function Settings({ settings, items, groups, onSaved, appTheme, o
         {group === "economy" && <Economy settings={settings} onSaved={onSaved} />}
         {group === "pricing" && <Pricing settings={settings} items={items} onSaved={onSaved} />}
         {group === "roles" && <Roles settings={settings} onSaved={onSaved} />}
+        {group === "npc_customers" && <NpcCustomers settings={settings} onSaved={onSaved} />}
         {group === "blip" && <Blip settings={settings} onSaved={onSaved} />}
       </div>
     </div>
@@ -270,6 +273,94 @@ function Roles({ settings, onSaved }: { settings: any; onSaved: () => void }) {
           </div>
         ))}
         <Button variant="outline" size="sm" onClick={addRole}><Plus className="h-4 w-4" /> {_L("settings.add_role")}</Button>
+      </div>
+    </Section>
+  );
+}
+
+/** NPC customers — AI customers that queue at a restaurant's counter, place a real POS
+ * ticket, and pay on serve. All values are clamped server-side (NpcConfig) too, so this
+ * editor only needs light coercion. `models` is a plain list of GTA ped model names
+ * (NOT inventory items), so it's edited as text rows, not an ItemPicker. */
+function NpcCustomers({ settings, onSaved }: { settings: any; onSaved: () => void }) {
+  const c = settings.npc_customers && typeof settings.npc_customers === "object" ? settings.npc_customers : {};
+  const [enabled, setEnabled] = useState(c.enabled !== false);
+  const [requireStaff, setRequireStaff] = useState(c.require_staff !== false);
+  const [staffRadius, setStaffRadius] = useState(Number(c.staff_radius ?? 30));
+  const [interval, setInterval] = useState(Number(c.spawn_interval ?? 45));
+  const [maxQueue, setMaxQueue] = useState(Number(c.max_queue ?? 4));
+  const [patience, setPatience] = useState(Number(c.patience_seconds ?? 240));
+  const [minItems, setMinItems] = useState(Number(c.min_items ?? 1));
+  const [maxItems, setMaxItems] = useState(Number(c.max_items ?? 2));
+  const [tipChance, setTipChance] = useState(Number(c.tip_chance ?? 25));
+  const [tipMax, setTipMax] = useState(Number(c.tip_max_percent ?? 15));
+  const [counterOffset, setCounterOffset] = useState(Number(c.counter_offset ?? 1.0));
+  const [queueSpacing, setQueueSpacing] = useState(Number(c.queue_spacing ?? 0.85));
+  const [spawnDistance, setSpawnDistance] = useState(Number(c.spawn_distance ?? 6.0));
+  const [models, setModels] = useState<string[]>(Array.isArray(c.models) ? c.models : []);
+
+  const intv = (v: number, lo = 0) => Math.max(lo, Math.floor(v || 0));
+  const status = useAutoSave(
+    () => saveSettings({
+      npc_customers: {
+        enabled, require_staff: requireStaff,
+        staff_radius: Math.max(3, staffRadius || 0),
+        spawn_interval: intv(interval, 5), max_queue: intv(maxQueue, 1),
+        patience_seconds: intv(patience, 15),
+        min_items: intv(minItems, 1), max_items: intv(maxItems, 1),
+        tip_chance: intv(tipChance), tip_max_percent: intv(tipMax),
+        counter_offset: counterOffset || 0, queue_spacing: queueSpacing || 0,
+        spawn_distance: spawnDistance || 0,
+        models: models.map((m) => m.trim()).filter(Boolean),
+      },
+    }).then(onSaved),
+    [enabled, requireStaff, staffRadius, interval, maxQueue, patience, minItems, maxItems,
+     tipChance, tipMax, counterOffset, queueSpacing, spawnDistance, models]
+  );
+
+  const updateModel = (i: number, v: string) => setModels((l) => l.map((m, idx) => (idx === i ? v : m)));
+
+  return (
+    <Section title={_L("settings.npc_title")} description={_L("settings.npc_desc")} status={status}>
+      <div className="space-y-3">
+        <Toggle checked={enabled} onChange={setEnabled} label={_L("settings.npc_enabled")} />
+        <Toggle checked={requireStaff} onChange={setRequireStaff} label={_L("settings.npc_require_staff")} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <NumberField label={_L("settings.npc_spawn_interval")} hint={_L("settings.npc_spawn_interval_hint")} value={interval} min={5} onChange={setInterval} />
+        <NumberField label={_L("settings.npc_max_queue")} value={maxQueue} min={1} onChange={setMaxQueue} />
+        <NumberField label={_L("settings.npc_patience")} hint={_L("settings.npc_patience_hint")} value={patience} min={15} onChange={setPatience} />
+        <NumberField label={_L("settings.npc_staff_radius")} hint={_L("settings.npc_staff_radius_hint")} value={staffRadius} min={3} onChange={setStaffRadius} />
+        <NumberField label={_L("settings.npc_min_items")} value={minItems} min={1} onChange={setMinItems} />
+        <NumberField label={_L("settings.npc_max_items")} value={maxItems} min={1} onChange={setMaxItems} />
+        <NumberField label={_L("settings.npc_tip_chance")} hint={_L("settings.npc_tip_chance_hint")} value={tipChance} min={0} onChange={setTipChance} />
+        <NumberField label={_L("settings.npc_tip_max")} hint={_L("settings.npc_tip_max_hint")} value={tipMax} min={0} onChange={setTipMax} />
+      </div>
+
+      <div className="mt-2">
+        <h4 className="mb-2 text-xs font-semibold text-muted-foreground">{_L("settings.npc_layout")}</h4>
+        <div className="grid grid-cols-3 gap-3">
+          <NumberField label={_L("settings.npc_counter_offset")} value={counterOffset} min={0} step={0.05} onChange={setCounterOffset} />
+          <NumberField label={_L("settings.npc_queue_spacing")} value={queueSpacing} min={0.3} step={0.05} onChange={setQueueSpacing} />
+          <NumberField label={_L("settings.npc_spawn_distance")} value={spawnDistance} min={1} step={0.5} onChange={setSpawnDistance} />
+        </div>
+        <p className="mt-1 text-xs text-muted-foreground">{_L("settings.npc_layout_hint")}</p>
+      </div>
+
+      <div className="mt-2">
+        <h4 className="mb-2 text-xs font-semibold text-muted-foreground">{_L("settings.npc_models")}</h4>
+        <p className="mb-2 text-xs text-muted-foreground">{_L("settings.npc_models_hint")}</p>
+        <div className="space-y-2">
+          {models.length === 0 && <div className="py-2 text-xs text-muted-foreground">{_L("settings.npc_no_models")}</div>}
+          {models.map((m, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <Input className="flex-1" value={m} placeholder="a_m_y_business_01" onChange={(e) => updateModel(i, e.target.value)} />
+              <Button size="icon" variant="destructive" onClick={() => setModels((l) => l.filter((_, idx) => idx !== i))}><Trash2 className="h-4 w-4" /></Button>
+            </div>
+          ))}
+          <Button variant="outline" size="sm" onClick={() => setModels((l) => [...l, ""])}><Plus className="h-4 w-4" /> {_L("settings.npc_add_model")}</Button>
+        </div>
       </div>
     </Section>
   );

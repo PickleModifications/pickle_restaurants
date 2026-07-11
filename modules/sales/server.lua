@@ -11,6 +11,7 @@
 
 local function ReceiptItem() return GetSetting("receipt_item", "receipt") end
 local function DrinkItemName() return GetSetting("drink_item", "drink") end
+local function MealItemName() return GetSetting("meal_item", "meal") end
 
 -- ─── sellable catalog ────────────────────────────────────────────────────────
 -- Everything a restaurant may put a price on: cooked recipe outputs, assembled
@@ -44,11 +45,11 @@ function BuildSellableCatalog(rid)
     end
 
     -- POS modifiers derived from IN-PLACE finishes on a cooked item (a doughnut's
-    -- frosting + sprinkles): each finish tool becomes a single-choice GROUP and
-    -- every flavor a pick-one option (colored swatch). Only finishes that keep the
-    -- SAME item (t.item == t.output — the overlay doughnut finishes) become
-    -- modifiers; a finish that changes the item (cake → decorated_cake) stays its
-    -- own sellable. Ticket instructions only — the cook applies the finish.
+    -- frosting + sprinkles, a cake's frosting flavor): each finish tool becomes a
+    -- single-choice GROUP and every flavor a pick-one option (colored swatch). Only
+    -- finishes that keep the SAME item (t.item == t.output — every collapsed finish:
+    -- doughnut frosting/sprinkles, cake frosting) become modifiers, so the item
+    -- stays ONE sellable. Ticket instructions only — the cook applies the finish.
     local function finishModsFor(item)
         local mods = {}
         for _, f in ipairs(GetSetting("finishes", {})) do
@@ -175,6 +176,271 @@ local function payCommission(rid, src, amount, ticket)
     return commission
 end
 
+-- ─── ticket fulfillment planner (restaurant-wide cooked-items pool) ──────────
+-- Tickets are fulfilled from the UNION of every cook's tray for the restaurant
+-- (PoolCount*/PoolConsume* in core), not the cashier's inventory — so cooks needn't
+-- double as cashiers. Matching is by BASE ITEM (the menu entry): a burger fills any
+-- burger order, a cake any cake, regardless of modifiers/toppings — customisations
+-- (cheese, frosting, no-lettuce…) are ticket instructions the cook should honour,
+-- never a hard completion gate, so an honest mistake still fulfils the order.
+-- DRINKS are the one exception: each flavor is its OWN menu product (a distinct
+-- sellable/variant), so a drink line matches only its flavor — a Cola order is never
+-- filled by a Sprite. At most ONE meal may be used, covering the lines its layers'
+-- items match.
+
+-- The MODIFIER items an assembly output offers (cheese, lettuce…) → the parts that
+-- make a customised build differ from the plain one, keyed by item AND by modifier
+-- id (with each id's default flag). Returns nil if the item isn't an assembly
+-- output. Base components (buns, patties) are deliberately NOT here: a burger's bun
+-- is split into a top + bottom HALF (two `bun` layers), so counting raw parts would
+-- read a plain burger as "two buns" and never match a one-bun order. Only the
+-- presence of an actual modifier item (a cheese slice) is a variation.
+local function modifierSpec(item)
+    for _, a in ipairs(GetSetting("assembly", {})) do
+        if a.output == item then
+            local byItem, byId = {}, {}
+            for _, m in ipairs(a.modifiers or {}) do
+                if m.item and m.item ~= "" then
+                    byItem[m.item] = true
+                    byId[tostring(m.id)] = { item = m.item, default = (m.default == true or m.default == 1) }
+                end
+            end
+            return { byItem = byItem, byId = byId }
+        end
+    end
+    return nil
+end
+
+-- The modifier items a built assembly stack actually carries, as item→count. Two
+-- forms count as the "cheese" modifier: a cheese SLICE item layer, OR a patty MELTED
+-- with cheese (cheese field ≥ 1) — a burger's cheese is the grill melt on the patty,
+-- never a separate slice, so without this a grill-made cheeseburger reads as plain and
+-- never matches a "+Cheese" order.
+local function assemblyModCounts(spec, stack)
+    local count = {}
+    if type(stack) == "table" then
+        for _, s in ipairs(stack) do
+            if spec.byItem[s.item] then
+                count[s.item] = (count[s.item] or 0) + 1
+            elseif spec.byItem["cheese"] and (tonumber(s.cheese) or 0) >= 1 then
+                count["cheese"] = (count["cheese"] or 0) + 1
+            end
+        end
+    end
+    return count
+end
+
+-- A canonical match key for one cooked instance / meal layer. Matching is by base
+-- item (see the section header), so this is "" for everything EXCEPT a drink, whose
+-- flavor is its menu identity. Kept in lock-step with lineVariationKey below so a POS
+-- line and a cooked instance describe the same thing.
+local function variationKey(item, meta)
+    if item == DrinkItemName() then
+        -- the flavor riding as the drink's one meta layer
+        local key = (type(meta) == "table" and meta[1] and meta[1].item) or ""
+        return "d:" .. tostring(key)
+    end
+    return "" -- item-name match: any variation of the item fills the line
+end
+
+-- The match key an order line asks for, in the SAME key space as variationKey. Only
+-- a drink line pins a flavor (its `variant`); every other line matches by item alone,
+-- so modifiers/toppings stay ticket instructions and never block completion.
+local function lineVariationKey(line)
+    if line.kind == "drink" then return "d:" .. tostring(line.variant or "") end
+    return ""
+end
+
+-- A predicate an instance's meta must satisfy to fill units of (item, key).
+local function variationMatcher(item, key)
+    return function(meta) return variationKey(item, meta) == key end
+end
+
+-- The order's lines expanded into one { item, key, label } unit per qty.
+local function requiredUnits(order)
+    local req = {}
+    for _, l in ipairs(order.lines or {}) do
+        local key = lineVariationKey(l)
+        for _ = 1, math.max(1, tonumber(l.qty) or 1) do
+            req[#req + 1] = { item = l.item, key = key, label = l.label }
+        end
+    end
+    return req
+end
+
+-- Resolve a finish tool:flavor to a display view (label like "Frosting: Strawberry"
+-- + the flavor's colour swatch), matching how the POS renders a finish modifier.
+local function finishFlavorView(toolId, flavorId)
+    for _, f in ipairs(GetSetting("finishes", {})) do
+        if f.tool == toolId then
+            for _, t in ipairs(f.targets or {}) do
+                for _, fl in ipairs(t.flavors or {}) do
+                    if fl.id == flavorId then
+                        return { label = GetItemLabel(toolId) .. ": " .. (fl.label or fl.id), color = fl.color }
+                    end
+                end
+            end
+            return { label = GetItemLabel(toolId) .. ": " .. tostring(flavorId) }
+        end
+    end
+    return { label = tostring(flavorId) }
+end
+
+-- Resolve a drink flavor key to a display view (label + colour).
+local function drinkFlavorView(key)
+    for _, d in ipairs(GetSetting("drinks", {})) do
+        if d.output == key then return { label = d.label or key, color = d.color } end
+    end
+    return { label = tostring(key) }
+end
+
+-- The image-rich contents of a meal's build stack for the register's in-depth meal
+-- picker: one entry per top-level layer, each with the item's label + image and its
+-- toppings (a burger's cheese/lettuce as item images, a cake/doughnut's frosting +
+-- sprinkles as coloured swatches, a drink shown by its flavor) so the cashier sees
+-- exactly what's inside before fulfilling with it.
+local function mealItemsDetail(meta)
+    local mealItem = MealItemName()
+    local out = {}
+    for _, l in ipairs(type(meta) == "table" and meta or {}) do
+        if l.item ~= mealItem then
+            local entry = { item = l.item, image = GetItemImage(l.item), mods = {} }
+            if l.item == DrinkItemName() then
+                local key = type(l.stack) == "table" and l.stack[1] and l.stack[1].item or nil
+                entry.label = drinkFlavorView(key).label
+            else
+                local top = type(l.stack) == "table" and l.stack[1] or nil
+                entry.label = GetItemLabel(l.item)
+                if type(top) == "table" and top.flavor then
+                    local cur = top
+                    while type(cur) == "table" and cur.flavor do
+                        local fv = finishFlavorView(cur.tool, cur.flavor)
+                        entry.mods[#entry.mods + 1] = { label = fv.label, color = fv.color }
+                        cur = type(cur.stack) == "table" and cur.stack[1] or nil
+                    end
+                else
+                    local spec = modifierSpec(l.item)
+                    if spec then
+                        for it, n in pairs(assemblyModCounts(spec, l.stack)) do
+                            for _ = 1, n do
+                                entry.mods[#entry.mods + 1] = { label = GetItemLabel(it), image = GetItemImage(it) }
+                            end
+                        end
+                    end
+                end
+            end
+            out[#out + 1] = entry
+        end
+    end
+    return out
+end
+
+-- Given a meal's build stack, remove the required units its top-level layers cover
+-- (EXACT variation match — a cheeseburger layer covers a "+cheese" burger line,
+-- never a plain-burger line). Returns the leftovers.
+local function mealCovers(meta, required)
+    local mealItem = MealItemName()
+    local provide = {}
+    for _, l in ipairs(type(meta) == "table" and meta or {}) do
+        if l.item ~= mealItem then -- ignore any nested meal layer
+            provide[#provide + 1] = { item = l.item, key = variationKey(l.item, l.stack) }
+        end
+    end
+    local uncovered = {}
+    for _, u in ipairs(required) do
+        local matched = false
+        for _, p in ipairs(provide) do
+            if not p.used and p.item == u.item and p.key == u.key then
+                p.used, matched = true, true
+                break
+            end
+        end
+        if not matched then uncovered[#uncovered + 1] = u end
+    end
+    return uncovered
+end
+
+-- Can the pool complete this order (optionally using the one meal `mealSig`)?
+-- Returns { ok, singles = { {item, key, count}, … }, mealSig, missing }.
+function PlanFulfillment(rid, order, mealSig)
+    local req = requiredUnits(order)
+    local usedMealSig = nil
+    if type(mealSig) == "string" and mealSig ~= "" then
+        local mealItem = MealItemName()
+        if PoolCount(rid, mealItem, mealSig) < 1 then
+            return { ok = false, missing = { _L("order_meal_gone") } }
+        end
+        req = mealCovers(PoolTopMeta(rid, mealItem, mealSig), req)
+        usedMealSig = mealSig
+    end
+
+    -- group the remaining units by (item, variation key) and check pool availability
+    local groups, gorder = {}, {}
+    for _, u in ipairs(req) do
+        local gk = u.item .. "|" .. u.key
+        if not groups[gk] then
+            groups[gk] = { item = u.item, key = u.key, label = u.label, need = 0 }
+            gorder[#gorder + 1] = gk
+        end
+        groups[gk].need = groups[gk].need + 1
+    end
+
+    local singles, missing, ok = {}, {}, true
+    for _, gk in ipairs(gorder) do
+        local g = groups[gk]
+        local have = PoolCountMatch(rid, g.item, variationMatcher(g.item, g.key))
+        if have >= g.need then
+            singles[#singles + 1] = { item = g.item, key = g.key, count = g.need }
+        else
+            ok = false
+            missing[#missing + 1] = ("%d× %s"):format(g.need - have, g.label or GetItemLabel(g.item))
+        end
+    end
+    return { ok = ok, singles = singles, mealSig = usedMealSig, missing = (#missing > 0) and missing or nil }
+end
+
+-- Attach per-ticket fulfillment state:
+--   `ok`          — singles ALONE complete the order (the register's one-tap complete).
+--   `mealOptions` — each pool meal that (with singles) completes the WHOLE order, so
+--                   only completing options are ever offered; each carries its exact
+--                   layer contents.
+--   `ready`       — the order is completable AT ALL: singles alone OR using one of the
+--                   available meals. This is what the read-only Tickets widget shows,
+--                   so a meal on the tray counts toward "ready".
+--   `missing`     — the shortfall of the BEST plan (singles, or singles + the meal that
+--                   covers the most), shown when the order can't be completed yet.
+-- The pool is restaurant-wide, so this is identical for every cashier — it rides the
+-- SyncOrders broadcast unchanged.
+local function AnnotateOrders(rid, list)
+    local mealItem = MealItemName()
+    -- Only offer meals the customer can actually be handed: single items come from
+    -- the sellable catalog (ItemExists-filtered), but a meal can sit in the tray
+    -- without being an installed item — never hand over something that'd vanish.
+    local meals = ItemExists(mealItem) and PoolVariations(rid, mealItem) or {}
+    for _, o in ipairs(list) do
+        local base = PlanFulfillment(rid, o)
+        local ready = base.ok
+        local bestMissing = base.ok and nil or base.missing
+        local opts = {}
+        for _, m in ipairs(meals) do
+            local plan = PlanFulfillment(rid, o, m.sig)
+            if plan.ok then
+                ready = true
+                opts[#opts + 1] = { sig = m.sig, label = GetItemLabel(mealItem),
+                                    items = mealItemsDetail(m.meta) }
+            elseif not ready and plan.missing
+                and (not bestMissing or #plan.missing < #bestMissing) then
+                -- this meal covers more than singles alone: report the smaller shortfall
+                bestMissing = plan.missing
+            end
+        end
+        local fulfill = { ok = base.ok, ready = ready, missing = (not ready) and bestMissing or nil }
+        if #opts > 0 then fulfill.mealOptions = opts end
+        o.fulfill = fulfill
+    end
+    return list
+end
+
 -- ─── register payload ────────────────────────────────────────────────────────
 
 local function buildRegister(src, id)
@@ -187,7 +453,7 @@ local function buildRegister(src, id)
         balance      = r.balance,
         commission   = emp and emp.commission_rate or 0,
         catalog      = (BuildPricedCatalog(id, true)),
-        tickets      = GetOpenOrders(id), -- initial list; kept live thereafter by SyncOrders
+        tickets      = AnnotateOrders(id, GetOpenOrders(id)), -- initial list; kept live thereafter by SyncOrders
         nearby       = NearbyPlayers(src, 6.0),
         receiptOk    = ItemExists(ReceiptItem()),
         theme        = r.metadata and r.metadata.theme or nil, -- skins the POS panel
@@ -198,6 +464,20 @@ lib.callback.register("pickle_restaurants:sales:getRegister", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "sell") then return { ok = false, error = _L("no_work_here") } end
     return buildRegister(src, id)
+end)
+
+-- Read-only annotated open tickets for the corner "Tickets" widget shown in every
+-- restaurant experience (cooking / management / virtual). Any staff member who
+-- can work the restaurant may VIEW them (a cook without `sell` still sees whether
+-- the kitchen has cleared each order) — serving stays gated on `sell` in
+-- completeOrder. Fulfillment is pool-wide, so this is the same list SyncOrders
+-- broadcasts; the widget stays live off that broadcast.
+lib.callback.register("pickle_restaurants:sales:getTickets", function(src, d)
+    local id = tonumber(d.id)
+    if not id or not (HasPerm(id, src, "cook") or HasPerm(id, src, "sell")) then
+        return { tickets = {} }
+    end
+    return { tickets = AnnotateOrders(id, GetOpenOrders(id)) }
 end)
 
 -- Push the fresh open-ticket list to every client. Each client applies it if it has
@@ -211,7 +491,7 @@ end)
 -- from its callback reply, which could race the broadcast and revive a cancelled
 -- ticket. The callbacks now return ok/error ONLY and never touch the list.)
 function SyncOrders(id)
-    TriggerClientEvent("pickle_restaurants:sales:orders", -1, id, GetOpenOrders(id))
+    TriggerClientEvent("pickle_restaurants:sales:orders", -1, id, AnnotateOrders(id, GetOpenOrders(id)))
 end
 
 -- ─── order helpers ───────────────────────────────────────────────────────────
@@ -250,13 +530,6 @@ local function orderSummary(lines)
         parts[#parts + 1] = s
     end
     return table.concat(parts, ", ")
-end
-
--- A drink line's exact build signature (the flavor layer every poured drink
--- carries) — computed with the real TraySig so it can never drift from the
--- cooking module's own signatures.
-local function drinkSig(variant)
-    return TraySig({ { item = variant } })
 end
 
 -- ─── create order ────────────────────────────────────────────────────────────
@@ -399,61 +672,6 @@ end)
 
 -- ─── complete order ──────────────────────────────────────────────────────────
 
--- What the completing staff member is missing for `lines`, using slot metadata
--- where the bridge exposes it (a drink line must match its flavor's exact sig).
--- Returns nil when everything is on hand, else a list of "2× Cola" strings.
-local function missingForLines(src, lines)
-    local missing = {}
-    for _, l in ipairs(lines) do
-        local have
-        if l.kind == "drink" and Inventory.GetItemSlots then
-            have = 0
-            local want = drinkSig(l.variant)
-            for _, s in ipairs(Inventory.GetItemSlots(src, l.item) or {}) do
-                local m = type(s.metadata) == "table" and s.metadata or {}
-                if TraySig(type(m.stack) == "table" and m.stack or nil) == want then
-                    have = have + (s.count or 1)
-                end
-            end
-        else
-            -- no slot metadata (bare ESX) → any instance of the item qualifies
-            have = Inventory.GetItemCount(src, l.item) or 0
-        end
-        if have < l.qty then
-            missing[#missing + 1] = ("%d× %s"):format(l.qty - have, l.label)
-        end
-    end
-    return #missing > 0 and missing or nil
-end
-
--- Move one line's items from the staff inventory to the customer, one unit at a
--- time so every unit keeps its OWN slot metadata (the trayToInventory precedent
--- — a pepperoni pizza arrives as that exact pepperoni pizza).
-local function transferLine(src, customerSrc, l)
-    local wantSig = (l.kind == "drink") and drinkSig(l.variant) or nil
-    local left = l.qty
-    if Inventory.GetItemSlots then
-        while left > 0 do
-            local slot
-            for _, s in ipairs(Inventory.GetItemSlots(src, l.item) or {}) do
-                if not wantSig then slot = s break end
-                local m = type(s.metadata) == "table" and s.metadata or {}
-                if TraySig(type(m.stack) == "table" and m.stack or nil) == wantSig then slot = s break end
-            end
-            if not slot then return false end -- vanished mid-transfer (shouldn't happen; pre-verified)
-            Inventory.RemoveItemSlot(src, l.item, 1, slot.slot)
-            Inventory.AddItem(customerSrc, l.item, 1, slot.metadata)
-            left = left - 1
-        end
-        return true
-    end
-    -- bare ESX: plain counts, no metadata to preserve
-    if (Inventory.GetItemCount(src, l.item) or 0) < left then return false end
-    Inventory.RemoveItem(src, l.item, left)
-    Inventory.AddItem(customerSrc, l.item, left)
-    return true
-end
-
 -- The order's receipt on the customer. With slot metadata the exact order's
 -- receipt is required (metadata.order_id); bare ESX settles for any one receipt
 -- item. `consume` false just verifies it's there. Returns false only when the
@@ -494,6 +712,56 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
         return { ok = false, error = err }
     end
 
+    -- NPC customer: no player wallet, receipt or inventory hand-off. Verify the NPC is
+    -- still waiting at the counter, fulfil from the shared pool (the instances are just
+    -- consumed — the NPC "takes" them), then pay the restaurant (+ a possible tip) and
+    -- commission the serving staff, and send the ped away happy. The whole player path
+    -- below is skipped. (IsNpcOrder/NpcOrderPresent/NpcRollTip/NpcDropOrder are globals
+    -- from modules/npc_customers/server.lua.)
+    if IsNpcOrder and IsNpcOrder(o) then
+        if not NpcOrderPresent(id, o.id) then return fail(_L("order_customer_missing")) end
+
+        local mealSig = (type(d.mealSig) == "string" and d.mealSig ~= "") and d.mealSig or nil
+        local plan = PlanFulfillment(id, o, mealSig)
+        if not plan.ok then
+            return fail(_L("order_missing_items", table.concat(plan.missing or {}, ", ")))
+        end
+        local mealItem = MealItemName()
+        if plan.mealSig and not ItemExists(mealItem) then
+            return fail(_L("cook_item_not_installed", mealItem))
+        end
+
+        -- Consume from the pool under one guard — no yield since PlanFulfillment, so it
+        -- can only come up short if something throws.
+        local consumed, cerr = pcall(function()
+            if plan.mealSig then
+                local taken = PoolConsume(id, mealItem, plan.mealSig, 1)
+                if not taken or #taken < 1 then error(GetItemLabel(mealItem), 0) end
+            end
+            for _, g in ipairs(plan.singles) do
+                local taken = PoolConsumeMatch(id, g.item, variationMatcher(g.item, g.key), g.count)
+                if not taken or #taken < g.count then error(GetItemLabel(g.item), 0) end
+            end
+        end)
+        if not consumed then return fail(_L("order_missing_items", tostring(cerr))) end
+
+        AdjustBalance(id, o.total)
+        local summary = orderSummary(o.lines)
+        AddLedger(id, "sale", o.total, ("Ticket #%d — %s"):format(o.ticket, summary):sub(1, 255), o.customer_identifier)
+        local tip = (NpcRollTip and NpcRollTip(o.total)) or 0
+        if tip > 0 then
+            AdjustBalance(id, tip)
+            AddLedger(id, "sale", tip, ("Ticket #%d — tip"):format(o.ticket), o.customer_identifier)
+        end
+        payCommission(id, src, o.total + tip, o.ticket)
+
+        CloseOrder(id, o.id, "completed")
+        if NpcDropOrder then NpcDropOrder(id, o.id, true) end
+        ShowNotification(src, _L("order_completed", o.ticket))
+        SyncOrders(id)
+        return { ok = true }
+    end
+
     local customerSrc = findPlayerByIdentifier(o.customer_identifier)
     if not customerSrc or not playersNear(src, customerSrc, 8.0) then
         return fail(_L("order_customer_missing"))
@@ -504,29 +772,48 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
         return fail(_L("order_no_receipt"))
     end
 
-    -- Everything is verified across ALL lines before anything moves, so a
-    -- missing item can never leave a half-handed-over order.
-    local missing = missingForLines(src, o.lines)
-    if missing then
-        return fail(_L("order_missing_items", table.concat(missing, ", ")))
+    -- Fulfil from the restaurant-wide cooked-items pool (every cook's tray), not
+    -- the cashier's inventory. Plan first so a shortfall never half-hands an order;
+    -- `d.mealSig` (optional) is the one meal the cashier chose to combine in.
+    local mealSig = (type(d.mealSig) == "string" and d.mealSig ~= "") and d.mealSig or nil
+    local plan = PlanFulfillment(id, o, mealSig)
+    if not plan.ok then
+        return fail(_L("order_missing_items", table.concat(plan.missing or {}, ", ")))
     end
-    for _, l in ipairs(o.lines) do
-        if Inventory.CanCarryItem and not Inventory.CanCarryItem(customerSrc, l.item, l.qty) then
-            return fail(_L("order_cant_carry", l.label))
+    local mealItem = MealItemName()
+    if plan.mealSig and not ItemExists(mealItem) then
+        return fail(_L("cook_item_not_installed", mealItem))
+    end
+    if plan.mealSig and Inventory.CanCarryItem and not Inventory.CanCarryItem(customerSrc, mealItem, 1) then
+        return fail(_L("order_cant_carry", GetItemLabel(mealItem)))
+    end
+    for _, g in ipairs(plan.singles) do
+        if Inventory.CanCarryItem and not Inventory.CanCarryItem(customerSrc, g.item, g.count) then
+            return fail(_L("order_cant_carry", GetItemLabel(g.item)))
         end
     end
 
-    -- Hand the food over + consume the receipt under ONE guard so a mid-transfer
-    -- ERROR (not just a false return) releases the claim instead of wedging the
-    -- ticket. Every line was verified above, so a failure here is exceptional.
-    local moved, badLine = pcall(function()
-        for _, l in ipairs(o.lines) do
-            if not transferLine(src, customerSrc, l) then error(l.label, 0) end
+    -- Consume from the pool + hand each instance to the customer (build-stack
+    -- metadata intact, via BuildInvMeta — a pepperoni pizza arrives as that exact
+    -- pizza) + consume the receipt, under ONE guard. There is no yield between the
+    -- plan and here, so PoolConsume can't come up short unless something throws.
+    local moved, bad = pcall(function()
+        if plan.mealSig then
+            local taken = PoolConsume(id, mealItem, plan.mealSig, 1)
+            if not taken or #taken < 1 then error(GetItemLabel(mealItem), 0) end
+            Inventory.AddItem(customerSrc, mealItem, 1, BuildInvMeta(0, taken[1].meta))
+        end
+        for _, g in ipairs(plan.singles) do
+            local taken = PoolConsumeMatch(id, g.item, variationMatcher(g.item, g.key), g.count)
+            if not taken or #taken < g.count then error(GetItemLabel(g.item), 0) end
+            for _, inst in ipairs(taken) do
+                Inventory.AddItem(customerSrc, g.item, 1, BuildInvMeta(inst.cheese, inst.meta))
+            end
         end
         takeReceipt(customerSrc, o, true) -- verified above; best-effort by now
     end)
     if not moved then
-        return fail(_L("order_missing_items", tostring(badLine)))
+        return fail(_L("order_missing_items", tostring(bad)))
     end
 
     CloseOrder(id, o.id, "completed")
@@ -553,6 +840,16 @@ lib.callback.register("pickle_restaurants:sales:cancelOrder", function(src, d)
         o.busy = false
         ShowNotification(src, err)
         return { ok = false, error = err }
+    end
+
+    -- NPC customer: it never pre-paid (NPCs pay on serve), so there's nothing to
+    -- refund — just close the ticket and send the ped off.
+    if IsNpcOrder and IsNpcOrder(o) then
+        CloseOrder(id, o.id, "cancelled")
+        if NpcDropOrder then NpcDropOrder(id, o.id, false) end
+        ShowNotification(src, _L("order_cancelled", o.ticket))
+        SyncOrders(id)
+        return { ok = true }
     end
 
     -- Refunding needs a live player to hand the money back to.
@@ -590,4 +887,21 @@ lib.callback.register("pickle_restaurants:sales:cancelOrder", function(src, d)
     -- (which the acting cashier receives too). The reply never carries the list, so
     -- there is no second, racing update path.
     return { ok = true }
+end)
+
+-- ─── live fulfillment refresh ────────────────────────────────────────────────
+-- A ticket's Complete/Not-Complete state depends on the shared pool, which
+-- changes as cooks cook, cash out, or food expires — none of which touch the
+-- order list. The tray mutators flag the restaurant via MarkOrdersDirty (in tight
+-- loops), and this coalescing flusher rebroadcasts the (re-annotated) open list
+-- through the SAME single SyncOrders path — no new update path, so the staleness
+-- invariant holds. Skipped when a flagged restaurant has no open tickets.
+CreateThread(function()
+    while true do
+        Wait(750)
+        for rid in pairs(OrdersDirty) do
+            OrdersDirty[rid] = nil
+            if OrderCache[rid] and next(OrderCache[rid]) then SyncOrders(rid) end
+        end
+    end
 end)
