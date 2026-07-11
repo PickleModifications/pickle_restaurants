@@ -8,7 +8,7 @@
 
 lib.callback.register("pickle_restaurants:doors:toggle", function(src, d)
     local prop = PropCache[tonumber(d.prop_id)]
-    if not prop or prop.prop_type ~= "stovetop" then return { ok = false } end
+    if not prop or StationType(prop) ~= "stovetop" then return { ok = false } end
     if not HasPerm(prop.restaurant_id, src, "cook") then return { ok = false, error = _L("no_work_here") } end
 
     local door = tonumber(d.door)

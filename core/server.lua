@@ -1080,6 +1080,27 @@ end
 
 function GetRestaurant(id) return RestaurantCache[tonumber(id)] end
 
+-- The station type a prop row behaves as. A virtual point (an invisible anchor
+-- that opens a station inside the restaurant's kitchen shell) cooks as its
+-- metadata.target; everything else cooks as its own prop_type. Every cooking
+-- read of prop.prop_type goes through this so virtual points inherit the full
+-- station behavior while keeping their own per-row (= per point) state.
+function StationType(prop)
+    if prop and prop.prop_type == "virtual_point" then
+        return (prop.metadata and prop.metadata.target) or ""
+    end
+    return prop and prop.prop_type or ""
+end
+
+-- The per-prop shape the panels consume (admin restaurants list, management
+-- stations tab, placement getProps) — one place so the views can't drift.
+function PropSummary(p)
+    return {
+        id = p.id, prop_type = p.prop_type, model = p.model,
+        target = p.metadata and p.metadata.target, -- virtual points: the station they open
+    }
+end
+
 -- ─── recipe groups ───────────────────────────────────────────────────────────
 -- A recipe / assembly / drink / finish entry may carry an optional `group`
 -- ("bakery", "pizza"…). A restaurant carries a `groups` array; it can only cook
@@ -1668,6 +1689,9 @@ local function BuildClientRestaurant(r)
         -- NUI theme seed { primary, mode, radius } — the client passes it along
         -- when it opens a panel scoped to this restaurant (cooking stations).
         theme        = r.metadata and r.metadata.theme or nil,
+        -- virtual kitchen shell anchor { x, y, z, heading } — where a virtual
+        -- point session builds its local shell + stations (XY = counter).
+        shell        = r.metadata and r.metadata.shell or nil,
     }
 end
 

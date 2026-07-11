@@ -10,7 +10,7 @@ import { applyTheme, type ThemeConfig } from "@/lib/theme";
 import { money } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X,
+  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X, Building2, Sparkles,
 } from "lucide-react";
 
 const STATIONS = [
@@ -110,10 +110,15 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
   const props: any[] = r.props || [];
   const byType = (t: string) => props.filter((p) => p.prop_type === t);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Per-station placement mode: physical world prop vs. virtual point (opens the
+  // station inside the kitchen shell). Toggled per row, drives the Place button.
+  const [modes, setModes] = useState<Record<string, "physical" | "virtual">>({});
+  const setMode = (k: string, m: "physical" | "virtual") => setModes((prev) => ({ ...prev, [k]: m }));
   const stationsRef = useRef<HTMLDivElement>(null);
   const seatingRef = useRef<HTMLDivElement>(null);
 
   // Scroll the just-used section into view when reopened from a placement flow.
+  // Virtual placement lives in the stations card now, so "virtual" lands there.
   useEffect(() => {
     if (!focusSection) return;
     const el = focusSection === "seating" ? seatingRef.current : stationsRef.current;
@@ -201,30 +206,72 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
           </div>
         </div>
 
-        {/* stations */}
+        {/* stations — each type places EITHER a physical world prop or a virtual
+            point (an invisible anchor that opens the station inside the kitchen
+            shell). The per-row toggle picks the mode; the shell control up top is
+            the prerequisite for virtual points (one shell per restaurant). */}
         <div ref={stationsRef} className="rounded-lg border border-border p-3">
-          <div className="mb-3 text-sm font-semibold">{_L("admin.stations")}</div>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="text-sm font-semibold">{_L("admin.stations")}</div>
+            <Button size="sm" variant="outline" disabled={!r.hasCounter} onClick={() => fetchNui("admin:placeShell", { id: r.id })}>
+              <Building2 className="h-3.5 w-3.5" /> {r.hasShell ? _L("admin.adjust_shell") : _L("admin.place_shell")}
+            </Button>
+          </div>
+          <p className="mb-3 text-[11px] text-muted-foreground">
+            {!r.hasCounter ? _L("admin.shell_needs_counter") : r.hasShell ? _L("admin.shell_placed") : _L("admin.no_shell")}
+          </p>
           <div className="space-y-3">
             {STATIONS.map((s) => {
-              const placed = byType(s.key);
+              const physical = byType(s.key);
+              const virtual = props.filter((p) => p.prop_type === "virtual_point" && p.target === s.key);
+              const isVirtual = (modes[s.key] || "physical") === "virtual";
               const Icon = s.icon;
               return (
                 <div key={s.key}>
-                  <div className="mb-1.5 flex items-center justify-between">
+                  <div className="mb-1.5 flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 text-sm">
                       <Icon className="h-4 w-4 text-muted-foreground" />
                       {s.label}
-                      <Badge variant="secondary">{placed.length}</Badge>
+                      <Badge variant="secondary">{physical.length + virtual.length}</Badge>
                     </div>
-                    <Button size="sm" variant="outline" onClick={() => fetchNui("admin:placeProp", { id: r.id, prop_type: s.key })}>
-                      <Plus className="h-3.5 w-3.5" /> {_L("admin.place")}
-                    </Button>
+                    <div className="flex items-center gap-1.5">
+                      {/* physical | virtual placement toggle */}
+                      <div className="flex rounded-md border border-border p-0.5 text-[11px]">
+                        <button
+                          className={`rounded px-2 py-0.5 transition-colors ${!isVirtual ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                          onClick={() => setMode(s.key, "physical")}
+                        >{_L("admin.mode_physical")}</button>
+                        <button
+                          className={`rounded px-2 py-0.5 transition-colors ${isVirtual ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                          onClick={() => setMode(s.key, "virtual")}
+                        >{_L("admin.mode_virtual")}</button>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={isVirtual && !r.hasShell}
+                        onClick={() => isVirtual
+                          ? fetchNui("admin:placeVirtualPoint", { id: r.id, target: s.key })
+                          : fetchNui("admin:placeProp", { id: r.id, prop_type: s.key })}
+                      >
+                        {isVirtual ? <Sparkles className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />} {_L("admin.place")}
+                      </Button>
+                    </div>
                   </div>
-                  {placed.length > 0 && (
+                  {isVirtual && !r.hasShell && (
+                    <p className="mb-1 text-[11px] text-muted-foreground">{_L("admin.virtual_needs_shell")}</p>
+                  )}
+                  {(physical.length > 0 || virtual.length > 0) && (
                     <div className="flex flex-wrap gap-1.5">
-                      {placed.map((p) => (
+                      {physical.map((p) => (
                         <Badge key={p.id} variant="outline" className="gap-1.5">
                           #{p.id}
+                          <button onClick={() => act("admin:removeProp", { propId: p.id })}><Trash2 className="h-3 w-3" /></button>
+                        </Badge>
+                      ))}
+                      {virtual.map((p) => (
+                        <Badge key={p.id} variant="outline" className="gap-1.5" title={_L("admin.mode_virtual")}>
+                          <Sparkles className="h-3 w-3 text-primary" /> #{p.id}
                           <button onClick={() => act("admin:removeProp", { propId: p.id })}><Trash2 className="h-3 w-3" /></button>
                         </Badge>
                       ))}

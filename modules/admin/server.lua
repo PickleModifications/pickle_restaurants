@@ -20,9 +20,7 @@ local function buildAdminData()
     for _, r in pairs(RestaurantCache) do
         local props = {}
         for _, p in pairs(PropCache) do
-            if p.restaurant_id == r.id then
-                props[#props + 1] = { id = p.id, prop_type = p.prop_type, model = p.model }
-            end
+            if p.restaurant_id == r.id then props[#props + 1] = PropSummary(p) end
         end
         data.restaurants[#data.restaurants + 1] = {
             id           = r.id,
@@ -31,6 +29,7 @@ local function buildAdminData()
             owner        = r.owner_identifier,
             balance      = r.balance,
             hasCounter   = r.counter ~= nil,
+            hasShell     = (r.metadata and r.metadata.shell) ~= nil,
             groups       = r.groups or {},
             props        = props,
             propCount    = #props,
@@ -110,7 +109,13 @@ lib.callback.register("pickle_restaurants:admin:delete", function(src, d)
     EmployeeCache[id] = nil
     StockCache[id] = nil
     ClearOrders(id) -- drops OrderCache/NextTicket + bumps the rev so a stale register can't re-apply
-    for _, pid in ipairs(propIds) do PropCache[pid] = nil; TriggerClientEvent("pickle_restaurants:propRemoved", -1, pid) end
+    for _, pid in ipairs(propIds) do
+        PropCache[pid] = nil
+        TriggerClientEvent("pickle_restaurants:propRemoved", -1, pid)
+        -- release state other modules key on this prop (cooking items, seat
+        -- occupancy, station claims) — same notice removeProp gives
+        TriggerEvent("pickle_restaurants:propDeleted", pid)
+    end
     SyncToClient(-1)
     return { ok = true }
 end)

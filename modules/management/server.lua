@@ -76,7 +76,9 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
     end
 
     local props = {}
-    for _, p in pairs(PropCache) do if p.restaurant_id == id then props[#props + 1] = { id = p.id, prop_type = p.prop_type } end end
+    for _, p in pairs(PropCache) do
+        if p.restaurant_id == id then props[#props + 1] = PropSummary(p) end
+    end
 
     -- Supplies: the raw ingredients the restaurant can buy into its shared stock
     -- pool (the `ingredient_costs` map), each with its per-unit cost and the count
@@ -88,6 +90,8 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
                 item = item, label = GetItemLabel(item), image = GetItemImage(item),
                 cost = math.max(0, math.floor(tonumber(cost) or 0)),
                 stock = GetStockCount(id, item), installed = ItemExists(item),
+                -- how many the manager is personally carrying (offer to deposit)
+                held = Inventory.GetItemCount(src, item) or 0,
             }
         end
         table.sort(supplies, function(a, b) return (a.label or a.item):lower() < (b.label or b.item):lower() end)
@@ -96,6 +100,7 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
     return {
         ok        = true,
         restaurant = { id = r.id, label = r.label, balance = r.balance, owner = r.owner_identifier,
+                       hasShell     = (r.metadata and r.metadata.shell) ~= nil,
                        brand_image  = r.metadata and r.metadata.brand_image or nil,
                        brand_images = r.metadata and r.metadata.brand_images or nil,
                        theme        = r.metadata and r.metadata.theme or nil },
@@ -226,6 +231,46 @@ lib.callback.register("pickle_restaurants:management:buyStock", function(src, d)
     AddStock(id, item, qty)
     ShowNotification(src, _L("mgmt_stock_bought", qty, GetItemLabel(item)))
     return { ok = true, balance = GetRestaurant(id).balance, stock = GetStockCount(id, item) }
+end)
+
+-- Move ingredients between a manager's own pockets and the shared pool — the
+-- companion to buying. Both gated on manage_stock. Deposit takes items OUT of the
+-- player's inventory INTO the pool (free, no balance change); withdraw takes them
+-- back OUT of the pool INTO the player's inventory. Only a configured, installed
+-- ingredient (an `ingredient_costs` entry that is a real item) can move, and both
+-- are logged to the ledger (amount 0) as an audit trail of who moved what.
+lib.callback.register("pickle_restaurants:management:depositStock", function(src, d)
+    local id = tonumber(d.id)
+    if not HasPerm(id, src, "manage_stock") then return { ok = false, error = _L("no_permission") } end
+    local item = tostring(d.item or "")
+    local costs = GetSetting("ingredient_costs", {})
+    if costs[item] == nil or not ItemExists(item) then return { ok = false, error = _L("mgmt_item_required") } end
+    local qty = math.max(1, math.min(1000, math.floor(tonumber(d.qty) or 0)))
+    if (Inventory.GetItemCount(src, item) or 0) < qty then return { ok = false, error = _L("mgmt_not_enough_held") } end
+    Inventory.RemoveItem(src, item, qty)
+    AddStock(id, item, qty)
+    AddLedger(id, "supply", 0, ("Deposit: %d x %s"):format(qty, GetItemLabel(item)), GetIdentifier(src))
+    ShowNotification(src, _L("mgmt_stock_deposited", qty, GetItemLabel(item)))
+    return { ok = true, stock = GetStockCount(id, item), held = Inventory.GetItemCount(src, item) or 0 }
+end)
+
+lib.callback.register("pickle_restaurants:management:withdrawStock", function(src, d)
+    local id = tonumber(d.id)
+    if not HasPerm(id, src, "manage_stock") then return { ok = false, error = _L("no_permission") } end
+    local item = tostring(d.item or "")
+    local costs = GetSetting("ingredient_costs", {})
+    if costs[item] == nil or not ItemExists(item) then return { ok = false, error = _L("mgmt_item_required") } end
+    local qty = math.max(1, math.min(1000, math.floor(tonumber(d.qty) or 0)))
+    if GetStockCount(id, item) < qty then return { ok = false, error = _L("mgmt_not_enough_stock") } end
+    if Inventory.CanCarryItem and not Inventory.CanCarryItem(src, item, qty) then
+        return { ok = false, error = _L("mgmt_cant_carry") }
+    end
+    -- pull from the pool FIRST (write-through + fails if raced dry), then give
+    if not RemoveStock(id, item, qty) then return { ok = false, error = _L("mgmt_not_enough_stock") } end
+    Inventory.AddItem(src, item, qty)
+    AddLedger(id, "supply", 0, ("Withdraw: %d x %s"):format(qty, GetItemLabel(item)), GetIdentifier(src))
+    ShowNotification(src, _L("mgmt_stock_withdrawn", qty, GetItemLabel(item)))
+    return { ok = true, stock = GetStockCount(id, item), held = Inventory.GetItemCount(src, item) or 0 }
 end)
 
 -- ─── finances ────────────────────────────────────────────────────────────────

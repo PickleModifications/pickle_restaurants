@@ -93,3 +93,11 @@ RegisterNUICallback("management:placeSeat", function(d, cb)
     StartSeatPlacement(d.id)
     OpenManagement(d.id, "seating")
 end)
+
+-- Virtual point anchors (the shell itself is placed from the ADMIN panel only).
+RegisterNUICallback("management:placeVirtualPoint", function(d, cb)
+    CloseNUI()
+    cb({})
+    StartVirtualPointPlacement(d.id, d.target)
+    OpenManagement(d.id, "virtual")
+end)

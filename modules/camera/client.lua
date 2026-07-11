@@ -53,21 +53,39 @@ function StartStationCamera(prop)
     local camPos = localToWorld(prop, ent, cfg.pos)
     local lookAt = localToWorld(prop, ent, cfg.lookAt)
 
+    if VirtualDebugOn and VirtualDebugOn() then
+        print(("[pickle_restaurants][virtual] camera for '%s' (ent=%s exists=%s): "
+            .. "pos %.2f,%.2f,%.2f  lookAt %.2f,%.2f,%.2f  fov %.0f")
+            :format(tostring(prop.prop_type), tostring(ent), tostring(ent and DoesEntityExist(ent)),
+                camPos.x, camPos.y, camPos.z, lookAt.x, lookAt.y, lookAt.z, cfg.fov))
+    end
+
     local cam = CreateCamWithParams("DEFAULT_SCRIPTED_CAMERA",
         camPos.x, camPos.y, camPos.z, 0.0, 0.0, 0.0, cfg.fov, false, 0)
     PointCamAtCoord(cam, lookAt.x, lookAt.y, lookAt.z)
     SetCamActive(cam, true)
-    -- ease = true interpolates from the live gameplay camera into this one.
-    RenderScriptCams(true, true, EASE_MS, true, true)
+    -- A virtual session is built behind a screen fade at a shell that can be
+    -- anywhere (underground / in the sky), far from the player's real position.
+    -- Easing from the live gameplay camera would drag the shot from the player
+    -- down through the terrain to the shell — so cut STRAIGHT to the framed shell
+    -- (no interp): the first frame the fade reveals is already the station. A
+    -- physical station eases as before (ease = true) for the smooth lean-in.
+    if prop.virtual then
+        RenderScriptCams(true, false, 0, true, true)
+    else
+        RenderScriptCams(true, true, EASE_MS, true, true)
+    end
     StationCam = cam
     StationActive = true
 
     -- Hide the player's own ped (local-only — visibility isn't networked, so
     -- others still see them) ~200ms before the entry ease finishes, so the prop
-    -- view settles without the ped popping out of frame. Guarded on the session
-    -- flag (not cam identity) so a mid-transition view swap doesn't cancel it.
+    -- view settles without the ped popping out of frame. Virtual sessions cut
+    -- instantly (no ease window) and the ped is nowhere near the shot, so hide
+    -- immediately. Guarded on the session flag (not cam identity) so a
+    -- mid-transition view swap doesn't cancel it.
     CreateThread(function()
-        Wait(EASE_MS - 200)
+        Wait(prop.virtual and 0 or (EASE_MS - 200))
         if StationActive then
             SetEntityVisible(PlayerPedId(), false, false)
         end

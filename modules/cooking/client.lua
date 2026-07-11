@@ -1316,7 +1316,35 @@ local function cancelMove()
     moving = nil
 end
 
+-- ─── virtual point render gate ───────────────────────────────────────────────
+-- Items cooking at a VIRTUAL point live inside a kitchen shell that only exists
+-- on the client currently in a session at that exact point — everyone else must
+-- not materialize their props (the state still broadcasts to all, so it survives
+-- sessions and keeps cooking unattended, same as physical stations).
+local CookPropId = {} -- [uid] = prop id the item belongs to (only spawned items)
+
+local function renderableProp(propId)
+    local p = GetClientProp and GetClientProp(tonumber(propId) or propId)
+    -- fail CLOSED on an unknown prop: a broadcast landing before this client's
+    -- first sync fills propsById could be a virtual item (which must never
+    -- materialize outside its session), and everything skipped here is replayed
+    -- by the post-sync cooking:bulk anyway
+    if not p then return false end
+    if p.prop_type ~= "virtual_point" then return true end
+    return cookingOpen and currentCookProp and currentCookProp.virtual
+        and currentCookProp.id == p.id
+end
+
+-- gate + remember which prop a spawned item belongs to, so a closing virtual
+-- session can drop exactly its own items again
+local function gateSpawn(uid, propId)
+    if not renderableProp(propId) then return false end
+    CookPropId[uid] = tonumber(propId) or propId
+    return true
+end
+
 RegisterNetEvent("pickle_restaurants:cooking:spawn", function(uid, model, x, y, z, state, propId)
+    if not gateSpawn(uid, propId) then return end
     SpawnCookObject(uid, model, x, y, z, state, propId)
 end)
 
@@ -1329,12 +1357,13 @@ end)
 
 -- spawn or update a dual-sided patty (both faces + live status in one payload)
 RegisterNetEvent("pickle_restaurants:cooking:dual", function(p)
-    if p then RebuildDual(p) end
+    if not p or not gateSpawn(p.uid, p.prop_id) then return end
+    RebuildDual(p)
 end)
 
 -- spawn an oven/fryer/soda item at its station slot
 RegisterNetEvent("pickle_restaurants:cooking:slotSpawn", function(p)
-    if not p then return end
+    if not p or not gateSpawn(p.uid, p.prop_id) then return end
     SpawnSlotObject(p.uid, p.model, p.prop_id, p.method, p.door, p.slot, p.state, p.stack)
     if p.method == "soda" then
         updateSodaIce(p.uid, p.ice, p.state)
@@ -1373,11 +1402,18 @@ RegisterNetEvent("pickle_restaurants:fryer:dip", function(propId, slot, lowered)
     updateSlotBasket(propId, slot, true)
 end)
 
-RegisterNetEvent("pickle_restaurants:cooking:move", function(uid, x, y, z)
+RegisterNetEvent("pickle_restaurants:cooking:move", function(uid, x, y, z, propId)
+    -- gate like the spawn events: recording coords for a gated-off virtual item
+    -- would let a later update event materialize it outside its session. For
+    -- PHYSICAL items the unconditional record stays — it's the recovery seed
+    -- that lets an update respawn an item whose model failed to stream.
+    if not renderableProp(propId) then return end
     MoveCookObjectLocal(uid, x, y, z)
 end)
 
-RegisterNetEvent("pickle_restaurants:cooking:remove", function(uid)
+-- drop one item's local props/visuals (shared by the remove broadcast and a
+-- closing virtual session dropping its own renders — the server state lives on)
+local function dropItemLocal(uid)
     if CookObjects[uid] then CookEntityUid[CookObjects[uid]] = nil end
     if not RemoveDual(uid) then
         SafeDeleteEntity(CookObjects[uid])
@@ -1386,11 +1422,15 @@ RegisterNetEvent("pickle_restaurants:cooking:remove", function(uid)
     removeSodaIce(uid)
     stopSodaPour(uid)
     SodaFill[uid] = nil
+    CookPropId[uid] = nil
     CookObjects[uid], CookState[uid], CookCoords[uid], CookSlot[uid], CookProg[uid], CookYaw[uid] = nil, nil, nil, nil, nil, nil
-end)
+end
 
-RegisterNetEvent("pickle_restaurants:cooking:bulk", function(list)
+RegisterNetEvent("pickle_restaurants:cooking:remove", dropItemLocal)
+
+local function ApplyBulkList(list)
     for _, it in ipairs(list or {}) do
+        if not gateSpawn(it.uid, it.prop_id) then goto continue end
         if it.dual then
             RebuildDual(it)
         elseif it.method == "oven" or it.method == "fry" or it.method == "soda" then
@@ -1409,8 +1449,25 @@ RegisterNetEvent("pickle_restaurants:cooking:bulk", function(list)
         else
             SpawnCookObject(it.uid, it.model, it.x, it.y, it.z, it.state, it.prop_id)
         end
+        ::continue::
     end
-end)
+end
+
+RegisterNetEvent("pickle_restaurants:cooking:bulk", ApplyBulkList)
+
+-- A virtual session opening: render THIS point's in-progress items inside the
+-- freshly built shell (they were gated off while no session was open here).
+function ReplayActiveItemsFor(propId)
+    local list = lib.callback.await("pickle_restaurants:cooking:getActive", false, { prop_id = propId })
+    ApplyBulkList(list or {})
+end
+
+-- A virtual session closing: un-render exactly this point's items.
+function DropItemsFor(propId)
+    for uid, pid in pairs(CookPropId) do
+        if pid == propId then dropItemLocal(uid) end
+    end
+end
 
 -- ─── click-to-flip hover ─────────────────────────────────────────────────────
 
@@ -2178,8 +2235,24 @@ local function runDragThread(drag)
     end)
 end
 
+local stoppingCooking = false -- re-entrancy latch: the teardown below yields
+
 local function StopCooking()
+    -- The fade wait and the prep auto-save awards below all yield with
+    -- cookingOpen still true — a second close (double ESC, a force-close event
+    -- landing mid-fade) must not run the teardown concurrently.
+    if stoppingCooking then return end
+    stoppingCooking = true
+    local closedProp = currentCookProp
+    local wasVirtual = closedProp and closedProp.virtual
     local wasPrep = currentCookProp and currentCookProp.prop_type == "kitchen_prep"
+    -- Leaving a virtual point: everything below (prep auto-save roundtrips, the
+    -- camera easing back to the player) happens behind a faded screen; the
+    -- virtual module tears the shell down and fades back in when it's gone.
+    if wasVirtual then
+        DoScreenFadeOut(VirtualFadeMs and VirtualFadeMs() or 400)
+        while not IsScreenFadedOut() do Wait(0) end
+    end
     -- Deliver completed work on the way out: each stack still on the table is saved as
     -- its closest product (the exact variation preserved). Stacks that form no product
     -- fall through to prepClose below, which drops their reservations — parts stay in
@@ -2209,10 +2282,33 @@ local function StopCooking()
     StopStationCamera()
     CloseNUI()
     SendNUIMessage({ action = "cookingItems", items = {} })
+    -- free the exclusive station claim (physical and virtual alike)
+    if closedProp then TriggerServerEvent("pickle_restaurants:cooking:closeStation", closedProp.id) end
+    if wasVirtual and OnVirtualStationClosed then OnVirtualStationClosed(closedProp) end
+    stoppingCooking = false
 end
+
+-- for other modules (virtual points force-close when their point/shell changes)
+function ForceStopCooking() if cookingOpen then StopCooking() end end
+function IsCookingOpen() return cookingOpen end
 
 function OpenCookingStation(prop)
     if cookingOpen then return end
+    -- Exclusive use: one player per station entity at a time, server-arbitrated.
+    -- Virtual sessions already hold their claim (OpenVirtualStation takes it
+    -- before fading), so don't spend a second roundtrip re-claiming.
+    if not prop.virtual then
+        local claim = lib.callback.await("pickle_restaurants:cooking:openStation", false, { prop_id = prop.id })
+        if not (claim and claim.ok) then
+            return ShowNotification((claim and claim.error) or _L("cook_station_busy"))
+        end
+        if cookingOpen then -- re-check: the await yielded, another open may have won
+            if not (currentCookProp and currentCookProp.id == prop.id) then
+                TriggerServerEvent("pickle_restaurants:cooking:closeStation", prop.id)
+            end
+            return
+        end
+    end
     currentCookProp = prop
     cookingOpen = true
     StartStationCamera(prop)

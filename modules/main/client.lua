@@ -30,6 +30,16 @@ local spawnedProps       = {} -- [propId]        = entity
 local propInteractions   = {} -- [propId]        = interaction index
 local restaurantBlips    = {} -- [restaurantId]  = blip
 local counterInteractions = {} -- [restaurantId] = interaction index
+local propsById          = {} -- [propId]        = synced prop row (stations, seats, virtual points)
+
+-- A virtual session (modules/virtual) spawns its station as a LOCAL prop inside
+-- the kitchen shell and registers it here so everything that anchors to "the
+-- station entity" — the scripted camera, oven doors, fryer baskets, slot seating —
+-- resolves to the virtual one for that point's prop id.
+local virtualStations = {} -- [propId] = entity while a virtual session is open
+
+function RegisterVirtualStation(propId, ent) virtualStations[propId] = ent end
+function GetClientProp(propId) return propsById[propId] end
 
 -- ─── world cleanup ───────────────────────────────────────────────────────────
 
@@ -64,7 +74,7 @@ end
 
 -- ─── prop spawning + interaction ─────────────────────────────────────────────
 
-function GetStationEntity(propId) return spawnedProps[propId] end
+function GetStationEntity(propId) return virtualStations[propId] or spawnedProps[propId] end
 
 local function SpawnProp(prop)
     -- A seat is an INVISIBLE sit anchor: no world model spawns — just a "Sit"
@@ -85,6 +95,24 @@ local function SpawnProp(prop)
             distance       = 2.5,
         }, function()
             if SitOnSeat then SitOnSeat(prop) end
+        end)
+        return
+    end
+
+    -- A virtual point is an INVISIBLE anchor like a seat: nothing spawns here —
+    -- using it fades out and builds the restaurant's kitchen shell (with this
+    -- point's station inside) locally for just this player (modules/virtual).
+    if prop.prop_type == "virtual_point" then
+        local target = prop.metadata and prop.metadata.target
+        local label = _L(STATION_LABELS[target] or "main_station_generic")
+        propInteractions[prop.id] = CreateInteraction({
+            coords         = vector3(prop.x, prop.y, prop.z),
+            label          = _L("main_use_virtual", label),
+            icon           = STATION_ICONS[target] or "fa-solid fa-utensils",
+            radius         = 1.2,
+            interactRadius = 1.8,
+        }, function()
+            if OpenVirtualStation then OpenVirtualStation(prop) end
         end)
         return
     end
@@ -204,7 +232,9 @@ local function ApplySync(payload)
         SideContainerModel = payload.settings.side_container_model or ""
     end
 
+    propsById = {}
     for _, prop in ipairs(payload.props or {}) do
+        propsById[prop.id] = prop
         if Restaurants[prop.restaurant_id] then
             table.insert(Restaurants[prop.restaurant_id].props, prop)
         end
@@ -225,6 +255,7 @@ end
 RegisterNetEvent("pickle_restaurants:sync", ApplySync)
 
 RegisterNetEvent("pickle_restaurants:propPlaced", function(prop)
+    propsById[prop.id] = prop
     if Restaurants[prop.restaurant_id] then
         table.insert(Restaurants[prop.restaurant_id].props, prop)
     end
@@ -236,6 +267,7 @@ RegisterNetEvent("pickle_restaurants:propRemoved", function(propId)
     if DespawnFryerBaskets then DespawnFryerBaskets(propId) end
     SafeDeleteEntity(spawnedProps[propId])
     spawnedProps[propId] = nil
+    propsById[propId] = nil
     if propInteractions[propId] then DeleteInteraction(propInteractions[propId]); propInteractions[propId] = nil end
 end)
 

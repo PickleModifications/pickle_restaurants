@@ -53,6 +53,68 @@ lib.callback.register("pickle_restaurants:placement:saveSeat", function(src, d)
     return { ok = true, id = propId }
 end)
 
+-- The station types a virtual point may open. Mirrors PLACEABLE_MODELS' keys —
+-- the NUI is untrusted, so the target is whitelisted here.
+local VIRTUAL_TARGETS = {
+    soda_machine = true, fryer = true, stovetop = true, kitchen_prep = true,
+}
+
+-- A virtual point is an INVISIBLE interaction anchor (prop_type "virtual_point"),
+-- stored like a seat: no model, just a point + heading. metadata.target names the
+-- station type it opens inside the restaurant's virtual kitchen shell. Each row is
+-- its own point INSTANCE — the cooking state it holds is keyed by this prop id, so
+-- two points for the same station type never share anything.
+lib.callback.register("pickle_restaurants:placement:saveVirtualPoint", function(src, d)
+    local id = tonumber(d.restaurant_id)
+    if not GetRestaurant(id) then return { ok = false, error = _L("placement_no_restaurant") } end
+    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    if not VIRTUAL_TARGETS[d.target] then return { ok = false, error = _L("placement_invalid_station") } end
+    local x, y, z = tonumber(d.x), tonumber(d.y), tonumber(d.z)
+    if not (x and y and z) then return { ok = false } end
+
+    local metadata = { target = d.target }
+    local propId = MySQL.insert.await(
+        "INSERT INTO pickle_restaurant_props (restaurant_id, prop_type, model, x, y, z, heading, metadata) VALUES (?, 'virtual_point', '', ?, ?, ?, ?, ?)",
+        { id, x + 0.0, y + 0.0, z + 0.0, (tonumber(d.heading) or 0.0) + 0.0, json.encode(metadata) })
+    if not propId then return { ok = false } end
+
+    local prop = {
+        id = propId, restaurant_id = id, prop_type = "virtual_point", model = "",
+        x = x + 0.0, y = y + 0.0, z = z + 0.0, heading = (tonumber(d.heading) or 0.0) + 0.0, metadata = metadata,
+    }
+    PropCache[propId] = prop
+    TriggerClientEvent("pickle_restaurants:propPlaced", -1, prop)
+    return { ok = true, id = propId }
+end)
+
+-- The restaurant's virtual kitchen shell: one per restaurant, stored in
+-- metadata.shell. XY is always re-derived from the counter (the blip/center
+-- anchor) so the shell can't drift from its restaurant — the admin placement
+-- view only chooses height + facing.
+lib.callback.register("pickle_restaurants:placement:saveShell", function(src, d)
+    local id = tonumber(d.restaurant_id)
+    local r = GetRestaurant(id)
+    if not r then return { ok = false, error = _L("placement_no_restaurant") } end
+    if not IsPlayerAdmin(src) then return { ok = false, error = _L("no_permission") } end
+    if not r.counter then return { ok = false, error = _L("place_shell_needs_counter") } end
+    local z = tonumber(d.z)
+    if not z then return { ok = false } end
+
+    local old = r.metadata and r.metadata.shell
+    r.metadata = r.metadata or {}
+    r.metadata.shell = {
+        x = r.counter.x + 0.0, y = r.counter.y + 0.0,
+        z = z + 0.0, heading = (tonumber(d.heading) or 0.0) + 0.0,
+    }
+    MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), id })
+    -- cooking shifts any free-placed virtual items with the shell...
+    TriggerEvent("pickle_restaurants:shellMoved", id, old, r.metadata.shell)
+    -- ...and any client mid-session inside this shell closes out cleanly.
+    TriggerClientEvent("pickle_restaurants:shellMoved", -1, id)
+    SyncToClient(-1)
+    return { ok = true }
+end)
+
 lib.callback.register("pickle_restaurants:placement:saveCounter", function(src, d)
     local id = tonumber(d.restaurant_id)
     if not GetRestaurant(id) then return { ok = false, error = _L("placement_no_restaurant") } end
@@ -84,9 +146,7 @@ lib.callback.register("pickle_restaurants:getProps", function(src, d)
     if not HasPerm(id, src, "manage_props") then return {} end
     local list = {}
     for _, p in pairs(PropCache) do
-        if p.restaurant_id == id then
-            list[#list + 1] = { id = p.id, prop_type = p.prop_type, model = p.model }
-        end
+        if p.restaurant_id == id then list[#list + 1] = PropSummary(p) end
     end
     return list
 end)

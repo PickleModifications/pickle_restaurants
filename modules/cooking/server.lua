@@ -12,6 +12,39 @@
 local CookingItems = {} -- [uid] = { uid, rid, prop_id, station, kind, recipe, drink, output, state, model, x, y, z, dual, sides, flipped, down, elapsed, timerToken, phaseStart }
 local cookUid = 0
 
+-- ─── exclusive station use ───────────────────────────────────────────────────
+-- One player per station entity at a time — physical stations and virtual points
+-- alike (same pattern as the seating module's SeatOccupancy). Claimed when a
+-- cooking session opens, freed when it closes, the player drops, or the prop is
+-- deleted. Re-claiming a station you already hold is a no-op success: the virtual
+-- flow claims early (before fading) and OpenCookingStation claims again.
+local StationOccupancy = {} -- [propId] = src currently cooking there
+
+lib.callback.register("pickle_restaurants:cooking:openStation", function(src, d)
+    local propId = tonumber(d and d.prop_id)
+    local prop = propId and PropCache[propId]
+    if not prop or prop.prop_type == "seat" then return { ok = false } end
+    if not HasPerm(prop.restaurant_id, src, "cook") then return { ok = false, error = _L("no_work_here") } end
+    local holder = StationOccupancy[propId]
+    if holder and holder ~= src then return { ok = false, error = _L("cook_station_busy") } end
+    StationOccupancy[propId] = src
+    -- live metadata rides along: a virtual session rebuilds its oven doors /
+    -- fryer baskets from this (the synced row can be stale — door/basket flips
+    -- mutate the cache without a full re-sync)
+    return { ok = true, metadata = prop.metadata }
+end)
+
+RegisterNetEvent("pickle_restaurants:cooking:closeStation", function(propId)
+    propId = tonumber(propId)
+    if propId and StationOccupancy[propId] == source then StationOccupancy[propId] = nil end
+end)
+
+AddEventHandler("playerDropped", function()
+    for propId, holder in pairs(StationOccupancy) do
+        if holder == source then StationOccupancy[propId] = nil end
+    end
+end)
+
 -- Interactive prep reservations live here. Declared up top (defined further down)
 -- so the ingredient/tray callbacks can subtract what a build has reserved from the
 -- counts they show — items aren't consumed until Make, but the bar reflects them
@@ -332,7 +365,7 @@ local function armGateTimer(it)
                 uid = uid, model = cur.model, prop_id = cur.prop_id, method = cur.method,
                 door = cur.door, slot = cur.slot, state = cur.state, stack = cur.stack })
         else
-            TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, cur.model, cur.state)
+            TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, cur.model, cur.state, cur.prop_id)
         end
         broadcastGate(cur)
         armGateTimer(cur)
@@ -479,11 +512,38 @@ end
 
 -- A "pool item" is a raw simple ingredient (raw patty, bun, cheese, cup, finish
 -- tool…) — anything that is NOT a tray-held PRODUCT and not the meal item. These
--- are drawn from and refunded to the shared restaurant STOCK POOL (StockCache)
--- instead of the cook's personal inventory. Products keep their build-stack
--- metadata and continue to live in the tray / inventory slots.
+-- are drawn PREFERENTIALLY from the shared restaurant STOCK POOL (StockCache),
+-- falling back to the cook's personal inventory when the pool is dry (see
+-- poolInvCount/poolInvConsume), and are refunded to the pool. Products keep their
+-- build-stack metadata and continue to live in the tray / inventory slots.
 local function isPoolItem(item)
     return item ~= nil and item ~= "" and not isTrayItem(item) and item ~= MealItem()
+end
+
+-- Hybrid raw-ingredient sourcing. A pool item is drawn from the shared restaurant
+-- STOCK POOL whenever the pool CARRIES it, and falls back to the cook's PERSONAL
+-- inventory only when the pool is dry — a stocked larder is always spent before
+-- anyone's pockets. The ingredient bar therefore shows the pool figure when there
+-- is stock and the personal figure otherwise (never both). Products / the meal
+-- item are never pool items and always come from inventory.
+--   poolInvCount  -> (count, fromPool) available to `src` for one raw ingredient.
+--   poolInvConsume-> spend `n` (default 1), mirroring poolInvCount's pool-first
+--                    choice. Call only once poolInvCount confirmed enough is held.
+-- (Both are yield-free, so a count immediately followed by a consume always agree.)
+local function poolInvCount(src, rid, item)
+    if isPoolItem(item) and (GetStockCount(rid, item) or 0) > 0 then
+        return GetStockCount(rid, item), true
+    end
+    return (Inventory.GetItemCount(src, item) or 0), false
+end
+
+local function poolInvConsume(src, rid, item, n)
+    n = n or 1
+    if isPoolItem(item) and (GetStockCount(rid, item) or 0) > 0 then
+        RemoveStock(rid, item, n)
+    else
+        Inventory.RemoveItem(src, item, n)
+    end
 end
 
 -- The ordered component layers a product decomposes into: its stored build stack
@@ -919,7 +979,7 @@ end
 lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src, d)
     local prop = PropCache[tonumber(d.prop_id)]
     if not prop then return {} end
-    local station = prop.prop_type
+    local station = StationType(prop)
     local rid = prop.restaurant_id -- raw ingredients are counted from the restaurant's shared stock pool
     local out = {}
 
@@ -931,7 +991,7 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
             -- A recipe whose group this restaurant doesn't carry is hidden too.
             if recipe.station == station and IsRecipeValid(recipe) and not findAssembly(recipe.input_item)
                 and RestaurantHasAccess(prop.restaurant_id, recipe.group) then
-                local count = GetStockCount(rid, recipe.input_item)
+                local count = poolInvCount(src, rid, recipe.input_item)
                 if count and count > 0 then
                     out[#out + 1] = { kind = "cook", item = recipe.input_item, label = GetItemLabel(recipe.input_item),
                                       image = GetItemImage(recipe.input_item), count = count }
@@ -941,7 +1001,7 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         -- Cheese is a topping you drag onto a cooked patty (stovetop only). It
         -- renders the real fresh-slice prop in 3D as you drag (no 2D pill).
         if station == "stovetop" and ItemExists("cheese") then
-            local count = GetStockCount(rid, "cheese") or 0
+            local count = poolInvCount(src, rid, "cheese")
             if count > 0 then
                 out[#out + 1] = { kind = "topping", item = "cheese", label = GetItemLabel("cheese"),
                                   image = GetItemImage("cheese"), count = count, model = "pickle_cheese_applied_01" }
@@ -954,7 +1014,7 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         for _, drink in ipairs(sodaFlavors(prop.restaurant_id)) do
             if not seen[drink.input] then
                 seen[drink.input] = true
-                local count = GetStockCount(rid, drink.input) or 0
+                local count = poolInvCount(src, rid, drink.input)
                 out[#out + 1] = { kind = "drink", item = drink.input, label = GetItemLabel(drink.input),
                                   image = GetItemImage(drink.input), count = count }
             end
@@ -989,7 +1049,7 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         for _, f in ipairs(GetSetting("finishes", {})) do
             if f.tool and ItemExists(f.tool) and RestaurantHasAccess(prop.restaurant_id, f.group) then
                 finishTools[f.tool] = true
-                local count = GetStockCount(rid, f.tool) or 0
+                local count = poolInvCount(src, rid, f.tool)
                 if count > 0 then
                     local flavors, seenFl = {}, {}
                     for _, t in ipairs(f.targets or {}) do
@@ -1022,7 +1082,7 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
             -- Finish tools already have their own applicator card above.
             if seen[comp] or finishTools[comp] or not ItemExists(comp) or isTrayItem(comp) then return end
             seen[comp] = true
-            local count = GetStockCount(rid, comp) or 0
+            local count = poolInvCount(src, rid, comp)
             if count <= 0 then return end
             -- Placed-but-not-yet-built parts are "spoken for": show what's left after
             -- this build's reservations (inv layers always reserve at cheese 0).
@@ -1047,11 +1107,15 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
     return out
 end)
 
--- send all in-progress items to a (re)connecting / station-opening client
-lib.callback.register("pickle_restaurants:cooking:getActive", function(_, _)
+-- send all in-progress items to a (re)connecting / station-opening client;
+-- with a prop_id, only that station's items (a virtual session replaying its point)
+lib.callback.register("pickle_restaurants:cooking:getActive", function(_, d)
+    local propId = d and tonumber(d.prop_id) or nil
     local list = {}
     for _, it in pairs(CookingItems) do
-        list[#list + 1] = activeEntry(it)
+        if not propId or it.prop_id == propId then
+            list[#list + 1] = activeEntry(it)
+        end
     end
     return list
 end)
@@ -1063,7 +1127,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
     if not prop then return { ok = false } end
     local rid = prop.restaurant_id
     if not HasPerm(rid, src, "cook") then return { ok = false, error = _L("no_work_here") } end
-    local station = prop.prop_type
+    local station = StationType(prop)
 
     cookUid = cookUid + 1
     local uid = cookUid
@@ -1087,10 +1151,12 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         local fromTray = d.source == "tray"
         local sig = (type(d.sig) == "string") and d.sig or nil
         local cheese = CheeseVal(d.cheese)
-        -- A raw simple ingredient comes from the shared restaurant stock POOL; an
-        -- assembled/uncooked product dragged from inventory keeps its slot-metadata
-        -- variation pull (so a pepperoni pizza stays a pepperoni pizza).
+        -- A raw simple ingredient comes from the shared restaurant stock POOL while
+        -- the pool carries it, and from the cook's personal inventory once it runs
+        -- dry; an assembled/uncooked product dragged from inventory keeps its
+        -- slot-metadata variation pull (so a pepperoni pizza stays a pepperoni pizza).
         local fromPool = (not fromTray) and isPoolItem(d.item)
+            and (GetStockCount(rid, d.item) or 0) > 0
         local have
         if fromTray then
             have = GetTrayCount(rid, id, d.item, cheese, sig)
@@ -1201,11 +1267,11 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         SetTimeout(recipe.cook_ms, function()
             local cur = CookingItems[uid]; if not cur or cur.state ~= "raw" then return end
             cur.state, cur.model = "cooked", recipe.cooked_model
-            TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, cur.model, cur.state)
+            TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, cur.model, cur.state, cur.prop_id)
             SetTimeout(recipe.burn_ms, function()
                 local c2 = CookingItems[uid]; if not c2 or c2.state ~= "cooked" then return end
                 c2.state, c2.model = "burnt", recipe.burnt_model
-                TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, c2.model, c2.state)
+                TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, c2.model, c2.state, c2.prop_id)
             end)
         end)
         return { ok = true, uid = uid }
@@ -1231,9 +1297,9 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
             if dd.input == d.item then cup, model = dd.input, dd.model break end
         end
         if not cup then return { ok = false, error = _L("cook_unknown_cup") } end
-        -- cups come from the shared restaurant stock pool
-        if GetStockCount(rid, cup) < 1 then return { ok = false, error = _L("cook_need_cup") } end
-        RemoveStock(rid, cup, 1)
+        -- cups come from the shared restaurant stock pool (personal inventory once dry)
+        if poolInvCount(src, rid, cup) < 1 then return { ok = false, error = _L("cook_need_cup") } end
+        poolInvConsume(src, rid, cup, 1)
         it.kind, it.method, it.slot = "drink", "soda", slot
         it.input, it.state, it.ice = cup, "empty", false
         it.model = model or "pickle_drink_container_01"
@@ -1246,16 +1312,16 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         local asm = findAssembly(d.item)
         if not asm then return { ok = false, error = _L("cook_unknown_recipe") } end
         if not RestaurantHasAccess(rid, asm.group) then return { ok = false, error = _L("cook_unknown_recipe") } end
-        -- raw components come from the stock pool; a product component (e.g. a
-        -- cooked patty cashed to inventory) still comes from personal inventory.
-        -- Two-pass: verify everything is available, then consume, so a partial
-        -- build never leaves stock/inventory half-spent.
+        -- raw components come from the stock pool (personal inventory once dry); a
+        -- product component (e.g. a cooked patty cashed to inventory) always comes
+        -- from personal inventory. Two-pass: verify everything is available, then
+        -- consume, so a partial build never leaves stock/inventory half-spent.
         for _, comp in ipairs(asm.components or {}) do
-            local have = isPoolItem(comp) and GetStockCount(rid, comp) or (Inventory.GetItemCount(src, comp) or 0)
+            local have = poolInvCount(src, rid, comp)
             if have < 1 then return { ok = false, error = _L("cook_missing_components") } end
         end
         for _, comp in ipairs(asm.components or {}) do
-            if isPoolItem(comp) then RemoveStock(rid, comp, 1) else Inventory.RemoveItem(src, comp, 1) end
+            poolInvConsume(src, rid, comp, 1)
         end
         it.kind, it.output, it.state, it.model = "assembly", asm.output, "done", asm.model
         CookingItems[uid] = it
@@ -1285,7 +1351,7 @@ end)
 -- Baskets are individually controlled, like oven doors.
 lib.callback.register("pickle_restaurants:cooking:fryerDip", function(src, d)
     local prop = PropCache[tonumber(d.prop_id)]
-    if not prop or prop.prop_type ~= "fryer" then return { ok = false } end
+    if not prop or StationType(prop) ~= "fryer" then return { ok = false } end
     if not HasPerm(prop.restaurant_id, src, "cook") then return { ok = false } end
     local slot = tonumber(d.slot)
     if not slot then return { ok = false } end
@@ -1312,7 +1378,7 @@ end)
 -- in before or after the drink, but never through a lid.
 lib.callback.register("pickle_restaurants:cooking:sodaTap", function(src, d)
     local prop = PropCache[tonumber(d and d.prop_id)]
-    if not prop or prop.prop_type ~= "soda_machine" then return { ok = false } end
+    if not prop or StationType(prop) ~= "soda_machine" then return { ok = false } end
     if not HasPerm(prop.restaurant_id, src, "cook") then return { ok = false } end
     local slot = tonumber(d.slot)
     if not slot then return { ok = false } end
@@ -1354,7 +1420,7 @@ lib.callback.register("pickle_restaurants:cooking:sodaTap", function(src, d)
             local cur = CookingItems[uid]
             if not cur or cur.timerToken ~= token then return end
             cur.state, cur.phaseStart = "filled", nil
-            TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, cur.model, cur.state)
+            TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, cur.model, cur.state, cur.prop_id)
             broadcastSoda(cur)
         end)
     end
@@ -1404,9 +1470,9 @@ lib.callback.register("pickle_restaurants:cooking:applyCheese", function(src, d)
 
     local up = (it.down == 1) and 2 or 1
     if it.sides[up] ~= "cooked" then return { ok = false, error = _L("cook_cook_side_first") } end
-    -- cheese comes from the shared restaurant stock pool
-    if GetStockCount(it.rid, "cheese") < 1 then return { ok = false, error = _L("cook_no_cheese") } end
-    RemoveStock(it.rid, "cheese", 1)
+    -- cheese comes from the shared restaurant stock pool (personal inventory once dry)
+    if poolInvCount(src, it.rid, "cheese") < 1 then return { ok = false, error = _L("cook_no_cheese") } end
+    poolInvConsume(src, it.rid, "cheese", 1)
 
     it.cheese = "applied"
     broadcastDual(it)
@@ -1427,7 +1493,7 @@ lib.callback.register("pickle_restaurants:cooking:move", function(src, d)
     if not it then return { ok = false } end
     if not HasPerm(it.rid, src, "cook") then return { ok = false } end
     it.x, it.y, it.z = d.x + 0.0, d.y + 0.0, d.z + 0.0
-    TriggerClientEvent("pickle_restaurants:cooking:move", -1, it.uid, it.x, it.y, it.z)
+    TriggerClientEvent("pickle_restaurants:cooking:move", -1, it.uid, it.x, it.y, it.z, it.prop_id)
     return { ok = true }
 end)
 
@@ -1561,7 +1627,8 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
     local drinkItem = DrinkItem()
     -- At the prep table, cooked items placed on a build are spoken for — subtract
     -- the reservations so the tray shows what's still free to grab.
-    local build = (prop.prop_type == "kitchen_prep") and PrepBuilds[src] or nil
+    local isPrep = StationType(prop) == "kitchen_prep"
+    local build = isPrep and PrepBuilds[src] or nil
     local out = {}
     for _, e in ipairs(list) do
         if build then
@@ -1604,7 +1671,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                     e.stack = drinkRender(dd)
                 end
             end
-            if prop.prop_type == "kitchen_prep" and (findAssembly(e.item) or e.meal) and not isFinished then e.decompose = true end
+            if isPrep and (findAssembly(e.item) or e.meal) and not isFinished then e.decompose = true end
             -- still-raw items that are a cook-recipe input (e.g. an uncooked pizza) go
             -- to the oven/fryer next; the NUI files them under "Uncooked Items" and lets
             -- them be dragged straight into their station (cookStation) to cook.
@@ -1742,7 +1809,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 -- same item unchanged). Mirrors the tray path; a finished/frosted instance
                 -- is terminal (never comes apart).
                 local isFinishedInv = ftarget ~= nil
-                if prop.prop_type == "kitchen_prep" and findAssembly(item) and not isFinishedInv then
+                if isPrep and findAssembly(item) and not isFinishedInv then
                     entry.decompose = true
                 end
                 -- a collected drink renders cup+lid, a side renders in its box — never bare
@@ -1755,7 +1822,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 if item == mealItem then
                     entry.meal = true
                     if type(v.meta) == "table" and v.meta[1] ~= nil and v.meta[1].box then entry.boxed = true end
-                    if prop.prop_type == "kitchen_prep" then entry.decompose = true end
+                    if isPrep then entry.decompose = true end
                 end
                 out[#out + 1] = entry
             end
@@ -1889,7 +1956,7 @@ end
 
 lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     local prop = PropCache[tonumber(d.prop_id)]
-    if not prop or prop.prop_type ~= "kitchen_prep" then return { ok = false } end
+    if not prop or StationType(prop) ~= "kitchen_prep" then return { ok = false } end
     local rid = prop.restaurant_id
     if not HasPerm(rid, src, "cook") then return { ok = false } end
     local item = d.item
@@ -1924,11 +1991,12 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
         end
     else
         cheese = 0
-        -- a plain raw component comes from the shared restaurant stock pool (only
-        -- reserved here; consumed on Make). Reservations are per-cook, so two cooks
-        -- can optimistically reserve the same units — the pool re-checks on Make.
+        -- a plain raw component comes from the shared restaurant stock pool (personal
+        -- inventory once dry) — only reserved here; consumed on Make. Reservations are
+        -- per-cook, so two cooks can optimistically reserve the same units — the pool
+        -- (or inventory) re-checks on Make.
         local needed = math.ceil(reservedUnits(b, "inv", item, 0) + addUnits)
-        local have = isPoolItem(item) and GetStockCount(rid, item) or (Inventory.GetItemCount(src, item) or 0)
+        local have = poolInvCount(src, rid, item)
         if have < needed then
             return { ok = false, error = _L("cook_missing_item") }
         end
@@ -1961,7 +2029,7 @@ end)
 -- images itself). Recipes referencing a missing item are hidden until fixed.
 lib.callback.register("pickle_restaurants:cooking:getRecipes", function(src, d)
     local prop = PropCache[tonumber(d and d.prop_id)]
-    if not prop or prop.prop_type ~= "kitchen_prep" then return {} end
+    if not prop or StationType(prop) ~= "kitchen_prep" then return {} end
     if not HasPerm(prop.restaurant_id, src, "cook") then return {} end
     local out = {}
     for _, asm in ipairs(GetSetting("assembly", {})) do
@@ -2055,9 +2123,11 @@ local function consumeLayers(src, b, id, layers)
         end
     end
     for _, t in pairs(needInv) do
-        -- raw components come from the shared stock pool; inventory-held products
-        -- (with a build-stack signature) come from the matching inventory slot
-        local have = isPoolItem(t.item) and GetStockCount(b.rid, t.item)
+        -- raw components come from the shared stock pool (personal inventory once
+        -- dry); inventory-held products (with a build-stack signature) come from the
+        -- matching inventory slot. A pool item's variation is always plain.
+        local fromPool = isPoolItem(t.item) and (GetStockCount(b.rid, t.item) or 0) > 0
+        local have = fromPool and GetStockCount(b.rid, t.item)
             or invVariationCount(src, t.item, t.cheese, t.sig)
         if have < t.n then
             return nil, _L("cook_missing_components")
@@ -2065,7 +2135,8 @@ local function consumeLayers(src, b, id, layers)
     end
     for _, t in pairs(needTray) do RemoveTray(b.rid, id, t.item, t.cheese, t.n, t.sig) end
     for _, t in pairs(needInv) do
-        if isPoolItem(t.item) then RemoveStock(b.rid, t.item, t.n)
+        if isPoolItem(t.item) and (GetStockCount(b.rid, t.item) or 0) >= t.n then
+            RemoveStock(b.rid, t.item, t.n)
         else removeInvVariation(src, t.item, t.cheese, t.sig, t.n) end
     end
     return true
@@ -2200,7 +2271,7 @@ end)
 -- exactly where the target was.
 lib.callback.register("pickle_restaurants:cooking:applyFinish", function(src, d)
     local prop = PropCache[tonumber(d and d.prop_id)]
-    if not prop or prop.prop_type ~= "kitchen_prep" then return { ok = false } end
+    if not prop or StationType(prop) ~= "kitchen_prep" then return { ok = false } end
     if not HasPerm(prop.restaurant_id, src, "cook") then return { ok = false } end
     local b = PrepBuilds[src]
     if not b or b.prop_id ~= prop.id then return { ok = false, error = _L("cook_item_changed") } end
@@ -2214,8 +2285,8 @@ lib.callback.register("pickle_restaurants:cooking:applyFinish", function(src, d)
     if not cfg or not target or not flavor then return { ok = false, error = _L("cook_cant_apply") } end
     if not RestaurantHasAccess(prop.restaurant_id, cfg.group) then return { ok = false, error = _L("cook_cant_apply") } end
     if not ItemExists(cfg.tool) then return { ok = false } end
-    -- finish tools come from the shared restaurant stock pool
-    if GetStockCount(prop.restaurant_id, cfg.tool) < 1 then
+    -- finish tools come from the shared restaurant stock pool (personal inventory once dry)
+    if poolInvCount(src, prop.restaurant_id, cfg.tool) < 1 then
         return { ok = false, error = _L("cook_no_tool_left", GetItemLabel(cfg.tool)) }
     end
 
@@ -2238,7 +2309,7 @@ lib.callback.register("pickle_restaurants:cooking:applyFinish", function(src, d)
     local ok, err = consumeLayers(src, b, id, { layer }) -- sig-pinned; captures the target's own nested stack
     if not ok then return { ok = false, error = err } end
     dropLayerReservations(src, b, { layer })
-    RemoveStock(prop.restaurant_id, cfg.tool, 1)
+    poolInvConsume(src, prop.restaurant_id, cfg.tool, 1)
 
     -- ONE meta layer: the finished target with its flavor and the TOOL that applied it
     -- (so a collapsed cooked_doughnut resolves its finish from meta), plus whatever
@@ -2274,7 +2345,7 @@ end)
 -- removal and exit-refund flow through the existing reservation paths untouched.
 lib.callback.register("pickle_restaurants:cooking:prepDecompose", function(src, d)
     local prop = PropCache[tonumber(d and d.prop_id)]
-    if not prop or prop.prop_type ~= "kitchen_prep" then return { ok = false } end
+    if not prop or StationType(prop) ~= "kitchen_prep" then return { ok = false } end
     local rid = prop.restaurant_id
     if not HasPerm(rid, src, "cook") then return { ok = false } end
     local item = d and d.item
@@ -2366,7 +2437,7 @@ end)
 -- stack follows the cursor (not just the product's single prop).
 lib.callback.register("pickle_restaurants:cooking:prepDecomposePeek", function(src, d)
     local prop = PropCache[tonumber(d and d.prop_id)]
-    if not prop or prop.prop_type ~= "kitchen_prep" then return { ok = false } end
+    if not prop or StationType(prop) ~= "kitchen_prep" then return { ok = false } end
     if not HasPerm(prop.restaurant_id, src, "cook") then return { ok = false } end
     local item = d and d.item
     local isMeal = item ~= nil and item == MealItem()
@@ -2408,10 +2479,33 @@ end)
 
 -- drop a prop's cooking items if the prop is deleted
 AddEventHandler("pickle_restaurants:propDeleted", function(propId)
+    StationOccupancy[tonumber(propId)] = nil
     for uid, it in pairs(CookingItems) do
         if it.prop_id == propId then
             CookingItems[uid] = nil
             TriggerClientEvent("pickle_restaurants:cooking:remove", -1, uid)
+        end
+    end
+end)
+
+-- The admin re-placed a restaurant's kitchen shell: carry that restaurant's
+-- free-placed virtual items along (translate + rotate about the shell origin).
+-- Slot items (oven/fry/soda) seat relative to the station entity and need
+-- nothing. No client event: virtual items only render inside a session, any
+-- live session there is force-closed by the mirrored client shellMoved, and
+-- the next session replays the shifted coords fresh via getActive — pushing
+-- moves would only teleport props on-screen for the closing occupant.
+AddEventHandler("pickle_restaurants:shellMoved", function(rid, old, new)
+    if not old then return end
+    local dh = math.rad((new.heading or 0.0) - (old.heading or 0.0))
+    local c, s = math.cos(dh), math.sin(dh)
+    for _, it in pairs(CookingItems) do
+        local prop = PropCache[it.prop_id]
+        if it.rid == rid and prop and prop.prop_type == "virtual_point" and not it.method and it.x then
+            local rx, ry = it.x - old.x, it.y - old.y
+            it.x = new.x + (rx * c - ry * s)
+            it.y = new.y + (rx * s + ry * c)
+            it.z = it.z + (new.z - old.z)
         end
     end
 end)
