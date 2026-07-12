@@ -12,6 +12,10 @@ local PLACEABLE_MODELS = {
     -- Wall-mounted terminal (_01) and free-standing ground kiosk (_02).
     kiosk        = "pickle_kiosk_large_01",
     kiosk_ground = "pickle_kiosk_large_02",
+    -- Non-interactable customer info screens (menu board / orders board); their
+    -- branded screen texture is driven by a DUI in modules/screens.
+    menu_screen   = "pickle_screen_menu_01",
+    orders_screen = "pickle_screen_orders_01",
 }
 
 lib.callback.register("pickle_restaurants:placement:saveProp", function(src, d)

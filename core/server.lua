@@ -1665,13 +1665,23 @@ function GetOpenOrders(restaurantId)
     local list = {}
     for _, o in pairs(OrderCache[restaurantId] or {}) do
         if o.status == "open" then
+            -- NPC tickets carry a patience countdown so the POS / kitchen widget can
+            -- show the time left (and a radial) before the customer walks. Helpers
+            -- are globals from modules/npc_customers; guard so this stays valid even
+            -- if that module is absent. Player tickets get npc=false / no timer.
+            local isNpc = (IsNpcOrder and IsNpcOrder(o)) or false
+            local expiresIn, patience
+            if isNpc and NpcOrderTimer then expiresIn, patience = NpcOrderTimer(restaurantId, o.id) end
             list[#list + 1] = {
-                orderId  = o.id,
-                ticket   = o.ticket,
-                customer = o.customer_name,
-                lines    = o.lines,
-                total    = o.total,
-                status   = o.status,
+                orderId   = o.id,
+                ticket    = o.ticket,
+                customer  = o.customer_name,
+                lines     = o.lines,
+                total     = o.total,
+                status    = o.status,
+                npc       = isNpc,
+                expiresIn = expiresIn, -- seconds left at send time (client ticks down)
+                patience  = patience,  -- full patience window (radial denominator)
             }
         end
     end
@@ -2049,6 +2059,11 @@ local function BuildClientRestaurant(r)
         -- virtual kitchen shell anchor { x, y, z, heading } — where a virtual
         -- point session builds its local shell + stations (XY = counter).
         shell        = r.metadata and r.metadata.shell or nil,
+        -- Compact orderable menu for a placed MENU SCREEN prop (modules/screens):
+        -- { label, price, image, kind }. Built from the live priced catalog so the
+        -- board tracks menu edits (each menu change re-syncs). Guarded because the
+        -- builder lives in the sales module (loaded after core).
+        menu         = BuildMenuBoard and BuildMenuBoard(r.id) or nil,
     }
 end
 

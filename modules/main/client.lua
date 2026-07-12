@@ -169,6 +169,16 @@ local function SpawnProp(prop)
         return
     end
 
+    -- A menu / orders SCREEN is a placed but NON-INTERACTABLE prop: its branded
+    -- screen texture is replaced at runtime by a DUI (modules/screens) rendering the
+    -- restaurant's live menu / open tickets. Re-assert the screen render now the model
+    -- exists (AddReplaceTexture only takes on a streamed model), and spawn no
+    -- interaction — players just read it.
+    if prop.prop_type == "menu_screen" or prop.prop_type == "orders_screen" then
+        if ReassertScreenFor then ReassertScreenFor(prop.model) end
+        return
+    end
+
     -- Stovetops carry two oven doors that render + sync independently.
     if prop.prop_type == "stovetop" and SpawnOvenDoors then SpawnOvenDoors(prop, ent) end
     -- Let the cooking module (re)seat any oven/fryer items on this station and pick up
@@ -273,6 +283,10 @@ local function ApplySync(payload)
     -- so a brand edit takes effect after re-streaming the item (no resource restart).
     -- RefreshBrands is defined in modules/rendertarget/client.lua (same client).
     if RefreshBrands then RefreshBrands() end
+    -- Same for the info SCREENS: their props were just (re)spawned above, so re-assert
+    -- each screen's render-target replacement while the fresh prop exists and re-push
+    -- its data (menu may have changed). RefreshScreens is in modules/screens/client.lua.
+    if RefreshScreens then RefreshScreens() end
 end
 
 RegisterNetEvent("pickle_restaurants:sync", ApplySync)
@@ -288,9 +302,30 @@ end)
 RegisterNetEvent("pickle_restaurants:propRemoved", function(propId)
     if DespawnOvenDoors then DespawnOvenDoors(propId) end
     if DespawnFryerBaskets then DespawnFryerBaskets(propId) end
+    local prop = propsById[propId]
+    -- Delete the entity we're tracking. Note whether we actually held a live one.
+    local hadEntity = spawnedProps[propId] and DoesEntityExist(spawnedProps[propId])
     SafeDeleteEntity(spawnedProps[propId])
     spawnedProps[propId] = nil
+    -- Safety sweep: if our tracked handle was already gone (the prop streamed out and
+    -- back, or was placed before we cached its entity), the world object could linger
+    -- until a resource restart. Delete any object of this model still sitting at the
+    -- prop's point so a "removed" station can't stay in the world. Skipped for
+    -- modelless anchors (seats / virtual points spawn no world prop).
+    if not hadEntity and prop and prop.model and prop.model ~= "" then
+        local hash = (type(prop.model) == "number") and prop.model or GetHashKey(prop.model)
+        local ghost = GetClosestObjectOfType(prop.x + 0.0, prop.y + 0.0, prop.z + 0.0, 1.5, hash, false, false, false)
+        if ghost and ghost ~= 0 and DoesEntityExist(ghost) then SafeDeleteEntity(ghost) end
+    end
+    -- Prune the client cache so nothing keeps treating the prop as still placed —
+    -- notably the screens driver (modules/screens), which scans r.props to decide a
+    -- board still exists and would otherwise leave its texture replacement bound
+    -- until the next full sync / restart.
     propsById[propId] = nil
+    if prop and Restaurants[prop.restaurant_id] then
+        local list = Restaurants[prop.restaurant_id].props or {}
+        for i = #list, 1, -1 do if list[i].id == propId then table.remove(list, i) end end
+    end
     if propInteractions[propId] then DeleteInteraction(propInteractions[propId]); propInteractions[propId] = nil end
 end)
 

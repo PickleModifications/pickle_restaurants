@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { fetchNui } from "@/lib/nui";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,6 +22,9 @@ const STATIONS = [
   { key: "kiosk", label: _L("admin.station_kiosk"), icon: Monitor, physicalOnly: true },
   // Free-standing floor kiosk (the _02 body) — same terminal, ground-placed.
   { key: "kiosk_ground", label: _L("admin.station_kiosk_ground"), icon: Monitor, physicalOnly: true },
+  // Customer info SCREENS — wall boards driven by a render target (menu / orders).
+  { key: "menu_screen", label: _L("admin.station_menu_screen"), icon: Monitor, physicalOnly: true },
+  { key: "orders_screen", label: _L("admin.station_orders_screen"), icon: Monitor, physicalOnly: true },
 ];
 
 type Focus = { restaurant?: number; section?: string };
@@ -145,10 +148,16 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
   // ref keeps the cleanup reading the CURRENT app theme, not the one at mount.
   const appThemeRef = useRef(appTheme);
   appThemeRef.current = appTheme;
-  useEffect(() => {
-    applyTheme(r.theme);
-    return () => applyTheme(appThemeRef.current);
-  }, [r.id]);
+  // Re-assert the franchise theme on mount AND after EVERY data refresh — not just
+  // when the restaurant id changes. Any in-detail action (remove a prop/seat, set
+  // owner, set access groups) routes through `act` -> `refresh`, which re-dispatches
+  // the admin `setView`; App's handler then re-applies the panel's OWN app theme,
+  // snapping this open detail back to the management look. `r` is a fresh object on
+  // every refresh (never on the detail's local state), so this fires exactly then and
+  // wins the last write. useLayoutEffect stamps it before paint, so there's no flash.
+  useLayoutEffect(() => { applyTheme(r.theme); }, [r]);
+  // Restore the panel's own theme when the detail closes.
+  useEffect(() => () => applyTheme(appThemeRef.current), []);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">

@@ -18,13 +18,18 @@ PLACEABLE_MODELS = {
     -- floor like any other prop. Both are `kiosk`-family props everywhere downstream.
     kiosk        = "pickle_kiosk_large_01",
     kiosk_ground = "pickle_kiosk_large_02",
+    -- Customer-facing INFO SCREENS: non-interactable wall props whose branded screen
+    -- texture is replaced at runtime by a DUI (modules/screens). The menu board slideshows
+    -- what the restaurant sells; the orders board shows tickets in progress, latest first.
+    menu_screen   = "pickle_screen_menu_01",
+    orders_screen = "pickle_screen_orders_01",
 }
 
 -- Wall-mounted props sit flush against the wall the admin aims at, so their origin
 -- lands ON the wall face and half the body buries into it. These get pushed back off
 -- the wall (toward the placer) by ~half their depth in the gizmo. Ground props place
 -- normally (origin on the floor).
-local WALL_MOUNTED = { kiosk = true }
+local WALL_MOUNTED = { kiosk = true, menu_screen = true, orders_screen = true }
 
 -- Half the model's front-to-back depth (its local Y extent) — how far to nudge a
 -- wall-mounted prop off the wall so its BACK rests against it instead of its centre.

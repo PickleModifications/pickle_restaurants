@@ -12,6 +12,7 @@ import {
   OrderBuilder, Thumb, OptRow, arr,
   type Cat, type Near, type Ticket, type MealOption, type MealItem, type OptView,
 } from "@/components/OrderBuilder";
+import TicketTimer from "@/components/TicketTimer";
 
 export default function Register({ data, onClose }: { data: any; onClose: () => void }) {
   const id = data?.restaurantId;
@@ -117,7 +118,14 @@ function TicketCard({ id, t, onOpenPicker }: { id: number; t: Ticket; onOpenPick
             </span>
             <span className="truncate text-sm font-medium">{t.customer}</span>
           </div>
-          <span className="shrink-0 font-mono text-sm font-bold tabular-nums">{money(t.total)}</span>
+          <div className="flex shrink-0 items-center gap-2">
+            {/* NPC walk-ins run out of patience — show the time left + radial so the
+                cashier knows how long the order will still be here to fulfill. */}
+            {t.npc && t.expiresIn != null && (
+              <TicketTimer expiresIn={t.expiresIn} patience={t.patience} size={34} />
+            )}
+            <span className="font-mono text-sm font-bold tabular-nums">{money(t.total)}</span>
+          </div>
         </div>
         <div className="receipt-rule mb-2" />
         <div className="mb-3 space-y-1">

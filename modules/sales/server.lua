@@ -161,6 +161,19 @@ function BuildPricedCatalog(rid, pricedOnly)
     return out, priced
 end
 
+-- A compact projection of the orderable menu for the customer-facing MENU SCREEN
+-- (modules/screens): just what a board needs to show — label, price, image and a
+-- coarse `kind` for sectioning. Rides the restaurant sync payload so a placed screen
+-- always shows the current, live menu (re-synced whenever the menu is edited).
+function BuildMenuBoard(rid)
+    local out = {}
+    for _, e in ipairs((BuildPricedCatalog(rid, true))) do
+        out[#out + 1] = { label = e.label or e.item, price = e.price,
+                          image = e.image or GetItemImage(e.item), kind = e.kind }
+    end
+    return out
+end
+
 -- ─── shared money bits ───────────────────────────────────────────────────────
 
 -- Pay the serving employee's commission out of the restaurant's take (the same
@@ -481,6 +494,18 @@ lib.callback.register("pickle_restaurants:sales:getTickets", function(src, d)
         return { tickets = {} }
     end
     return { tickets = AnnotateOrders(id, GetOpenOrders(id)) }
+end)
+
+-- Seed for the customer-facing ORDERS SCREEN (modules/screens). The screen stays
+-- live off the SyncOrders broadcast (sent to everyone), but a player who arrives
+-- between changes needs the current list once — this is that one-shot. Public on
+-- purpose: an orders board is a "now preparing" display anyone standing in the
+-- restaurant can read (the client shows only ticket #, items and ready-state — no
+-- customer identity), so it is NOT perm-gated like the staff widget above.
+lib.callback.register("pickle_restaurants:screens:getOrders", function(src, d)
+    local id = tonumber(d.id)
+    if not id or not GetRestaurant(id) then return { orders = {} } end
+    return { orders = AnnotateOrders(id, GetOpenOrders(id)) }
 end)
 
 -- Push the fresh open-ticket list to every client. Each client applies it if it has

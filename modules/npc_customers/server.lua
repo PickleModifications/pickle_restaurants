@@ -232,6 +232,7 @@ local function spawnNpcCustomer(rid, r, cfg)
         orderId   = order.id,
         model     = model,
         expiresAt = os.time() + cfg.patience_seconds,
+        patience  = cfg.patience_seconds, -- the full window, for the ticket UI's radial
     }
     st.lastSpawn = os.time()
 
@@ -335,6 +336,24 @@ function NpcOrderPresent(rid, orderId)
     local st = NpcState[rid]
     if not st then return false end
     return queueIndexOf(st, orderId) ~= nil
+end
+
+-- Remaining patience for an NPC's ticket, for the ticket UI's live countdown +
+-- radial indicator: returns (secondsLeft, patienceWindow) — seconds left clamped
+-- to >= 0, and the full patience window that is the radial's denominator. Returns
+-- nil when this order isn't a currently-waiting NPC (a player ticket, or an NPC
+-- that already walked). The client ticks the value down locally between broadcasts.
+function NpcOrderTimer(rid, orderId)
+    local st = NpcState[rid]
+    if not st then return nil end
+    for _, e in ipairs(st.queue) do
+        if e.orderId == orderId then
+            local left = e.expiresAt - os.time()
+            if left < 0 then left = 0 end
+            return left, (e.patience or left)
+        end
+    end
+    return nil
 end
 
 -- A configured tip on a served order: 0 unless the roll hits, then 0..tip_max_percent%.

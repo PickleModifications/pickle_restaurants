@@ -30,7 +30,10 @@ export type MealOption = { sig: string; label: string; items?: MealItem[] };
 // `ok` = completable with single items alone; `mealOptions` = meals that complete it;
 // `missing` = the single-item shortfall shown when nothing can complete it.
 export type Fulfill = { ok: boolean; mealOptions?: MealOption[]; missing?: string[] };
-export type Ticket = { orderId: number; ticket: number; customer: string; lines: Line[]; total: number; fulfill?: Fulfill };
+// `npc` flags an AI walk-in customer; those carry a patience countdown (`expiresIn`
+// seconds left at send time, ticked down locally) out of `patience` total seconds
+// (the radial's denominator). Player tickets have npc=false and no timer fields.
+export type Ticket = { orderId: number; ticket: number; customer: string; lines: Line[]; total: number; fulfill?: Fulfill; npc?: boolean; expiresIn?: number; patience?: number };
 export type Near = { id: number; name: string };
 // A cart entry: which catalog item, how many, and the selected modifier ids.
 export type CartEntry = { catKey: string; qty: number; sel: string[] };

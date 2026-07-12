@@ -195,6 +195,7 @@ lib.callback.register("pickle_restaurants:management:saveMenuItem", function(src
     ]], { id, entry.item, entry.variant or "", entry.label, math.max(0, math.floor(tonumber(d.price) or 0)),
           entry.kind, d.enabled and 1 or 0 })
     ShowNotification(src, _L("mgmt_menu_saved"))
+    SyncToClient(-1) -- refresh the customer-facing menu SCREEN board (modules/screens)
     return { ok = true }
 end)
 
@@ -206,6 +207,7 @@ lib.callback.register("pickle_restaurants:management:deleteMenuItem", function(s
     MySQL.update.await("DELETE FROM pickle_restaurant_menu WHERE restaurant_id = ? AND item = ? AND variant = ?",
         { id, item, variant })
     ShowNotification(src, _L("mgmt_menu_removed"))
+    SyncToClient(-1) -- refresh the customer-facing menu SCREEN board (modules/screens)
     return { ok = true }
 end)
 

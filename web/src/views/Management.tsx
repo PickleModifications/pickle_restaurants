@@ -346,6 +346,10 @@ function Stations({ id, props, hasShell, hasNpcSpawn, focusSection }: any) {
     { key: "kiosk", label: _L("admin.station_kiosk"), physicalOnly: true },
     // Free-standing floor kiosk (the _02 body) — same order terminal, ground-placed.
     { key: "kiosk_ground", label: _L("admin.station_kiosk_ground"), physicalOnly: true },
+    // Customer info SCREENS — non-interactable wall boards driven by a render target
+    // (menu slideshow / live orders). Physical world props only.
+    { key: "menu_screen", label: _L("admin.station_menu_screen"), physicalOnly: true },
+    { key: "orders_screen", label: _L("admin.station_orders_screen"), physicalOnly: true },
   ];
   const seats = (props as any[]).filter((p) => p.prop_type === "seat");
   const [modes, setModes] = useState<Record<string, "physical" | "virtual">>({});

@@ -56,6 +56,8 @@
   "admin.station_kiosk": "Kiosk (Wall)",
   "admin.station_kiosk_ground": "Kiosk (Floor)",
   "admin.station_kitchen_prep": "Kitchen Prep",
+  "admin.station_menu_screen": "Menu Screen",
+  "admin.station_orders_screen": "Orders Screen",
   "admin.station_soda_machine": "Soda Machine",
   "admin.station_stovetop": "Stovetop",
   "admin.stations": "Stations",

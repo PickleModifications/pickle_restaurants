@@ -32,6 +32,7 @@ files {
     'nui/index.html',
     'nui/**/*',
     'html/brand.html', -- DUI page for the render-target brand texture
+    'html/screens.html', -- DUI page for the menu / orders info screens (modules/screens)
 }
 
 dependencies {

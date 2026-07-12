@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    /* The screen prop uses an OPAQUE shader, so we paint a solid dark board and let
+       the accent + white type carry the design. Everything is sized in `--u` units
+       (1% of the stage's short edge) so the same layout reads correctly whatever DUI
+       resolution the screen is calibrated to, and stays legible from across the room. */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%; overflow: hidden; background: #0b0f14;
+      font-family: "Bricolage Grotesque", "Trebuchet MS", system-ui, sans-serif;
+      color: #f4f6f8; -webkit-font-smoothing: antialiased;
+    }
+    /* The stage is the LOGICAL board; #root applies the prop's rot/flip so content
+       lands upright on a rotated/mirrored UV (mirrors brand.html's withOrient). */
+    /* Default to the full surface so the board paints a real (non-black) frame the
+       instant the page loads, before any data message sizes it precisely. */
+    #root { position: absolute; top: 50%; left: 50%; width: 100vw; height: 100vh;
+            transform: translate(-50%, -50%); transform-origin: center center; }
+    #stage {
+      position: relative; width: 100%; height: 100%;
+      display: flex; flex-direction: column;
+      background:
+        radial-gradient(120% 80% at 50% -10%, rgba(255,255,255,0.06), transparent 60%),
+        linear-gradient(180deg, #10161d 0%, #0b0f14 100%);
+      padding: calc(var(--u) * 4);
+    }
+
+    /* header */
+    .hdr { display: flex; align-items: center; justify-content: space-between; gap: calc(var(--u) * 2);
+           padding-bottom: calc(var(--u) * 2.5); border-bottom: calc(var(--u) * 0.4) solid rgba(255,255,255,0.12); }
+    .hdr .title { font-weight: 800; font-size: calc(var(--u) * 7); letter-spacing: -0.01em; line-height: 1; }
+    .hdr .kicker { display: flex; align-items: center; gap: calc(var(--u) * 1.6); }
+    .hdr .dot { width: calc(var(--u) * 2.2); height: calc(var(--u) * 2.2); border-radius: 50%; background: var(--accent); box-shadow: 0 0 calc(var(--u)*2) var(--accent); }
+    .hdr .eyebrow { font-family: "Spline Sans Mono", ui-monospace, monospace; text-transform: uppercase;
+                    letter-spacing: 0.22em; font-size: calc(var(--u) * 2.6); color: var(--accent); font-weight: 700; }
+
+    .body { flex: 1; min-height: 0; position: relative; margin-top: calc(var(--u) * 3); }
+
+    /* ── menu grid ── */
+    /* Visible by DEFAULT — an offscreen DUI can't be relied on to fire the rAF that
+       would flip an opacity:0 → 1 fade, which left the board reading as black. The
+       `.show` class only deepens an already-visible fade-in. */
+    .grid { position: absolute; inset: 0; display: grid; gap: calc(var(--u) * 2.6);
+            opacity: 1; }
+    .card { display: flex; align-items: center; gap: calc(var(--u) * 2.4);
+            background: rgba(255,255,255,0.04); border: calc(var(--u)*0.25) solid rgba(255,255,255,0.08);
+            border-radius: calc(var(--u) * 2); padding: calc(var(--u) * 2.2); overflow: hidden; }
+    .card .thumb { width: calc(var(--u) * 13); height: calc(var(--u) * 13); flex: 0 0 auto;
+                   border-radius: calc(var(--u) * 1.4); background: rgba(255,255,255,0.06);
+                   display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    .card .thumb img { width: 100%; height: 100%; object-fit: contain; }
+    .card .thumb .ph { font-weight: 800; font-size: calc(var(--u) * 6); color: var(--accent); opacity: 0.7; }
+    .card .info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: calc(var(--u) * 0.6); }
+    .card .name { font-weight: 700; font-size: calc(var(--u) * 4); line-height: 1.05;
+                  overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .card .tag { font-family: "Spline Sans Mono", monospace; text-transform: uppercase; letter-spacing: 0.14em;
+                 font-size: calc(var(--u) * 2.1); color: rgba(244,246,248,0.45); }
+    .card .price { font-family: "Spline Sans Mono", monospace; font-weight: 700; font-size: calc(var(--u) * 4.6);
+                   color: var(--accent); flex: 0 0 auto; white-space: nowrap; }
+
+    /* ── orders list ── */
+    .orders { position: absolute; inset: 0; display: flex; flex-direction: column; gap: calc(var(--u) * 2.2);
+              opacity: 1; }
+    .ticket { background: rgba(255,255,255,0.04); border: calc(var(--u)*0.25) solid rgba(255,255,255,0.08);
+              border-left: calc(var(--u) * 1) solid var(--accent); border-radius: calc(var(--u) * 1.6);
+              padding: calc(var(--u) * 2.4); display: flex; flex-direction: column; gap: calc(var(--u) * 1.4); }
+    .ticket.ready { border-left-color: #4ade80; }
+    .ticket .top { display: flex; align-items: center; justify-content: space-between; gap: calc(var(--u) * 2); }
+    .ticket .no { font-family: "Spline Sans Mono", monospace; font-weight: 800; font-size: calc(var(--u) * 5); }
+    .ticket .no small { color: rgba(244,246,248,0.4); font-size: 0.55em; font-weight: 700; }
+    .chip { font-family: "Spline Sans Mono", monospace; text-transform: uppercase; letter-spacing: 0.14em;
+            font-weight: 700; font-size: calc(var(--u) * 2.6); padding: calc(var(--u)*1) calc(var(--u)*2);
+            border-radius: calc(var(--u) * 6); background: rgba(255,255,255,0.08); color: rgba(244,246,248,0.7); }
+    .chip.ready { background: rgba(74,222,128,0.16); color: #7ff0a8; }
+    .chip.prep { background: rgba(255,176,32,0.14); color: #ffca5e; }
+    .lines { display: flex; flex-wrap: wrap; gap: calc(var(--u) * 1.4) calc(var(--u) * 3); }
+    .line { display: flex; align-items: center; gap: calc(var(--u) * 1.2); font-size: calc(var(--u) * 3.1); }
+    .line .qty { font-family: "Spline Sans Mono", monospace; font-weight: 800; color: var(--accent); }
+    .line .li-img { width: calc(var(--u) * 4.6); height: calc(var(--u) * 4.6); object-fit: contain;
+                    background: rgba(255,255,255,0.05); border-radius: calc(var(--u) * 0.8); }
+
+    /* empty / footer */
+    .empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
+             justify-content: center; gap: calc(var(--u) * 2); color: rgba(244,246,248,0.35); text-align: center; }
+    .empty .big { font-size: calc(var(--u) * 5); font-weight: 700; }
+    .empty .sub { font-family: "Spline Sans Mono", monospace; letter-spacing: 0.14em; text-transform: uppercase;
+                  font-size: calc(var(--u) * 2.6); }
+    .foot { display: flex; align-items: center; justify-content: center; gap: calc(var(--u) * 1.4);
+            padding-top: calc(var(--u) * 2.2); min-height: calc(var(--u) * 4); }
+    .pgdot { width: calc(var(--u) * 1.4); height: calc(var(--u) * 1.4); border-radius: 50%;
+             background: rgba(255,255,255,0.2); transition: all 0.3s ease; }
+    .pgdot.on { background: var(--accent); width: calc(var(--u) * 4.5); border-radius: calc(var(--u)*1); }
+  </style>
+</head>
+<body>
+  <div id="root"><div id="stage">
+    <div class="hdr">
+      <div class="title" id="title">Menu</div>
+      <div class="kicker"><span class="eyebrow" id="eyebrow">MENU</span><span class="dot"></span></div>
+    </div>
+    <div class="body" id="body">
+      <div class="empty"><div class="big">Loading…</div><div class="sub">connecting</div></div>
+    </div>
+    <div class="foot" id="foot"></div>
+  </div></div>
+
+  <script>
+  (function () {
+    var root = document.getElementById("root");
+    var stage = document.getElementById("stage");
+    var body = document.getElementById("body");
+    var foot = document.getElementById("foot");
+    var titleEl = document.getElementById("title");
+    var eyebrowEl = document.getElementById("eyebrow");
+
+    var state = null;         // last message
+    var page = 0;             // current slideshow page
+    var pages = [];           // array of page render fns
+    var flipTimer = null;
+    var painted = false;
+
+    // Fit the logical stage to the surface, applying the prop's rot/flip so content
+    // lands upright even on a rotated/mirrored screen UV.
+    function layout(d) {
+      var W = window.innerWidth, H = window.innerHeight;
+      var rot = ((Math.round((d.rot || 0) / 90) * 90) % 360 + 360) % 360;
+      var swap = (rot === 90 || rot === 270);
+      var DW = swap ? H : W, DH = swap ? W : H;
+      root.style.width = DW + "px";
+      root.style.height = DH + "px";
+      var fx = d.flipx ? -1 : 1, fy = d.flipy ? -1 : 1;
+      root.style.transform = "translate(-50%,-50%) rotate(" + rot + "deg) scale(" + fx + "," + fy + ")";
+      // 1 unit = 1% of the logical short edge → everything scales with the board.
+      stage.style.setProperty("--u", (Math.min(DW, DH) / 100) + "px");
+      stage.style.setProperty("--accent", d.accent || "#ff7a00");
+    }
+
+    function notifyPainted() {
+      if (painted || !state || !state.res || !state.key) return;
+      painted = true;
+      try {
+        fetch("https://" + state.res + "/screen:painted", {
+          method: "POST",
+          headers: { "Content-Type": "application/json; charset=UTF-8" },
+          body: JSON.stringify({ key: state.key }),
+        }).catch(function () {});
+      } catch (e) {}
+    }
+
+    function el(cls, html) { var e = document.createElement("div"); if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; }
+    function money(n) { n = Math.round(Number(n) || 0); return "$" + String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+    function esc(s) { return String(s == null ? "" : s).replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }); }
+
+    function thumb(img, label) {
+      var t = el("thumb");
+      if (img) {
+        var im = document.createElement("img");
+        im.src = img;
+        im.onerror = function () { t.innerHTML = ""; t.appendChild(el("ph", esc((label || "?").charAt(0).toUpperCase()))); };
+        t.appendChild(im);
+      } else {
+        t.appendChild(el("ph", esc((label || "?").charAt(0).toUpperCase())));
+      }
+      return t;
+    }
+
+    // Break a list into pages of `per` items.
+    function paginate(list, per) {
+      var out = [];
+      for (var i = 0; i < list.length; i += per) out.push(list.slice(i, i + per));
+      return out.length ? out : [[]];
+    }
+
+    // Decide how many items fit one menu page from the stage aspect: wider boards get
+    // two columns, taller boards a single column; enough rows to stay large + readable.
+    function menuLayout() {
+      var w = root.offsetWidth, h = root.offsetHeight;
+      var cols = (w / h >= 1.15) ? 2 : 1;
+      var rows = (w / h >= 1.15) ? 4 : 6;
+      return { cols: cols, per: cols * rows };
+    }
+
+    function renderMenu(d) {
+      titleEl.textContent = d.title || "Menu";
+      eyebrowEl.textContent = "MENU";
+      var items = (d.items || []).slice();
+      if (!items.length) { renderEmpty("Menu coming soon", "check back shortly"); return; }
+      var lay = menuLayout();
+      var chunks = paginate(items, lay.per);
+      pages = chunks.map(function (chunk) {
+        return function () {
+          var g = el("grid");
+          g.style.gridTemplateColumns = "repeat(" + lay.cols + ", 1fr)";
+          g.style.gridAutoRows = "1fr";
+          chunk.forEach(function (it) {
+            var card = el("card");
+            card.appendChild(thumb(it.image, it.label));
+            var info = el("info");
+            info.appendChild(el("name", esc(it.label)));
+            if (it.kind) info.appendChild(el("tag", esc(it.kind === "drink" ? "Drink" : "Food")));
+            card.appendChild(info);
+            card.appendChild(el("price", money(it.price)));
+            g.appendChild(card);
+          });
+          return g;
+        };
+      });
+      showPages();
+    }
+
+    function renderOrders(d) {
+      titleEl.textContent = d.title || "Orders";
+      eyebrowEl.textContent = "NOW PREPARING";
+      var orders = (d.orders || []).slice(); // already newest-first from Lua
+      if (!orders.length) { renderEmpty("No open orders", "all caught up"); return; }
+      // Portrait boards fit ~4 tickets, wider ones ~3 taller cards; paginate the rest.
+      var per = (root.offsetWidth / root.offsetHeight >= 1.15) ? 3 : 4;
+      var chunks = paginate(orders, per);
+      pages = chunks.map(function (chunk) {
+        return function () {
+          var wrap = el("orders");
+          chunk.forEach(function (o) {
+            var tk = el("ticket" + (o.ready ? " ready" : ""));
+            var top = el("top");
+            top.appendChild(el("no", "#" + esc(o.ticket) + " <small>TICKET</small>"));
+            top.appendChild(el("chip " + (o.ready ? "ready" : "prep"), o.ready ? "Ready" : "Preparing"));
+            tk.appendChild(top);
+            var lines = el("lines");
+            (o.items || []).forEach(function (li) {
+              var ln = el("line");
+              ln.appendChild(el("qty", esc(li.qty) + "×"));
+              if (li.image) { var im = document.createElement("img"); im.className = "li-img"; im.src = li.image; im.onerror = function () { im.style.display = "none"; }; ln.appendChild(im); }
+              ln.appendChild(el(null, esc(li.label)));
+              lines.appendChild(ln);
+            });
+            tk.appendChild(lines);
+            wrap.appendChild(tk);
+          });
+          return wrap;
+        };
+      });
+      showPages();
+    }
+
+    function renderEmpty(big, sub) {
+      pages = [];
+      body.innerHTML = "";
+      foot.innerHTML = "";
+      var e = el("empty");
+      e.appendChild(el("big", esc(big)));
+      e.appendChild(el("sub", esc(sub)));
+      body.appendChild(e);
+      foot.innerHTML = "";
+      notifyPainted();
+    }
+
+    // Render the current page and (re)arm the slideshow if there's more than one.
+    function showPages() {
+      if (flipTimer) { clearInterval(flipTimer); flipTimer = null; }
+      if (page >= pages.length) page = 0;
+      drawPage();
+      if (pages.length > 1) {
+        flipTimer = setInterval(function () { page = (page + 1) % pages.length; drawPage(); }, 7000);
+      }
+    }
+
+    function drawPage() {
+      body.innerHTML = "";
+      var node = pages[page] ? pages[page]() : el("empty");
+      if (node.classList) node.classList.add("show");
+      body.appendChild(node);
+      // page dots
+      foot.innerHTML = "";
+      if (pages.length > 1) {
+        for (var i = 0; i < pages.length; i++) foot.appendChild(el("pgdot" + (i === page ? " on" : "")));
+      }
+      notifyPainted();
+    }
+
+    function render() {
+      if (!state) return;
+      if (state.action === "orders") renderOrders(state);
+      else renderMenu(state);
+    }
+
+    window.addEventListener("message", function (e) {
+      var d = e.data;
+      if (typeof d === "string") { try { d = JSON.parse(d); } catch (_) { return; } }
+      if (!d) return;
+      // Reset the slideshow to page 0 only when the CONTENT identity changes, so a
+      // periodic no-op re-push (or an orientation tweak) doesn't yank the page back.
+      var sig = d.action + "|" + (d.title || "") + "|" +
+                ((d.items || []).length) + "|" + ((d.orders || []).length);
+      if (!state || sig !== state._sig) { page = 0; painted = false; } // re-notify Lua to rebind against the new content
+      d._sig = sig;
+      state = d;
+      layout(d);
+      render();
+    });
+
+    window.addEventListener("resize", function () { if (state) { layout(state); render(); } });
+  })();
+  </script>
+</body>
+</html>
