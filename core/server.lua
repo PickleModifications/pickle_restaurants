@@ -18,6 +18,7 @@ TrayCache       = {}    -- [restaurantId][identifier][item.."|"..cheese] = { ite
 SettingsCache   = {}    -- [key]           = decoded value
 OrderCache      = {}    -- [restaurantId][orderId] = open POS ticket row (lines decoded)
 NextTicket      = {}    -- [restaurantId]  = next kitchen ticket number
+ComboCache      = {}    -- [restaurantId][comboId] = combo-meal row (slots/photo_crop decoded)
 OrdersDirty     = {}    -- [restaurantId]  = true when the pool changed → register needs a live SyncOrders (coalesced flusher in modules/sales)
 
 PERMISSIONS = { "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance", "manage_stock" }
@@ -672,6 +673,30 @@ local function CreateTables()
         MySQL.query.await(
             "ALTER TABLE `pickle_restaurant_menu` DROP INDEX `uniq_item`, ADD UNIQUE KEY `uniq_item` (`restaurant_id`, `item`, `variant`)")
     end
+
+    -- Combo meals: a per-restaurant, numbered, priced BUNDLE of existing sellable
+    -- items ("Burger + Fries + Cola = The Pickle Meal #3"), sold as one entry and
+    -- fulfilled from the pool as its individual component items. `slots` is the
+    -- ordered list of choose-slots (each a list of allowed sellable-catalog keys);
+    -- `photo_url`/`photo_crop` reuse the brand-image pipeline for the board card.
+    -- Identity is `id`; `number` is a plain sortable display field (NO unique key —
+    -- renumbering must never deadlock; the editor warns on duplicates instead).
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `pickle_restaurant_combos` (
+            `id`            INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `restaurant_id` INT UNSIGNED NOT NULL,
+            `number`        INT UNSIGNED NOT NULL DEFAULT 1,
+            `label`         VARCHAR(80)  NOT NULL,
+            `price`         INT          NOT NULL DEFAULT 0,
+            `enabled`       TINYINT(1)   NOT NULL DEFAULT 1,
+            `photo_url`     VARCHAR(512) DEFAULT NULL,
+            `photo_crop`    JSON         DEFAULT NULL,
+            `slots`         JSON         NOT NULL,
+            `created_at`    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_rest` (`restaurant_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
 end
 
 -- ─── loaders ─────────────────────────────────────────────────────────────────
@@ -1209,6 +1234,20 @@ local function LoadOrders()
     end
 end
 
+-- Combo meals into the module-global cache. `slots`/`photo_crop` are JSON columns —
+-- decode them once here (like OrderCache's `lines`) so every read is a plain table.
+local function LoadCombos()
+    ComboCache = {}
+    local rows = MySQL.query.await("SELECT * FROM pickle_restaurant_combos") or {}
+    for _, row in ipairs(rows) do
+        row.slots      = dec(row.slots, {})
+        row.photo_crop = dec(row.photo_crop, nil)
+        row.enabled    = (row.enabled == 1 or row.enabled == true)
+        ComboCache[row.restaurant_id] = ComboCache[row.restaurant_id] or {}
+        ComboCache[row.restaurant_id][row.id] = row
+    end
+end
+
 -- Cheese state on a cooked item: 0 = none, 1 = applied (unmelted), 2 = melted. Kept
 -- distinct through the tray + DB so a collected burger renders at the melt state it
 -- was in; anything > 0 counts as "has cheese" for recipe matching.
@@ -1656,6 +1695,49 @@ function ClearOrders(restaurantId)
     NextTicket[restaurantId] = nil
 end
 
+-- ─── combo meals (write-through cache) ────────────────────────────────────────
+-- Insert or update one combo. `combo` carries { id?, number, label, price, enabled,
+-- photo_url, photo_crop, slots } already sanitized by the caller (management). On
+-- insert the DB assigns the id; the returned combo is what lands in ComboCache.
+function SaveCombo(restaurantId, combo)
+    combo.restaurant_id = restaurantId
+    local slotsJson = json.encode(combo.slots or {})
+    local cropJson  = combo.photo_crop and json.encode(combo.photo_crop) or nil
+    if combo.id then
+        MySQL.update.await([[
+            UPDATE `pickle_restaurant_combos`
+               SET `number` = ?, `label` = ?, `price` = ?, `enabled` = ?,
+                   `photo_url` = ?, `photo_crop` = ?, `slots` = ?
+             WHERE `id` = ? AND `restaurant_id` = ?
+        ]], { combo.number, combo.label, combo.price, combo.enabled and 1 or 0,
+              combo.photo_url, cropJson, slotsJson, combo.id, restaurantId })
+    else
+        combo.id = MySQL.insert.await([[
+            INSERT INTO `pickle_restaurant_combos`
+                (`restaurant_id`, `number`, `label`, `price`, `enabled`, `photo_url`, `photo_crop`, `slots`)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ]], { restaurantId, combo.number, combo.label, combo.price, combo.enabled and 1 or 0,
+              combo.photo_url, cropJson, slotsJson })
+    end
+    if not combo.id then return nil end
+    ComboCache[restaurantId] = ComboCache[restaurantId] or {}
+    ComboCache[restaurantId][combo.id] = combo
+    return combo
+end
+
+function DeleteCombo(restaurantId, comboId)
+    MySQL.update.await("DELETE FROM pickle_restaurant_combos WHERE id = ? AND restaurant_id = ?",
+        { comboId, restaurantId })
+    if ComboCache[restaurantId] then ComboCache[restaurantId][comboId] = nil end
+    return true
+end
+
+-- Drop a restaurant's combos (restaurant deleted). Row cleanup is done by the
+-- caller's DELETE alongside the other per-restaurant tables.
+function ClearCombos(restaurantId)
+    ComboCache[restaurantId] = nil
+end
+
 -- Open tickets for the register NUI, oldest first (kitchen works the queue in order).
 -- Only genuinely-open rows are surfaced: the callbacks hold their transient claim in
 -- o.busy (never o.status), so o.status is always "open" here — but the explicit
@@ -2064,6 +2146,10 @@ local function BuildClientRestaurant(r)
         -- board tracks menu edits (each menu change re-syncs). Guarded because the
         -- builder lives in the sales module (loaded after core).
         menu         = BuildMenuBoard and BuildMenuBoard(r.id) or nil,
+        -- Numbered combo-meal cards for the same board (kept SEPARATE from `menu` —
+        -- combo cards carry a number, photo+crop and a component list). Also drives
+        -- the POS combo section. Guarded like `menu` (builder lives in sales).
+        combos       = BuildComboBoard and BuildComboBoard(r.id) or nil,
     }
 end
 
@@ -2230,6 +2316,7 @@ CreateThread(function()
         LoadStock()
         LoadOrders()
         LoadCookedItems()
+        LoadCombos()
         RestaurantsReady = true
         debugPrint(("Booted: %d restaurants, %d props, %d recipes."):format(
             #BuildSyncPayload().restaurants, #BuildSyncPayload().props, #RecipeCache))

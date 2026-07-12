@@ -164,8 +164,12 @@ const BRAND_TEXTURES: { key: string; label: string; w: number; h: number; hint: 
   { key: "kiosk", label: _L("branding.tex_kiosk_label"), w: 1080, h: 1920, hint: _L("branding.tex_kiosk_hint") },
 ];
 
-type Crop = { x: number; y: number; w: number; h: number };
+export type Crop = { x: number; y: number; w: number; h: number };
 type Aspect = { w: number; h: number };
+// A photo target: the crop frame's aspect + copy for the picker dialog. The brand
+// textures satisfy this structurally (they add a `key`); combos pass their own.
+export type PhotoAspect = { label: string; w: number; h: number; hint: string };
+export type PhotoEntry = { url: string; crop?: Crop | null };
 const clampN = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 
 // The largest normalised rect of the target aspect that fits inside the image
@@ -301,9 +305,59 @@ function BrandTextureCard({
   );
 }
 
+// A reusable "Set / Update / Remove photo" card (URL + crop), shared by the brand
+// textures and the combo editor. `aspect` locks the crop frame + dialog copy; `entry`
+// is the current { url, crop }; `onChange(null)` clears it. `empty` overrides the
+// no-photo caption. Same WYSIWYG cropper as the packaging brands.
+export function PhotoField({
+  aspect, entry, onChange, empty, className,
+}: {
+  aspect: PhotoAspect; entry?: PhotoEntry | null;
+  onChange: (e: PhotoEntry | null) => void; empty?: string; className?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const has = !!entry?.url;
+  return (
+    <div className={className}>
+      {has ? (
+        <CropThumb url={entry!.url} aspect={aspect} crop={entry!.crop || null} />
+      ) : (
+        <div className="flex h-28 items-center justify-center rounded-md border border-dashed border-border bg-muted/30 text-[11px] text-muted-foreground">
+          {empty ?? _L("branding.uses_default_image")}
+        </div>
+      )}
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          onClick={() => setEditing(true)}
+          className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-secondary px-2 py-1.5 text-xs font-semibold text-foreground transition hover:bg-accent"
+        >
+          {has ? <><Pencil className="h-3.5 w-3.5" /> {_L("branding.update_photo")}</> : <><Plus className="h-3.5 w-3.5" /> {_L("branding.set_photo")}</>}
+        </button>
+        {has && (
+          <button
+            onClick={() => onChange(null)}
+            title={_L("branding.remove_photo")}
+            className="flex items-center justify-center rounded-md border border-border bg-secondary p-1.5 text-muted-foreground transition hover:border-destructive/60 hover:text-destructive"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+      {editing && (
+        <BrandPhotoModal
+          tex={aspect}
+          initial={entry || null}
+          onClose={() => setEditing(false)}
+          onSave={(e) => { onChange(e); setEditing(false); }}
+        />
+      )}
+    </div>
+  );
+}
+
 // A small static preview of the saved crop, drawn the same way the prop will look.
 // Fixed height, aspect-correct width — so a tall texture (cup) doesn't blow up the card.
-function CropThumb({ url, aspect, crop }: { url: string; aspect: Aspect; crop: Crop | null }) {
+export function CropThumb({ url, aspect, crop }: { url: string; aspect: Aspect; crop: Crop | null }) {
   const A = aspect.w / aspect.h;
   const imgRef = useRef<HTMLImageElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -336,7 +390,7 @@ function CropThumb({ url, aspect, crop }: { url: string; aspect: Aspect; crop: C
 function BrandPhotoModal({
   tex, initial, onClose, onSave,
 }: {
-  tex: (typeof BRAND_TEXTURES)[number]; initial: { url: string; crop?: Crop | null } | null;
+  tex: PhotoAspect; initial: { url: string; crop?: Crop | null } | null;
   onClose: () => void; onSave: (e: { url: string; crop?: Crop | null } | null) => void;
 }) {
   const [url, setUrl] = useState(initial?.url || "");

@@ -61,6 +61,29 @@
     .card .price { font-family: "Spline Sans Mono", monospace; font-weight: 700; font-size: calc(var(--u) * 4.6);
                    color: var(--accent); flex: 0 0 auto; white-space: nowrap; }
 
+    /* ── combo meals ── */
+    .cgrid { position: absolute; inset: 0; display: grid; gap: calc(var(--u) * 2.6); opacity: 1; }
+    .ccard { position: relative; display: flex; flex-direction: column; overflow: hidden;
+             border-radius: calc(var(--u) * 2); background: rgba(255,255,255,0.04);
+             border: calc(var(--u)*0.25) solid rgba(255,255,255,0.08); }
+    .ccard .cphoto { position: relative; width: 100%; flex: 1 1 auto; min-height: 0;
+                     background-color: rgba(255,255,255,0.05); background-repeat: no-repeat; }
+    .ccard .cphoto.cph { display: flex; align-items: center; justify-content: center; }
+    .ccard .cphoto .phletter { font-weight: 800; font-size: calc(var(--u) * 10); color: var(--accent); opacity: 0.55; }
+    .ccard .cnum { position: absolute; top: calc(var(--u) * 1.4); left: calc(var(--u) * 1.4);
+                   min-width: calc(var(--u) * 6); height: calc(var(--u) * 6); padding: 0 calc(var(--u)*1.2);
+                   display: flex; align-items: center; justify-content: center; border-radius: calc(var(--u) * 1.2);
+                   background: var(--accent); color: #10161d; font-family: "Spline Sans Mono", monospace;
+                   font-weight: 800; font-size: calc(var(--u) * 4); box-shadow: 0 calc(var(--u)*0.4) calc(var(--u)*1.5) rgba(0,0,0,0.5); }
+    .ccard .cinfo { display: flex; flex-direction: column; gap: calc(var(--u) * 0.5);
+                    padding: calc(var(--u) * 1.8) calc(var(--u) * 2); background: linear-gradient(180deg, rgba(16,22,29,0.0), rgba(16,22,29,0.85) 40%); }
+    .ccard .cname { font-weight: 800; font-size: calc(var(--u) * 3.6); line-height: 1.05;
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ccard .cparts { font-family: "Spline Sans Mono", monospace; font-size: calc(var(--u) * 2.1);
+                     color: rgba(244,246,248,0.55); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ccard .cprice { font-family: "Spline Sans Mono", monospace; font-weight: 800; font-size: calc(var(--u) * 4.2);
+                     color: var(--accent); margin-top: calc(var(--u) * 0.4); }
+
     /* ── orders list ── */
     .orders { position: absolute; inset: 0; display: flex; flex-direction: column; gap: calc(var(--u) * 2.2);
               opacity: 1; }
@@ -183,31 +206,103 @@
       return { cols: cols, per: cols * rows };
     }
 
+    // Position a combo card's photo to show its owner-set crop rect (normalised
+    // {x,y,w,h}); no crop → a centred cover. A bad URL falls back to a big letter.
+    function setPhoto(node, photo, label) {
+      var url = photo && photo.url;
+      if (url) {
+        node.style.backgroundImage = 'url("' + String(url).replace(/"/g, "%22") + '")';
+        var c = photo.crop;
+        if (c && c.w > 0 && c.h > 0) {
+          node.style.backgroundSize = (100 / c.w) + "% " + (100 / c.h) + "%";
+          var px = c.w < 1 ? (c.x / (1 - c.w)) * 100 : 50;
+          var py = c.h < 1 ? (c.y / (1 - c.h)) * 100 : 50;
+          node.style.backgroundPosition = px + "% " + py + "%";
+        } else {
+          node.style.backgroundSize = "cover";
+          node.style.backgroundPosition = "center";
+        }
+        var probe = new Image();
+        probe.onerror = function () {
+          node.style.backgroundImage = "";
+          node.classList.add("cph");
+          node.appendChild(el("phletter", esc((label || "?").charAt(0).toUpperCase())));
+        };
+        probe.src = url;
+      } else {
+        node.classList.add("cph");
+        node.appendChild(el("phletter", esc((label || "?").charAt(0).toUpperCase())));
+      }
+    }
+
+    // How many combo cards fit a page: wider boards get two columns.
+    function comboLayout() {
+      var w = root.offsetWidth, h = root.offsetHeight;
+      var cols = (w / h >= 1.15) ? 2 : 1;
+      var rows = (w / h >= 1.15) ? 2 : 3;
+      return { cols: cols, per: cols * rows };
+    }
+
+    function comboPage(chunk, cols) {
+      return function () {
+        eyebrowEl.textContent = "COMBO MEALS";
+        var g = el("cgrid");
+        g.style.gridTemplateColumns = "repeat(" + cols + ", 1fr)";
+        g.style.gridAutoRows = "1fr";
+        chunk.forEach(function (c) {
+          var card = el("ccard");
+          var ph = el("cphoto");
+          setPhoto(ph, c.photo, c.label);
+          ph.appendChild(el("cnum", esc(String(c.number))));
+          card.appendChild(ph);
+          var info = el("cinfo");
+          info.appendChild(el("cname", esc(c.label)));
+          if (c.items && c.items.length) info.appendChild(el("cparts", esc(c.items.join(" · "))));
+          info.appendChild(el("cprice", money(c.price)));
+          card.appendChild(info);
+          g.appendChild(card);
+        });
+        return g;
+      };
+    }
+
+    function itemPage(chunk, cols) {
+      return function () {
+        eyebrowEl.textContent = "MENU";
+        var g = el("grid");
+        g.style.gridTemplateColumns = "repeat(" + cols + ", 1fr)";
+        g.style.gridAutoRows = "1fr";
+        chunk.forEach(function (it) {
+          var card = el("card");
+          card.appendChild(thumb(it.image, it.label));
+          var info = el("info");
+          info.appendChild(el("name", esc(it.label)));
+          if (it.kind) info.appendChild(el("tag", esc(it.kind === "drink" ? "Drink" : "Food")));
+          card.appendChild(info);
+          card.appendChild(el("price", money(it.price)));
+          g.appendChild(card);
+        });
+        return g;
+      };
+    }
+
     function renderMenu(d) {
       titleEl.textContent = d.title || "Menu";
       eyebrowEl.textContent = "MENU";
-      var items = (d.items || []).slice();
-      if (!items.length) { renderEmpty("Menu coming soon", "check back shortly"); return; }
-      var lay = menuLayout();
-      var chunks = paginate(items, lay.per);
-      pages = chunks.map(function (chunk) {
-        return function () {
-          var g = el("grid");
-          g.style.gridTemplateColumns = "repeat(" + lay.cols + ", 1fr)";
-          g.style.gridAutoRows = "1fr";
-          chunk.forEach(function (it) {
-            var card = el("card");
-            card.appendChild(thumb(it.image, it.label));
-            var info = el("info");
-            info.appendChild(el("name", esc(it.label)));
-            if (it.kind) info.appendChild(el("tag", esc(it.kind === "drink" ? "Drink" : "Food")));
-            card.appendChild(info);
-            card.appendChild(el("price", money(it.price)));
-            g.appendChild(card);
-          });
-          return g;
-        };
-      });
+      // Lua encodes an EMPTY list as {} (object), so guard before .slice().
+      var combos = Array.isArray(d.combos) ? d.combos.slice() : [];
+      var items = Array.isArray(d.items) ? d.items.slice() : [];
+      if (!combos.length && !items.length) { renderEmpty("Menu coming soon", "check back shortly"); return; }
+      pages = [];
+      // Combo cards lead (the hero of the board), then the à la carte list.
+      if (combos.length) {
+        var cl = comboLayout();
+        paginate(combos, cl.per).forEach(function (chunk) { pages.push(comboPage(chunk, cl.cols)); });
+      }
+      if (items.length) {
+        var lay = menuLayout();
+        paginate(items, lay.per).forEach(function (chunk) { pages.push(itemPage(chunk, lay.cols)); });
+      }
       showPages();
     }
 
@@ -293,7 +388,9 @@
       // Reset the slideshow to page 0 only when the CONTENT identity changes, so a
       // periodic no-op re-push (or an orientation tweak) doesn't yank the page back.
       var sig = d.action + "|" + (d.title || "") + "|" +
-                ((d.items || []).length) + "|" + ((d.orders || []).length);
+                ((Array.isArray(d.items) ? d.items : []).length) + "|" +
+                ((Array.isArray(d.combos) ? d.combos : []).length) + "|" +
+                ((Array.isArray(d.orders) ? d.orders : []).length);
       if (!state || sig !== state._sig) { page = 0; painted = false; } // re-notify Lua to rebind against the new content
       d._sig = sig;
       state = d;

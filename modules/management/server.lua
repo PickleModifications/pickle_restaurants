@@ -37,6 +37,50 @@ local function buildEmployees(rid, roles)
     return list
 end
 
+-- Combos for the boss editor: the RAW stored combos (option keys kept intact so they
+-- stay editable) plus a per-slot/option validity annotation against the live sellable
+-- catalog — mirrors the price-list `stale` handling so the boss sees an option that
+-- points at something the restaurant can no longer make. A combo is `stale` if any
+-- slot has no valid option left (that's when the ORDER path hides it).
+local function buildComboEditorList(id)
+    local index = {}
+    for _, e in ipairs(BuildSellableCatalog(id)) do index[e.key] = e end
+    local out = {}
+    for _, c in pairs(ComboCache[id] or {}) do
+        local slots, stale = {}, false
+        for _, s in ipairs(c.slots or {}) do
+            local options, dead = {}, 0
+            for _, o in ipairs(s.options or {}) do
+                local key = o.key
+                local e = key and index[key]
+                if not e then dead = dead + 1 end
+                options[#options + 1] = {
+                    key = key,
+                    label = e and e.label or (key and PrettyItemName((key:gsub("::.*$", "")))) or "?",
+                    image = e and e.image or nil,
+                    kind = e and e.kind or nil,
+                    valid = e ~= nil,
+                }
+            end
+            local slotStale = (#options == 0) or (dead >= #options)
+            if slotStale then stale = true end
+            slots[#slots + 1] = { label = s.label or "", options = options, stale = slotStale }
+        end
+        out[#out + 1] = {
+            id = c.id, number = tonumber(c.number) or 1, label = c.label or "",
+            price = math.max(0, math.floor(tonumber(c.price) or 0)),
+            enabled = c.enabled ~= false,
+            photo = (c.photo_url and c.photo_url ~= "") and { url = c.photo_url, crop = c.photo_crop } or nil,
+            slots = slots, stale = stale,
+        }
+    end
+    table.sort(out, function(a, b)
+        if (a.number or 0) ~= (b.number or 0) then return (a.number or 0) < (b.number or 0) end
+        return (a.id or 0) < (b.id or 0)
+    end)
+    return out
+end
+
 -- ─── open ────────────────────────────────────────────────────────────────────
 
 lib.callback.register("pickle_restaurants:management:getData", function(src, d)
@@ -112,6 +156,7 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
         ledger    = ledger,
         priceList = priceList,
         stale     = stale,
+        combos    = effective.manage_menu and buildComboEditorList(id) or {},
         supplies  = supplies,
         props     = props,
         nearby    = effective.manage_employees and NearbyPlayers(src, 10.0) or {},
@@ -352,6 +397,67 @@ lib.callback.register("pickle_restaurants:management:setBrandImage", function(sr
     local res = SetRestaurantBrand(id, d.key, d.url, d.crop)
     if res and res.ok then ShowNotification(src, _L("branding_saved")) end
     return res
+end)
+
+-- ─── combo meals ─────────────────────────────────────────────────────────────
+-- A combo is a per-restaurant, numbered, priced BUNDLE of existing sellables sold as
+-- one entry (see BuildComboCatalog / resolveComboEntry in modules/sales). The boss
+-- edits them here (same `manage_menu` perm as the price list). Option keys are stored
+-- VERBATIM — never validated away — so a temporarily-uninstalled item doesn't wipe the
+-- config; the order path drops dead options and hides an unfulfillable combo, and the
+-- editor flags them. Photo reuses the brand-image { url, crop } shape + sanitizeCrop.
+local MAX_COMBO_SLOTS   = 8
+local MAX_SLOT_OPTIONS  = 12
+
+lib.callback.register("pickle_restaurants:management:saveCombo", function(src, d)
+    local id = tonumber(d.id)
+    if not HasPerm(id, src, "manage_menu") then return { ok = false, error = _L("no_permission") } end
+    if not GetRestaurant(id) then return { ok = false } end
+
+    local label = tostring(d.label or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if label == "" then return { ok = false, error = _L("mgmt_combo_label_required") } end
+
+    -- Sanitize slots: keep the structure + option keys verbatim, cap sizes. A slot
+    -- with no option is dropped; at least one slot must survive.
+    local slots = {}
+    for _, s in ipairs(type(d.slots) == "table" and d.slots or {}) do
+        if #slots >= MAX_COMBO_SLOTS then break end
+        local options = {}
+        for _, o in ipairs(type(s) == "table" and type(s.options) == "table" and s.options or {}) do
+            if #options >= MAX_SLOT_OPTIONS then break end
+            local key = type(o) == "table" and tostring(o.key or "") or tostring(o or "")
+            if key ~= "" then options[#options + 1] = { key = key:sub(1, 80) } end
+        end
+        if #options > 0 then
+            slots[#slots + 1] = { label = tostring(s.label or ""):sub(1, 40), options = options }
+        end
+    end
+    if #slots == 0 then return { ok = false, error = _L("mgmt_combo_needs_slot") } end
+
+    local url = tostring((d.photo and d.photo.url) or ""):gsub("^%s+", ""):gsub("%s+$", ""):sub(1, 512)
+    local combo = SaveCombo(id, {
+        id         = d.comboId and tonumber(d.comboId) or nil,
+        number     = math.max(0, math.floor(tonumber(d.number) or 1)),
+        label      = label:sub(1, 80),
+        price      = math.max(0, math.floor(tonumber(d.price) or 0)),
+        enabled    = d.enabled ~= false,
+        photo_url  = (url ~= "") and url or nil,
+        photo_crop = (url ~= "") and sanitizeCrop(d.photo and d.photo.crop) or nil,
+        slots      = slots,
+    })
+    if not combo then return { ok = false, error = _L("order_failed") } end
+    ShowNotification(src, _L("mgmt_combo_saved"))
+    SyncToClient(-1) -- refresh POS + the customer-facing MENU SCREEN board (modules/screens)
+    return { ok = true, comboId = combo.id }
+end)
+
+lib.callback.register("pickle_restaurants:management:deleteCombo", function(src, d)
+    local id = tonumber(d.id)
+    if not HasPerm(id, src, "manage_menu") then return { ok = false, error = _L("no_permission") } end
+    DeleteCombo(id, tonumber(d.comboId))
+    ShowNotification(src, _L("mgmt_combo_removed"))
+    SyncToClient(-1)
+    return { ok = true }
 end)
 
 -- ─── theme ───────────────────────────────────────────────────────────────────

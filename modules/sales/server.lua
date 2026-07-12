@@ -174,6 +174,67 @@ function BuildMenuBoard(rid)
     return out
 end
 
+-- ─── combo meals ─────────────────────────────────────────────────────────────
+-- A combo is a per-restaurant, numbered, priced BUNDLE of existing sellables. Its
+-- slots reference sellable-catalog KEYS only; the live label/image/kind/variant/
+-- modifiers are resolved here from BuildSellableCatalog (the MAKEABLE set — a combo
+-- may bundle an item that isn't sold à la carte), so a combo can never drift from
+-- the current recipe/assembly config. Only ORDERABLE combos are returned (enabled,
+-- price > 0, and no slot left with zero valid options). The management editor reads
+-- ComboCache directly for editing + stale annotation.
+function BuildComboCatalog(rid)
+    local index = {}
+    for _, e in ipairs(BuildSellableCatalog(rid)) do index[e.key] = e end
+    local out = {}
+    for _, c in pairs(ComboCache[rid] or {}) do
+        local price = math.max(0, math.floor(tonumber(c.price) or 0))
+        if c.enabled ~= false and price > 0 then
+            local slots, ok = {}, true
+            for _, s in ipairs(c.slots or {}) do
+                local options = {}
+                for _, o in ipairs(s.options or {}) do
+                    local e = o.key and index[o.key]
+                    if e then
+                        options[#options + 1] = { key = e.key, item = e.item, variant = e.variant,
+                                                  label = e.label, image = e.image, kind = e.kind,
+                                                  modifiers = e.modifiers }
+                    end
+                end
+                if #options == 0 then ok = false end -- a dead slot makes the whole combo unfulfillable
+                slots[#slots + 1] = { label = s.label or "", options = options }
+            end
+            if ok and #slots > 0 then
+                out[#out + 1] = {
+                    comboId = c.id, number = tonumber(c.number) or 1, label = c.label or "Combo",
+                    price = price, slots = slots,
+                    photo = (c.photo_url and c.photo_url ~= "") and { url = c.photo_url, crop = c.photo_crop } or nil,
+                }
+            end
+        end
+    end
+    table.sort(out, function(a, b) return (a.number or 0) < (b.number or 0) end)
+    return out
+end
+
+-- Compact combo cards for the customer MENU SCREEN board: number, label, price,
+-- photo (url+crop) and the component-slot labels (a choose-slot shows its label,
+-- a fixed slot its item). Orderable combos only. Rides the restaurant sync payload
+-- like BuildMenuBoard, so a board tracks combo edits live.
+function BuildComboBoard(rid)
+    local out = {}
+    for _, c in ipairs(BuildComboCatalog(rid)) do
+        local items = {}
+        for _, s in ipairs(c.slots) do
+            local first = s.options[1]
+            items[#items + 1] = (#s.options > 1 and s.label ~= "" and s.label)
+                or (first and first.label) or s.label or "?"
+        end
+        out[#out + 1] = { number = c.number, label = c.label, price = c.price,
+                          photo = c.photo, items = items, kind = "combo" }
+    end
+    return out
+end
+
 -- ─── shared money bits ───────────────────────────────────────────────────────
 
 -- Pay the serving employee's commission out of the restaurant's take (the same
@@ -469,6 +530,7 @@ local function buildRegister(src, id)
         balance      = r.balance,
         commission   = emp and emp.commission_rate or 0,
         catalog      = (BuildPricedCatalog(id, true)),
+        combos       = BuildComboCatalog(id), -- orderable combo bundles (parallel to catalog)
         tickets      = AnnotateOrders(id, GetOpenOrders(id)), -- initial list; kept live thereafter by SyncOrders
         nearby       = NearbyPlayers(src, 6.0),
         receiptOk    = ItemExists(ReceiptItem()),
@@ -548,14 +610,34 @@ local function modSummary(mods)
     return table.concat(parts, ", ")
 end
 
--- One readable "2× Burger (+Cheese), 1× Cola" line for ledger rows & receipt metadata.
+-- One readable "2× Burger (+Cheese), 1× #3 The Pickle Meal [Burger +Cheese / Fries /
+-- Cola]" line for ledger rows & receipt metadata. A combo's component lines are
+-- emitted contiguously (resolveComboEntry), sharing a combo.id + combo.inst, so they
+-- collapse into one bracketed group here.
 local function orderSummary(lines)
-    local parts = {}
-    for _, l in ipairs(lines) do
-        local s = ("%d× %s"):format(l.qty, l.label)
-        local m = modSummary(l.mods)
-        if m ~= "" then s = s .. " (" .. m .. ")" end
-        parts[#parts + 1] = s
+    local parts, i, n = {}, 1, #lines
+    while i <= n do
+        local l = lines[i]
+        if l.combo then
+            local comps, j = {}, i
+            while j <= n and lines[j].combo
+                and lines[j].combo.id == l.combo.id and lines[j].combo.inst == l.combo.inst do
+                local cs = lines[j].label
+                local m = modSummary(lines[j].mods)
+                if m ~= "" then cs = cs .. " " .. m end
+                comps[#comps + 1] = cs
+                j = j + 1
+            end
+            parts[#parts + 1] = ("%d× #%s %s [%s]"):format(
+                l.qty, tostring(l.combo.number), l.combo.label, table.concat(comps, " / "))
+            i = j
+        else
+            local s = ("%d× %s"):format(l.qty, l.label)
+            local m = modSummary(l.mods)
+            if m ~= "" then s = s .. " (" .. m .. ")" end
+            parts[#parts + 1] = s
+            i = i + 1
+        end
     end
     return table.concat(parts, ", ")
 end
@@ -566,55 +648,111 @@ end
 -- price, clamp quantities and record/charge modifiers identically. Only real
 -- catalog entries, allowed modifiers and 1..10 quantities survive. Returns
 -- `lines, total` on success, or `nil, nil, errorMessage`.
+-- Resolve a customer's selected modifier ids against a sellable entry's allowed set
+-- (the NUI is untrusted): record only real additions (a non-default modifier that's
+-- on → +price) and removals (a default that's off), enforcing group single-choice.
+-- Mods are ticket instructions + pricing; the kitchen match is item-only. Returns the
+-- recorded mod list + the price EXTRA the additions add on top of the base. Shared by
+-- the à la carte path and every combo component so validation is identical.
+local function resolveLineModifiers(e, selMods)
+    local mods, extra = {}, 0
+    if type(e.modifiers) ~= "table" then return mods, extra end
+    local sel, groupTaken = {}, {}
+    if type(selMods) == "table" then
+        for _, mid in ipairs(selMods) do sel[tostring(mid)] = true end
+    end
+    for _, m in ipairs(e.modifiers) do
+        local isDefault = m.default == true or m.default == 1
+        local on = sel[tostring(m.id)] == true
+        -- a grouped modifier is single-choice — only the first selected in its group
+        -- counts (the NUI enforces this; re-enforced here)
+        if on and m.group and groupTaken[m.group] then on = false end
+        if on and not isDefault then
+            if m.group then groupTaken[m.group] = true end
+            local price = math.max(0, math.floor(tonumber(m.price) or 0))
+            extra = extra + price
+            local label = m.group and (tostring(m.group) .. ": " .. tostring(m.label)) or m.label
+            -- carry the modifier's icon (item image, or flavor colour swatch) so the
+            -- kitchen ticket can render it as an image, not just text
+            mods[#mods + 1] = { id = m.id, label = label, price = price, added = true,
+                                image = m.image, color = m.color }
+        elseif isDefault and not on then
+            mods[#mods + 1] = { id = m.id, label = m.label, removed = true,
+                                image = m.image, color = m.color }
+        end
+    end
+    return mods, extra
+end
+
+-- Expand ONE combo cart entry { combo=id, qty, slots={ {key, mods}, ... } } into
+-- component order lines. The chosen key for each slot must be one the combo offers
+-- (a single-option slot defaults if the client omits it); per-item modifiers validate
+-- against that option's own allowed set. The flat combo price rides the FIRST
+-- component line and each component carries its own modifier extras, so the order
+-- total is comboPrice + Σextras while the kitchen (which matches by item, ignoring
+-- price) fulfils every component like a normal single. Returns lines, or nil + error.
+local function resolveComboEntry(c, combo, inst)
+    local qty = math.max(1, math.min(10, math.floor(tonumber(c.qty) or 1)))
+    local size = #combo.slots
+    local out = {}
+    for i, slot in ipairs(combo.slots) do
+        local pick = type(c.slots) == "table" and c.slots[i] or nil
+        local key = pick and pick.key or nil
+        local chosen
+        for _, o in ipairs(slot.options) do
+            if key and o.key == key then chosen = o break end
+        end
+        if not chosen and not key and #slot.options == 1 then chosen = slot.options[1] end
+        if not chosen then return nil, _L("order_combo_bad_option") end
+        local mods, extra = resolveLineModifiers(chosen, pick and pick.mods or nil)
+        local base = (i == 1) and combo.price or 0
+        out[#out + 1] = {
+            item = chosen.item, variant = chosen.variant, label = chosen.label,
+            image = chosen.image or GetItemImage(chosen.item),
+            price = base + extra, qty = qty, kind = chosen.kind,
+            mods = (#mods > 0) and mods or nil,
+            combo = { id = combo.comboId, number = combo.number, label = combo.label,
+                      inst = inst, seq = i, size = size },
+        }
+    end
+    return out, nil
+end
+
 local function resolveOrderLines(id, cart)
     -- Re-derive the priced catalog server-side; the cart is only keys + counts.
     local priced = select(1, BuildPricedCatalog(id, true))
     local byKey = {}
     for _, e in ipairs(priced) do byKey[e.key] = e end
+    -- Combos on a parallel track — indexed by combo id (the cart discriminator).
+    local comboById = {}
+    for _, cb in ipairs(BuildComboCatalog(id)) do comboById[cb.comboId] = cb end
 
-    local lines, total = {}, 0
+    local lines, total, comboInst = {}, 0, 0
     for _, c in ipairs(type(cart) == "table" and cart or {}) do
-        local e = type(c) == "table" and byKey[c.key] or nil
-        if not e then return nil, nil, _L("order_not_priced") end
-        local qty = math.max(1, math.min(10, math.floor(tonumber(c.qty) or 1)))
-
-        -- Resolve the customer's selected modifiers against the entry's allowed
-        -- set (the NUI is untrusted): record only real additions (a non-default
-        -- modifier that's on → +price) and removals (a default that's off). Mods
-        -- are ticket instructions + pricing; the kitchen match is item-only.
-        local unit, mods = e.price, {}
-        if type(e.modifiers) == "table" then
-            local sel, groupTaken = {}, {}
-            if type(c.mods) == "table" then
-                for _, mid in ipairs(c.mods) do sel[tostring(mid)] = true end
+        if type(c) == "table" and c.combo then
+            -- a combo bundle → expand into its component lines
+            local combo = comboById[tonumber(c.combo)]
+            if not combo then return nil, nil, _L("order_combo_unavailable") end
+            comboInst = comboInst + 1
+            local clines, cerr = resolveComboEntry(c, combo, comboInst)
+            if not clines then return nil, nil, cerr end
+            for _, l in ipairs(clines) do
+                lines[#lines + 1] = l
+                total = total + l.price * l.qty
             end
-            for _, m in ipairs(e.modifiers) do
-                local isDefault = m.default == true or m.default == 1
-                local on = sel[tostring(m.id)] == true
-                -- a grouped modifier is single-choice — only the first selected in
-                -- its group counts (the NUI enforces this; re-enforced here)
-                if on and m.group and groupTaken[m.group] then on = false end
-                if on and not isDefault then
-                    if m.group then groupTaken[m.group] = true end
-                    local price = math.max(0, math.floor(tonumber(m.price) or 0))
-                    unit = unit + price
-                    local label = m.group and (tostring(m.group) .. ": " .. tostring(m.label)) or m.label
-                    -- carry the modifier's icon (item image, or flavor colour swatch)
-                    -- so the kitchen ticket can render it as an image, not just text
-                    mods[#mods + 1] = { id = m.id, label = label, price = price, added = true,
-                                        image = m.image, color = m.color }
-                elseif isDefault and not on then
-                    mods[#mods + 1] = { id = m.id, label = m.label, removed = true,
-                                        image = m.image, color = m.color }
-                end
-            end
+        else
+            -- a single à la carte item
+            local e = type(c) == "table" and byKey[c.key] or nil
+            if not e then return nil, nil, _L("order_not_priced") end
+            local qty = math.max(1, math.min(10, math.floor(tonumber(c.qty) or 1)))
+            local mods, extra = resolveLineModifiers(e, c.mods)
+            local unit = e.price + extra
+            lines[#lines + 1] = { item = e.item, variant = e.variant, label = e.label,
+                                  image = e.image or GetItemImage(e.item),
+                                  price = unit, qty = qty, kind = e.kind,
+                                  mods = (#mods > 0) and mods or nil }
+            total = total + unit * qty
         end
-
-        lines[#lines + 1] = { item = e.item, variant = e.variant, label = e.label,
-                              image = e.image or GetItemImage(e.item),
-                              price = unit, qty = qty, kind = e.kind,
-                              mods = (#mods > 0) and mods or nil }
-        total = total + unit * qty
     end
     if #lines == 0 then return nil, nil, _L("order_nothing_selected") end
     return lines, RoundMoney(total)
@@ -741,6 +879,7 @@ lib.callback.register("pickle_restaurants:sales:getKiosk", function(src, d)
         restaurantId = id,
         label        = r.label,
         catalog      = (BuildPricedCatalog(id, true)),
+        combos       = BuildComboCatalog(id), -- orderable combo bundles (parallel to catalog)
         theme        = r.metadata and r.metadata.theme or nil,
     }
 end)

@@ -3,9 +3,11 @@ import { fetchNui } from "@/lib/nui";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { Check, X } from "lucide-react";
+import { groupLines, arr, type Line } from "@/components/OrderBuilder";
 
-type LineMod = { label: string; added?: boolean; removed?: boolean };
-type Line = { label: string; qty: number; price: number; mods?: LineMod[] };
+// One "+cheese / no lettuce" caption for a line's mods.
+const modText = (mods?: { label: string; removed?: boolean }[]) =>
+  (mods || []).map((m) => (m.removed ? "no " + m.label : "+ " + m.label)).join("  ·  ");
 
 // The customer-facing charge prompt, printed as the restaurant's thermal
 // receipt (perforated edges, mono body, the franchise theme rides the payload).
@@ -14,7 +16,7 @@ type Line = { label: string; qty: number; price: number; mods?: LineMod[] };
 // double-fire when the countdown and a button race.
 export default function PayConfirm({ data }: { data: any }) {
   const total: number = data?.total ?? 0;
-  const lines: Line[] = data?.lines || [];
+  const lines: Line[] = arr<Line>(data?.lines);
   const [left, setLeft] = useState(30);
   const answered = useRef(false);
 
@@ -56,23 +58,38 @@ export default function PayConfirm({ data }: { data: any }) {
 
           <div className="receipt-rule my-3" />
 
-          {/* line items — mono, right-aligned prices */}
+          {/* line items — mono, right-aligned prices; combos print as one grouped row */}
           <div className="space-y-1 font-mono text-xs">
-            {lines.map((l, i) => (
-              <div key={i}>
-                <div className="flex items-start justify-between gap-2">
-                  <span className="min-w-0">
-                    {l.qty}× {l.label}
-                  </span>
-                  <span className="shrink-0 tabular-nums">{money(l.price * l.qty)}</span>
-                </div>
-                {l.mods && l.mods.length > 0 && (
-                  <div className="pl-4 text-[10px] leading-snug text-muted-foreground">
-                    {l.mods.map((m) => (m.removed ? "no " + m.label : "+ " + m.label)).join("  ·  ")}
+            {groupLines(lines).map((b, i) => {
+              if (b.type === "item") {
+                const l = b.line;
+                return (
+                  <div key={i}>
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="min-w-0">{l.qty}× {l.label}</span>
+                      <span className="shrink-0 tabular-nums">{money(l.price * l.qty)}</span>
+                    </div>
+                    {l.mods && l.mods.length > 0 && (
+                      <div className="pl-4 text-[10px] leading-snug text-muted-foreground">{modText(l.mods)}</div>
+                    )}
                   </div>
-                )}
-              </div>
-            ))}
+                );
+              }
+              const price = b.comps.reduce((s, c) => s + (c.price || 0), 0);
+              return (
+                <div key={i}>
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="min-w-0">{b.qty}× #{b.number} {b.label}</span>
+                    <span className="shrink-0 tabular-nums">{money(price * b.qty)}</span>
+                  </div>
+                  {b.comps.map((c, j) => (
+                    <div key={j} className="pl-4 text-[10px] leading-snug text-muted-foreground">
+                      {c.label}{c.mods && c.mods.length > 0 ? "  " + modText(c.mods) : ""}
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
           </div>
 
           <div className="receipt-rule my-3" />

@@ -148,7 +148,7 @@ local function payloadFor(t, r)
     if not r then return nil end
     if t.kind == "menu" then
         return { action = "menu", title = r.label, accent = restaurantAccent(r),
-                 items = r.menu or {} }
+                 items = r.menu or {}, combos = r.combos or {} }
     else
         return { action = "orders", title = r.label, accent = restaurantAccent(r),
                  orders = ScreenOrders[r.id] or {} }

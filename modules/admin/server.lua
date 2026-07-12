@@ -106,10 +106,12 @@ lib.callback.register("pickle_restaurants:admin:delete", function(src, d)
     MySQL.update.await("DELETE FROM pickle_restaurant_stock WHERE restaurant_id = ?", { id })
     MySQL.update.await("DELETE FROM pickle_restaurant_ledger WHERE restaurant_id = ?", { id })
     MySQL.update.await("DELETE FROM pickle_restaurant_orders WHERE restaurant_id = ?", { id })
+    MySQL.update.await("DELETE FROM pickle_restaurant_combos WHERE restaurant_id = ?", { id })
     RestaurantCache[id] = nil
     EmployeeCache[id] = nil
     StockCache[id] = nil
     ClearOrders(id) -- drops OrderCache/NextTicket + bumps the rev so a stale register can't re-apply
+    ClearCombos(id) -- drops the combo cache for the deleted restaurant
     for _, pid in ipairs(propIds) do
         PropCache[pid] = nil
         TriggerClientEvent("pickle_restaurants:propRemoved", -1, pid)

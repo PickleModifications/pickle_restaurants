@@ -9,6 +9,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Field, TextField, NumberField, Toggle } from "@/components/form";
 import { type Item } from "@/components/ItemPicker";
 import Branding, { ThemeEditor } from "@/components/Branding";
+import Combos from "@/components/ComboEditor";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { UserPlus, Trash2, Plus, Minus, MapPin, Banknote, Armchair, ImageOff, PackagePlus, ArrowDownToLine, ArrowUpFromLine, Sparkles, Users } from "lucide-react";
@@ -41,6 +42,7 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         <TabsList className="shrink-0">
           {perms.manage_employees && <TabsTrigger value="employees">{_L("mgmt.tab_employees")}</TabsTrigger>}
           {perms.manage_menu && <TabsTrigger value="menu">{_L("mgmt.tab_menu")}</TabsTrigger>}
+          {perms.manage_menu && <TabsTrigger value="combos">{_L("mgmt.tab_combos")}</TabsTrigger>}
           {perms.manage_stock && <TabsTrigger value="supplies">{_L("mgmt.tab_supplies")}</TabsTrigger>}
           {perms.view_finances && <TabsTrigger value="finances">{_L("mgmt.tab_finances")}</TabsTrigger>}
           {perms.manage_props && <TabsTrigger value="stations">{_L("mgmt.tab_stations")}</TabsTrigger>}
@@ -55,6 +57,17 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         {perms.manage_menu && (
           <TabsContent value="menu" className="min-h-0 flex-1 overflow-y-auto pr-1">
             <Menu id={id} priceList={data?.priceList || []} stale={data?.stale || []} />
+          </TabsContent>
+        )}
+        {perms.manage_menu && (
+          <TabsContent value="combos" className="min-h-0 flex-1 overflow-y-auto pr-1">
+            {/* Option picker is over sellable KEYS: map the price list to the ItemPicker
+                shape (name = catalog key, so drink flavors are pickable too). */}
+            <Combos
+              id={id}
+              combos={data?.combos || []}
+              sellables={(data?.priceList || []).map((e: any) => ({ name: e.key, label: e.label, image: e.image }))}
+            />
           </TabsContent>
         )}
         {perms.manage_stock && (

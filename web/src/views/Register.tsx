@@ -9,8 +9,8 @@ import {
   ShoppingCart, Trash2, Check, X, Loader2, ClipboardList, Ban, UtensilsCrossed,
 } from "lucide-react";
 import {
-  OrderBuilder, Thumb, OptRow, arr,
-  type Cat, type Near, type Ticket, type MealOption, type MealItem, type OptView,
+  OrderBuilder, Thumb, OptRow, arr, groupLines,
+  type Cat, type Combo, type Near, type Ticket, type MealOption, type MealItem, type OptView,
 } from "@/components/OrderBuilder";
 import TicketTimer from "@/components/TicketTimer";
 
@@ -19,6 +19,7 @@ export default function Register({ data, onClose }: { data: any; onClose: () => 
   // Catalog + nearby come from the initial open payload (they don't churn while
   // the panel is up).
   const catalog: Cat[] = arr<Cat>(data?.catalog);
+  const combos: Combo[] = arr<Combo>(data?.combos);
   const nearby: Near[] = arr<Near>(data?.nearby);
 
   // The ticket list is LIVE: seeded from the open payload, then kept in sync by
@@ -44,7 +45,7 @@ export default function Register({ data, onClose }: { data: any; onClose: () => 
         </TabsList>
 
         <TabsContent value="new" className="min-h-0 flex-1">
-          <OrderBuilder id={id} catalog={catalog} nearby={nearby} mode="register" />
+          <OrderBuilder id={id} catalog={catalog} combos={combos} nearby={nearby} mode="register" />
         </TabsContent>
 
         {/* not overflow-scrolled here — Tickets owns its own scroll so the meal
@@ -129,18 +130,40 @@ function TicketCard({ id, t, onOpenPicker }: { id: number; t: Ticket; onOpenPick
         </div>
         <div className="receipt-rule mb-2" />
         <div className="mb-3 space-y-1">
-          {t.lines.map((l, i) => {
-            const mods = Array.isArray(l.mods) ? l.mods : [];
-            const added = mods.filter((m) => !m.removed);
-            const removed = mods.filter((m) => m.removed);
-            return (
-              <div key={i} className="flex items-center gap-2 rounded-sm bg-muted/50 p-1.5">
-                <Thumb src={l.image} className="h-9 w-9 shrink-0" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-xs font-medium">{l.label}</div>
-                  <OptRow added={added} removed={removed} />
+          {groupLines(t.lines).map((b, bi) => {
+            if (b.type === "item") {
+              const l = b.line;
+              const mods = Array.isArray(l.mods) ? l.mods : [];
+              return (
+                <div key={bi} className="flex items-center gap-2 rounded-sm bg-muted/50 p-1.5">
+                  <Thumb src={l.image} className="h-9 w-9 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-xs font-medium">{l.label}</div>
+                    <OptRow added={mods.filter((m) => !m.removed)} removed={mods.filter((m) => m.removed)} />
+                  </div>
+                  <span className="shrink-0 font-mono text-xs font-semibold tabular-nums text-muted-foreground">×{l.qty}</span>
                 </div>
-                <span className="shrink-0 font-mono text-xs font-semibold tabular-nums text-muted-foreground">×{l.qty}</span>
+              );
+            }
+            return (
+              <div key={bi} className="rounded-sm bg-muted/50 p-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded bg-primary/15 font-mono text-[10px] font-bold text-primary tabular-nums">#{b.number}</span>
+                  <div className="min-w-0 flex-1 truncate text-xs font-semibold">{b.label}</div>
+                  <span className="shrink-0 font-mono text-xs font-semibold tabular-nums text-muted-foreground">×{b.qty}</span>
+                </div>
+                <div className="mt-1 space-y-0.5 border-l border-border/60 pl-2">
+                  {b.comps.map((l, li) => {
+                    const mods = Array.isArray(l.mods) ? l.mods : [];
+                    return (
+                      <div key={li} className="flex items-center gap-1.5">
+                        <Thumb src={l.image} className="h-6 w-6 shrink-0" />
+                        <span className="truncate text-[11px]">{l.label}</span>
+                        <OptRow added={mods.filter((m) => !m.removed)} removed={mods.filter((m) => m.removed)} />
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             );
           })}
