@@ -8,6 +8,8 @@ local PLACEABLE_MODELS = {
     fryer        = "pickle_fryer_01",
     stovetop     = "pickle_stovetop_01",
     kitchen_prep = "pickle_kitchen_prep_01",
+    -- Self-order kiosk (physical world prop; opens the order NUI, not a station).
+    kiosk        = "pickle_kiosk_large_01",
 }
 
 lib.callback.register("pickle_restaurants:placement:saveProp", function(src, d)

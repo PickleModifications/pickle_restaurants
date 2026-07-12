@@ -10,6 +10,7 @@ RecipesByStation = {}    -- [station]       = { recipe, ... }
 Drinks           = {}    -- soda definitions
 Assembly         = {}    -- kitchen-prep definitions
 Finishes         = {}    -- finish tools (frosting…): tool -> targets -> flavors
+Baking           = {}    -- baking mix + trays: { mix_item, mix_model, rub_dist, trays = {...} }
 
 -- prop_type → localization key (resolved via _L at interaction-build time)
 local STATION_LABELS = {
@@ -148,6 +149,25 @@ local function SpawnProp(prop)
     spawnedProps[prop.id] = ent
     debugPrint(("Spawned prop #%s '%s' at %.2f %.2f %.2f"):format(prop.id, prop.model, prop.x, prop.y, prop.z))
 
+    -- A kiosk is a real world prop but NOT a cooking station: its interaction opens
+    -- the self-service order NUI (modules/sales OpenKiosk) so a customer can place
+    -- an order without a cashier — the order still becomes a kitchen ticket a worker
+    -- fulfils. Re-assert any configured brand now the model exists (its screen is a
+    -- render-target texture; AddReplaceTexture only takes on a streamed model).
+    if prop.prop_type == "kiosk" then
+        if ReassertBrandFor then ReassertBrandFor(prop.model) end
+        propInteractions[prop.id] = CreateInteraction({
+            coords         = vector3(prop.x, prop.y, prop.z),
+            label          = _L("main_use_kiosk"),
+            icon           = "fa-solid fa-utensils",
+            radius         = 1.2,
+            interactRadius = 1.8,
+        }, function()
+            if OpenKiosk then OpenKiosk(prop.restaurant_id) end
+        end)
+        return
+    end
+
     -- Stovetops carry two oven doors that render + sync independently.
     if prop.prop_type == "stovetop" and SpawnOvenDoors then SpawnOvenDoors(prop, ent) end
     -- Let the cooking module (re)seat any oven/fryer items on this station and pick up
@@ -229,6 +249,7 @@ local function ApplySync(payload)
         Drinks   = payload.settings.drinks or {}
         Assembly = payload.settings.assembly or {}
         Finishes = payload.settings.finishes or {}
+        Baking   = payload.settings.baking or {}
         SideContainerModel = payload.settings.side_container_model or ""
     end
 

@@ -4,6 +4,7 @@
 
 -- Paste these entries into qb-core/shared/items.lua
 
+    ['baking_mix'] = { name = 'baking_mix', label = 'Baking Mix', weight = 400, type = 'item', image = 'baking_mix.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Baking Mix' },
     ['bun'] = { name = 'bun', label = 'Burger Bun', weight = 120, type = 'item', image = 'bun.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Burger Bun' },
     ['burger'] = { name = 'burger', label = 'Burger', weight = 350, type = 'item', image = 'burger.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Burger' },
     ['burnt_cake'] = { name = 'burnt_cake', label = 'Burnt Cake', weight = 400, type = 'item', image = 'burnt_cake.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Burnt Cake' },
@@ -13,7 +14,6 @@
     ['burnt_fries'] = { name = 'burnt_fries', label = 'Burnt Fries', weight = 180, type = 'item', image = 'burnt_fries.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Burnt Fries' },
     ['burnt_nuggets'] = { name = 'burnt_nuggets', label = 'Burnt Nuggets', weight = 180, type = 'item', image = 'burnt_nuggets.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Burnt Nuggets' },
     ['burnt_pizza'] = { name = 'burnt_pizza', label = 'Burnt Pizza', weight = 500, type = 'item', image = 'burnt_pizza.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Burnt Pizza' },
-    ['cheese'] = { name = 'cheese', label = 'Cheese Slice', weight = 60, type = 'item', image = 'cheese.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Cheese Slice' },
     ['cheeseburger'] = { name = 'cheeseburger', label = 'Cheeseburger', weight = 380, type = 'item', image = 'cheeseburger.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Cheeseburger' },
     ['chicken_sandwich'] = { name = 'chicken_sandwich', label = 'Chicken Sandwich', weight = 350, type = 'item', image = 'chicken_sandwich.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Chicken Sandwich' },
     ['coffee'] = { name = 'coffee', label = 'Coffee', weight = 300, type = 'item', image = 'coffee.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Coffee' },
@@ -27,6 +27,7 @@
     ['decorated_cake'] = { name = 'decorated_cake', label = 'Decorated Cake', weight = 420, type = 'item', image = 'decorated_cake.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Decorated Cake' },
     ['deluxe_burger'] = { name = 'deluxe_burger', label = 'Deluxe Burger', weight = 420, type = 'item', image = 'deluxe_burger.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Deluxe Burger' },
     ['diet_cola'] = { name = 'diet_cola', label = 'Diet Cola', weight = 300, type = 'item', image = 'diet_cola.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Diet Cola' },
+    ['drink'] = { name = 'drink', label = 'Restaurant Drink', weight = 300, type = 'item', image = 'drink.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Restaurant Drink' },
     ['empty_cup'] = { name = 'empty_cup', label = 'Empty Cup', weight = 100, type = 'item', image = 'empty_cup.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Empty Cup' },
     ['frosted_doughnut'] = { name = 'frosted_doughnut', label = 'Frosted Doughnut', weight = 160, type = 'item', image = 'frosted_doughnut.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Frosted Doughnut' },
     ['frosting'] = { name = 'frosting', label = 'Frosting', weight = 100, type = 'item', image = 'frosting.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Frosting' },
@@ -48,6 +49,7 @@
     ['raw_fries'] = { name = 'raw_fries', label = 'Raw Cut Fries', weight = 180, type = 'item', image = 'raw_fries.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Raw Cut Fries' },
     ['raw_nuggets'] = { name = 'raw_nuggets', label = 'Raw Nuggets', weight = 180, type = 'item', image = 'raw_nuggets.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Raw Nuggets' },
     ['raw_pizza'] = { name = 'raw_pizza', label = 'Uncooked Pizza', weight = 500, type = 'item', image = 'raw_pizza.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Uncooked Pizza' },
+    ['receipt'] = { name = 'receipt', label = 'Receipt', weight = 10, type = 'item', image = 'receipt.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Receipt' },
     ['soda'] = { name = 'soda', label = 'Classic Cola', weight = 300, type = 'item', image = 'soda.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Classic Cola' },
     ['sprinkled_doughnut'] = { name = 'sprinkled_doughnut', label = 'Sprinkled Doughnut', weight = 160, type = 'item', image = 'sprinkled_doughnut.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Sprinkled Doughnut' },
     ['sprinkles'] = { name = 'sprinkles', label = 'Sprinkles', weight = 40, type = 'item', image = 'sprinkles.png', unique = false, useable = true, shouldClose = true, combinable = nil, description = 'Sprinkles' },

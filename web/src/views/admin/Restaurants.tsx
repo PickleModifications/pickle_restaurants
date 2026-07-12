@@ -10,7 +10,7 @@ import { applyTheme, type ThemeConfig } from "@/lib/theme";
 import { money } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X, Building2, Sparkles,
+  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X, Building2, Sparkles, Monitor,
 } from "lucide-react";
 
 const STATIONS = [
@@ -18,6 +18,8 @@ const STATIONS = [
   { key: "fryer", label: _L("admin.station_fryer"), icon: Flame },
   { key: "stovetop", label: _L("admin.station_stovetop"), icon: CookingPot },
   { key: "kitchen_prep", label: _L("admin.station_kitchen_prep"), icon: Sandwich },
+  // Self-service order kiosk — a physical customer terminal, no virtual variant.
+  { key: "kiosk", label: _L("admin.station_kiosk"), icon: Monitor, physicalOnly: true },
 ];
 
 type Focus = { restaurant?: number; section?: string };
@@ -224,7 +226,7 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
             {STATIONS.map((s) => {
               const physical = byType(s.key);
               const virtual = props.filter((p) => p.prop_type === "virtual_point" && p.target === s.key);
-              const isVirtual = (modes[s.key] || "physical") === "virtual";
+              const isVirtual = !s.physicalOnly && (modes[s.key] || "physical") === "virtual";
               const Icon = s.icon;
               return (
                 <div key={s.key}>
@@ -236,6 +238,7 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
                     </div>
                     <div className="flex items-center gap-1.5">
                       {/* physical | virtual placement toggle */}
+                      {!s.physicalOnly && (
                       <div className="flex rounded-md border border-border p-0.5 text-[11px]">
                         <button
                           className={`rounded px-2 py-0.5 transition-colors ${!isVirtual ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
@@ -246,6 +249,7 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
                           onClick={() => setMode(s.key, "virtual")}
                         >{_L("admin.mode_virtual")}</button>
                       </div>
+                      )}
                       <Button
                         size="sm"
                         variant="outline"

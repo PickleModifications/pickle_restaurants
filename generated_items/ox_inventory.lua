@@ -4,6 +4,12 @@
 
 -- Paste these entries into ox_inventory/data/items.lua
 
+    ['baking_mix'] = {
+        label  = 'Baking Mix',
+        weight = 400,
+        stack  = true,
+        close  = true,
+    },
     ['bun'] = {
         label  = 'Burger Bun',
         weight = 120,
@@ -60,12 +66,6 @@
     ['burnt_pizza'] = {
         label  = 'Burnt Pizza',
         weight = 500,
-        stack  = true,
-        close  = true,
-    },
-    ['cheese'] = {
-        label  = 'Cheese Slice',
-        weight = 60,
         stack  = true,
         close  = true,
     },
@@ -203,6 +203,17 @@
     },
     ['diet_cola'] = {
         label  = 'Diet Cola',
+        weight = 300,
+        stack  = true,
+        close  = true,
+        client = {
+            status = { thirst = 200000, },
+            anim = { dict = 'mp_player_intdrink', clip = 'loop_bottle' }, usetime = 2500,
+        },
+        consume = 1,
+    },
+    ['drink'] = {
+        label  = 'Restaurant Drink',
         weight = 300,
         stack  = true,
         close  = true,
@@ -355,6 +366,12 @@
     ['raw_pizza'] = {
         label  = 'Uncooked Pizza',
         weight = 500,
+        stack  = true,
+        close  = true,
+    },
+    ['receipt'] = {
+        label  = 'Receipt',
+        weight = 10,
         stack  = true,
         close  = true,
     },

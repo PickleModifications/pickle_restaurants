@@ -15,6 +15,16 @@ function OpenRegister(restaurantId)
     OpenNUI("register", data)
 end
 
+-- Customer-facing self-service kiosk: opens the SAME priced menu the register
+-- sells, but the customer builds and pays for their own order (no cashier). The
+-- server still turns it into a normal kitchen ticket that staff fulfil at the
+-- register, so nothing about the kitchen/fulfillment flow changes.
+function OpenKiosk(restaurantId)
+    local data = lib.callback.await("pickle_restaurants:sales:getKiosk", false, { id = restaurantId })
+    if not data or not data.ok then return ShowNotification((data and data.error) or _L("sales_kiosk_unavailable")) end
+    OpenNUI("order", data)
+end
+
 -- The restaurant whose corner "Tickets" widget is currently shown (nil = none).
 -- Set/cleared by OpenNUI/CloseNUI for restaurant-scoped experiences.
 TicketWidgetRid = nil
@@ -74,7 +84,7 @@ local function relayOrder(event)
         -- the customer confirm) can drop the NUI cursor, and then the NEXT click —
         -- charging a new order, cancelling the next ticket — silently no-ops. Keep
         -- the panel clickable so back-to-back create/cancel/create always works.
-        if NUIView == "register" then
+        if NUIView == "register" or NUIView == "order" then
             SetNuiFocus(true, true)
             SetNuiFocusKeepInput(false)
         end
@@ -84,6 +94,8 @@ end
 relayOrder("sales:createOrder")
 relayOrder("sales:completeOrder")
 relayOrder("sales:cancelOrder")
+-- The self-service kiosk order (customer pays for their own; becomes a ticket).
+relayOrder("sales:kioskOrder")
 
 -- ─── customer payment confirm ────────────────────────────────────────────────
 -- The server awaits this while the cashier's register shows "waiting". The

@@ -532,22 +532,22 @@ local function orderSummary(lines)
     return table.concat(parts, ", ")
 end
 
--- ─── create order ────────────────────────────────────────────────────────────
-
-lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
-    local id = tonumber(d.id)
-    if not HasPerm(id, src, "sell") then return { ok = false, error = _L("no_work_here") } end
-    local r = GetRestaurant(id); if not r then return { ok = false } end
-
+-- Resolve an untrusted cart ({ key, qty, mods }) against the restaurant's LIVE
+-- priced catalog into validated, priced order lines + the rounded total. Shared by
+-- the staff register (createOrder) and the self-service kiosk (kioskOrder) so both
+-- price, clamp quantities and record/charge modifiers identically. Only real
+-- catalog entries, allowed modifiers and 1..10 quantities survive. Returns
+-- `lines, total` on success, or `nil, nil, errorMessage`.
+local function resolveOrderLines(id, cart)
     -- Re-derive the priced catalog server-side; the cart is only keys + counts.
     local priced = select(1, BuildPricedCatalog(id, true))
     local byKey = {}
     for _, e in ipairs(priced) do byKey[e.key] = e end
 
     local lines, total = {}, 0
-    for _, c in ipairs(type(d.cart) == "table" and d.cart or {}) do
+    for _, c in ipairs(type(cart) == "table" and cart or {}) do
         local e = type(c) == "table" and byKey[c.key] or nil
-        if not e then return { ok = false, error = _L("order_not_priced") } end
+        if not e then return nil, nil, _L("order_not_priced") end
         local qty = math.max(1, math.min(10, math.floor(tonumber(c.qty) or 1)))
 
         -- Resolve the customer's selected modifiers against the entry's allowed
@@ -588,8 +588,20 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
                               mods = (#mods > 0) and mods or nil }
         total = total + unit * qty
     end
-    if #lines == 0 then return { ok = false, error = _L("order_nothing_selected") } end
-    total = RoundMoney(total)
+    if #lines == 0 then return nil, nil, _L("order_nothing_selected") end
+    return lines, RoundMoney(total)
+end
+
+-- ─── create order ────────────────────────────────────────────────────────────
+
+lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
+    local id = tonumber(d.id)
+    if not HasPerm(id, src, "sell") then return { ok = false, error = _L("no_work_here") } end
+    local r = GetRestaurant(id); if not r then return { ok = false } end
+
+    -- Price the untrusted cart into validated order lines (shared with the kiosk).
+    local lines, total, lerr = resolveOrderLines(id, d.cart)
+    if not lines then return { ok = false, error = lerr } end
 
     -- Resolve the paying customer: 0/nil = the cashier buys their own meal.
     local customerSrc = src
@@ -668,6 +680,102 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
     -- (which the acting cashier receives too). The reply never carries the list, so
     -- there is no second, racing update path.
     return { ok = true }
+end)
+
+-- ─── self-service kiosk ──────────────────────────────────────────────────────
+-- A kiosk lets a CUSTOMER order without a cashier: they open the same priced menu
+-- the register sells, build a cart, and pay for their OWN order. It still becomes a
+-- normal kitchen ticket that staff cook and hand over at the register exactly like a
+-- cashier-rung order — the kitchen/fulfillment flow is unchanged. No `sell`
+-- permission (the whole point is ordering unattended); the trust boundary is that
+-- the ordering player must physically be at one of the restaurant's kiosk props.
+
+local KIOSK_REACH = 4.0
+local function PlayerAtKiosk(src, rid)
+    local ped = GetPlayerPed(src)
+    if ped == 0 then return false end
+    local c = GetEntityCoords(ped)
+    for _, p in pairs(PropCache) do
+        if p.restaurant_id == rid and p.prop_type == "kiosk" then
+            if #(c - vector3(p.x + 0.0, p.y + 0.0, p.z + 0.0)) <= KIOSK_REACH then return true end
+        end
+    end
+    return false
+end
+
+-- The kiosk's menu payload — the same priced/enabled catalog the register sells,
+-- plus the restaurant theme so the order NUI is skinned like every scoped panel.
+lib.callback.register("pickle_restaurants:sales:getKiosk", function(src, d)
+    local id = tonumber(d.id)
+    local r = GetRestaurant(id); if not r then return { ok = false, error = _L("order_failed") } end
+    return {
+        ok           = true,
+        restaurantId = id,
+        label        = r.label,
+        catalog      = (BuildPricedCatalog(id, true)),
+        theme        = r.metadata and r.metadata.theme or nil,
+    }
+end)
+
+-- Place a self-service order. The customer pays for their own order (there is no
+-- cashier to charge someone else) and receives the receipt; the order enters the
+-- kitchen queue as an ordinary ticket. No commission is paid at order time (no
+-- serving employee yet) — the restaurant keeps the full sale, and staff fulfil the
+-- ticket at the register like any other.
+lib.callback.register("pickle_restaurants:sales:kioskOrder", function(src, d)
+    local id = tonumber(d.id)
+    local r = GetRestaurant(id); if not r then return { ok = false, error = _L("order_failed") } end
+    if not PlayerAtKiosk(src, id) then return { ok = false, error = _L("kiosk_too_far") } end
+
+    local lines, total, lerr = resolveOrderLines(id, d.cart)
+    if not lines then return { ok = false, error = lerr } end
+
+    -- Re-check funds here; the real charge is inside the guarded block below.
+    if GetMoney(src, "money") < total then return { ok = false, error = _L("not_enough_cash") } end
+
+    -- Create the row FIRST (a create failure never takes money), then charge, then
+    -- best-effort side-effects — mirroring createOrder so a throw can never leave
+    -- "charged, no ticket". The customer is their own cashier (self-service).
+    local customerId = GetIdentifier(src)
+    local ticketNo
+    local ok, err = pcall(function()
+        local order = CreateOrder(id, {
+            customer_identifier = customerId,
+            customer_name       = GetPlayerCharacterName(src),
+            cashier_identifier  = customerId,
+            lines               = lines,
+            total               = total,
+        })
+        ticketNo = order.ticket
+
+        RemoveMoney(src, total, "money")
+        AdjustBalance(id, total)
+
+        local summary = orderSummary(lines)
+        AddLedger(id, "sale", total, ("Ticket #%d — %s (kiosk)"):format(order.ticket, summary):sub(1, 255), customerId)
+
+        -- Hand the customer their receipt (metadata carries the ticket, so the same
+        -- item verifies the right order at completion). Skipped gracefully when the
+        -- receipt item isn't installed — the ticket alone still drives fulfillment.
+        if ItemExists(ReceiptItem()) then
+            Inventory.AddItem(src, ReceiptItem(), 1, {
+                order_id      = order.id,
+                restaurant_id = id,
+                ticket        = order.ticket,
+                description   = ("%s — Ticket #%d: %s (%s)"):format(r.label, order.ticket, summary, GetCurrencyString(total)),
+            })
+        end
+
+        ShowNotification(src, _L("order_placed", order.ticket))
+    end)
+    if not ok then
+        print(("[pickle_restaurants] kioskOrder failed: %s"):format(tostring(err)))
+        return { ok = false, error = _L("order_failed") }
+    end
+
+    -- Broadcast the new ticket to every open register / Tickets widget.
+    SyncOrders(id)
+    return { ok = true, ticket = ticketNo }
 end)
 
 -- ─── complete order ──────────────────────────────────────────────────────────

@@ -341,6 +341,9 @@ function Stations({ id, props, hasShell, focusSection }: any) {
     { key: "fryer", label: _L("admin.station_fryer") },
     { key: "stovetop", label: _L("admin.station_stovetop") },
     { key: "kitchen_prep", label: _L("admin.station_kitchen_prep") },
+    // The self-service kiosk is a customer ORDER terminal, not a cooking station,
+    // so it's placed as a physical world prop only (no virtual-kitchen variant).
+    { key: "kiosk", label: _L("admin.station_kiosk"), physicalOnly: true },
   ];
   const seats = (props as any[]).filter((p) => p.prop_type === "seat");
   const [modes, setModes] = useState<Record<string, "physical" | "virtual">>({});
@@ -374,7 +377,7 @@ function Stations({ id, props, hasShell, focusSection }: any) {
             {STATIONS.map((s) => {
               const physical = (props as any[]).filter((p) => p.prop_type === s.key);
               const virtual = (props as any[]).filter((p) => p.prop_type === "virtual_point" && p.target === s.key);
-              const isVirtual = (modes[s.key] || "physical") === "virtual";
+              const isVirtual = !s.physicalOnly && (modes[s.key] || "physical") === "virtual";
               return (
                 <div key={s.key}>
                   <div className="mb-1.5 flex items-center justify-between gap-2">
@@ -383,6 +386,7 @@ function Stations({ id, props, hasShell, focusSection }: any) {
                       <Badge variant="secondary">{physical.length + virtual.length}</Badge>
                     </div>
                     <div className="flex items-center gap-1.5">
+                      {!s.physicalOnly && (
                       <div className="flex rounded-md border border-border p-0.5 text-[11px]">
                         <button
                           className={cn("rounded px-2 py-0.5 transition-colors", !isVirtual ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}
@@ -393,6 +397,7 @@ function Stations({ id, props, hasShell, focusSection }: any) {
                           onClick={() => setMode(s.key, "virtual")}
                         >{_L("mgmt.mode_virtual")}</button>
                       </div>
+                      )}
                       <Button
                         variant="outline"
                         size="sm"

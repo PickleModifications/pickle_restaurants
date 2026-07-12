@@ -37,6 +37,7 @@ local KNOWN = {
     cooked_cookie        = { label = "Cookie",               weight = 120, hunger = 90000  },
     burnt_cookie         = { label = "Burnt Cookie",         weight = 120 },
     raw_cake             = { label = "Cake Batter",          weight = 400 },
+    baking_mix           = { label = "Baking Mix",           weight = 400 },
     cooked_cake          = { label = "Cake",                 weight = 400, hunger = 200000 },
     burnt_cake           = { label = "Burnt Cake",           weight = 400 },
     lettuce              = { label = "Lettuce",              weight = 80  },
@@ -142,6 +143,17 @@ local function collectItems()
     for _, f in ipairs(GetSetting("finishes", {})) do
         add(f.tool)
         for _, t in ipairs(f.targets or {}) do add(t.item); add(t.output) end
+    end
+    -- baking mix + tray outputs: the shared mix is a real (consumed) raw ingredient,
+    -- and each tray's output (raw_cake / raw_cookie) is a real carried item — neither
+    -- is a recipe input the loop above would have picked up on its own. (The trays
+    -- themselves are free equipment, never items.)
+    do
+        local baking = GetSetting("baking", {})
+        if type(baking) == "table" then
+            add(baking.mix_item)
+            for _, t in ipairs(baking.trays or {}) do add(t.output) end
+        end
     end
     -- any item an admin mapped to a prep prop is a real item too (sprinkles etc.,
     -- optional toppings that aren't a required component of any recipe)

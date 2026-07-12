@@ -9,6 +9,11 @@ PLACEABLE_MODELS = {
     fryer        = "pickle_fryer_01",
     stovetop     = "pickle_stovetop_01",
     kitchen_prep = "pickle_kitchen_prep_01",
+    -- The kiosk is a customer-facing SELF-ORDER terminal, not a cooking station:
+    -- its interaction opens the order NUI (modules/sales OpenKiosk), and the order
+    -- becomes an ordinary kitchen ticket a worker fulfils. Physical-only (no virtual
+    -- point — it must be a reachable world prop), so it is NOT in VIRTUAL_TARGETS.
+    kiosk        = "pickle_kiosk_large_01",
 }
 
 function StartPropPlacement(restaurantId, propType)

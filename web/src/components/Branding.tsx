@@ -161,6 +161,7 @@ const BRAND_TEXTURES: { key: string; label: string; w: number; h: number; hint: 
   { key: "cup", label: _L("branding.tex_cup_label"), w: 1024, h: 1792, hint: _L("branding.tex_cup_hint") },
   { key: "tray", label: _L("branding.tex_tray_label"), w: 1792, h: 1024, hint: _L("branding.tex_tray_hint") },
   { key: "side", label: _L("branding.tex_side_label"), w: 2304, h: 1024, hint: _L("branding.tex_side_hint") },
+  { key: "kiosk", label: _L("branding.tex_kiosk_label"), w: 1080, h: 1920, hint: _L("branding.tex_kiosk_hint") },
 ];
 
 type Crop = { x: number; y: number; w: number; h: number };

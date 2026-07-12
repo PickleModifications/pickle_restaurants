@@ -50,6 +50,13 @@ end)
 -- counts they show — items aren't consumed until Make, but the bar reflects them
 -- as "spoken for" the moment they're placed on the table.
 local PrepBuilds = {} -- [src] = { prop_id, rid, seq, layers = { {id, source, item, cheese, half} … } }
+-- Filled baking trays awaiting collection. Rubbing the mix into a tray consumes 1
+-- mix immediately (cheat-safe: you can't conjure a raw bake without spending mix)
+-- and records a pending credit here; dragging the filled tray to the hotbar redeems
+-- one credit for its output item. Un-redeemed credits are refunded to the pool when
+-- the cook leaves the station or disconnects.
+--   BakePending[src] = { rid, mix, outs = { [output_item] = count } }
+local BakePending = {}
 local layerUnits      -- fwd: units a single layer contributes (bun half = 0.5)
 local reservedUnits   -- fwd: units of (source,item,cheese) a build already reserved
 
@@ -681,6 +688,10 @@ end)
 -- everywhere it appears. Returns the (possibly created) stack, or nil untouched.
 local function withContainer(recipe, models, baseModel)
     if not (recipe and recipe.container_model and recipe.container_model ~= "") then return models end
+    -- A batch recipe (output_count > 1, e.g. the six-cookie tray) is collected as
+    -- individual servings, so the container tray rides only the cooking batch in the
+    -- oven — never each collected output. A whole bake (cake, output_count 1) keeps it.
+    if (tonumber(recipe.output_count) or 1) > 1 then return models end
     models = models or { baseModel }
     table.insert(models, 1, recipe.container_model)
     return models
@@ -1055,6 +1066,24 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         -- same meal item — flagged so it sets back down as its box, not a tray.
         out[#out + 1] = { kind = "pizzabox", item = MealItem(), label = "Pizza Box",
                           image = GetItemImage(MealItem()) }
+        -- Baking trays (cake tin / cookie tray) follow the same free-equipment
+        -- pattern: drag one out, rub the shared baking mix over it to fill it, then
+        -- drag the filled tray into the hotbar to collect its oven-ready output
+        -- (raw_cake / raw_cookie). Also filed under the COOKED ITEMS tab. `bakeMixItem`
+        -- is captured here so the component loop below can exclude the mix (it has its
+        -- own applicator card, like the finish tools).
+        local baking = GetSetting("baking", {})
+        local bakeMixItem = (type(baking) == "table") and baking.mix_item or nil
+        if type(baking) == "table" and baking.trays then
+            for _, t in ipairs(baking.trays) do
+                -- gate on the output being a real item (same as BuildSyncPayload ships),
+                -- so the card can't appear for a kind the client won't recognise
+                if t.kind and t.tray_model and ItemExists(t.output)
+                    and RestaurantHasAccess(prop.restaurant_id, t.group) then
+                    out[#out + 1] = { kind = "baketray", subkind = t.kind, label = t.label or t.kind }
+                end
+            end
+        end
         -- Finish tools (frosting…) are draggable applicators, flavor picked on the
         -- card itself. The card shows the union of every valid target's flavors;
         -- per-target validity is enforced while rubbing and again at apply time.
@@ -1087,13 +1116,28 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
                 end
             end
         end
+        -- The baking mix applicator card: rubbed over a placed cake tin / cookie tray
+        -- to fill it. Held from the shared pool like a finish tool; shown only when in
+        -- stock (and only if the restaurant has access to at least one tray group).
+        if bakeMixItem and ItemExists(bakeMixItem) then
+            local hasTrayAccess = false
+            for _, t in ipairs((type(baking) == "table" and baking.trays) or {}) do
+                if RestaurantHasAccess(prop.restaurant_id, t.group) then hasTrayAccess = true break end
+            end
+            local count = hasTrayAccess and poolInvCount(src, rid, bakeMixItem) or 0
+            if count > 0 then
+                out[#out + 1] = { kind = "bakemix", item = bakeMixItem, label = GetItemLabel(bakeMixItem),
+                                  image = GetItemImage(bakeMixItem), count = count,
+                                  model = (type(baking) == "table") and baking.mix_model or nil }
+            end
+        end
         local build = PrepBuilds[src]
         local seen = {}
         local function addComp(comp)
             -- Products (cook/assembly outputs — a cooked patty, a burger) are never
             -- "ingredients": inventory-held ones file under the Cooked/Uncooked tabs.
             -- Finish tools already have their own applicator card above.
-            if seen[comp] or finishTools[comp] or not ItemExists(comp) or isTrayItem(comp) then return end
+            if seen[comp] or finishTools[comp] or comp == bakeMixItem or not ItemExists(comp) or isTrayItem(comp) then return end
             seen[comp] = true
             local count = poolInvCount(src, rid, comp)
             if count <= 0 then return end
@@ -1226,8 +1270,18 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
             -- stackBase layer swaps models as it cooks; the container rides along
             -- un-swapped and despawns with the stack. Never an item.
             if recipe.container_model and recipe.container_model ~= "" then
-                stackModels = stackModels or { recipe.raw_model }
-                table.insert(stackModels, 1, recipe.container_model)
+                local n = tonumber(recipe.output_count) or 1
+                if n > 1 and not (stackModels and #stackModels > 1) then
+                    -- A batch bake (the six-cookie tray): the container holds N copies of
+                    -- the raw model, laid out as a grid client-side. They cook together
+                    -- (the client swaps every matching layer by cook state) and collect as
+                    -- N individual servings when done.
+                    stackModels = { recipe.container_model }
+                    for _ = 1, n do stackModels[#stackModels + 1] = recipe.raw_model end
+                else
+                    stackModels = stackModels or { recipe.raw_model }
+                    table.insert(stackModels, 1, recipe.container_model)
+                end
             end
 
             consume()
@@ -2357,6 +2411,70 @@ lib.callback.register("pickle_restaurants:cooking:applyFinish", function(src, d)
              sig = TraySig(meta), spec = compSpec({ item = target.output, cheese = 0, stack = meta }) }
 end)
 
+-- Refund any un-redeemed filled-tray credits back to the shared pool. Refunds to the
+-- larder even if the mix originally came from a cook's pockets (the abandoned-fill
+-- edge case) — never destroys value, at worst gifts the restaurant a little stock.
+local function refundBakePending(src)
+    local p = BakePending[src]
+    if not p then return end
+    local total = 0
+    for _, n in pairs(p.outs or {}) do total = total + (tonumber(n) or 0) end
+    if total > 0 and p.mix and p.rid then AddStock(p.rid, p.mix, total) end
+    BakePending[src] = nil
+end
+
+-- Rub-to-fill: a placed cake tin / cookie tray is filled with the shared baking mix.
+-- Consumes 1 mix from the pool (personal inventory once dry) and records a pending
+-- credit for the tray's oven-ready output. The tray itself is free client equipment.
+lib.callback.register("pickle_restaurants:cooking:fillBakeTray", function(src, d)
+    local prop = PropCache[tonumber(d and d.prop_id)]
+    if not prop or StationType(prop) ~= "kitchen_prep" then return { ok = false } end
+    local rid = prop.restaurant_id
+    if not HasPerm(rid, src, "cook") then return { ok = false } end
+    local baking = GetSetting("baking", {})
+    if type(baking) ~= "table" or not baking.mix_item or not ItemExists(baking.mix_item) then
+        return { ok = false }
+    end
+    local mix = baking.mix_item
+    local tray
+    for _, t in ipairs(baking.trays or {}) do
+        if t.kind == (d and d.kind) then tray = t break end
+    end
+    if not tray or not tray.output then return { ok = false } end
+    if not RestaurantHasAccess(rid, tray.group) then return { ok = false, error = _L("cook_cant_apply") } end
+    -- The output must be a real installed item — it's handed to the inventory on collect.
+    if not ItemExists(tray.output) then return { ok = false, error = _L("cook_item_not_installed", tray.output) } end
+    if poolInvCount(src, rid, mix) < 1 then
+        return { ok = false, error = _L("cook_no_tool_left", GetItemLabel(mix)) }
+    end
+    poolInvConsume(src, rid, mix, 1)
+    local p = BakePending[src]
+    -- switching restaurants without a station close: refund the old larder's un-redeemed
+    -- credits before starting a fresh tally, so they're never silently dropped
+    if p and p.rid ~= rid then refundBakePending(src); p = nil end
+    if not p then p = { rid = rid, mix = mix, outs = {} }; BakePending[src] = p end
+    p.outs[tray.output] = (p.outs[tray.output] or 0) + 1
+    return { ok = true, output = tray.output, label = GetItemLabel(tray.output) }
+end)
+
+-- Collect a filled baking tray into the hotbar: redeems one pending credit for its
+-- output item. The mix was already spent at fill time, so this only grants the item.
+lib.callback.register("pickle_restaurants:cooking:bakeTrayToInv", function(src, d)
+    local prop = PropCache[tonumber(d and d.prop_id)]
+    if not prop then return { ok = false } end
+    local rid = prop.restaurant_id
+    if not HasPerm(rid, src, "cook") then return { ok = false } end
+    local output = d and d.output
+    local p = BakePending[src]
+    if not output or not p or (p.outs[output] or 0) < 1 then
+        return { ok = false, error = _L("cook_item_changed") }
+    end
+    if not ItemExists(output) then return { ok = false, error = _L("cook_item_not_installed", output) } end
+    p.outs[output] = p.outs[output] - 1
+    Inventory.AddItem(src, output, 1)
+    return { ok = true, item = output, count = 1, label = GetItemLabel(output) }
+end)
+
 -- Save a whole stack as its CLOSEST product — the drag-whole-stack-to-hotbar and
 -- exit path. Auto-picks the most specific recipe the stack satisfies and makes it,
 -- variation preserved; returns noMatch when the stack forms no product (the caller
@@ -2499,8 +2617,14 @@ lib.callback.register("pickle_restaurants:cooking:prepDecomposePeek", function(s
 end)
 
 -- closing the station / dropping just discards the reservation (nothing consumed)
-RegisterNetEvent("pickle_restaurants:cooking:prepClose", function() PrepBuilds[source] = nil end)
-AddEventHandler("playerDropped", function() PrepBuilds[source] = nil end)
+RegisterNetEvent("pickle_restaurants:cooking:prepClose", function()
+    PrepBuilds[source] = nil
+    refundBakePending(source)
+end)
+AddEventHandler("playerDropped", function()
+    PrepBuilds[source] = nil
+    refundBakePending(source)
+end)
 
 -- send active items to clients that (re)sync
 RegisterNetEvent("pickle_restaurants:requestSync", function()

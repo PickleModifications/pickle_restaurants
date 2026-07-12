@@ -44,11 +44,20 @@
 -- Omit for "upright" (the default). Tune live with /pickle_brand_orient, then bake the
 -- number in here. rot 90/270 swaps which way the image is fitted, so keep the w/h aspect
 -- as the texture's real pixel aspect and let rot handle the turn.
+-- `debugGap` (optional) is the FOOTPRINT the /pickle_brand_debug row reserves for
+-- this model — the big kiosk needs far more room than a cup/box so the calibration
+-- props don't overlap. Defaults to 0.8 when omitted.
 local TARGETS = {
     { key = "pizza_box", txd = "pickle_pizza_box_02",       txn = "pizza_brand",              w = 1024, h = 1024, rot = 270, flipx = false, flipy = false },
     { key = "cup",       txd = "pickle_drink_container_01",  txn = "cup_brand",                w = 1024, h = 1792, rot = 90, flipx = false, flipy = false },
     { key = "tray",      txd = "pickle_tray_paper_01",       txn = "tray_paper",               w = 1792, h = 1024, rot = 180, flipx = false, flipy = false },
     { key = "side",      txd = "pickle_side_container_01",   txn = "side_container_brand_01",  w = 2304, h = 1024, rot = 0, flipx = false, flipy = false },
+    -- The self-order kiosk's brand SCREEN. Both kiosk models embed a
+    -- `kiosk_large_brand` texture; only pickle_kiosk_large_01 is placeable, so it's
+    -- the only txd to swap. Portrait default (a tall menu screen) — tune the aspect
+    -- live with /pickle_brand_res kiosk <w> <h> and orientation with
+    -- /pickle_brand_orient kiosk, then bake the numbers here + into BRAND_TEXTURES.
+    { key = "kiosk",     txd = "pickle_kiosk_large_01",      txn = "kiosk_large_brand",        w = 1080, h = 1920, rot = 0, flipx = false, flipy = false, debugGap = 3.5 },
 }
 local TARGET_BY_KEY, TARGET_BY_MODEL = {}, {}
 for _, t in ipairs(TARGETS) do TARGET_BY_KEY[t.key] = t; TARGET_BY_MODEL[t.txd] = t end
@@ -390,12 +399,17 @@ RegisterCommand("pickle_brand_debug", function(_, args)
             while t.dui and not IsDuiAvailable(t.dui) and GetGameTimer() - t0 < 3000 do Wait(50) end
         end
         Wait(300) -- let brand.html fetch + paint before the props stream in
-        local i = 0
+        -- Lay the props out along X, each centred in its own footprint (debugGap)
+        -- with half-gap padding on both sides, so a wide model (the kiosk) never
+        -- overlaps its neighbours the way a fixed 0.8m step did.
+        local x = DEBUG_COORD.x
         for _, t in ipairs(TARGETS) do
+            local half = (t.debugGap or 0.8) * 0.5
+            x = x + half
             -- txd == model name for these props, so it doubles as the model to spawn
-            local ent = spawnModel(t.txd, DEBUG_COORD.x + i * 0.8, DEBUG_COORD.y, DEBUG_COORD.z)
+            local ent = spawnModel(t.txd, x, DEBUG_COORD.y, DEBUG_COORD.z)
             if ent then debugProps[#debugProps + 1] = ent end
-            i = i + 1
+            x = x + half
         end
         print(("[brand] debug zone: spawned %d/%d models -> %s")
             :format(#debugProps, #TARGETS, debugForce.calib and "calibration grid" or debugForce.url))

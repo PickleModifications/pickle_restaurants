@@ -306,7 +306,7 @@ end)
 -- (pizza box, cup, tray paper, side container). Without `key` this sets the SHARED
 -- default (`brand_image`, used by any texture with no override); with a `key` it sets
 -- that one texture's override (`brand_images[key]`). Blank clears the entry.
-local BRAND_KEYS = { pizza_box = true, cup = true, tray = true, side = true }
+local BRAND_KEYS = { pizza_box = true, cup = true, tray = true, side = true, kiosk = true }
 
 -- A crop is a normalised SOURCE rectangle { x, y, w, h } (0..1) into the image; the
 -- client draws exactly that region onto the texture. Sanitise to 4 numbers within

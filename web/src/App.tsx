@@ -8,9 +8,10 @@ import Cooking from "@/views/Cooking";
 import Admin from "@/views/Admin";
 import Management from "@/views/Management";
 import Register from "@/views/Register";
+import Order from "@/views/Order";
 import PayConfirm from "@/views/PayConfirm";
 
-type View = "none" | "cooking" | "admin" | "management" | "register" | "payconfirm";
+type View = "none" | "cooking" | "admin" | "management" | "register" | "order" | "payconfirm";
 
 // Contains a render error in any single view (e.g. a malformed payload) so it
 // can't white-screen the whole NUI — the panel closes and control returns to the
@@ -82,6 +83,7 @@ export default function App() {
           {view === "admin" && <Admin data={data} onClose={close} />}
           {view === "management" && <Management data={data} onClose={close} />}
           {view === "register" && <Register data={data} onClose={close} />}
+          {view === "order" && <Order data={data} onClose={close} />}
           {view === "payconfirm" && <PayConfirm data={data} />}
         </ViewErrorBoundary>
       )}

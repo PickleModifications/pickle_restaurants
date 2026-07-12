@@ -34,6 +34,11 @@ local moving  = nil -- live drag of an already-placed prop: { uid, hit, coords, 
 -- rubbed over a placed prep part; the result prop fades in with tool travel.
 -- { tube, cfg, flavor, ghosts = {[pid] = {ent, sid, idx}}, coverage = {[pid] = m}, last, applying }
 local finishing = nil
+-- live baking-mix drag: the mix bowl follows the cursor and is rubbed over a placed
+-- EMPTY baking tray; the raw sheet/dough fades in with travel, and at full coverage
+-- the tray fills (server consumes 1 mix). { prop, ghosts = {[tid]={ent}}, coverage =
+-- {[tid]=m}, last, applying }
+local bakeMixing = nil
 
 -- Stacked-face framing for dual patties. Two face props stacked back-to-back:
 -- the BOTTOM face sits on the grill and is the one that cooks; the TOP face is
@@ -255,6 +260,40 @@ local function stackBaseLift(model)
     if not isContainer then return 0.0 end
     local mn = GetModelDimensions(EnsureModel(model))
     return mn and math.max(-(mn.z + STACK_PHYS_MARGIN), 0.0) or 0.0
+end
+
+-- Is `model` a recipe container tray (cake tin / cookie tray) or the side box? Used
+-- to recognise a containered BATCH bake so its many servings lay out as a grid ON the
+-- tray instead of a vertical tower.
+local function isContainerModel(model)
+    if not model then return false end
+    if SideContainerModel and SideContainerModel ~= "" and model == SideContainerModel then return true end
+    for _, r in pairs(RecipesByInput or {}) do
+        if r.container_model == model then return true end
+    end
+    return false
+end
+
+-- Even (dx, dy) tray positions for `n` servings inside a container of half-extents
+-- (hx, hy): up to 3 columns, rows as needed, centred on the tray. Tray-local metres
+-- (the caller rotates them to the tray's heading). Used by the oven batch render and
+-- the prep baking tray so both show the same six-cookie layout.
+local function batchGridOffsets(n, hx, hy)
+    if n <= 1 then return { { dx = 0.0, dy = 0.0 } } end
+    local cols = math.min(n, 3)
+    local rows = math.ceil(n / cols)
+    -- keep servings inside the rim: span ~70% of the usable half-extent
+    local spanx, spany = hx * 0.7, hy * 0.7
+    local offs = {}
+    for i = 0, n - 1 do
+        local r = math.floor(i / cols)
+        local c = i % cols
+        local rowN = math.min(cols, n - r * cols) -- last row may hold fewer, still centred
+        local dx = (rowN == 1) and 0.0 or (-1.0 + 2.0 * (c / (rowN - 1))) * spanx
+        local dy = (rows == 1) and 0.0 or (-1.0 + 2.0 * (r / (rows - 1))) * spany
+        offs[#offs + 1] = { dx = dx, dy = dy }
+    end
+    return offs
 end
 
 -- A stacked topping (pizza cheese/pepperoni) that has a cooked look follows the
@@ -543,7 +582,7 @@ local function seatSlotItem(uid, fryerZ)
     local st = CookSlotStack[uid]
     if s.method == "oven" then
         if st then
-            if SeatOvenSlotStack then SeatOvenSlotStack(s.propId, s.door, s.slot, st.ents, st.heights, st.baseDz, st.rolls) end
+            if SeatOvenSlotStack then SeatOvenSlotStack(s.propId, s.door, s.slot, st.ents, st.heights, st.baseDz, st.rolls, st.offsets) end
         elseif SeatOvenSlot then SeatOvenSlot(s.propId, s.door, s.slot, ent) end
     else
         local station = GetStationEntity and GetStationEntity(s.propId)
@@ -822,19 +861,42 @@ local function SpawnSlotObject(uid, model, propId, method, door, slot, state, st
     if type(stack) == "table" and #stack > 1 then
         -- expand a dual patty layer into its two faces; cookedVariant already applied
         local mdls, heights, rolls = expandStackLayers(stack, state)
-        local ents, hs, rl = {}, {}, {}
+        -- A containered BATCH bake (the six-cookie tray) is a container base with two or
+        -- more identical servings on top: lay them out as a grid ON the tray (all at the
+        -- tray-top height, spread in xy) instead of a vertical tower. Any other stack
+        -- (pizza, a single-serving cake) keeps the normal vertical stacking.
+        -- Detect on the EXPANDED models (cookedVariant applied): as it bakes the server
+        -- only swaps the one stackBase layer, so the raw `stack` array has mixed models,
+        -- but every serving normalises to the same cook variant here.
+        local offs = nil
+        if #mdls == #stack and #mdls >= 3 and isContainerModel(mdls[1]) then
+            local same = true
+            for i = 3, #mdls do if mdls[i] ~= mdls[2] then same = false break end end
+            if same then
+                local mn, mx = GetModelDimensions(EnsureModel(mdls[1]))
+                local hx = (mn and mx) and math.max((mx.x - mn.x) * 0.5 - 0.03, 0.05) or 0.12
+                local hy = (mn and mx) and math.max((mx.y - mn.y) * 0.5 - 0.03, 0.05) or 0.08
+                local grid = batchGridOffsets(#mdls - 1, hx, hy)
+                offs = { { dx = 0.0, dy = 0.0 } } -- container centred
+                for i = 1, #grid do offs[#offs + 1] = grid[i] end
+                for i = 2, #heights do heights[i] = 0.0 end -- servings share the tray-top z
+            end
+        end
+        local ents, hs, rl, of = {}, {}, {}, {}
         for i, mdl in ipairs(mdls) do
             local e = SpawnProp(mdl, 0.0, 0.0, 0.0)
             if e then
                 ents[#ents + 1] = e
                 hs[#hs + 1] = heights[i]
                 rl[#rl + 1] = rolls[i]
+                of[#of + 1] = offs and offs[i] or nil
                 CookEntityUid[e] = uid
             end
         end
         if #ents > 0 then
             CookObjects[uid] = ents[1] -- base prop drives the hover chip projection
-            CookSlotStack[uid] = { ents = ents, heights = hs, rolls = rl, baseDz = stackBaseLift(stack[1]) }
+            CookSlotStack[uid] = { ents = ents, heights = hs, rolls = rl,
+                                   offsets = offs and of or nil, baseDz = stackBaseLift(stack[1]) }
             seatSlotItem(uid)
             return
         end
@@ -1769,10 +1831,44 @@ end
 -- The serving tray and the pizza box share all the placement/pick machinery —
 -- `kind` ("tray" | "box", nil = "tray") picks which pair of props and which
 -- config drives the footprint maths.
+-- Baking trays (cake tin / cookie tray) are FREE prep equipment like the serving
+-- tray: a single container prop you drag onto the table, rub the shared baking mix
+-- into (coverage accrues, the raw sheet/dough fades in), then drag into the hotbar
+-- to collect its oven-ready output. They live in PrepTrays keyed by their config
+-- `kind` (from the synced Baking.trays), so placement, hover, outline and grab all
+-- reuse the tray machinery; food-drop and meal-making are gated off (a bake tray
+-- never accepts loose food and never makes a meal — see runDragThread / prepDrop).
+local BAKEP = {
+    food_dz   = 0.0,   -- raw sheet/dough lift above the tray bed. TUNE IN-GAME.
+    rim_inset = 0.05,  -- (unused for food-drop, kept for trayCfg parity)
+    pick_pad  = 0.03,  -- extra grab margin (m) around the tray footprint
+    pick_dz   = 0.4,   -- max height diff between the cursor's surface hit and the tray
+}
+-- The synced Baking.trays entry for a kind (nil if it isn't a baking-tray kind).
+local function bakeEntryFor(kind)
+    if not kind then return nil end
+    for _, t in ipairs((type(Baking) == "table" and Baking.trays) or {}) do
+        if t.kind == kind then return t end
+    end
+end
+local function isBakeKind(kind) return bakeEntryFor(kind) ~= nil end
+-- How many servings a baking tray holds: its config `slots`, else the bake recipe's
+-- output_count (a cookie tray bakes into six), else one (a cake tin).
+local function bakeSlotCount(kind)
+    local be = bakeEntryFor(kind)
+    if be and tonumber(be.slots) then return math.max(1, math.floor(tonumber(be.slots))) end
+    local rec = be and be.output and RecipesByInput and RecipesByInput[be.output]
+    if rec and tonumber(rec.output_count) then return math.max(1, math.floor(tonumber(rec.output_count))) end
+    return 1
+end
+
 local function trayCfg(kind)
+    if isBakeKind(kind) then return BAKEP end
     return kind == "box" and BOXP or TRAYP
 end
 local function trayBaseModel(kind)
+    local be = bakeEntryFor(kind)
+    if be then return be.tray_model end
     return kind == "box" and BOXP.base_model or TRAYP.tray_model
 end
 
@@ -1780,6 +1876,7 @@ end
 -- doesn't z-fight the surface under it.
 local function trayFoodDz(kind)
     if kind == "box" then return BOXP.food_dz end
+    if isBakeKind(kind) then return BAKEP.food_dz end
     return TRAYP.paper_dz + 0.002
 end
 
@@ -1820,6 +1917,29 @@ end
 -- each prop corrected for its own origin offset.
 local function layoutTrayAt(ents, x, y, z, kind, openT)
     local yaw = curYaw() -- faces the prep station, not the world axes
+    if isBakeKind(kind) then
+        -- container prop (ents[1]) + one serving prop per slot (ents[2..], present once
+        -- filled) laid out as a grid ON the tray bed. All face the station.
+        local base = ents and ents[1]
+        if base and DoesEntityExist(base) then
+            SetEntityCoordsNoOffset(base, x, y, z + modelBaseLift(trayBaseModel(kind)), false, false, false)
+            SetEntityRotation(base, 0.0, 0.0, yaw, 2, true)
+        end
+        local hx, hy = trayHalfExtents(kind)
+        local offs = batchGridOffsets(bakeSlotCount(kind), hx, hy)
+        local hr, fz = math.rad(yaw), z + trayFoodDz(kind)
+        for i = 2, #(ents or {}) do
+            local e = ents[i]
+            local ofs = offs[i - 1] or { dx = 0.0, dy = 0.0 }
+            if e and DoesEntityExist(e) then
+                SetEntityCoordsNoOffset(e, x + ofs.dx * math.cos(hr) - ofs.dy * math.sin(hr),
+                                           y + ofs.dx * math.sin(hr) + ofs.dy * math.cos(hr),
+                                           fz, false, false, false)
+                SetEntityRotation(e, 0.0, 0.0, yaw, 2, true)
+            end
+        end
+        return
+    end
     if kind == "box" then
         local base = ents and ents[1]
         if base and DoesEntityExist(base) then
@@ -1843,6 +1963,13 @@ local function layoutTrayAt(ents, x, y, z, kind, openT)
 end
 
 local function spawnTrayEnts(x, y, z, kind, openT)
+    if isBakeKind(kind) then
+        local base = SpawnProp(trayBaseModel(kind), x, y, z)
+        if not base then return nil end
+        local ents = { base }
+        layoutTrayAt(ents, x, y, z, kind, openT)
+        return ents
+    end
     local m1, m2 = TRAYP.tray_model, TRAYP.paper_model
     if kind == "box" then m1, m2 = BOXP.base_model, BOXP.lid_model end
     local t = SpawnProp(m1, x, y, z)
@@ -2081,6 +2208,19 @@ local function cancelFinish()
     for _, g in pairs(f.ghosts or {}) do SafeDeleteEntity(g.ent) end
 end
 
+-- Drop an in-progress baking-mix drag: the mix bowl and every partially-faded raw
+-- sheet ghost go away. Nothing was consumed (a tray only fills at full coverage), so
+-- the target trays stay empty.
+local function cancelBakeMix()
+    local f = bakeMixing; bakeMixing = nil
+    if not f then return end
+    SafeDeleteEntity(f.prop)
+    for _, g in pairs(f.ghosts or {}) do
+        for _, e in ipairs(g.ents or {}) do SafeDeleteEntity(e) end
+    end
+    setTrayOutline(nil)
+end
+
 -- Group carried parts into piles by their (dx, dy) tray offset — consecutive
 -- parts at the same spot stack bottom-to-top, mirroring how the meal was built.
 local function groupPiles(parts)
@@ -2109,7 +2249,7 @@ end
 
 -- Commit a carried tray/box group: (re)create it at (x, y, z) and one stack per
 -- pile, anchored at its offset. Used by the meal un-make drop and a tray move.
-local function commitTrayGroup(x, y, z, ents, piles, kind, open)
+local function commitTrayGroup(x, y, z, ents, piles, kind, open, extra)
     prepTid = prepTid + 1
     local tid = prepTid
     kind = kind or "tray"
@@ -2117,6 +2257,14 @@ local function commitTrayGroup(x, y, z, ents, piles, kind, open)
     PrepTrays[tid] = { x = x, y = y, z = z, kind = kind, ents = ents,
                        open = isBox and (open and true or false) or nil,
                        openT = isBox and (open and 1.0 or 0.0) or nil }
+    -- Baking trays carry their fill state + output item so a move preserves them and
+    -- a grab knows whether there's anything to collect. A fresh placement has none.
+    if isBakeKind(kind) then
+        local be = bakeEntryFor(kind)
+        PrepTrays[tid].output   = (extra and extra.output) or (be and be.output)
+        PrepTrays[tid].rawModel = be and be.raw_model
+        PrepTrays[tid].filled   = (extra and extra.filled) and true or false
+    end
     layoutTrayAt(ents, x, y, z, kind, open and 1.0 or 0.0)
     local fz = z + trayFoodDz(kind)
     for _, pile in ipairs(piles or {}) do
@@ -2236,9 +2384,11 @@ local function runDragThread(drag)
                         setTrayOutline(tid, 80, 200, 120)
                         layoutParts(drag.parts, t.x, t.y, fz, false)
                     end
-                elseif tid and hit and coords then
-                    -- over a tray: anchor to the paper where the cursor points, clamped
-                    -- inside the rim; release starts a new pile at that exact offset
+                elseif tid and hit and coords and PrepTrays[tid].kind == "tray" then
+                    -- over a SERVING tray: anchor to the paper where the cursor points,
+                    -- clamped inside the rim; release starts a new pile at that exact
+                    -- offset. (Baking trays never accept loose food — they fall through
+                    -- to plain table placement below.)
                     local t = PrepTrays[tid]
                     local hx, hy = trayHalfExtents(t.kind)
                     local dx = math.min(math.max(coords.x - t.x, -hx), hx)
@@ -2305,6 +2455,7 @@ local function StopCooking()
     cancelPlace() -- drop any in-progress placement preview
     cancelMove()  -- drop any in-progress drag of a placed prop
     cancelFinish() -- drop any in-progress finish-tool (frosting) drag
+    cancelBakeMix() -- drop any in-progress baking-mix drag
     HoverPatty(nil)
     if HoverOvenDoor then HoverOvenDoor(nil, nil) end -- clear any door outline
     clearPrepStacks()
@@ -2443,7 +2594,7 @@ function OpenCookingStation(prop)
             local prepTip = nil
             local prepHoverTid = nil
             local prepHoverBox = false -- the hovered tray is a pizza box (click = lid toggle)
-            if currentCookProp and currentCookProp.prop_type == "kitchen_prep" and not prepDrag and not finishing then
+            if currentCookProp and currentCookProp.prop_type == "kitchen_prep" and not prepDrag and not finishing and not bakeMixing then
                 local sid, _, part = pickPart(nil)
                 local stack = sid and PrepStacks[sid]
                 -- A pile sitting ON a serving tray offers only the tray-level "Make
@@ -2470,10 +2621,13 @@ function OpenCookingStation(prop)
                 if prepHoverTid then
                     local t = PrepTrays[prepHoverTid]
                     local isBox = t.kind == "box"
+                    local isBake = isBakeKind(t.kind)
                     prepHoverBox = isBox
                     local on, sx, sy = GetScreenCoordFromWorldCoord(t.x, t.y, t.z + trayFoodDz(t.kind) + 0.06)
                     prepTip = { tray = true, box = isBox or nil, open = isBox and (t.open and true or false) or nil,
                                 boxing = (isBox and t.boxing) and true or nil,
+                                -- a baking tray shows a rub/collect hint (never a Make Meal)
+                                bake = isBake or nil, filled = (isBake and t.filled) or nil,
                                 tid = prepHoverTid, onScreen = on, x = sx, y = sy, count = trayPileCount(prepHoverTid) }
                 end
             end
@@ -3068,6 +3222,32 @@ RegisterNUICallback("cooking:prepDrop", function(d, cb)
     -- meal; dropped in the world the tray moves there (piles keep their offsets);
     -- anywhere else it snaps back home.
     if drag.tray then
+        -- A carried BAKING tray: on the bar a FILLED one is collected into the hotbar
+        -- (its output item); an empty one just goes away. In the world it moves like
+        -- any tray, keeping its fill state + raw sheet.
+        if drag.bake then
+            if d and d.cancel then
+                if drag.bakeFilled then
+                    local res = lib.callback.await("pickle_restaurants:cooking:bakeTrayToInv", false,
+                        { prop_id = currentCookProp and currentCookProp.id, output = drag.bakeOutput })
+                    if res and res.ok then
+                        deleteDrag(drag)
+                        if res.label then ShowNotification(_L("cook_saved", res.label)) end
+                        RefreshBar()
+                        return cb(res)
+                    end
+                    if res and res.error then ShowNotification(res.error) end
+                    -- fall through: set the tray back down
+                else
+                    deleteDrag(drag) -- empty baking tray dropped on the bar: put it away
+                    return cb({ ok = true })
+                end
+            end
+            local c = (drag.hit and drag.coords) or drag.home
+            commitTrayGroup(c.x, c.y, c.z, drag.tray, nil, drag.trayKind, false,
+                            { filled = drag.bakeFilled, output = drag.bakeOutput })
+            return cb({ ok = true })
+        end
         if d and d.cancel then
             local items = {}
             for _, pile in ipairs(drag.piles or {}) do
@@ -3244,10 +3424,14 @@ RegisterNUICallback("cooking:beginTrayPlace", function(d, cb)
     setOutline(nil); setTrayOutline(nil)
     local base = currentCookProp
     if not base or base.prop_type ~= "kitchen_prep" then return cb({ ok = false }) end
-    local kind = (d and d.kind == "box") and "box" or "tray"
+    local kind = "tray"
+    if d and d.kind == "box" then kind = "box"
+    elseif d and isBakeKind(d.kind) then kind = d.kind
+    elseif d and d.kind then return cb({ ok = false }) end -- an unknown (e.g. unsynced bake) kind: refuse, never a stray serving tray
     local ents = spawnTrayEnts(base.x, base.y, base.z, kind, 0.0)
     if not ents then return cb({ ok = false }) end
-    prepDrag = { tray = ents, trayKind = kind, openT = 0.0, parts = {}, piles = {}, hit = false }
+    prepDrag = { tray = ents, trayKind = kind, openT = 0.0, parts = {}, piles = {}, hit = false,
+                 bake = isBakeKind(kind) or nil, bakeFilled = false }
     runDragThread(prepDrag)
     cb({ ok = true })
 end)
@@ -3304,7 +3488,10 @@ RegisterNUICallback("cooking:trayGrab", function(d, cb)
     local isBox = t.kind == "box"
     prepDrag = { tray = t.ents, trayKind = t.kind, open = isBox and (t.open and true or false) or nil,
                  openT = isBox and (t.open and 1.0 or 0.0) or nil, piles = piles, parts = parts,
-                 home = { x = t.x, y = t.y, z = t.z }, hit = false }
+                 home = { x = t.x, y = t.y, z = t.z }, hit = false,
+                 -- a baking tray carries its fill state + output so the drop can collect
+                 -- it (bar) or set it back down (world) with the raw sheet intact
+                 bake = isBakeKind(t.kind) or nil, bakeFilled = t.filled or nil, bakeOutput = t.output }
     runDragThread(prepDrag)
     cb({ ok = true })
 end)
@@ -3765,6 +3952,129 @@ RegisterNUICallback("cooking:endFinish", function(_, cb)
     cb({ ok = true })
 end)
 
+-- Full coverage reached on a baking tray: the server consumes 1 mix and credits the
+-- tray's output. Keep the raw sheet ghost as the tray's (opaque) contents so it moves
+-- and collects with the tray; drop the mix bowl and any other partial ghosts.
+local function applyBakeMixAt(f, tid)
+    local t = PrepTrays[tid]
+    -- Retire the drag BEFORE the server round-trip: releasing the mouse the instant a
+    -- tray auto-fills fires cooking:endBakeMix → cancelBakeMix on another coroutine,
+    -- which would delete the raw-sheet ghost we mean to keep. Clearing bakeMixing now
+    -- makes that cancel a no-op, so this function alone owns the props from here.
+    if bakeMixing == f then bakeMixing = nil end
+    local res = t and lib.callback.await("pickle_restaurants:cooking:fillBakeTray", false,
+        { prop_id = currentCookProp and currentCookProp.id, kind = t.kind }) or nil
+    SafeDeleteEntity(f.prop)
+    setTrayOutline(nil)
+    if res and res.ok and PrepTrays[tid] then
+        local keep = f.ghosts[tid]
+        for k, g in pairs(f.ghosts) do
+            if k ~= tid then for _, e in ipairs(g.ents or {}) do SafeDeleteEntity(e) end end
+        end
+        -- the gridded serving props become the tray's contents (ents[2..]): opaque now,
+        -- and they ride, move and delete with the tray
+        for _, e in ipairs((keep and keep.ents) or {}) do
+            if DoesEntityExist(e) then
+                SetEntityAlpha(e, 255, false)
+                PrepTrays[tid].ents[#PrepTrays[tid].ents + 1] = e
+            end
+        end
+        PrepTrays[tid].filled = true
+        PrepTrays[tid].output = res.output or PrepTrays[tid].output
+        if res.label then ShowNotification(_L("cook_made", res.label)) end
+        RefreshBar()
+    else
+        for _, g in pairs(f.ghosts) do
+            for _, e in ipairs(g.ents or {}) do SafeDeleteEntity(e) end
+        end
+        if res and res.error then ShowNotification(res.error) end
+    end
+    SendNUIMessage({ action = "cookingBakeDone" })
+end
+
+-- begin dragging the baking mix: the mix bowl follows the cursor and is rubbed over a
+-- placed EMPTY baking tray; the raw sheet/dough fades in with travel, and at full
+-- coverage the tray fills (server consumes 1 mix). Mirrors the finish-tool loop but
+-- targets a tray, not a stacked part.
+RegisterNUICallback("cooking:beginBakeMix", function(d, cb)
+    cancelPlace(); cancelMove(); cancelFinish(); cancelBakeMix()
+    if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
+    local base = currentCookProp
+    if not base or base.prop_type ~= "kitchen_prep" then return cb({ ok = false }) end
+    if type(Baking) ~= "table" or not Baking.mix_model then return cb({ ok = false }) end
+    local mix = SpawnProp(Baking.mix_model, base.x, base.y, base.z)
+    if not mix then return cb({ ok = false }) end
+    SetEntityRotation(mix, 0.0, 0.0, curYaw(), 2, true)
+    local mixLift = meshBottomLift(Baking.mix_model) + FINISH.tool_lift
+    local f = { prop = mix, ghosts = {}, coverage = {}, applying = false }
+    bakeMixing = f
+    CreateThread(function()
+        while bakeMixing == f do
+            local hit, coords = CursorToWorld()
+            local tid = (hit and coords) and pickTray(coords) or nil
+            local t = tid and PrepTrays[tid]
+            local valid = t and isBakeKind(t.kind) and not t.filled
+            if hit and coords then
+                -- ride the mix bowl above the tray bed (or the surface hit otherwise)
+                local z = coords.z
+                if t then z = math.max(z, t.z + trayFoodDz(t.kind) + 0.05) end
+                SetEntityCoordsNoOffset(mix, coords.x, coords.y, z + mixLift, false, false, false)
+            end
+            if valid then
+                setTrayOutline(tid, 80, 200, 120)
+                if f.last then
+                    local dx, dy = coords.x - f.last.x, coords.y - f.last.y
+                    f.coverage[tid] = (f.coverage[tid] or 0.0)
+                        + math.min(math.sqrt(dx * dx + dy * dy), FINISH.max_step)
+                end
+                local g = f.ghosts[tid]
+                if not g and t.rawModel then
+                    -- one serving prop per slot, gridded on the tray (a cookie tray fades
+                    -- in six dough balls); all rise together as the mix is rubbed in
+                    local hx, hy = trayHalfExtents(t.kind)
+                    local offs = batchGridOffsets(bakeSlotCount(t.kind), hx, hy)
+                    local hr, fz = math.rad(curYaw()), t.z + trayFoodDz(t.kind)
+                    local ents = {}
+                    for _, ofs in ipairs(offs) do
+                        local ent = SpawnProp(t.rawModel,
+                            t.x + ofs.dx * math.cos(hr) - ofs.dy * math.sin(hr),
+                            t.y + ofs.dx * math.sin(hr) + ofs.dy * math.cos(hr),
+                            fz)
+                        if ent then
+                            SetEntityRotation(ent, 0.0, 0.0, curYaw(), 2, true)
+                            SetEntityAlpha(ent, 0, false)
+                            ents[#ents + 1] = ent
+                        end
+                    end
+                    if #ents > 0 then g = { ents = ents }; f.ghosts[tid] = g end
+                end
+                local progress = math.min((f.coverage[tid] or 0.0) / (tonumber(Baking.rub_dist) or 1.2), 1.0)
+                if g and g.ents then
+                    local a = math.floor(progress * 255 + 0.5)
+                    for _, e in ipairs(g.ents) do if DoesEntityExist(e) then SetEntityAlpha(e, a, false) end end
+                end
+                if progress >= 1.0 and not f.applying then
+                    f.applying = true
+                    applyBakeMixAt(f, tid)
+                    break
+                end
+            else
+                setTrayOutline(nil)
+            end
+            f.last = (hit and coords) and { x = coords.x, y = coords.y } or nil
+            Wait(0)
+        end
+        setTrayOutline(nil)
+    end)
+    cb({ ok = true })
+end)
+
+-- release a baking-mix drag before full coverage: everything resets, nothing consumed
+RegisterNUICallback("cooking:endBakeMix", function(_, cb)
+    cancelBakeMix()
+    cb({ ok = true })
+end)
+
 -- click empty grill -> toggle the oven door under the cursor (tracked per-frame).
 RegisterNUICallback("cooking:worldClick", function(_, cb)
     if currentCookProp and currentCookProp.prop_type == "stovetop" and GetHoveredOvenDoor then
@@ -3817,4 +4127,5 @@ AddEventHandler("onResourceStop", function(res)
     clearPrepStacks()
     deletePreview(placing); placing = nil
     cancelFinish()
+    cancelBakeMix()
 end)

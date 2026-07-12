@@ -98,7 +98,11 @@ end
 -- lifted by the summed height of the parts below it, all aligned to the stove heading.
 -- Renders an uncooked assembled bake (e.g. a topped pizza) as its full build stack
 -- rather than just the base prop.
-function SeatOvenSlotStack(propId, door, slot, ents, heights, baseDz, rolls)
+-- `offsets` (optional, parallel to ents) spreads layers horizontally in the tray
+-- plane instead of stacking them — a batch bake (the six-cookie tray) lays its
+-- servings out as a grid ON the tray. Each {dx, dy} is tray-local metres, rotated to
+-- the stove's heading so the grid faces the oven like everything else.
+function SeatOvenSlotStack(propId, door, slot, ents, heights, baseDz, rolls, offsets)
     local rec = OvenDoors[propId]
     local o = rec and OVEN.slots[door] and OVEN.slots[door][slot]
     if not rec or not o or not DoesEntityExist(rec.stove) then return end
@@ -111,10 +115,17 @@ function SeatOvenSlotStack(propId, door, slot, ents, heights, baseDz, rolls)
     -- correction, so a cake tin rests ON the rack instead of sinking through it.
     local base = GetOffsetFromEntityInWorldCoords(rec.stove, o.x, o.y, o.z + OVEN.z_seat)
     local sr = GetEntityRotation(rec.stove, 2)
+    local hr = math.rad(sr.z)
     local lift = baseDz or 0.0
     for i, ent in ipairs(ents or {}) do
         if ent and DoesEntityExist(ent) then
-            SetEntityCoordsNoOffset(ent, base.x, base.y, base.z + lift, false, false, false)
+            local wx, wy = base.x, base.y
+            local ofs = offsets and offsets[i]
+            if ofs then -- spread this layer across the tray plane (rotated to heading)
+                wx = wx + ofs.dx * math.cos(hr) - ofs.dy * math.sin(hr)
+                wy = wy + ofs.dx * math.sin(hr) + ofs.dy * math.cos(hr)
+            end
+            SetEntityCoordsNoOffset(ent, wx, wy, base.z + lift, false, false, false)
             -- a patty face in the stack carries its own roll (the two-faced flip)
             SetEntityRotation(ent, 0.0, (rolls and rolls[i]) or 0.0, sr.z, 2, true)
         end

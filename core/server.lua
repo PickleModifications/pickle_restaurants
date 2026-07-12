@@ -72,7 +72,11 @@ local DEFAULT_SETTINGS = {
     ingredient_costs = {
         raw_drumstick = 4, raw_fries = 2, raw_nuggets = 3,
         raw_beef_patty = 5, raw_chicken_patty = 5,
-        raw_doughnut = 2, raw_cookie = 2, raw_cake = 6,
+        raw_doughnut = 2,
+        -- raw_cake / raw_cookie are no longer bought directly: they're produced by
+        -- rubbing `baking_mix` (below) into a cake tin / cookie tray. Their menu-price
+        -- cost traces through the mix in ResolveItemCost.
+        baking_mix = 4,
         pizza_dough = 3, pizza_sauce = 1, pizza_cheese = 2, pepperoni = 2,
         bun = 1, cheese = 1, lettuce = 1, tomato = 1, pickle = 1,
         empty_cup = 1, frosting = 2, sprinkles = 1,
@@ -160,6 +164,9 @@ local DEFAULT_SETTINGS = {
         burnt_fries      = "pickle_side_fries_03",
         cooked_nuggets   = "pickle_side_nuggets_02",
         burnt_nuggets    = "pickle_side_nuggets_03",
+        -- (Cookies need no override: pickle_cookie_02/03 are already single cooked/burnt
+        -- cookies, so a collected cookie matches what baked on the tray. The six-cookie
+        -- tray layout is done by the batch-grid render, not the item model.)
     },
     -- Kitchen-prep assembly: combine components -> output item. ONE base item per
     -- food family (one-item consolidation rule): a cheeseburger / deluxe burger is
@@ -251,6 +258,26 @@ local DEFAULT_SETTINGS = {
               } },
           } },
     },
+    -- Baking mix + trays. One shared `mix_item` (a raw ingredient bought into the
+    -- shared stock pool, like any `ingredient_costs` entry) is rubbed into a tray to
+    -- produce that tray's `output` (an oven-ready raw bake). The trays themselves are
+    -- FREE kitchen equipment (like the serving tray / pizza box — never an item, never
+    -- consumed): drag a tray card out of the prep station's equipment strip, rub the
+    -- mix over it (coverage accrues with cursor travel, `rub_dist` metres = full),
+    -- then drag the filled tray into the hotbar to collect its `output`. The oven then
+    -- bakes it inside its `container_model` (set on the matching recipe). `raw_model`
+    -- is the raw sheet/dough shown in the tray as it fills.
+    baking = {
+        mix_item  = "baking_mix",
+        mix_model = "pickle_cake_mix_01",  -- the mix bowl that follows the cursor while rubbing
+        rub_dist  = 1.2,                   -- metres of cursor travel over the tray to fill it
+        trays = {
+            { kind = "caketin",    label = "Cake Tin",    tray_model = "pickle_cake_container_01",
+              output = "raw_cake",   raw_model = "pickle_cake_mix_pour_02", group = "Bakery" },
+            { kind = "cookietray", label = "Cookie Tray", tray_model = "pickle_cookie_tray_01",
+              output = "raw_cookie", raw_model = "pickle_cookie_01", slots = 6, group = "Bakery" },
+        },
+    },
     -- NPC customers. AI customers walk up to a restaurant's counter, queue, place a
     -- REAL POS ticket (a random pick off the restaurant's priced menu), wait for staff
     -- to cook + serve them at the register, pay into the balance, and walk away — a
@@ -308,9 +335,15 @@ local DEFAULT_RECIPES = {
     { input = "raw_doughnut", station = "fryer", method = "fry", group = "Bakery",
       raw = "pickle_doughnut_01", cooked = "pickle_doughnut_02", burnt = "pickle_doughnut_03",
       out_cooked = "cooked_doughnut", out_burnt = "burnt_doughnut", cook_ms = 12000, burn_ms = 12000 },
-    -- Cookies + cake bake inside the oven doors (on their own trays).
+    -- Cookies + cake bake inside the oven doors (on their own trays). The cookie
+    -- dough bakes as a batch on its tray (the container rides along visually, never
+    -- an item) — same container machinery as the cake tin.
+    -- The cookie models render a six-slot tray-batch, so one raw tray yields six
+    -- individual cookies (output_count) when collected — each carried/stacked as a
+    -- single cookie (prep_models `cooked_cookie`), like the fryer batch servings.
     { input = "raw_cookie", station = "stovetop", method = "oven", group = "Bakery",
       raw = "pickle_cookie_01", cooked = "pickle_cookie_02", burnt = "pickle_cookie_03",
+      container = "pickle_cookie_tray_01", output_count = 6,
       out_cooked = "cooked_cookie", out_burnt = "burnt_cookie", cook_ms = 20000, burn_ms = 18000 },
     -- Cake batter bakes as a thin sheet inside its container tray (the container
     -- rides along visually, never an item). pickle_cake_01..04 are the four whole
@@ -1019,6 +1052,46 @@ local function SeedRecipes()
         SetSetting("cake_models_seeded", true)
     end
 
+    -- One-time: cookies now bake inside a tray like the cake tin. Point the stored
+    -- cookie recipe at its container tray, but ONLY while it still has none, so an
+    -- admin who set (or cleared) a container in the recipe editor keeps theirs.
+    if not GetSetting("cookie_container_seeded", false) then
+        MySQL.update.await([[
+            UPDATE pickle_restaurant_recipes
+               SET container_model = ?
+             WHERE input_item = 'raw_cookie' AND (container_model IS NULL OR container_model = '')
+        ]], { "pickle_cookie_tray_01" })
+        SetSetting("cookie_container_seeded", true)
+    end
+
+    -- One-time: a cookie tray now bakes into six cookies. Bump the stored cookie
+    -- recipe's yield, but ONLY while it still holds the old single-cookie default, so
+    -- an admin who set their own yield keeps it. (output_count_seeded already ran, so
+    -- this needs its own flag.)
+    if not GetSetting("cookie_yield_seeded", false) then
+        MySQL.update.await([[
+            UPDATE pickle_restaurant_recipes
+               SET output_count = 6
+             WHERE input_item = 'raw_cookie' AND output_count = 1
+        ]])
+        SetSetting("cookie_yield_seeded", true)
+    end
+
+    -- One-time: switch the Supplies pool from buying finished cake batter / cookie
+    -- dough to buying the shared baking mix. Only drops raw_cake/raw_cookie while
+    -- they still hold their original default costs (6 / 2) — an admin who repriced
+    -- either owns it and keeps it. Always ensures a baking_mix cost exists.
+    if not GetSetting("baking_mix_seeded", false) then
+        local costs = GetSetting("ingredient_costs", {})
+        if type(costs) == "table" then
+            if tonumber(costs.raw_cake) == 6 then costs.raw_cake = nil end
+            if tonumber(costs.raw_cookie) == 2 then costs.raw_cookie = nil end
+            if costs.baking_mix == nil then costs.baking_mix = 4 end
+            SetSetting("ingredient_costs", costs)
+        end
+        SetSetting("baking_mix_seeded", true)
+    end
+
     -- One-time: the chicken patty is FRIED, so move it from the grill to the fryer
     -- on servers seeded with the old stovetop/grill default — only while the row
     -- still holds that exact default, so an admin who re-stationed it keeps theirs.
@@ -1222,6 +1295,14 @@ function ResolveItemCost(item, seen)
             local sum = 0
             for _, c in ipairs(a.components or {}) do sum = sum + ResolveItemCost(c, seen) end
             return sum
+        end
+    end
+    -- A baking-tray output (raw_cake / raw_cookie) is produced by rubbing the shared
+    -- baking mix into a free tray, so it costs one baking mix.
+    local baking = GetSetting("baking", {})
+    if type(baking) == "table" then
+        for _, t in ipairs(baking.trays or {}) do
+            if t.output == item then return ResolveItemCost(baking.mix_item, seen) end
         end
     end
     return 0
@@ -1983,10 +2064,29 @@ function BuildSyncPayload()
         end
     end
 
+    -- Baking mix + trays: shipped only when the shared mix is a real (consumed)
+    -- inventory item; individual trays are dropped unless their output is a usable
+    -- item/product (raw_cake/raw_cookie are real items — needed for bakeTrayToInv).
+    local baking = nil
+    do
+        local b = GetSetting("baking", {})
+        if type(b) == "table" and b.mix_item and ItemExists(b.mix_item) then
+            local trays = {}
+            for _, t in ipairs(b.trays or {}) do
+                if t.kind and t.tray_model and FinishItemOk(t.output) then trays[#trays + 1] = t end
+            end
+            if #trays > 0 then
+                baking = { mix_item = b.mix_item, mix_model = b.mix_model,
+                           rub_dist = b.rub_dist, trays = trays }
+            end
+        end
+    end
+
     local payload = { restaurants = {}, props = {}, recipes = recipes, settings = {
         drinks   = drinks,
         assembly = assembly,
         finishes = finishes,
+        baking   = baking,
         -- the side-serving container box (fries…) — shipped so the client can apply
         -- the mesh-bottom base-lift correction when it's the base of a build stack
         side_container_model = GetSetting("side_container_model", ""),
