@@ -618,7 +618,7 @@ export default function Cooking({ data }: { data: any }) {
   const [hovered, setHovered] = useState<number | null>(null);
   const [view, setView] = useState<string>("stovetop");
   const [tray, setTray] = useState<TrayEntry[]>([]);
-  const [tab, setTab] = useState<"ingredients" | "cooked" | "uncooked">("ingredients");
+  const [tab, setTab] = useState<"packaging" | "ingredients" | "cooked" | "uncooked">("ingredients");
   // bar organisation: text filter over the cards, one-row strip vs wrapped grid,
   // and the card whose bin button is waiting for its confirming second click
   const [query, setQuery] = useState("");
@@ -651,6 +651,7 @@ export default function Cooking({ data }: { data: any }) {
   const lidRef = useRef<string | null>(null);     // dragging a lid onto a filled soda cup
   const finishRef = useRef<string | null>(null); // rubbing a finish tool (frosting) over a target
   const bakeMixRef = useRef<string | null>(null); // rubbing the baking mix over an empty baking tray
+  const condimentRef = useRef<string | null>(null); // squeezing a condiment bottle over a build stack
   const [finishFlavor, setFinishFlavor] = useState<Record<string, string>>({}); // chosen flavor per finish tool
   const prepDragRef = useRef<{ source: string; item: string; cheese: number; model?: string | null; decompose?: boolean; sig?: string } | null>(null); // dragging a NEW part (or a product/meal to take apart) onto the prep table
   const prepHoveredRef = useRef<number | null>(null); // placed prep part under the cursor (grab target)
@@ -665,14 +666,14 @@ export default function Cooking({ data }: { data: any }) {
   // you can see where it lands; prevTabRef remembers the tab to fall BACK to if the
   // drag doesn't finish on the prep table (cancel / drop on the bar). tabRef mirrors
   // `tab` so the []-deps pointer handlers read the live value.
-  const prevTabRef = useRef<"ingredients" | "cooked" | "uncooked" | null>(null);
+  const prevTabRef = useRef<"packaging" | "ingredients" | "cooked" | "uncooked" | null>(null);
   const tabRef = useRef(tab);
   useEffect(() => { tabRef.current = tab; }, [tab]);
   // dragging a prop FROM the world/prep table (grill collect, prep restack/remove) —
   // the hotbar becomes the prominent orange drop zone against a dimmed backdrop
   const [worldDragging, setWorldDragging] = useState(false);
   // switch the bar to a dragged item's category, remembering where we came from
-  const dragSwitchTab = (cat: "ingredients" | "cooked" | "uncooked") => {
+  const dragSwitchTab = (cat: "packaging" | "ingredients" | "cooked" | "uncooked") => {
     if (tabRef.current !== cat) {
       if (prevTabRef.current === null) prevTabRef.current = tabRef.current;
       setTab(cat);
@@ -706,6 +707,12 @@ export default function Cooking({ data }: { data: any }) {
   // baking-mix drag concluded on the Lua side (tray filled, or rejected)
   useNuiEvent("cookingBakeDone", () => {
     bakeMixRef.current = null;
+    setDragging(false);
+    setDragHint(null);
+  });
+  // condiment drag concluded on the Lua side (squeeze finished & applied, or rejected)
+  useNuiEvent("cookingCondimentDone", () => {
+    condimentRef.current = null;
     setDragging(false);
     setDragHint(null);
   });
@@ -794,8 +801,9 @@ export default function Cooking({ data }: { data: any }) {
     );
   const trayListAll = tab === "uncooked" ? uncookedItems : cookedItems;
   const trayList = sortTray(trayListAll.filter(trayMatches));
-  // kitchen equipment (serving tray, pizza box) files under the COOKED ITEMS tab —
-  // that's where the food they package lives — not among the raw ingredients
+  // kitchen equipment (serving tray, pizza box, baking tray) is its own "Containers &
+  // Packaging" category — the gear food gets arranged on/in — split out of both the
+  // raw ingredients and the cooked-food tabs so neither is crowded by it
   const isEquipment = (ing: Ingredient) => ing.kind === "tray" || ing.kind === "pizzabox" || ing.kind === "baketray";
   const equipmentCards = isPrep
     ? ingredients.filter((ing) => isEquipment(ing) && (!q || ing.label.toLowerCase().includes(q)))
@@ -911,6 +919,7 @@ export default function Cooking({ data }: { data: any }) {
     if (ing.kind === "pizzabox") return _L("cook.inghint_pizzabox");
     if (ing.kind === "topping") return _L("cook.inghint_topping");
     if (ing.kind === "finish") return _L("cook.inghint_finish");
+    if (ing.kind === "condiment") return _L("cook.inghint_condiment");
     if (ing.kind === "drink") return _L("cook.inghint_drink");
     if (ing.kind === "lid") return _L("cook.inghint_lid");
     if (isPrep) return _L("cook.inghint_prep");
@@ -999,6 +1008,17 @@ export default function Cooking({ data }: { data: any }) {
     setDragging(true);
     setDragHint(_L("cook.draghint_bakemix"));
     fetchNui("cooking:beginBakeMix", { item: ing.item });
+  };
+  // condiment bottle: dragged as its container prop and held over a build stack — the
+  // bottle flips upside-down and squeezes once, laying a sauce layer on top (the Lua
+  // side commits at squeeze end; cookingCondimentDone ends the drag state).
+  const startCondiment = (e: React.PointerEvent, ing: Ingredient) => {
+    e.preventDefault();
+    condimentRef.current = ing.item;
+    setTab("ingredients");
+    setDragging(true);
+    setDragHint(_L("cook.draghint_condiment"));
+    fetchNui("cooking:beginCondiment", { item: ing.item });
   };
   // at the prep station, drag a tray item / ingredient onto the table to add a
   // layer. With a model it spawns a live 3D prop that follows the cursor (like the
@@ -1166,6 +1186,15 @@ export default function Cooking({ data }: { data: any }) {
       if (bakeMixRef.current) {
         bakeMixRef.current = null;
         fetchNui("cooking:endBakeMix", { cancel: overBar });
+        return;
+      }
+
+      // condiment bottle released before the squeeze finishes: cancels harmlessly
+      // (nothing reserved/consumed). At squeeze end the Lua side already committed
+      // the sauce layer and cleared the drag via cookingCondimentDone.
+      if (condimentRef.current) {
+        condimentRef.current = null;
+        fetchNui("cooking:endCondiment", {});
         return;
       }
 
@@ -1460,11 +1489,16 @@ export default function Cooking({ data }: { data: any }) {
         {/* tabs: raw ingredients · ready cooked items · still-raw uncooked items —
             plus the bar tools on the right: burnt sweep, search, one-row/grid toggle */}
         <div className="mb-2 flex items-center gap-1">
-          {([
-            ["ingredients", _L("cook.tab_ingredients"), Carrot, 0],
+          {(([
+            // Containers & Packaging (serving trays, pizza boxes, baking trays) leads the
+            // strip — the kitchen equipment food gets arranged on/in. Only shown at the
+            // prep table (the sole station with equipment); other stations start at
+            // Ingredients. Kept as its own category so cooked food isn't crowded by gear.
+            ...(isPrep ? [["packaging", _L("cook.tab_packaging"), Package, equipmentCards.length]] : []),
+            ["ingredients", _L("cook.tab_ingredients"), Carrot, shownIngredients.length],
             ["cooked", _L("cook.tab_cooked_items"), ChefHat, cookedTotal],
             ["uncooked", _L("cook.tab_uncooked_items"), CookingPot, uncookedTotal],
-          ] as const).map(([key, label, TabIcon, count]) => (
+          ]) as ["packaging" | "ingredients" | "cooked" | "uncooked", string, React.ComponentType<{ className?: string }>, number][]).map(([key, label, TabIcon, count]) => (
             <button
               key={key}
               onClick={() => setTab(key)}
@@ -1545,6 +1579,7 @@ export default function Cooking({ data }: { data: any }) {
                 else if (ing.kind === "topping") startTopping(e, ing);
                 else if (ing.kind === "finish") startFinish(e, ing);
                 else if (ing.kind === "bakemix") startBakeMix(e, ing);
+                else if (ing.kind === "condiment") startCondiment(e, ing);
                 else if (isPrep) startPrepDrag(e, "inv", { item: ing.item, cheese: 0, model: ing.model, label: ing.label, image: ing.image, dual: ing.dual });
                 else startPlace(e, ing);
               };
@@ -1621,38 +1656,47 @@ export default function Cooking({ data }: { data: any }) {
               );
             })}
           </div>
+        ) : tab === "packaging" ? (
+          <div className={rowCls} onWheel={onRowWheel}>
+            {/* Containers & Packaging: the serving tray, pizza box and baking trays the
+                cooked food gets arranged on/in — same drag-to-place gesture as before */}
+            {equipmentCards.length === 0 && (
+              <div className="text-sm text-muted-foreground">
+                {q && ingredients.some(isEquipment)
+                  ? _L("cook.no_matches", query.trim())
+                  : _L("cook.no_packaging")}
+              </div>
+            )}
+            {equipmentCards.map((ing) => (
+              <div
+                key={"equip-" + ing.kind + (ing.subkind || "")}
+                onPointerDown={(e) => {
+                  setBarTip(null);
+                  if (ing.kind === "tray") startTrayPlace(e);
+                  else if (ing.kind === "baketray") startTrayPlace(e, ing.subkind);
+                  else startTrayPlace(e, "box");
+                }}
+                onPointerEnter={(ev) => showBarTip(ev, { ing, hint: ingHint(ing) })}
+                onPointerLeave={hideBarTip}
+                className="relative flex h-32 w-28 shrink-0 cursor-grab touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border border-border/80 bg-card text-center text-xs font-medium hover:border-primary/50 hover:bg-accent/60 active:cursor-grabbing"
+              >
+                {ing.kind === "tray" ? (
+                  <UtensilsCrossed className="h-10 w-10 text-primary/80" />
+                ) : ing.kind === "baketray" ? (
+                  <CookingPot className="h-10 w-10 text-primary/80" />
+                ) : (
+                  <Package className="h-10 w-10 text-primary/80" />
+                )}
+                <span className="w-full truncate px-1.5 leading-tight">{ing.label}</span>
+                <span className="text-[10px] text-muted-foreground">
+                  {ing.kind === "tray" ? "Build a meal" : ing.kind === "baketray" ? "Rub in the mix" : "Boxes a pizza"}
+                </span>
+              </div>
+            ))}
+          </div>
         ) : (
           <div className={rowCls} onWheel={onRowWheel}>
-            {/* kitchen equipment leads the strip: the serving tray and pizza box the
-                cooked food gets arranged on/in — same drag-to-place gesture as before */}
-            {tab === "cooked" &&
-              equipmentCards.map((ing) => (
-                <div
-                  key={"equip-" + ing.kind + (ing.subkind || "")}
-                  onPointerDown={(e) => {
-                    setBarTip(null);
-                    if (ing.kind === "tray") startTrayPlace(e);
-                    else if (ing.kind === "baketray") startTrayPlace(e, ing.subkind);
-                    else startTrayPlace(e, "box");
-                  }}
-                  onPointerEnter={(ev) => showBarTip(ev, { ing, hint: ingHint(ing) })}
-                  onPointerLeave={hideBarTip}
-                  className="relative flex h-32 w-28 shrink-0 cursor-grab touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border border-border/80 bg-card text-center text-xs font-medium hover:border-primary/50 hover:bg-accent/60 active:cursor-grabbing"
-                >
-                  {ing.kind === "tray" ? (
-                    <UtensilsCrossed className="h-10 w-10 text-primary/80" />
-                  ) : ing.kind === "baketray" ? (
-                    <CookingPot className="h-10 w-10 text-primary/80" />
-                  ) : (
-                    <Package className="h-10 w-10 text-primary/80" />
-                  )}
-                  <span className="w-full truncate px-1.5 leading-tight">{ing.label}</span>
-                  <span className="text-[10px] text-muted-foreground">
-                    {ing.kind === "tray" ? "Build a meal" : ing.kind === "baketray" ? "Rub in the mix" : "Boxes a pizza"}
-                  </span>
-                </div>
-              ))}
-            {trayList.length === 0 && (tab !== "cooked" || equipmentCards.length === 0) && (
+            {trayList.length === 0 && (
               <div className="text-sm text-muted-foreground">
                 {q && trayListAll.length > 0
                   ? _L("cook.no_matches", query.trim())

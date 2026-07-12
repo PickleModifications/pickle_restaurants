@@ -102,7 +102,10 @@ local TRAY_ONLY = {
 --   decorated_cake: the cake collapsed into ONE `cooked_cake` item (frosting flavor
 --   is a customer MODIFIER / build metadata now), so this output is no longer
 --   produced or sold — retained one release for legacy stacks.
-local RETAIN = { "frosted_doughnut", "sprinkled_doughnut", "raw_pizza", "cheeseburger", "deluxe_burger", "decorated_cake" }
+--   raw_cake / raw_cookie: the baking-tray outputs became tray-only uncooked
+--   INTERMEDIATES (produced by rubbing mix into a tray, dragged straight to the oven),
+--   so they're no longer carried items — retained one release for legacy stacks.
+local RETAIN = { "frosted_doughnut", "sprinkled_doughnut", "raw_pizza", "cheeseburger", "deluxe_burger", "decorated_cake", "raw_cake", "raw_cookie" }
 
 -- ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -117,11 +120,22 @@ local function collectItems()
     local function add(n) if n and n ~= "" and not TRAY_ONLY[n] then set[n] = true end end
     local assembled = {}
     for _, a in ipairs(GetSetting("assembly", {})) do assembled[a.output] = true end
+    -- baking-tray outputs (raw_cake / raw_cookie) are tray-only uncooked intermediates
+    -- too — produced by rubbing mix into a tray, never carried — so exclude them from
+    -- the carried-input export below (they're grace-retained via RETAIN for one release)
+    local bakeOnly = {}
+    do
+        local baking = GetSetting("baking", {})
+        if type(baking) == "table" then
+            for _, t in ipairs(baking.trays or {}) do if t.output then bakeOnly[t.output] = true end end
+        end
+    end
 
     for _, r in ipairs(RecipeCache) do
-        -- an ASSEMBLED cook input (raw_pizza) is tray-only, never an item — you
-        -- build it at prep and bake it; only true raw inputs are carried as items
-        if not assembled[r.input_item] then add(r.input_item) end
+        -- an ASSEMBLED cook input (raw_pizza) or a baking-tray output (raw_cookie) is
+        -- tray-only, never an item — you build/fill it at prep and bake it; only true
+        -- raw inputs are carried as items
+        if not assembled[r.input_item] and not bakeOnly[r.input_item] then add(r.input_item) end
         add(r.output_cooked_item); add(r.output_burnt_item)
     end
     -- Drinks are ONE generic item (`drink_item`, "Restaurant Drink") — the flavor
@@ -144,15 +158,16 @@ local function collectItems()
         add(f.tool)
         for _, t in ipairs(f.targets or {}) do add(t.item); add(t.output) end
     end
-    -- baking mix + tray outputs: the shared mix is a real (consumed) raw ingredient,
-    -- and each tray's output (raw_cake / raw_cookie) is a real carried item — neither
-    -- is a recipe input the loop above would have picked up on its own. (The trays
-    -- themselves are free equipment, never items.)
+    -- condiment bottles (ketchup / mustard / mayo): each is a real consumed pool item,
+    -- laid as a sauce layer on a build stack (the applied prop is visual-only, no item)
+    for _, c in ipairs(GetSetting("condiments", {})) do add(c.item) end
+    -- baking mix: the shared mix is a real (consumed) raw ingredient — a recipe input
+    -- the loop above wouldn't pick up on its own. (The trays themselves are free
+    -- equipment, and their outputs are tray-only intermediates — see bakeOnly above.)
     do
         local baking = GetSetting("baking", {})
         if type(baking) == "table" then
             add(baking.mix_item)
-            for _, t in ipairs(baking.trays or {}) do add(t.output) end
         end
     end
     -- any item an admin mapped to a prep prop is a real item too (sprinkles etc.,

@@ -10,7 +10,7 @@ import { applyTheme, type ThemeConfig } from "@/lib/theme";
 import { money } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X, Building2, Sparkles, Monitor,
+  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X, Building2, Sparkles, Monitor, Users,
 } from "lucide-react";
 
 const STATIONS = [
@@ -20,12 +20,14 @@ const STATIONS = [
   { key: "kitchen_prep", label: _L("admin.station_kitchen_prep"), icon: Sandwich },
   // Self-service order kiosk — a physical customer terminal, no virtual variant.
   { key: "kiosk", label: _L("admin.station_kiosk"), icon: Monitor, physicalOnly: true },
+  // Free-standing floor kiosk (the _02 body) — same terminal, ground-placed.
+  { key: "kiosk_ground", label: _L("admin.station_kiosk_ground"), icon: Monitor, physicalOnly: true },
 ];
 
 type Focus = { restaurant?: number; section?: string };
-type Props = { restaurants: any[]; players: any[]; groups: string[]; refresh: () => void; focus?: Focus; appTheme?: ThemeConfig | null };
+type Props = { restaurants: any[]; players: any[]; groups: string[]; refresh: () => void; focus?: Focus; appTheme?: ThemeConfig | null; onDetailChange?: (open: boolean) => void };
 
-export default function Restaurants({ restaurants, players, groups, refresh, focus, appTheme }: Props) {
+export default function Restaurants({ restaurants, players, groups, refresh, focus, appTheme, onDetailChange }: Props) {
   // After a placement reopen, `focus.restaurant` drops us straight back into that
   // restaurant (and `focus.section` scrolls to its stations/seating).
   const [selectedId, setSelectedId] = useState<number | null>(focus?.restaurant ?? null);
@@ -36,6 +38,16 @@ export default function Restaurants({ restaurants, players, groups, refresh, foc
   const [themeEdits, setThemeEdits] = useState<Record<number, ThemeConfig>>({});
   const base = restaurants.find((r) => r.id === selectedId) || null;
   const selected = base && themeEdits[base.id] ? { ...base, theme: themeEdits[base.id] } : base;
+
+  // Tell the shell whether a single restaurant's detail is open, so it can drop the
+  // top-level admin tab strip (Restaurants / Recipes / Settings) while you're inside
+  // one restaurant — the detail has its own back button + header, and the two levels
+  // of tabs stacked together are what read as confusing.
+  const isDetail = !!selected;
+  useEffect(() => {
+    onDetailChange?.(isDetail);
+    return () => onDetailChange?.(false);
+  }, [isDetail]);
 
   const act = async (event: string, payload: any) => { await fetchNui(event, payload); await refresh(); };
 
@@ -203,6 +215,17 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
               <span className="text-xs text-muted-foreground">{r.hasCounter ? _L("admin.counter_placed") : _L("admin.no_counter_placed")}</span>
               <Button size="sm" variant="outline" onClick={() => fetchNui("admin:setCounter", { id: r.id })}>
                 <MapPin className="h-3.5 w-3.5" /> {r.hasCounter ? _L("admin.reposition") : _L("admin.place")}
+              </Button>
+            </div>
+          </div>
+          {/* NPC customer spawn point — where AI customers appear before walking up to
+              queue. Without it they spawn a fixed distance back and can get stuck. */}
+          <div className="rounded-lg border border-border p-3">
+            <div className="mb-2 flex items-center gap-2 text-sm font-semibold"><Users className="h-4 w-4 text-primary" /> {_L("admin.npc_spawn")}</div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-muted-foreground">{r.hasNpcSpawn ? _L("admin.npc_spawn_placed") : _L("admin.no_npc_spawn")}</span>
+              <Button size="sm" variant="outline" onClick={() => fetchNui("admin:placeNpcSpawn", { id: r.id })}>
+                <MapPin className="h-3.5 w-3.5" /> {r.hasNpcSpawn ? _L("admin.reposition") : _L("admin.place")}
               </Button>
             </div>
           </div>

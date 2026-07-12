@@ -25,6 +25,11 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
   // Settings editor previews live AND a restaurant detail can restore it on close.
   const [appTheme, setAppTheme] = useState<ThemeConfig | null>(data?.theme ?? null);
 
+  // Whether a single restaurant's detail is open in the Restaurants tab. While it is,
+  // hide the top-level admin tab strip — the detail is its own focused view (with a
+  // back button), and stacking the admin tabs above it is what got confusing.
+  const [restDetail, setRestDetail] = useState(false);
+
   const refresh = async () => {
     const fresh = await fetchNui<any>("admin:getData");
     if (fresh && fresh.ok) window.postMessage({ action: "setView", view: "admin", data: fresh }, "*");
@@ -33,14 +38,16 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
   return (
     <Panel title={_L("admin.title")} subtitle={_L("admin.subtitle")} onClose={onClose} width="max-w-4xl">
       <Tabs defaultValue="restaurants" className="flex min-h-0 flex-1 flex-col">
+        {!restDetail && (
         <TabsList className="shrink-0">
           <TabsTrigger value="restaurants">{_L("admin.tab_restaurants")}</TabsTrigger>
           <TabsTrigger value="recipes">{_L("admin.tab_recipes")}</TabsTrigger>
           <TabsTrigger value="settings">{_L("admin.tab_settings")}</TabsTrigger>
         </TabsList>
+        )}
 
         <TabsContent value="restaurants" className="flex min-h-0 flex-1 flex-col">
-          <Restaurants restaurants={restaurants} players={players} groups={groups} refresh={refresh} focus={focus} appTheme={appTheme} />
+          <Restaurants restaurants={restaurants} players={players} groups={groups} refresh={refresh} focus={focus} appTheme={appTheme} onDetailChange={setRestDetail} />
         </TabsContent>
 
         <TabsContent value="recipes" className="flex min-h-0 flex-1 flex-col">

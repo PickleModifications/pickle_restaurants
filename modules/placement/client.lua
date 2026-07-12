@@ -13,14 +13,38 @@ PLACEABLE_MODELS = {
     -- its interaction opens the order NUI (modules/sales OpenKiosk), and the order
     -- becomes an ordinary kitchen ticket a worker fulfils. Physical-only (no virtual
     -- point — it must be a reachable world prop), so it is NOT in VIRTUAL_TARGETS.
+    -- Two body styles: the WALL-mounted terminal (_01, pushed off the wall so it
+    -- doesn't bury into it) and a free-standing GROUND kiosk (_02) that sits on the
+    -- floor like any other prop. Both are `kiosk`-family props everywhere downstream.
     kiosk        = "pickle_kiosk_large_01",
+    kiosk_ground = "pickle_kiosk_large_02",
 }
+
+-- Wall-mounted props sit flush against the wall the admin aims at, so their origin
+-- lands ON the wall face and half the body buries into it. These get pushed back off
+-- the wall (toward the placer) by ~half their depth in the gizmo. Ground props place
+-- normally (origin on the floor).
+local WALL_MOUNTED = { kiosk = true }
+
+-- Half the model's front-to-back depth (its local Y extent) — how far to nudge a
+-- wall-mounted prop off the wall so its BACK rests against it instead of its centre.
+local function WallMountDepth(model)
+    local hash = GetHashKey(model)
+    RequestModel(hash)
+    local t = GetGameTimer()
+    while not HasModelLoaded(hash) and GetGameTimer() - t < 1000 do Wait(0) end
+    local mn, mx = GetModelDimensions(hash)
+    if mn and mx then return math.max((mx.y - mn.y) * 0.5, 0.1) end
+    return 0.35 -- fallback depth (m) if the model's bounds aren't ready
+end
 
 function StartPropPlacement(restaurantId, propType)
     local model = PLACEABLE_MODELS[propType]
     if not model then return ShowNotification(_L("place_unknown_station")) end
     Wait(250) -- let the NUI fully release focus before the gizmo takes input
-    local result = StartGizmoEditor({ model = GetHashKey(model), enableCancel = true, deleteEntity = true })
+    local opts = { model = GetHashKey(model), enableCancel = true, deleteEntity = true }
+    if WALL_MOUNTED[propType] then opts.wallOffset = WallMountDepth(model) end
+    local result = StartGizmoEditor(opts)
     if not result or not result.position then return end
     local res = lib.callback.await("pickle_restaurants:placement:saveProp", false, {
         restaurant_id = restaurantId,
@@ -68,6 +92,33 @@ function StartSeatPlacement(restaurantId)
         ShowNotification(_L("place_seat_placed"))
     else
         ShowNotification((res and res.error) or _L("place_seat_fail"))
+    end
+end
+
+-- Place the per-restaurant NPC customer spawn point: where AI customers appear
+-- before walking up to the counter to queue. A standing ghost ped previews exactly
+-- where (and facing which way) a customer will materialise, so admins put it on a
+-- clear, reachable spot near the register — the old behaviour spawned them a fixed
+-- distance back along the queue line, which often landed inside props and stuck them.
+-- Only the point + heading are saved (no runtime prop).
+function StartNpcSpawnPlacement(restaurantId)
+    Wait(250)
+    local result = StartGizmoEditor({
+        isPed        = true,
+        model        = SEAT_PREVIEW_PED,
+        enableCancel = true,
+        deleteEntity = true,
+    })
+    if not result or not result.position then return end
+    local res = lib.callback.await("pickle_restaurants:placement:saveNpcSpawn", false, {
+        restaurant_id = restaurantId,
+        x = result.position.x, y = result.position.y, z = result.position.z,
+        heading = (result.rotation and result.rotation.z) or 0.0,
+    })
+    if res and res.ok then
+        ShowNotification(_L("place_npc_spawn_set"))
+    else
+        ShowNotification((res and res.error) or _L("place_npc_spawn_fail"))
     end
 end
 

@@ -9,7 +9,9 @@ local PLACEABLE_MODELS = {
     stovetop     = "pickle_stovetop_01",
     kitchen_prep = "pickle_kitchen_prep_01",
     -- Self-order kiosk (physical world prop; opens the order NUI, not a station).
+    -- Wall-mounted terminal (_01) and free-standing ground kiosk (_02).
     kiosk        = "pickle_kiosk_large_01",
+    kiosk_ground = "pickle_kiosk_large_02",
 }
 
 lib.callback.register("pickle_restaurants:placement:saveProp", function(src, d)
@@ -126,6 +128,25 @@ lib.callback.register("pickle_restaurants:placement:saveCounter", function(src, 
     MySQL.update.await("UPDATE pickle_restaurants SET counter = ? WHERE id = ?", { json.encode(counter), id })
     RestaurantCache[id].counter = counter
     SyncToClient(-1) -- rebuild counter interaction + blip everywhere
+    return { ok = true }
+end)
+
+-- The per-restaurant NPC customer spawn point (where AI customers appear before
+-- walking up to queue). One per restaurant, stored in metadata.npc_spawn like the
+-- kitchen shell — a free point + heading. modules/npc_customers folds it into every
+-- spawn/state broadcast so clients start the walk-in there instead of a fixed offset
+-- back from the counter (which used to bury customers in props and strand them).
+lib.callback.register("pickle_restaurants:placement:saveNpcSpawn", function(src, d)
+    local id = tonumber(d.restaurant_id)
+    local r = GetRestaurant(id)
+    if not r then return { ok = false, error = _L("placement_no_restaurant") } end
+    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    local x, y, z = tonumber(d.x), tonumber(d.y), tonumber(d.z)
+    if not (x and y and z) then return { ok = false } end
+
+    r.metadata = r.metadata or {}
+    r.metadata.npc_spawn = { x = x + 0.0, y = y + 0.0, z = z + 0.0, heading = (tonumber(d.heading) or 0.0) + 0.0 }
+    MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), id })
     return { ok = true }
 end)
 

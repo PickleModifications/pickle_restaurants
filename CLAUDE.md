@@ -299,6 +299,26 @@ the NUI is untrusted.
   tools/targets/outputs + `prep_models` keys. A sprinkles tool is one more config row —
   no code. There is no admin-panel editor for finishes yet (settings table only).
 
+- **Condiments (ketchup / mustard / mayo) — the `condiments` setting.** A squeeze-bottle
+  applicator that lays a sauce LAYER on a build stack. Config is a list of
+  `{ item, container_model, applied_model }` (each flavor's `container_01` holds the sauce,
+  `applied_01` is what's left on the food — no separate sauce item). Sibling to the finish
+  tools in wiring (synced as the client `Condiments` global via `BuildSyncPayload`; a
+  `kind = "condiment"` applicator card in `getIngredients`; itemgen exports the bottle
+  item; `ingredient_costs` prices it) but DIFFERENT in effect: a finish consumes a FINISHED
+  tray product and re-trays a decorated one, whereas a condiment adds a LAYER to an
+  in-progress prep BUILD exactly like a pepperoni/pickle component — reserved via `prepAdd`
+  (source nil, pool item), consumed at Make, riding along as a build-stack variation
+  (`TraySig`). `itemModel(condiment)` returns the `applied_model`, so the layer renders as
+  its sauce everywhere (prep table, tray, meal, decompose) — structurally identical to the
+  existing `pickle` applied component. The gesture (`cooking:beginCondiment` in
+  `modules/cooking/client.lua`): the bottle follows the cursor upright, FLIPS 180° (a pitch
+  about its centre-bottom origin) when held over a valid stack, then SQUEEZES down-and-up
+  once (`CONDIMENT` tunables — `flip_ms`/`squeeze_ms`/`dip`/`hover_gap`, TUNE IN-GAME); the
+  sauce fades in and commits at the squeeze's end. A condiment can NEVER be a stack's first
+  layer (nothing under it to sauce) — enforced client-side (the applicator only engages over
+  a stack with ≥1 existing part). No admin-panel editor (settings table only, like finishes).
+
 ## One-item consolidation rule
 
 Variants NEVER multiply items — they collapse into ONE item with the variation in

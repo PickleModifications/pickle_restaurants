@@ -70,6 +70,20 @@ function StartMovement(prop, data)
             if not isFrozen then
                 coords = vector3(hitCoords.x, hitCoords.y, hitCoords.z + coordsOffset.z)
                 heading = GetGameplayCamRot(2).z
+                -- Wall-mounted props: nudge the prop back off the surface it's aimed
+                -- at (toward the camera/placer) by data.wallOffset so it doesn't bury
+                -- into the wall. Horizontal only, so a slightly-angled aim can't
+                -- lift/sink it. Baked into `coords`, so the SAVED position matches.
+                if data.wallOffset and data.wallOffset > 0.0 then
+                    local cam = GetGameplayCamCoord()
+                    local back = vector3(cam.x - hitCoords.x, cam.y - hitCoords.y, 0.0)
+                    local len = #back
+                    if len > 0.01 then
+                        local inv = data.wallOffset / len
+                        coords = vector3(coords.x + back.x * inv,
+                                         coords.y + back.y * inv, coords.z)
+                    end
+                end
                 SetEntityCoords(prop, coords.x + coordsOffset.x, coords.y + coordsOffset.y, coords.z)
                 if not data.keepRotation then
                     SetEntityRotation(prop, rotationOffset.x, rotationOffset.y, heading + rotationOffset.z, 2) 

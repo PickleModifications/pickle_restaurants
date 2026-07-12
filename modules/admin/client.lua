@@ -95,6 +95,13 @@ RegisterNUICallback("admin:placeSeat", function(d, cb)
     ReopenAdmin(d.id, "seating")
 end)
 
+RegisterNUICallback("admin:placeNpcSpawn", function(d, cb)
+    CloseNUI()
+    cb({})
+    StartNpcSpawnPlacement(d.id)
+    ReopenAdmin(d.id, "stations")
+end)
+
 -- Virtual kitchen: the shell height/facing view and virtual point anchors.
 RegisterNUICallback("admin:placeShell", function(d, cb)
     CloseNUI()

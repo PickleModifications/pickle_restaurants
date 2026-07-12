@@ -11,7 +11,7 @@ import { type Item } from "@/components/ItemPicker";
 import Branding, { ThemeEditor } from "@/components/Branding";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { UserPlus, Trash2, Plus, Minus, MapPin, Banknote, Armchair, ImageOff, PackagePlus, ArrowDownToLine, ArrowUpFromLine, Sparkles } from "lucide-react";
+import { UserPlus, Trash2, Plus, Minus, MapPin, Banknote, Armchair, ImageOff, PackagePlus, ArrowDownToLine, ArrowUpFromLine, Sparkles, Users } from "lucide-react";
 
 // Inventory thumbnail from a direct nui:// url the server resolved.
 function Thumb({ src, className }: { src?: string; className?: string }) {
@@ -69,7 +69,7 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         )}
         {perms.manage_props && (
           <TabsContent value="stations" className="min-h-0 flex-1 overflow-y-auto pr-1">
-            <Stations id={id} props={data?.props || []} hasShell={data?.restaurant?.hasShell} focusSection={focus?.section} />
+            <Stations id={id} props={data?.props || []} hasShell={data?.restaurant?.hasShell} hasNpcSpawn={data?.restaurant?.hasNpcSpawn} focusSection={focus?.section} />
           </TabsContent>
         )}
         {perms.manage_props && (
@@ -335,7 +335,7 @@ function Finances({ id, balance, ledger, canManage }: any) {
   );
 }
 
-function Stations({ id, props, hasShell, focusSection }: any) {
+function Stations({ id, props, hasShell, hasNpcSpawn, focusSection }: any) {
   const STATIONS = [
     { key: "soda_machine", label: _L("admin.station_soda_machine") },
     { key: "fryer", label: _L("admin.station_fryer") },
@@ -344,6 +344,8 @@ function Stations({ id, props, hasShell, focusSection }: any) {
     // The self-service kiosk is a customer ORDER terminal, not a cooking station,
     // so it's placed as a physical world prop only (no virtual-kitchen variant).
     { key: "kiosk", label: _L("admin.station_kiosk"), physicalOnly: true },
+    // Free-standing floor kiosk (the _02 body) — same order terminal, ground-placed.
+    { key: "kiosk_ground", label: _L("admin.station_kiosk_ground"), physicalOnly: true },
   ];
   const seats = (props as any[]).filter((p) => p.prop_type === "seat");
   const [modes, setModes] = useState<Record<string, "physical" | "virtual">>({});
@@ -369,9 +371,14 @@ function Stations({ id, props, hasShell, focusSection }: any) {
         <CardContent className="pt-4">
           <div className="mb-3 flex items-center justify-between gap-2">
             <h3 className="text-sm font-semibold">{_L("mgmt.stations_heading")}</h3>
-            <Button variant="outline" size="sm" onClick={() => fetchNui("management:setCounter", { id })}>
-              <MapPin className="h-3.5 w-3.5" /> {_L("mgmt.set_counter")}
-            </Button>
+            <div className="flex items-center gap-1.5">
+              <Button variant="outline" size="sm" onClick={() => fetchNui("management:placeNpcSpawn", { id })}>
+                <Users className="h-3.5 w-3.5" /> {hasNpcSpawn ? `${_L("mgmt.set_npc_spawn")} ✓` : _L("mgmt.set_npc_spawn")}
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => fetchNui("management:setCounter", { id })}>
+                <MapPin className="h-3.5 w-3.5" /> {_L("mgmt.set_counter")}
+              </Button>
+            </div>
           </div>
           <div className="space-y-3">
             {STATIONS.map((s) => {

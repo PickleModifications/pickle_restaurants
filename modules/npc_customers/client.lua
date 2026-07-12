@@ -41,8 +41,14 @@ local function slotPos(counter, geo, index)
     return pos
 end
 
--- Where a new arrival appears before walking up: further back along the same line.
-local function spawnPos(counter, geo, index)
+-- Where a new arrival appears before walking up. Prefer the restaurant's admin-placed
+-- spawn point (a clear, reachable spot near the register) — it's the same for every
+-- customer, and the queue geometry takes over once they reach their slot. Falls back
+-- to the legacy computed point (further back along the queue line) when none is placed.
+local function spawnPos(counter, geo, index, spawn)
+    if spawn and spawn.x then
+        return vector3(spawn.x + 0.0, spawn.y + 0.0, spawn.z + 0.0)
+    end
     local slot = slotPos(counter, geo, index)
     return slot + (forwardVec(counter.heading or 0.0) * -(geo.spawn_distance or 6.0))
 end
@@ -66,12 +72,18 @@ local function walkToSlot(rid, orderId, ped, target, headingFace)
     if not entry or not DoesEntityExist(ped) then return end
     FreezeEntityPosition(ped, false)
     entry.isWalking = true
-    TaskGoStraightToCoord(ped, target.x, target.y, target.z, 1.0, -1, 0.0, 0.0)
+    -- NavMesh (not straight-line) so the ped paths AROUND counters/props instead of
+    -- shoving into them and stalling. A hard timeout below snaps it into the slot if
+    -- it still can't reach — a queued customer must never be left wandering.
+    TaskFollowNavMeshToCoord(ped, target.x, target.y, target.z, 1.0, 20000, 0.35, false, 0.0)
     CreateThread(function()
+        local waited = 0
         while DoesEntityExist(ped) and OrderNPCs[rid] and OrderNPCs[rid][orderId]
             and OrderNPCs[rid][orderId].isWalking do
             Wait(400)
-            if #(GetEntityCoords(ped) - target) < 0.35 then
+            waited = waited + 400
+            -- Reached the slot, or gave up finding a path: settle into place either way.
+            if #(GetEntityCoords(ped) - target) < 0.5 or waited >= 20000 then
                 ClearPedTasks(ped)
                 SetEntityCoordsNoOffset(ped, target.x, target.y, target.z, false, false, false)
                 SetEntityHeading(ped, headingFace)
@@ -87,13 +99,13 @@ end
 
 -- Create the ped (optionally walking it in). `atSlot` seats it immediately with no
 -- walk-in — used when re-rendering NPCs that were already queued before we arrived.
-local function makeNpc(rid, orderId, model, counter, geo, index, ticket, atSlot)
+local function makeNpc(rid, orderId, model, counter, geo, index, ticket, spawn, atSlot)
     OrderNPCs[rid] = OrderNPCs[rid] or {}
     if OrderNPCs[rid][orderId] then return end -- already have this one
     if #(playerCoords() - counterVec(counter)) > RENDER_DIST then return end -- too far to bother
 
     local h = facing(counter.heading or 0.0)
-    local start = atSlot and slotPos(counter, geo, index) or spawnPos(counter, geo, index)
+    local start = atSlot and slotPos(counter, geo, index) or spawnPos(counter, geo, index, spawn)
     local ped = CreateNPC(GetHashKey(model), start.x, start.y, start.z, h, false, true)
     if not ped or ped == 0 or not DoesEntityExist(ped) then return end
     configurePed(ped)
@@ -144,7 +156,7 @@ end
 
 RegisterNetEvent("pickle_restaurants:npc:spawn", function(d)
     if not d or not d.counter then return end
-    makeNpc(d.rid, d.orderId, d.model, d.counter, d.geo or {}, d.queueIndex or 0, d.ticket, false)
+    makeNpc(d.rid, d.orderId, d.model, d.counter, d.geo or {}, d.queueIndex or 0, d.ticket, d.spawn, false)
 end)
 
 -- Re-slot NPCs after the line moved (someone joined / left).
@@ -176,7 +188,7 @@ RegisterNetEvent("pickle_restaurants:npc:state", function(list)
     for _, s in ipairs(list or {}) do
         if s.counter and #(playerCoords() - counterVec(s.counter)) <= RENDER_DIST then
             for _, e in ipairs(s.entries or {}) do
-                makeNpc(s.rid, e.orderId, e.model, s.counter, s.geo or {}, e.queueIndex or 0, e.ticket, true)
+                makeNpc(s.rid, e.orderId, e.model, s.counter, s.geo or {}, e.queueIndex or 0, e.ticket, s.spawn, true)
             end
         end
     end
@@ -187,42 +199,6 @@ local function requestState() TriggerServerEvent("pickle_restaurants:npc:request
 -- Re-request whenever the world re-syncs (a counter may have moved / a restaurant
 -- appeared). This is a SECOND handler for the sync event — main/client owns the props.
 RegisterNetEvent("pickle_restaurants:sync", function() SetTimeout(500, requestState) end)
-
--- ─── overhead ticket tag ─────────────────────────────────────────────────────
--- A tiny "#<ticket>" over a waiting NPC's head when a nearby staff member looks, so
--- the ped is visibly the ticket in the register. Cheap: only draws for close peds.
-
-local function drawText3D(x, y, z, text)
-    local onScreen, sx, sy = World3dToScreen2d(x, y, z)
-    if not onScreen then return end
-    SetTextScale(0.35, 0.35)
-    SetTextFont(4)
-    SetTextColour(255, 255, 255, 215)
-    SetTextOutline()
-    SetTextCentre(true)
-    SetTextEntry("STRING")
-    AddTextComponentString(text)
-    DrawText(sx, sy)
-end
-
-CreateThread(function()
-    while true do
-        local sleep = 500
-        local pc = playerCoords()
-        for _, peds in pairs(OrderNPCs) do
-            for _, entry in pairs(peds) do
-                if entry.ticket and DoesEntityExist(entry.ped) then
-                    local c = GetEntityCoords(entry.ped)
-                    if #(pc - c) < 12.0 then
-                        sleep = 0
-                        drawText3D(c.x, c.y, c.z + 1.05, ("#%s"):format(entry.ticket))
-                    end
-                end
-            end
-        end
-        Wait(sleep)
-    end
-end)
 
 -- ─── distance cull + approach spawn ──────────────────────────────────────────
 -- Free peds for restaurants we've walked away from (they return via npc:state), and

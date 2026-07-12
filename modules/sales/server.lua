@@ -83,7 +83,10 @@ function BuildSellableCatalog(rid)
             and RestaurantHasAccess(rid, a.group) then
             local ok = true
             for _, comp in ipairs(a.components or {}) do
-                if not ItemExists(comp) then ok = false end
+                -- a component is a real item OR a cooked-pool product (a patty) — the
+                -- latter is valid without being installed (IsProductItem), so a burger
+                -- still sells even though its patty is a pool-only intermediate
+                if not ItemExists(comp) and not IsProductItem(comp) then ok = false end
             end
             -- enrich each modifier with its item's image + a clean price for the
             -- POS grid (the raw config price/default/id survive for order pricing)
@@ -696,7 +699,7 @@ local function PlayerAtKiosk(src, rid)
     if ped == 0 then return false end
     local c = GetEntityCoords(ped)
     for _, p in pairs(PropCache) do
-        if p.restaurant_id == rid and p.prop_type == "kiosk" then
+        if p.restaurant_id == rid and (p.prop_type == "kiosk" or p.prop_type == "kiosk_ground") then
             if #(c - vector3(p.x + 0.0, p.y + 0.0, p.z + 0.0)) <= KIOSK_REACH then return true end
         end
     end

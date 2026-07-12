@@ -101,6 +101,7 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
         ok        = true,
         restaurant = { id = r.id, label = r.label, balance = r.balance, owner = r.owner_identifier,
                        hasShell     = (r.metadata and r.metadata.shell) ~= nil,
+                       hasNpcSpawn  = (r.metadata and r.metadata.npc_spawn) ~= nil,
                        brand_image  = r.metadata and r.metadata.brand_image or nil,
                        brand_images = r.metadata and r.metadata.brand_images or nil,
                        theme        = r.metadata and r.metadata.theme or nil },

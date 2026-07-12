@@ -30,6 +30,7 @@ local function buildAdminData()
             balance      = r.balance,
             hasCounter   = r.counter ~= nil,
             hasShell     = (r.metadata and r.metadata.shell) ~= nil,
+            hasNpcSpawn  = (r.metadata and r.metadata.npc_spawn) ~= nil,
             groups       = r.groups or {},
             props        = props,
             propCount    = #props,

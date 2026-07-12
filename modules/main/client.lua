@@ -10,6 +10,7 @@ RecipesByStation = {}    -- [station]       = { recipe, ... }
 Drinks           = {}    -- soda definitions
 Assembly         = {}    -- kitchen-prep definitions
 Finishes         = {}    -- finish tools (frosting…): tool -> targets -> flavors
+Condiments       = {}    -- squeeze-bottle condiments: { item, container_model, applied_model }
 Baking           = {}    -- baking mix + trays: { mix_item, mix_model, rub_dist, trays = {...} }
 
 -- prop_type → localization key (resolved via _L at interaction-build time)
@@ -154,7 +155,7 @@ local function SpawnProp(prop)
     -- an order without a cashier — the order still becomes a kitchen ticket a worker
     -- fulfils. Re-assert any configured brand now the model exists (its screen is a
     -- render-target texture; AddReplaceTexture only takes on a streamed model).
-    if prop.prop_type == "kiosk" then
+    if prop.prop_type == "kiosk" or prop.prop_type == "kiosk_ground" then
         if ReassertBrandFor then ReassertBrandFor(prop.model) end
         propInteractions[prop.id] = CreateInteraction({
             coords         = vector3(prop.x, prop.y, prop.z),
@@ -234,7 +235,7 @@ end
 
 local function ApplySync(payload)
     ClearWorld()
-    Restaurants, RecipesByInput, RecipesByStation, Drinks, Assembly, Finishes = {}, {}, {}, {}, {}, {}
+    Restaurants, RecipesByInput, RecipesByStation, Drinks, Assembly, Finishes, Condiments = {}, {}, {}, {}, {}, {}, {}
 
     for _, r in ipairs(payload.restaurants or {}) do
         r.props = {}
@@ -249,6 +250,7 @@ local function ApplySync(payload)
         Drinks   = payload.settings.drinks or {}
         Assembly = payload.settings.assembly or {}
         Finishes = payload.settings.finishes or {}
+        Condiments = payload.settings.condiments or {}
         Baking   = payload.settings.baking or {}
         SideContainerModel = payload.settings.side_container_model or ""
     end

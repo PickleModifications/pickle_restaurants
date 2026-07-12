@@ -476,6 +476,12 @@ function itemModel(item)
     -- The cheese slice is ALWAYS the unmelted slice (_01). _02 is the melted variant,
     -- used only for the stovetop cook animation — never as a stackable/applied slice.
     if item == "cheese" then return "pickle_cheese_applied_01" end
+    -- A condiment layer renders as its `applied_model` sauce everywhere it appears in a
+    -- build stack (prep table, tray, meal, decompose) — the bottle is only the drag
+    -- applicator, never the stacked prop.
+    for _, c in ipairs(GetSetting("condiments", {})) do
+        if c.item == item then return c.applied_model end
+    end
     -- A finish output with no recorded flavor (plain instance / a framework that
     -- strips slot metadata): first flavor for a replace-mode product, the bare
     -- target's prop for an overlay-mode one. finishRender handles flavored metas.
@@ -516,6 +522,14 @@ local function isTrayItem(item)
     -- the generic collected drink lives in the tray too (its flavor is metadata),
     -- so a drink layer in a meal refunds back to the tray with its flavor intact
     if item == GetSetting("drink_item", "drink") then return true end
+    -- a baking-tray output (raw_cake / raw_cookie) is a tray-only uncooked
+    -- intermediate (like raw_pizza) — it lives in the tray until it's baked
+    local baking = GetSetting("baking", {})
+    if type(baking) == "table" then
+        for _, t in ipairs(baking.trays or {}) do
+            if t.output == item then return true end
+        end
+    end
     return false
 end
 
@@ -1010,10 +1024,14 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
     if station == "fryer" or station == "stovetop" then
         for _, recipe in ipairs(RecipeCache) do
             -- Recipes that reference a missing item are hidden until fixed. Inputs
-            -- that are themselves an assembled product (an uncooked pizza) aren't
-            -- raw ingredients — they file under the "Uncooked Items" tab instead.
-            -- A recipe whose group this restaurant doesn't carry is hidden too.
-            if recipe.station == station and IsRecipeValid(recipe) and not findAssembly(recipe.input_item)
+            -- that are themselves a PRODUCT/INTERMEDIATE aren't raw ingredients — they
+            -- file under the "Uncooked Items" tab (getTray flags them) and are dragged
+            -- into their station from there: an assembled uncooked pizza (findAssembly)
+            -- OR a tray-held bake intermediate (cookie dough / cake batter — raw_cookie /
+            -- raw_cake, isTrayItem). Only true raw pool ingredients (a raw patty) belong
+            -- on this bar. A recipe whose group this restaurant doesn't carry is hidden too.
+            if recipe.station == station and IsRecipeValid(recipe)
+                and not findAssembly(recipe.input_item) and not isTrayItem(recipe.input_item)
                 and RestaurantHasAccess(prop.restaurant_id, recipe.group) then
                 local count = poolInvCount(src, rid, recipe.input_item)
                 if count and count > 0 then
@@ -1076,9 +1094,10 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         local bakeMixItem = (type(baking) == "table") and baking.mix_item or nil
         if type(baking) == "table" and baking.trays then
             for _, t in ipairs(baking.trays) do
-                -- gate on the output being a real item (same as BuildSyncPayload ships),
-                -- so the card can't appear for a kind the client won't recognise
-                if t.kind and t.tray_model and ItemExists(t.output)
+                -- the output is a tray-only uncooked intermediate (raw_cake / raw_cookie),
+                -- so it needn't be an installed item — just a configured tray kind + model
+                -- the client can render (BuildSyncPayload ships it as a product)
+                if t.kind and t.tray_model
                     and RestaurantHasAccess(prop.restaurant_id, t.group) then
                     out[#out + 1] = { kind = "baketray", subkind = t.kind, label = t.label or t.kind }
                 end
@@ -1116,6 +1135,24 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
                 end
             end
         end
+        -- Condiment squeeze bottles (ketchup / mustard / mayo): draggable applicators
+        -- like the finish tools, but they lay a sauce LAYER on a build stack instead of
+        -- re-traying a product. Shown whenever the bottle is in the shared pool (personal
+        -- inventory once dry). Ungrouped — a condiment is a universal topping, so it
+        -- isn't gated on a restaurant's recipe groups. Kept in `condimentTools` so the
+        -- plain-component loop below doesn't also list the bottle as an ingredient.
+        local condimentTools = {}
+        for _, c in ipairs(GetSetting("condiments", {})) do
+            if c.item and c.container_model and c.applied_model and ItemExists(c.item) then
+                condimentTools[c.item] = true
+                local count = poolInvCount(src, rid, c.item)
+                if count > 0 then
+                    out[#out + 1] = { kind = "condiment", item = c.item, label = GetItemLabel(c.item),
+                                      image = GetItemImage(c.item), count = count,
+                                      model = c.container_model }
+                end
+            end
+        end
         -- The baking mix applicator card: rubbed over a placed cake tin / cookie tray
         -- to fill it. Held from the shared pool like a finish tool; shown only when in
         -- stock (and only if the restaurant has access to at least one tray group).
@@ -1137,7 +1174,7 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
             -- Products (cook/assembly outputs — a cooked patty, a burger) are never
             -- "ingredients": inventory-held ones file under the Cooked/Uncooked tabs.
             -- Finish tools already have their own applicator card above.
-            if seen[comp] or finishTools[comp] or comp == bakeMixItem or not ItemExists(comp) or isTrayItem(comp) then return end
+            if seen[comp] or finishTools[comp] or condimentTools[comp] or comp == bakeMixItem or not ItemExists(comp) or isTrayItem(comp) then return end
             seen[comp] = true
             local count = poolInvCount(src, rid, comp)
             if count <= 0 then return end
@@ -1937,6 +1974,13 @@ lib.callback.register("pickle_restaurants:cooking:trayToInventory", function(src
     local sig    = (type(d.sig) == "string") and d.sig or nil
     local count  = tonumber(d.count) or 1
     if not item or GetTrayCount(rid, id, item, cheese, sig) < count then return { ok = false, error = _L("cook_not_enough") } end
+    -- Burnt food is UNEXCHANGEABLE: it can never leave the tray into real inventory —
+    -- the only way to get rid of it is the bin (trayDiscard), where it's destroyed for
+    -- good. See memory: burnt-unexchangeable-destroyed.
+    do
+        local _, state = recipeForOutput(item)
+        if state == "burnt" then return { ok = false, error = _L("cook_cant_take_burnt") } end
+    end
     -- The tray holding accepts anything (e.g. a meal made before its item was
     -- installed), but the real inventory can't — don't consume the tray entry
     -- into an item the framework doesn't know (it would just vanish).
@@ -2107,7 +2151,9 @@ lib.callback.register("pickle_restaurants:cooking:getRecipes", function(src, d)
             and RestaurantHasAccess(prop.restaurant_id, asm.group) -- group-gated per restaurant
         local comps = {}
         for _, c in ipairs(asm.components or {}) do
-            if not ItemExists(c) then valid = false end
+            -- a component is a real item OR a cooked-pool product (a patty) — the latter
+            -- is valid without being installed (IsProductItem)
+            if not ItemExists(c) and not IsProductItem(c) then valid = false end
             comps[#comps + 1] = { item = c, label = GetItemLabel(c), image = GetItemImage(c) }
         end
         if valid then
@@ -2442,8 +2488,8 @@ lib.callback.register("pickle_restaurants:cooking:fillBakeTray", function(src, d
     end
     if not tray or not tray.output then return { ok = false } end
     if not RestaurantHasAccess(rid, tray.group) then return { ok = false, error = _L("cook_cant_apply") } end
-    -- The output must be a real installed item — it's handed to the inventory on collect.
-    if not ItemExists(tray.output) then return { ok = false, error = _L("cook_item_not_installed", tray.output) } end
+    -- The output is a tray-only uncooked intermediate (raw_cake / raw_cookie), collected
+    -- into the cooked-items tray — never required to be an installed inventory item.
     if poolInvCount(src, rid, mix) < 1 then
         return { ok = false, error = _L("cook_no_tool_left", GetItemLabel(mix)) }
     end
@@ -2457,8 +2503,12 @@ lib.callback.register("pickle_restaurants:cooking:fillBakeTray", function(src, d
     return { ok = true, output = tray.output, label = GetItemLabel(tray.output) }
 end)
 
--- Collect a filled baking tray into the hotbar: redeems one pending credit for its
--- output item. The mix was already spent at fill time, so this only grants the item.
+-- Collect a filled baking tray: redeems one pending credit for its oven-ready output.
+-- The output (raw_cake / raw_cookie) is an assembled-but-uncooked INTERMEDIATE — it's
+-- tray-only, never a real inventory item (like raw_pizza), so it lands in the
+-- per-player cooked-items tray, where getTray flags it "uncooked" (it's a cook-recipe
+-- input) and files it under the Uncooked Items tab to be dragged into the oven. The
+-- mix was already spent at fill time, so this only grants the tray credit.
 lib.callback.register("pickle_restaurants:cooking:bakeTrayToInv", function(src, d)
     local prop = PropCache[tonumber(d and d.prop_id)]
     if not prop then return { ok = false } end
@@ -2469,10 +2519,9 @@ lib.callback.register("pickle_restaurants:cooking:bakeTrayToInv", function(src, 
     if not output or not p or (p.outs[output] or 0) < 1 then
         return { ok = false, error = _L("cook_item_changed") }
     end
-    if not ItemExists(output) then return { ok = false, error = _L("cook_item_not_installed", output) } end
     p.outs[output] = p.outs[output] - 1
-    Inventory.AddItem(src, output, 1)
-    return { ok = true, item = output, count = 1, label = GetItemLabel(output) }
+    AddTray(rid, GetIdentifier(src), output, 0, 1, nil)
+    return { ok = true, output = output, label = GetItemLabel(output) }
 end)
 
 -- Save a whole stack as its CLOSEST product — the drag-whole-stack-to-hotbar and

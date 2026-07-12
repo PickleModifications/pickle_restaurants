@@ -28,7 +28,7 @@ local CFG_DEFAULTS = {
     staff_radius     = 30.0,
     spawn_interval   = 45,
     max_queue        = 4,
-    patience_seconds = 240,
+    patience_seconds = 300,
     min_items        = 1,
     max_items        = 2,
     tip_chance       = 25,
@@ -109,6 +109,13 @@ local function counterVec(r)
     local c = r and r.counter
     if not c then return nil end
     return vector3(c.x + 0.0, c.y + 0.0, c.z + 0.0)
+end
+
+-- The admin-placed spawn point for this restaurant (metadata.npc_spawn), or nil.
+-- When set, clients start a new customer's walk-in HERE; when nil they fall back to
+-- the legacy computed point (spawn_distance back along the queue line).
+local function spawnPoint(r)
+    return r and r.metadata and r.metadata.npc_spawn or nil
 end
 
 -- ─── presence gating ─────────────────────────────────────────────────────────
@@ -236,6 +243,7 @@ local function spawnNpcCustomer(rid, r, cfg)
         orderId    = order.id,
         model      = model,
         counter    = r.counter,
+        spawn      = spawnPoint(r),
         geo        = geometry(cfg),
         queueIndex = #st.queue - 1,
         ticket     = order.ticket,
@@ -309,7 +317,7 @@ RegisterNetEvent("pickle_restaurants:npc:requestState", function()
                     ticket     = o and o.ticket or nil,
                 }
             end
-            out[#out + 1] = { rid = rid, counter = r.counter, geo = geometry(cfg), entries = entries }
+            out[#out + 1] = { rid = rid, counter = r.counter, spawn = spawnPoint(r), geo = geometry(cfg), entries = entries }
         end
     end
     TriggerClientEvent("pickle_restaurants:npc:state", src, out)

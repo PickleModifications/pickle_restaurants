@@ -34,6 +34,10 @@ local moving  = nil -- live drag of an already-placed prop: { uid, hit, coords, 
 -- rubbed over a placed prep part; the result prop fades in with tool travel.
 -- { tube, cfg, flavor, ghosts = {[pid] = {ent, sid, idx}}, coverage = {[pid] = m}, last, applying }
 local finishing = nil
+-- live condiment-bottle drag: the container follows the cursor, flips 180° over a
+-- build stack and squeezes down-and-up once to lay a sauce layer on top.
+-- { container, cfg, ch, lift, flip, targetSid, sqStart, ghost, applying }
+local condimenting = nil
 -- live baking-mix drag: the mix bowl follows the cursor and is rubbed over a placed
 -- EMPTY baking tray; the raw sheet/dough fades in with travel, and at full coverage
 -- the tray fills (server consumes 1 mix). { prop, ghosts = {[tid]={ent}}, coverage =
@@ -294,6 +298,29 @@ local function batchGridOffsets(n, hx, hy)
         offs[#offs + 1] = { dx = dx, dy = dy }
     end
     return offs
+end
+
+-- Grid half-extents for a containered BATCH bake (the six-cookie tray) shown in the
+-- oven: start from the container prop's own footprint, but never let the span get so
+-- tight that the servings overlap. A container model that reports small bounds — or
+-- hasn't finished streaming when the slot spawns — would otherwise clamp the grid to a
+-- few centimetres and pile every cookie onto the same point ("all in the middle / one
+-- prop"). Flooring each column/row pitch by the serving prop's measured footprint keeps
+-- them spread out on the tray the same way the prep baking tray lays them.
+local function bakeGridExtents(n, containerModel, servingModel)
+    local cn, cx = GetModelDimensions(EnsureModel(containerModel))
+    local hx = (cn and cx) and math.max((cx.x - cn.x) * 0.5 - 0.03, 0.05) or 0.12
+    local hy = (cn and cx) and math.max((cx.y - cn.y) * 0.5 - 0.03, 0.05) or 0.08
+    local sn, sx = GetModelDimensions(EnsureModel(servingModel))
+    local sw = (sn and sx) and math.max(sx.x - sn.x, 0.03) or 0.05
+    local sd = (sn and sx) and math.max(sx.y - sn.y, 0.03) or 0.05
+    local cols = math.min(math.max(n, 1), 3)
+    local rows = math.ceil(math.max(n, 1) / cols)
+    -- batchGridOffsets spreads columns across -hx*0.7..+hx*0.7 (so (cols-1) gaps of
+    -- 2*hx*0.7/(cols-1)); require each gap >= a serving width plus a hair of clearance
+    if cols > 1 then hx = math.max(hx, (sw * 1.1 * (cols - 1)) / (2 * 0.7)) end
+    if rows > 1 then hy = math.max(hy, (sd * 1.1 * (rows - 1)) / (2 * 0.7)) end
+    return hx, hy
 end
 
 -- A stacked topping (pizza cheese/pepperoni) that has a cooked look follows the
@@ -869,13 +896,15 @@ local function SpawnSlotObject(uid, model, propId, method, door, slot, state, st
         -- only swaps the one stackBase layer, so the raw `stack` array has mixed models,
         -- but every serving normalises to the same cook variant here.
         local offs = nil
-        if #mdls == #stack and #mdls >= 3 and isContainerModel(mdls[1]) then
+        -- container base + two or more IDENTICAL serving layers → grid, not a tower.
+        -- `same` alone proves the top layers are uniform servings (a dual patty would
+        -- break it), so we no longer gate on #mdls == #stack — that made the layout
+        -- silently fall back to a centred pile whenever the counts drifted.
+        if #mdls >= 3 and isContainerModel(mdls[1]) then
             local same = true
             for i = 3, #mdls do if mdls[i] ~= mdls[2] then same = false break end end
             if same then
-                local mn, mx = GetModelDimensions(EnsureModel(mdls[1]))
-                local hx = (mn and mx) and math.max((mx.x - mn.x) * 0.5 - 0.03, 0.05) or 0.12
-                local hy = (mn and mx) and math.max((mx.y - mn.y) * 0.5 - 0.03, 0.05) or 0.08
+                local hx, hy = bakeGridExtents(#mdls - 1, mdls[1], mdls[2])
                 local grid = batchGridOffsets(#mdls - 1, hx, hy)
                 offs = { { dx = 0.0, dy = 0.0 } } -- container centred
                 for i = 1, #grid do offs[#offs + 1] = grid[i] end
@@ -1915,7 +1944,12 @@ end
 -- ON the surface; a tray's paper lies on the tray bed (paper_dz above the base),
 -- a box's lid seats on its hinge anchor and swings to opening fraction openT —
 -- each prop corrected for its own origin offset.
-local function layoutTrayAt(ents, x, y, z, kind, openT)
+-- `storedOffs` (optional) is the per-serving (dx, dy) list captured ONCE when the tray
+-- was filled — reuse it so a grabbed/moved cookie tray keeps every cookie exactly where
+-- it was, instead of re-deriving the grid each render (which drifts when the model's
+-- bounds haven't streamed in yet, or the surviving prop count differs from the slot
+-- count). Falls back to a fresh grid only for a tray that has no stored offsets.
+local function layoutTrayAt(ents, x, y, z, kind, openT, storedOffs)
     local yaw = curYaw() -- faces the prep station, not the world axes
     if isBakeKind(kind) then
         -- container prop (ents[1]) + one serving prop per slot (ents[2..], present once
@@ -1926,7 +1960,7 @@ local function layoutTrayAt(ents, x, y, z, kind, openT)
             SetEntityRotation(base, 0.0, 0.0, yaw, 2, true)
         end
         local hx, hy = trayHalfExtents(kind)
-        local offs = batchGridOffsets(bakeSlotCount(kind), hx, hy)
+        local offs = storedOffs or batchGridOffsets(bakeSlotCount(kind), hx, hy)
         local hr, fz = math.rad(yaw), z + trayFoodDz(kind)
         for i = 2, #(ents or {}) do
             local e = ents[i]
@@ -2221,6 +2255,16 @@ local function cancelBakeMix()
     setTrayOutline(nil)
 end
 
+-- Drop an in-progress condiment-bottle drag: the container and any faded sauce ghost
+-- go away. Nothing was reserved until the squeeze completes, so this is a clean reset.
+local function cancelCondiment()
+    local c = condimenting; condimenting = nil
+    if not c then return end
+    SafeDeleteEntity(c.container)
+    if c.ghost then SafeDeleteEntity(c.ghost) end
+    setOutline(nil)
+end
+
 -- Group carried parts into piles by their (dx, dy) tray offset — consecutive
 -- parts at the same spot stack bottom-to-top, mirroring how the meal was built.
 local function groupPiles(parts)
@@ -2240,7 +2284,7 @@ end
 -- Lay a carried tray/box (+ its piles) at a world point — the live preview while
 -- a meal / a grabbed tray follows the cursor.
 local function layoutTrayGroup(drag, x, y, z)
-    layoutTrayAt(drag.tray, x, y, z, drag.trayKind, drag.openT)
+    layoutTrayAt(drag.tray, x, y, z, drag.trayKind, drag.openT, drag.trayOffs)
     local fz = z + trayFoodDz(drag.trayKind)
     for _, pile in ipairs(drag.piles or {}) do
         layoutParts(pile.parts, x + pile.dx, y + pile.dy, fz, false)
@@ -2264,8 +2308,10 @@ local function commitTrayGroup(x, y, z, ents, piles, kind, open, extra)
         PrepTrays[tid].output   = (extra and extra.output) or (be and be.output)
         PrepTrays[tid].rawModel = be and be.raw_model
         PrepTrays[tid].filled   = (extra and extra.filled) and true or false
+        -- carry the persisted per-cookie offsets across the move so nothing re-grids
+        PrepTrays[tid].offs     = extra and extra.offs or nil
     end
-    layoutTrayAt(ents, x, y, z, kind, open and 1.0 or 0.0)
+    layoutTrayAt(ents, x, y, z, kind, open and 1.0 or 0.0, extra and extra.offs)
     local fz = z + trayFoodDz(kind)
     for _, pile in ipairs(piles or {}) do
         prepSid = prepSid + 1
@@ -2456,6 +2502,7 @@ local function StopCooking()
     cancelMove()  -- drop any in-progress drag of a placed prop
     cancelFinish() -- drop any in-progress finish-tool (frosting) drag
     cancelBakeMix() -- drop any in-progress baking-mix drag
+    cancelCondiment() -- drop any in-progress condiment-bottle drag
     HoverPatty(nil)
     if HoverOvenDoor then HoverOvenDoor(nil, nil) end -- clear any door outline
     clearPrepStacks()
@@ -3232,8 +3279,12 @@ RegisterNUICallback("cooking:prepDrop", function(d, cb)
                         { prop_id = currentCookProp and currentCookProp.id, output = drag.bakeOutput })
                     if res and res.ok then
                         deleteDrag(drag)
-                        if res.label then ShowNotification(_L("cook_saved", res.label)) end
-                        RefreshBar()
+                        if res.label then ShowNotification(_L("cook_made", res.label)) end
+                        -- the bake collects into the cooked-items tray (a tray-only
+                        -- uncooked intermediate), so re-pull the tray too — otherwise
+                        -- the "Uncooked Items" tab stays empty until the station is
+                        -- reopened (why it only showed up at the oven before)
+                        RefreshTray(); RefreshBar()
                         return cb(res)
                     end
                     if res and res.error then ShowNotification(res.error) end
@@ -3245,7 +3296,7 @@ RegisterNUICallback("cooking:prepDrop", function(d, cb)
             end
             local c = (drag.hit and drag.coords) or drag.home
             commitTrayGroup(c.x, c.y, c.z, drag.tray, nil, drag.trayKind, false,
-                            { filled = drag.bakeFilled, output = drag.bakeOutput })
+                            { filled = drag.bakeFilled, output = drag.bakeOutput, offs = drag.trayOffs })
             return cb({ ok = true })
         end
         if d and d.cancel then
@@ -3490,8 +3541,10 @@ RegisterNUICallback("cooking:trayGrab", function(d, cb)
                  openT = isBox and (t.open and 1.0 or 0.0) or nil, piles = piles, parts = parts,
                  home = { x = t.x, y = t.y, z = t.z }, hit = false,
                  -- a baking tray carries its fill state + output so the drop can collect
-                 -- it (bar) or set it back down (world) with the raw sheet intact
-                 bake = isBakeKind(t.kind) or nil, bakeFilled = t.filled or nil, bakeOutput = t.output }
+                 -- it (bar) or set it back down (world) with the raw sheet intact, plus its
+                 -- persisted per-cookie offsets so a move never re-grids the contents
+                 bake = isBakeKind(t.kind) or nil, bakeFilled = t.filled or nil, bakeOutput = t.output,
+                 trayOffs = t.offs }
     runDragThread(prepDrag)
     cb({ ok = true })
 end)
@@ -3868,7 +3921,7 @@ end
 -- begin dragging a finish tool: spawn the real tube prop following the cursor;
 -- coverage/ghost state lives per hovered part for the drag's lifetime.
 RegisterNUICallback("cooking:beginFinish", function(d, cb)
-    cancelPlace(); cancelMove(); cancelFinish()
+    cancelPlace(); cancelMove(); cancelFinish(); cancelCondiment()
     if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
     local base = currentCookProp
     if not base or base.prop_type ~= "kitchen_prep" then return cb({ ok = false }) end
@@ -3952,6 +4005,147 @@ RegisterNUICallback("cooking:endFinish", function(_, cb)
     cb({ ok = true })
 end)
 
+-- ─── condiments (ketchup / mustard / mayo) ───────────────────────────────────
+-- A condiment bottle (synced `Condiments` config) is dragged out of the bar and held
+-- OVER a build stack. It flips 180° (nozzle down) as it moves above the stack, then
+-- squeezes DOWN-and-UP once — the sauce (`applied_model`) fades in on the stack top and
+-- is committed as a NEW build-stack layer (reserved via prepAdd, consumed at Make). A
+-- condiment can never be a stack's FIRST layer (nothing under it to sauce), so the
+-- applicator only engages over a stack that already has ≥1 part. TUNE IN-GAME.
+local CONDIMENT = {
+    hover_gap  = 0.02,  -- clearance between the bottle nozzle and the stack top while hovering
+    flip_ms    = 220,   -- time to swing the bottle 180° once it moves over a valid stack
+    squeeze_ms = 420,   -- one full down-and-up squeeze that lays the sauce
+    dip        = 0.03,  -- how far the nozzle presses toward the food at the squeeze bottom
+}
+
+-- Squeeze complete: commit the sauce as a new top layer. Mirrors replacePartWithFinished
+-- but INSERTS on top instead of replacing. We clear `condimenting` BEFORE the server
+-- round-trip so a pointer-up cancel firing on another coroutine becomes a no-op and this
+-- function alone owns the props from here (same guard as applyBakeMixAt).
+local function applyCondimentAt(c, sid)
+    if condimenting == c then condimenting = nil end
+    local stack = PrepStacks[sid]
+    local res = stack and lib.callback.await("pickle_restaurants:cooking:prepAdd", false, {
+        prop_id = currentCookProp and currentCookProp.id, item = c.cfg.item,
+    }) or nil
+    SafeDeleteEntity(c.container)
+    if c.ghost then SafeDeleteEntity(c.ghost); c.ghost = nil end
+    setOutline(nil)
+    if res and res.ok then
+        stack = PrepStacks[sid] -- re-fetch: the stack may have changed during the await
+        local part = stack and makePart({ item = c.cfg.item, model = c.cfg.applied_model })
+        if part then
+            part.id = res.id
+            stack.parts[#stack.parts + 1] = part
+            relayout(stack)
+        else
+            -- the stack vanished mid-commit: drop the orphan reservation so the pool
+            -- figure and any later Make stay correct
+            lib.callback.await("pickle_restaurants:cooking:prepRemove", false, { id = res.id })
+        end
+        RefreshBar()
+    elseif res and res.error then
+        ShowNotification(res.error)
+    end
+    SendNUIMessage({ action = "cookingCondimentDone" })
+end
+
+-- begin dragging a condiment bottle: spawn the real container prop following the cursor;
+-- it rides upright over the table and flips over a valid stack to squeeze.
+RegisterNUICallback("cooking:beginCondiment", function(d, cb)
+    cancelPlace(); cancelMove(); cancelFinish(); cancelBakeMix(); cancelCondiment()
+    if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
+    local base = currentCookProp
+    if not base or base.prop_type ~= "kitchen_prep" then return cb({ ok = false }) end
+    local cfg
+    for _, cc in ipairs(Condiments or {}) do
+        if cc.item == (d and d.item) then cfg = cc break end
+    end
+    if not cfg or not cfg.container_model or not cfg.applied_model then return cb({ ok = false }) end
+    local container = SpawnProp(cfg.container_model, base.x, base.y, base.z)
+    if not container then return cb({ ok = false }) end
+    SetEntityRotation(container, 0.0, 0.0, curYaw(), 2, true) -- upright, facing the station
+    local c = {
+        container = container, cfg = cfg,
+        ch   = modelHeight(cfg.container_model),      -- bottle height (origin → its top)
+        lift = meshBottomLift(cfg.container_model),    -- seat the mesh bottom on the table
+        flip = 0.0, targetSid = nil, sqStart = nil, ghost = nil, applying = false,
+    }
+    condimenting = c
+    CreateThread(function()
+        local lastT = GetGameTimer()
+        while condimenting == c do
+            local now = GetGameTimer()
+            local dt = now - lastT; lastT = now
+            local hit, coords = CursorToWorld()
+            local sid = pickPart(nil)
+            local stack = sid and PrepStacks[sid]
+            -- a condiment can't be the first layer: the stack must already carry a part
+            local valid = stack and #stack.parts >= 1 and hit and coords and true or false
+
+            -- flip toward upside-down over a valid stack, back upright otherwise
+            local dir = valid and 1.0 or -1.0
+            c.flip = math.max(0.0, math.min(1.0, c.flip + dir * (dt / CONDIMENT.flip_ms)))
+
+            if valid then
+                setOutline(sid, 80, 200, 120)
+                local topZ = stackTopZ(stack)
+                local dip = 0.0
+                if c.flip >= 1.0 then
+                    -- fully flipped (nozzle down): run the one-shot squeeze
+                    c.sqStart = c.sqStart or now
+                    local sq = math.min((now - c.sqStart) / CONDIMENT.squeeze_ms, 1.0)
+                    dip = math.sin(sq * math.pi) * CONDIMENT.dip -- 0 → dip → 0 (down then up)
+                    -- the sauce fades in on the stack top as the bottle presses down
+                    if not c.ghost then
+                        local g = SpawnProp(cfg.applied_model, stack.x, stack.y, topZ)
+                        if g then
+                            SetEntityCoordsNoOffset(g, stack.x, stack.y, topZ, false, false, false)
+                            SetEntityRotation(g, 0.0, 0.0, curYaw(), 2, true)
+                            SetEntityAlpha(g, 0, false)
+                            c.ghost = g
+                        end
+                    end
+                    if c.ghost and DoesEntityExist(c.ghost) then
+                        SetEntityAlpha(c.ghost, math.floor(math.min(sq * 1.6, 1.0) * 255 + 0.5), false)
+                    end
+                    if sq >= 1.0 and not c.applying then
+                        c.applying = true
+                        applyCondimentAt(c, sid)
+                        break
+                    end
+                else
+                    c.sqStart = nil -- still flipping in; don't start the squeeze yet
+                end
+                -- origin sits above the stack; flipped, the origin rides a bottle-height
+                -- above the nozzle, so the nozzle hovers (hover_gap - dip) over the top
+                local originZ = topZ + CONDIMENT.hover_gap + c.ch * c.flip - dip
+                SetEntityCoordsNoOffset(container, stack.x, stack.y, originZ, false, false, false)
+            else
+                setOutline(nil)
+                c.sqStart = nil
+                if c.ghost then SafeDeleteEntity(c.ghost); c.ghost = nil end
+                if hit and coords then
+                    SetEntityCoordsNoOffset(container, coords.x, coords.y, coords.z + c.lift, false, false, false)
+                end
+            end
+            -- the flip is a 180° pitch about the centre-bottom origin (nozzle swings down)
+            SetEntityRotation(container, 180.0 * c.flip, 0.0, curYaw(), 2, true)
+            Wait(0)
+        end
+        setOutline(nil)
+    end)
+    cb({ ok = true })
+end)
+
+-- release a condiment drag before the squeeze completes: everything resets, nothing
+-- reserved or consumed
+RegisterNUICallback("cooking:endCondiment", function(_, cb)
+    cancelCondiment()
+    cb({ ok = true })
+end)
+
 -- Full coverage reached on a baking tray: the server consumes 1 mix and credits the
 -- tray's output. Keep the raw sheet ghost as the tray's (opaque) contents so it moves
 -- and collects with the tray; drop the mix bowl and any other partial ghosts.
@@ -3972,11 +4166,16 @@ local function applyBakeMixAt(f, tid)
             if k ~= tid then for _, e in ipairs(g.ents or {}) do SafeDeleteEntity(e) end end
         end
         -- the gridded serving props become the tray's contents (ents[2..]): opaque now,
-        -- and they ride, move and delete with the tray
-        for _, e in ipairs((keep and keep.ents) or {}) do
+        -- and they ride, move and delete with the tray. Persist each one's (dx, dy) so a
+        -- later grab/move re-seats it exactly here instead of recomputing the grid —
+        -- keeping `offs` PARALLEL to the appended contents (skip any despawned prop).
+        PrepTrays[tid].offs = PrepTrays[tid].offs or {}
+        local keepOffs = (keep and keep.offs) or {}
+        for i, e in ipairs((keep and keep.ents) or {}) do
             if DoesEntityExist(e) then
                 SetEntityAlpha(e, 255, false)
                 PrepTrays[tid].ents[#PrepTrays[tid].ents + 1] = e
+                PrepTrays[tid].offs[#PrepTrays[tid].offs + 1] = keepOffs[i] or { dx = 0.0, dy = 0.0 }
             end
         end
         PrepTrays[tid].filled = true
@@ -3997,7 +4196,7 @@ end
 -- coverage the tray fills (server consumes 1 mix). Mirrors the finish-tool loop but
 -- targets a tray, not a stacked part.
 RegisterNUICallback("cooking:beginBakeMix", function(d, cb)
-    cancelPlace(); cancelMove(); cancelFinish(); cancelBakeMix()
+    cancelPlace(); cancelMove(); cancelFinish(); cancelBakeMix(); cancelCondiment()
     if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
     local base = currentCookProp
     if not base or base.prop_type ~= "kitchen_prep" then return cb({ ok = false }) end
@@ -4034,7 +4233,10 @@ RegisterNUICallback("cooking:beginBakeMix", function(d, cb)
                     local hx, hy = trayHalfExtents(t.kind)
                     local offs = batchGridOffsets(bakeSlotCount(t.kind), hx, hy)
                     local hr, fz = math.rad(curYaw()), t.z + trayFoodDz(t.kind)
-                    local ents = {}
+                    -- keep each serving prop's (dx, dy) PARALLEL to `ents` (a SpawnProp
+                    -- can fail, so grid index ≠ ents index) — this list becomes the
+                    -- tray's persistent offsets so the cookies never re-grid on a move
+                    local ents, entOffs = {}, {}
                     for _, ofs in ipairs(offs) do
                         local ent = SpawnProp(t.rawModel,
                             t.x + ofs.dx * math.cos(hr) - ofs.dy * math.sin(hr),
@@ -4044,9 +4246,10 @@ RegisterNUICallback("cooking:beginBakeMix", function(d, cb)
                             SetEntityRotation(ent, 0.0, 0.0, curYaw(), 2, true)
                             SetEntityAlpha(ent, 0, false)
                             ents[#ents + 1] = ent
+                            entOffs[#entOffs + 1] = { dx = ofs.dx, dy = ofs.dy }
                         end
                     end
-                    if #ents > 0 then g = { ents = ents }; f.ghosts[tid] = g end
+                    if #ents > 0 then g = { ents = ents, offs = entOffs }; f.ghosts[tid] = g end
                 end
                 local progress = math.min((f.coverage[tid] or 0.0) / (tonumber(Baking.rub_dist) or 1.2), 1.0)
                 if g and g.ents then
@@ -4128,4 +4331,5 @@ AddEventHandler("onResourceStop", function(res)
     deletePreview(placing); placing = nil
     cancelFinish()
     cancelBakeMix()
+    cancelCondiment()
 end)

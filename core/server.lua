@@ -80,6 +80,7 @@ local DEFAULT_SETTINGS = {
         pizza_dough = 3, pizza_sauce = 1, pizza_cheese = 2, pepperoni = 2,
         bun = 1, cheese = 1, lettuce = 1, tomato = 1, pickle = 1,
         empty_cup = 1, frosting = 2, sprinkles = 1,
+        ketchup = 2, mustard = 2, mayo = 2,
     },
     cheese_melt_ms  = 8000, -- how long applied cheese takes to melt on a patty
     -- Global default freshness window (seconds) for collected cooked items in the
@@ -258,6 +259,23 @@ local DEFAULT_SETTINGS = {
               } },
           } },
     },
+    -- Condiments (ketchup / mustard / mayo). A squeeze-bottle applicator, sibling to
+    -- the finish tools but with a distinct gesture and a distinct EFFECT. Drag the
+    -- bottle out of the prep bar and hold it over a build stack: the `container_model`
+    -- flips 180° (nozzle down) and squeezes DOWN-and-UP once, laying its `applied_model`
+    -- sauce on top as a new build-stack LAYER. Unlike a finish (which consumes a
+    -- FINISHED tray product and re-trays a decorated one), a condiment adds a layer to
+    -- an in-progress prep BUILD exactly like adding pepperoni — it rides along as a
+    -- build-stack variation (TraySig) and is consumed from the shared stock pool at
+    -- Make. A condiment can NEVER be a stack's FIRST layer (there'd be nothing to sauce)
+    -- — enforced client-side in the applicator loop. `item` is the consumed inventory
+    -- item; every condiment prop shares a CENTRE-BOTTOM origin (bottle contains the
+    -- sauce, so only the two props per flavor are needed — no separate sauce item).
+    condiments = {
+        { item = "ketchup", container_model = "pickle_ketchup_container_01", applied_model = "pickle_ketchup_applied_01" },
+        { item = "mustard", container_model = "pickle_mustard_container_01", applied_model = "pickle_mustard_applied_01" },
+        { item = "mayo",    container_model = "pickle_mayo_container_01",    applied_model = "pickle_mayo_applied_01" },
+    },
     -- Baking mix + trays. One shared `mix_item` (a raw ingredient bought into the
     -- shared stock pool, like any `ingredient_costs` entry) is rubbed into a tray to
     -- produce that tray's `output` (an oven-ready raw bake). The trays themselves are
@@ -291,7 +309,7 @@ local DEFAULT_SETTINGS = {
         staff_radius     = 30.0,   -- how near a staff member must be to count as present
         spawn_interval   = 45,     -- seconds between spawn attempts per restaurant
         max_queue        = 4,      -- concurrent NPC customers per restaurant
-        patience_seconds = 240,    -- how long an NPC waits before leaving unserved
+        patience_seconds = 300,    -- how long an NPC waits before leaving unserved (5 min)
         min_items        = 1,      -- fewest line items an NPC orders
         max_items        = 2,      -- most line items an NPC orders
         tip_chance       = 25,     -- % of served orders that leave a tip
@@ -686,6 +704,7 @@ local function LoadSettings()
     mergeListDefaults("assembly", "output")
     mergeListDefaults("drinks", "output")
     mergeListDefaults("finishes", "tool")
+    mergeListDefaults("condiments", "item")
 
     -- Same idea for the item->model map: add any newly-defaulted entries without
     -- overwriting models an admin remapped.
@@ -767,6 +786,19 @@ local function LoadSettings()
             SetSetting("cooked_expire_seconds", DEFAULT_SETTINGS.cooked_expire_seconds or 900)
         end
         SetSetting("cooked_expire_default_seeded", true)
+    end
+
+    -- One-time: the default NPC patience grew from 4 to 5 minutes. Bump a stored
+    -- npc_customers map that still holds the OLD 240s default up to the new 300s —
+    -- gated, and only when it's still exactly the old default, so an admin who tuned
+    -- patience to any other value keeps theirs.
+    if not GetSetting("npc_patience_default_seeded", false) then
+        local npc = SettingsCache.npc_customers
+        if type(npc) == "table" and (tonumber(npc.patience_seconds) or 0) == 240 then
+            npc.patience_seconds = 300
+            SetSetting("npc_customers", npc)
+        end
+        SetSetting("npc_patience_default_seeded", true)
     end
 
     -- One-time: the sprinkles finish shipped with a single generic "Sprinkles"
@@ -1153,6 +1185,14 @@ end
 
 local function LoadOrders()
     OrderCache, NextTicket = {}, {}
+    -- NPC orders are ephemeral: each is tied to a live NPC ped + in-memory queue
+    -- (NpcState) that cannot survive a restart. Any still 'open' at boot is orphaned
+    -- — no ped, no queue entry — so it can never be fulfilled and just clogs every
+    -- register's Tickets widget. Cancel them up front (before loading the cache) so
+    -- they're gone on restart. Closed rows still count for ticket numbering below.
+    MySQL.update.await(
+        "UPDATE pickle_restaurant_orders SET status = 'cancelled', closed_at = NOW() "
+        .. "WHERE status = 'open' AND customer_identifier LIKE 'npc:%'")
     -- Only open tickets live in the cache; completed/cancelled rows stay in the DB
     -- as history. Ticket numbering continues from the highest ever issued so a
     -- restart never reuses a number a customer's receipt still shows.
@@ -1354,11 +1394,35 @@ function GetItemImage(name)
     return (type(data) == "table" and data.image) or nil
 end
 
--- Items a recipe references that don't exist in the catalogue.
+-- Is `item` consumed as a COMPONENT of some assembly recipe? A cooked output that
+-- feeds an assembly (a beef/chicken patty → burger/sandwich) is a POOL-ONLY
+-- intermediate: it lives in the per-player cooked-items pool and is built into the
+-- assembly at prep, never handed to a customer on its own — so it is NEVER an
+-- installed inventory item. See memory: cooked-intermediate-not-an-item.
+function IsAssemblyComponent(item)
+    if not item or item == "" then return false end
+    for _, a in ipairs(GetSetting("assembly", {})) do
+        for _, c in ipairs(a.components or {}) do
+            if c == item then return true end
+        end
+    end
+    return false
+end
+
+-- Items a recipe references that don't exist in the catalogue. Cook OUTPUTS are
+-- tray-held products, not necessarily items:
+--   • the INPUT is always a real consumed item (bought into the shared stock pool);
+--   • the COOKED output must be installed ONLY when it's an END product handed to a
+--     customer directly (a side like fries). When it's an assembly COMPONENT (a patty)
+--     it's a pool-only intermediate — never an item (aligns recipe validity with
+--     IsProductItem, which already treats the patties as products);
+--   • the BURNT output is NEVER an item — burnt food is unexchangeable and destroyed
+--     when binned, so it's never required to be installed.
 function RecipeMissingItems(r)
     local missing = {}
-    for _, it in ipairs({ r.input_item, r.output_cooked_item, r.output_burnt_item }) do
-        if not ItemExists(it) then missing[#missing + 1] = it end
+    if not ItemExists(r.input_item) then missing[#missing + 1] = r.input_item end
+    if not IsAssemblyComponent(r.output_cooked_item) and not ItemExists(r.output_cooked_item) then
+        missing[#missing + 1] = r.output_cooked_item
     end
     return missing
 end
@@ -1379,11 +1443,13 @@ local function drinkMissing(d)
 end
 
 local function assemblyMissing(a)
-    -- the output is a kitchen product (tray-held) — never required to be an
-    -- installed item (raw_pizza isn't one); components are real consumed items
+    -- the output is a kitchen product (tray-held) — never required to be an installed
+    -- item (raw_pizza isn't one). A component is a real consumed item UNLESS it's itself
+    -- a kitchen PRODUCT (a cooked patty pulled from the cooked pool) — those are valid
+    -- without being installed, exactly like the recipe outputs that make them.
     local missing = {}
     for _, comp in ipairs(a.components or {}) do
-        if not ItemExists(comp) then missing[#missing + 1] = comp end
+        if not ItemExists(comp) and not IsProductItem(comp) then missing[#missing + 1] = comp end
     end
     return missing
 end
@@ -2007,6 +2073,14 @@ function IsProductItem(item)
             if t.output == item then return true end
         end
     end
+    -- a baking-tray output (raw_cake / raw_cookie) is a tray-only uncooked
+    -- intermediate (like raw_pizza) — a kitchen product, never a carried item
+    local baking = GetSetting("baking", {})
+    if type(baking) == "table" then
+        for _, t in ipairs(baking.trays or {}) do
+            if t.output == item then return true end
+        end
+    end
     return false
 end
 
@@ -2042,7 +2116,11 @@ function BuildSyncPayload()
         -- without being an installed item (raw_pizza never is; only taking it out
         -- via trayToInventory would need one). Components are real consumed items.
         local ok = true
-        for _, comp in ipairs(a.components or {}) do if not ItemExists(comp) then ok = false end end
+        for _, comp in ipairs(a.components or {}) do
+            -- a component is a real consumed item OR a kitchen product (a cooked patty
+            -- from the pool) — the latter needn't be installed (IsProductItem)
+            if not ItemExists(comp) and not IsProductItem(comp) then ok = false end
+        end
         if ok then assembly[#assembly + 1] = a end
     end
     -- Finish tools ship with only their valid targets: the tool must be a real
@@ -2061,6 +2139,16 @@ function BuildSyncPayload()
                 copy.targets = targets
                 finishes[#finishes + 1] = copy
             end
+        end
+    end
+
+    -- Condiments: shipped only when the bottle's inventory item is real (consumed) and
+    -- both of its props are configured. An entry missing any of these is dropped — the
+    -- client's applicator would have nothing to spawn otherwise.
+    local condiments = {}
+    for _, c in ipairs(GetSetting("condiments", {})) do
+        if c.item and ItemExists(c.item) and c.container_model and c.applied_model then
+            condiments[#condiments + 1] = c
         end
     end
 
@@ -2086,6 +2174,7 @@ function BuildSyncPayload()
         drinks   = drinks,
         assembly = assembly,
         finishes = finishes,
+        condiments = condiments,
         baking   = baking,
         -- the side-serving container box (fries…) — shipped so the client can apply
         -- the mesh-bottom base-lift correction when it's the base of a build stack
