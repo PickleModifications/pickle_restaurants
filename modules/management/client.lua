@@ -56,6 +56,21 @@ RegisterNUICallback("management:setTheme", function(d, cb)
     cb(res or {})
 end)
 
+-- Combos autosave (and delete) from their own optimistic React state — a panel
+-- refresh would remount the editor mid-edit (losing the open card / cursor), so
+-- these relay to the server WITHOUT re-fetching getData, like the theme/brand saves.
+RegisterNUICallback("management:saveCombo", function(d, cb)
+    local res = lib.callback.await("pickle_restaurants:management:saveCombo", false, d)
+    if res and res.error then ShowNotification(res.error) end
+    cb(res or {})
+end)
+
+RegisterNUICallback("management:deleteCombo", function(d, cb)
+    local res = lib.callback.await("pickle_restaurants:management:deleteCombo", false, d)
+    if res and res.error then ShowNotification(res.error) end
+    cb(res or {})
+end)
+
 RegisterNUICallback("management:removeProp", function(d, cb)
     local res = lib.callback.await("pickle_restaurants:placement:removeProp", false, { id = d.propId })
     if res and res.error then ShowNotification(res.error) end

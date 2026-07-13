@@ -70,6 +70,7 @@ local KNOWN = {
     chicken_sandwich     = { label = "Chicken Sandwich",     weight = 350, hunger = 250000 },
     meal                 = { label = "Meal",                 weight = 800, hunger = 400000 },
     drink                = { label = "Restaurant Drink",     weight = 300, thirst = 200000 },
+    restaurant_bag       = { label = "Restaurant Bag",       weight = 800, hunger = 300000 },
     receipt              = { label = "Receipt",              weight = 10 },
 }
 
@@ -152,6 +153,14 @@ local function collectItems()
         -- tray, metadata intact, until it's cooked into the real output item
         if not RecipeByInput[a.output] then add(a.output) end
         for _, c in ipairs(a.components or {}) do add(c) end
+    end
+    -- crafts: every craft collapses to the ONE bag item (per-craft variants are NEVER
+    -- separate items — one-item consolidation), so export the bag item once plus each
+    -- craft's components. Modifier items ride along too (like assembly modifiers).
+    add(GetSetting("bag_item", "restaurant_bag"))
+    for _, cr in ipairs(GetSetting("crafts", {})) do
+        for _, c in ipairs(cr.components or {}) do add(c) end
+        for _, m in ipairs(cr.modifiers or {}) do if m.item then add(m.item) end end
     end
     -- finish tools (frosting…) + their targets/outputs
     for _, f in ipairs(GetSetting("finishes", {})) do

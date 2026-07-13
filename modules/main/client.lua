@@ -12,6 +12,9 @@ Assembly         = {}    -- kitchen-prep definitions
 Finishes         = {}    -- finish tools (frosting…): tool -> targets -> flavors
 Condiments       = {}    -- squeeze-bottle condiments: { item, container_model, applied_model }
 Baking           = {}    -- baking mix + trays: { mix_item, mix_model, rub_dist, trays = {...} }
+Crafts           = {}    -- code-less combine recipes: { id, label, group, components, modifiers }
+BagItem          = "restaurant_bag" -- the ONE item every craft becomes
+BagModel         = "pickle_restaurant_bag_01" -- the Restaurant Bag vessel prop
 
 -- prop_type → localization key (resolved via _L at interaction-build time)
 local STATION_LABELS = {
@@ -262,6 +265,9 @@ local function ApplySync(payload)
         Finishes = payload.settings.finishes or {}
         Condiments = payload.settings.condiments or {}
         Baking   = payload.settings.baking or {}
+        Crafts   = payload.settings.crafts or {}
+        BagItem  = payload.settings.bag_item or "restaurant_bag"
+        BagModel = payload.settings.bag_model or "pickle_restaurant_bag_01"
         SideContainerModel = payload.settings.side_container_model or ""
     end
 

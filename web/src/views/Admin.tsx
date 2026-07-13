@@ -12,6 +12,7 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
   const restaurants = data?.restaurants || [];
   const recipes = data?.recipes || [];
   const assembly = data?.assembly || [];
+  const crafts = data?.crafts || [];
   const drinks = data?.drinks || [];
   const finishes = data?.finishes || [];
   const settings = data?.settings || {};
@@ -51,7 +52,7 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
         </TabsContent>
 
         <TabsContent value="recipes" className="flex min-h-0 flex-1 flex-col">
-          <Menu recipes={recipes} assembly={assembly} drinks={drinks} finishes={finishes} settings={settings} items={items} groups={groups} onSaved={refresh} />
+          <Menu recipes={recipes} assembly={assembly} crafts={crafts} drinks={drinks} finishes={finishes} settings={settings} items={items} groups={groups} onSaved={refresh} />
         </TabsContent>
 
         <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">

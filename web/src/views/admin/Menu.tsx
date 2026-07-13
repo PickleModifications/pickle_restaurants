@@ -6,19 +6,19 @@ import { Badge } from "@/components/ui/badge";
 import { type Item } from "@/components/ItemPicker";
 import {
   ItemImage, labelOf, type Recipe, BLANK_RECIPE, STATION_LABEL,
-  RecipeForm, DrinkFields, AssemblyFields, FinishFields,
+  RecipeForm, DrinkFields, AssemblyFields, CraftFields, FinishFields,
 } from "@/components/editors";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { Plus, Trash2, Pencil, X, TriangleAlert, EyeOff, Check, Loader2, Tags, ChevronDown } from "lucide-react";
 
 type Props = {
-  recipes: Recipe[]; assembly: any[]; drinks: any[]; finishes: any[];
+  recipes: Recipe[]; assembly: any[]; crafts: any[]; drinks: any[]; finishes: any[];
   settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void;
 };
 
 const KIND_LABEL: Record<string, string> = {
-  recipe: "menu.kind_recipe", assembly: "menu.kind_assembly", drink: "menu.kind_drink", finish: "menu.kind_finish",
+  recipe: "menu.kind_recipe", assembly: "menu.kind_assembly", craft: "menu.kind_craft", drink: "menu.kind_drink", finish: "menu.kind_finish",
 };
 
 // strip the server-side annotations (valid/missing/defaultPrice) so we never
@@ -26,9 +26,10 @@ const KIND_LABEL: Record<string, string> = {
 // local state for display; removed only on the way out to the server.
 const clean = (e: any) => { const { valid, missing, defaultPrice, ...rest } = e; return rest; };
 
-export default function Menu({ recipes, assembly, drinks, finishes, settings, items, groups, onSaved }: Props) {
-  // Assembly + drinks live in the `settings` blob and save as a whole array.
+export default function Menu({ recipes, assembly, crafts, drinks, finishes, settings, items, groups, onSaved }: Props) {
+  // Assembly + crafts + drinks live in the `settings` blob and save as a whole array.
   const [asm, setAsm] = useState<any[]>(() => (Array.isArray(assembly) ? assembly : []));
+  const [craftList, setCraftList] = useState<any[]>(() => (Array.isArray(crafts) ? crafts : []));
   const [drinkList, setDrinkList] = useState<any[]>(() => (Array.isArray(drinks) ? drinks : []));
   // Finishes are authored in Settings; here only their group is editable (saved as
   // the whole finishes array) and their stock/ingredient cost (the ingredient_costs
@@ -36,13 +37,15 @@ export default function Menu({ recipes, assembly, drinks, finishes, settings, it
   const [finishList, setFinishList] = useState<any[]>(() => (Array.isArray(finishes) ? finishes : []));
   const [costs, setCosts] = useState<Record<string, number>>(() => ({ ...(settings?.ingredient_costs || {}) }));
   const asmStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { assembly: asm.map(clean) } }).then(onSaved), [asm]);
+  const craftStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { crafts: craftList.map(clean) } }).then(onSaved), [craftList]);
   const drinkStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { drinks: drinkList.map(clean) } }).then(onSaved), [drinkList]);
   const finishStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { finishes: finishList.map(clean) } }).then(onSaved), [finishList]);
   const costStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { ingredient_costs: costs } }).then(onSaved), [costs]);
-  const listStatus = [asmStatus, drinkStatus, finishStatus, costStatus].includes("saving") ? "saving"
-    : [asmStatus, drinkStatus, finishStatus, costStatus].includes("saved") ? "saved" : "idle";
+  const listStatus = [asmStatus, craftStatus, drinkStatus, finishStatus, costStatus].includes("saving") ? "saving"
+    : [asmStatus, craftStatus, drinkStatus, finishStatus, costStatus].includes("saved") ? "saved" : "idle";
 
   const updateAsm = (i: number, patch: any) => setAsm((l) => l.map((a, idx) => (idx === i ? { ...a, ...patch } : a)));
+  const updateCraft = (i: number, patch: any) => setCraftList((l) => l.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
   const updateDrink = (i: number, patch: any) => setDrinkList((l) => l.map((d, idx) => (idx === i ? { ...d, ...patch } : d)));
   const updateFinish = (i: number, patch: any) => setFinishList((l) => l.map((f, idx) => (idx === i ? { ...f, ...patch } : f)));
 
@@ -69,6 +72,10 @@ export default function Menu({ recipes, assembly, drinks, finishes, settings, it
     setNewOpen(false);
     setAsm((l) => { const next = [...l, { output: "", label: "", model: "pickle_bread_bun_01", components: [] }]; setEditKey(`assembly:${next.length - 1}`); return next; });
   };
+  const addCraft = () => {
+    setNewOpen(false);
+    setCraftList((l) => { const next = [...l, { id: "", label: "", components: [], modifiers: [] }]; setEditKey(`craft:${next.length - 1}`); return next; });
+  };
   const addDrink = () => {
     setNewOpen(false);
     setDrinkList((l) => { const next = [...l, { input: "", output: "", label: "", model: "pickle_drink_container_01", fill_ms: 3000 }]; setEditKey(`drink:${next.length - 1}`); return next; });
@@ -80,12 +87,13 @@ export default function Menu({ recipes, assembly, drinks, finishes, settings, it
     const rows: Row[] = [];
     recipes.forEach((r) => rows.push({ kind: "recipe", key: `recipe:${r.input_item}`, group: (r.group as string) || "", sortLabel: labelOf(items, r.output_cooked_item || r.input_item), data: r }));
     asm.forEach((a, i) => rows.push({ kind: "assembly", key: `assembly:${i}`, group: a.group || "", sortLabel: a.label || a.output || "", index: i, data: a }));
+    craftList.forEach((c, i) => rows.push({ kind: "craft", key: `craft:${i}`, group: c.group || "", sortLabel: c.label || c.id || "", index: i, data: c }));
     drinkList.forEach((d, i) => rows.push({ kind: "drink", key: `drink:${i}`, group: d.group || "", sortLabel: d.label || d.output || "", index: i, data: d }));
     finishList.forEach((f, i) => rows.push({ kind: "finish", key: `finish:${i}`, group: f.group || "", sortLabel: f.tool ? labelOf(items, f.tool) : "", index: i, data: f }));
 
     const by: Record<string, Row[]> = {};
     rows.forEach((r) => { (by[r.group] ||= []).push(r); });
-    const order = ["recipe", "assembly", "drink", "finish"];
+    const order = ["recipe", "assembly", "craft", "drink", "finish"];
     const names = Object.keys(by).sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b)));
     return names.map((g) => ({
       name: g,
@@ -96,6 +104,7 @@ export default function Menu({ recipes, assembly, drinks, finishes, settings, it
   const imgItem = (row: any) =>
     row.kind === "recipe" ? row.data.output_cooked_item || row.data.input_item
     : row.kind === "assembly" ? row.data.output
+    : row.kind === "craft" ? (settings?.bag_item || "restaurant_bag")
     : row.kind === "drink" ? row.data.input
     : row.data.tool;
 
@@ -112,6 +121,7 @@ export default function Menu({ recipes, assembly, drinks, finishes, settings, it
               <div className="absolute right-0 z-10 mt-1 w-52 overflow-hidden rounded-md border border-border bg-popover shadow-md">
                 <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addRecipe}>{_L("menu.new_recipe")}</button>
                 <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addAssembly}>{_L("menu.new_assembly")}</button>
+                <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addCraft}>{_L("menu.new_craft")}</button>
                 <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addDrink}>{_L("menu.new_drink")}</button>
               </div>
             )}
@@ -152,6 +162,9 @@ export default function Menu({ recipes, assembly, drinks, finishes, settings, it
                           {row.kind === "drink" && d.drink_item_installed === false && (
                             <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("menu.drink_not_installed")}</Badge>
                           )}
+                          {row.kind === "craft" && d.bag_item_installed === false && (
+                            <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("menu.bag_not_installed")}</Badge>
+                          )}
                           {typeof d.defaultPrice === "number" && d.defaultPrice > 0 && (
                             <Badge variant="outline" className="text-emerald-500">{_L("menu.default_price", d.defaultPrice)}</Badge>
                           )}
@@ -180,6 +193,7 @@ export default function Menu({ recipes, assembly, drinks, finishes, settings, it
                         <Button size="sm" variant="destructive" onClick={async () => {
                           if (row.kind === "recipe") { await fetchNui("admin:deleteRecipe", { input_item: d.input_item }); onSaved(); }
                           else if (row.kind === "assembly") { close(); setAsm((l) => l.filter((_, i) => i !== row.index)); }
+                          else if (row.kind === "craft") { close(); setCraftList((l) => l.filter((_, i) => i !== row.index)); }
                           else if (row.kind === "drink") { close(); setDrinkList((l) => l.filter((_, i) => i !== row.index)); }
                         }}><Trash2 className="h-4 w-4" /></Button>
                       )}
@@ -190,6 +204,7 @@ export default function Menu({ recipes, assembly, drinks, finishes, settings, it
                     <div className="mt-3 border-t border-border pt-3">
                       {row.kind === "recipe" && draft && <RecipeForm form={draft} setForm={setDraft} items={items} groups={groups} />}
                       {row.kind === "assembly" && row.index !== undefined && <AssemblyFields asm={asm[row.index]} onChange={(p) => updateAsm(row.index!, p)} items={items} groups={groups} />}
+                      {row.kind === "craft" && row.index !== undefined && <CraftFields craft={craftList[row.index]} onChange={(p) => updateCraft(row.index!, p)} items={items} groups={groups} />}
                       {row.kind === "drink" && row.index !== undefined && <DrinkFields drink={drinkList[row.index]} onChange={(p) => updateDrink(row.index!, p)} items={items} groups={groups} />}
                       {row.kind === "finish" && row.index !== undefined && (
                         <FinishFields

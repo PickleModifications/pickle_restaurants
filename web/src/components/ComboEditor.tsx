@@ -3,7 +3,6 @@ import { fetchNui } from "@/lib/nui";
 import { useAutoSave } from "@/lib/autosave";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Field, Toggle } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
@@ -11,14 +10,17 @@ import { ItemImage } from "@/components/editors";
 import { PhotoField, type PhotoEntry, type PhotoAspect } from "@/components/Branding";
 import { cn, money } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { Plus, Trash2, Pencil, Check, Loader2, TriangleAlert, UtensilsCrossed, ChevronRight } from "lucide-react";
+import { Plus, Trash2, Pencil, Check, Loader2, TriangleAlert, UtensilsCrossed, ChevronRight, Layers } from "lucide-react";
 
 // A combo meal = a numbered, priced bundle of existing sellables. Each SLOT is a
-// list of allowed sellable-catalog KEYS: one key = a fixed item, several = a
-// "choose one" slot (choose your side / drink). Per-item toppings are the chosen
-// item's own modifiers, resolved live at order time — so a slot only stores keys.
+// list of allowed picks: a pick is either a fixed sellable-catalog KEY, or a whole
+// ACCESS GROUP (key `group:<Name>` — resolves to any item in that group at order
+// time, e.g. "Any Drink"). One pick = a fixed slot, several = a "choose one" slot.
+// Per-item toppings are the chosen item's own modifiers, resolved live at order
+// time — so a slot only stores keys.
 
-export type ComboOption = { key: string; label?: string; image?: string; valid?: boolean };
+export type ComboGroup = { group: string; count: number };
+export type ComboOption = { key: string; label?: string; image?: string; valid?: boolean; group?: string; count?: number };
 export type ComboSlot = { label: string; options: ComboOption[]; stale?: boolean };
 export type Combo = {
   id?: number; number: number; label: string; price: number; enabled: boolean;
@@ -28,14 +30,25 @@ export type Combo = {
 // The combo card photo aspect (landscape food shot, like a menu-board hero image).
 const COMBO_PHOTO: PhotoAspect = { label: _L("combo.tex_label"), w: 1200, h: 800, hint: _L("combo.photo_hint") };
 
+// A group pick is a normal option key with a reserved `group:` prefix (mirrors the
+// server's ComboOptionGroup). Kept as one key so storage/sanitize stay unchanged.
+const GROUP_PREFIX = "group:";
+const groupKey = (name: string) => GROUP_PREFIX + name;
+const isGroupKey = (k?: string) => !!k && k.startsWith(GROUP_PREFIX);
+const groupOf = (k: string) => k.slice(GROUP_PREFIX.length);
+
+// A new combo opens with one empty slot so the picker is immediately visible.
 const blankCombo = (nextNumber: number): Combo => ({
-  number: nextNumber, label: "", price: 0, enabled: true, photo: null, slots: [],
+  number: nextNumber, label: "", price: 0, enabled: true, photo: null,
+  slots: [{ label: "", options: [{ key: "" }] }],
 });
 
 // One local row: a stable client key + its editable draft.
 type Row = { cid: number; combo: Combo };
 
-export default function Combos({ id, combos, sellables }: { id: number; combos: Combo[]; sellables: Item[] }) {
+export default function Combos({ id, combos, sellables, groups }: {
+  id: number; combos: Combo[]; sellables: Item[]; groups?: ComboGroup[];
+}) {
   const cidRef = useRef(1);
   const [rows, setRows] = useState<Row[]>(() => (combos || []).map((c) => ({ cid: cidRef.current++, combo: c })));
   const [openCid, setOpenCid] = useState<number | null>(null);
@@ -46,6 +59,14 @@ export default function Combos({ id, combos, sellables }: { id: number; combos: 
   );
   // numbers used by OTHER combos, for the duplicate-number warning per card
   const numbersByCid = useMemo(() => rows.map((r) => ({ cid: r.cid, number: r.combo.number })), [rows]);
+
+  // Picker options: every access group ("Any Bakery") first, then each sellable.
+  const groupList = groups || [];
+  const pickerItems = useMemo<Item[]>(() => [
+    ...groupList.map((g) => ({ name: groupKey(g.group), label: _L("combo.any_group", g.group), image: undefined })),
+    ...sellables,
+  ], [groupList, sellables]);
+  const groupCount = useMemo(() => Object.fromEntries(groupList.map((g) => [g.group, g.count])), [groupList]);
 
   const patch = (cid: number, combo: Combo) =>
     setRows((rs) => rs.map((r) => (r.cid === cid ? { ...r, combo } : r)));
@@ -80,6 +101,8 @@ export default function Combos({ id, combos, sellables }: { id: number; combos: 
           id={id}
           combo={row.combo}
           sellables={sellables}
+          pickerItems={pickerItems}
+          groupCount={groupCount}
           open={openCid === row.cid}
           duplicateNumber={numbersByCid.some((n) => n.cid !== row.cid && n.number === row.combo.number)}
           onToggle={() => setOpenCid((c) => (c === row.cid ? null : row.cid))}
@@ -92,10 +115,17 @@ export default function Combos({ id, combos, sellables }: { id: number; combos: 
   );
 }
 
+// A readable label for one option key (item OR group), for the collapsed summary.
+function optionLabel(key: string, byKey: Record<string, Item>): string {
+  if (isGroupKey(key)) return _L("combo.any_group", groupOf(key));
+  return byKey[key]?.label || key || "?";
+}
+
 function ComboCard({
-  id, combo, sellables, open, duplicateNumber, onToggle, onChange, onSaved, onDelete,
+  id, combo, sellables, pickerItems, groupCount, open, duplicateNumber, onToggle, onChange, onSaved, onDelete,
 }: {
-  id: number; combo: Combo; sellables: Item[]; open: boolean; duplicateNumber: boolean;
+  id: number; combo: Combo; sellables: Item[]; pickerItems: Item[]; groupCount: Record<string, number>;
+  open: boolean; duplicateNumber: boolean;
   onToggle: () => void; onChange: (c: Combo) => void; onSaved: (serverId: number) => void; onDelete: () => void;
 }) {
   // server id is kept in a ref so capturing it after the first insert doesn't
@@ -106,18 +136,27 @@ function ComboCard({
   const byKey = useMemo(() => Object.fromEntries(sellables.map((s) => [s.name, s])), [sellables]);
   const set = (p: Partial<Combo>) => onChange({ ...combo, ...p });
 
+  // A combo only publishes once it has a name AND at least one real pick in a slot —
+  // an empty draft is skipped (the server would reject it) and flagged inline below.
+  const hasPick = combo.slots.some((s) => s.options.some((o) => (o.key || "").trim() !== ""));
+  const incomplete = !combo.label.trim() || !hasPick;
+
   // change signature drives the debounced save (id excluded — see above)
   const sig = JSON.stringify({
     number: combo.number, label: combo.label, price: combo.price, enabled: combo.enabled,
     photo: combo.photo, slots: combo.slots,
   });
   const status = useAutoSave(async () => {
-    if (!combo.label.trim() || combo.slots.length === 0) return; // server rejects; don't churn
+    if (incomplete) return; // server rejects; don't churn
     const res: any = await fetchNui("management:saveCombo", {
       id, comboId: idRef.current,
       number: combo.number, label: combo.label, price: combo.price, enabled: combo.enabled,
       photo: combo.photo?.url ? { url: combo.photo.url, crop: combo.photo.crop || undefined } : undefined,
-      slots: combo.slots.map((s) => ({ label: s.label, options: s.options.map((o) => ({ key: o.key })) })),
+      // drop blank picks before saving; keep item + group keys verbatim
+      slots: combo.slots.map((s) => ({
+        label: s.label,
+        options: s.options.filter((o) => (o.key || "").trim() !== "").map((o) => ({ key: o.key })),
+      })).filter((s) => s.options.length > 0),
     });
     if (res && res.ok && res.comboId) { idRef.current = res.comboId; onSaved(res.comboId); }
   }, [sig]);
@@ -147,10 +186,14 @@ function ComboCard({
               <span className="truncate font-medium">{combo.label || _L("combo.name_placeholder")}</span>
               <Badge variant="secondary" className="gap-1"><UtensilsCrossed className="h-3 w-3" /> {money(combo.price)}</Badge>
               {!combo.enabled && <Badge variant="outline">{_L("combo.disabled_badge")}</Badge>}
+              {incomplete && !invalid && <Badge variant="outline" className="gap-1 text-muted-foreground">{_L("combo.draft")}</Badge>}
               {invalid && <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("combo.invalid_option")}</Badge>}
             </span>
             <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
-              {combo.slots.map((s) => (s.options.length > 1 ? (s.label || "?") : (byKey[s.options[0]?.key]?.label || s.options[0]?.label || "?"))).join(" · ")}
+              {combo.slots
+                .filter((s) => s.options.some((o) => o.key))
+                .map((s) => (s.options.filter((o) => o.key).length > 1 ? (s.label || _L("combo.choose_one")) : optionLabel(s.options.find((o) => o.key)?.key || "", byKey)))
+                .join(" · ") || _L("combo.slots")}
             </span>
           </span>
         </button>
@@ -187,9 +230,12 @@ function ComboCard({
                 {combo.slots.map((slot, si) => (
                   <SlotRow
                     key={si}
+                    index={si}
                     slot={slot}
                     sellables={sellables}
+                    pickerItems={pickerItems}
                     byKey={byKey}
+                    groupCount={groupCount}
                     onLabel={(v) => updateSlot(si, { label: v })}
                     onSetOption={(oi, key) => setOption(si, oi, key)}
                     onAddOption={() => addOption(si)}
@@ -207,6 +253,10 @@ function ComboCard({
             </div>
           </div>
 
+          {incomplete && (
+            <div className="rounded-md bg-muted/60 px-2.5 py-1.5 text-[11px] text-muted-foreground">{_L("combo.incomplete_hint")}</div>
+          )}
+
           <div className="flex items-center justify-between">
             <Toggle checked={combo.enabled} onChange={(v) => set({ enabled: v })} label={_L("combo.enabled")} />
             <Button size="sm" variant="outline" onClick={onToggle}>{_L("combo.done")}</Button>
@@ -217,32 +267,61 @@ function ComboCard({
   );
 }
 
+// The thumbnail for one pick: a group icon for an "any <group>" pick, the item's
+// image for a fixed item, or a neutral dashed placeholder for an empty pick.
+function OptionThumb({ opt, sellables, className }: { opt: ComboOption; sellables: Item[]; className?: string }) {
+  if (isGroupKey(opt.key)) {
+    return (
+      <div className={cn("flex items-center justify-center rounded bg-primary/15 text-primary", className)}>
+        <Layers className="h-1/2 w-1/2" />
+      </div>
+    );
+  }
+  if (!opt.key) {
+    return (
+      <div className={cn("flex items-center justify-center rounded border border-dashed border-border/70 text-muted-foreground/60", className)}>
+        <UtensilsCrossed className="h-1/2 w-1/2" />
+      </div>
+    );
+  }
+  return <ItemImage items={sellables} name={opt.key} className={className} />;
+}
+
 function SlotRow({
-  slot, sellables, byKey, onLabel, onSetOption, onAddOption, onRemoveOption, onRemove,
+  index, slot, sellables, pickerItems, byKey, groupCount, onLabel, onSetOption, onAddOption, onRemoveOption, onRemove,
 }: {
-  slot: ComboSlot; sellables: Item[]; byKey: Record<string, Item>;
+  index: number; slot: ComboSlot; sellables: Item[]; pickerItems: Item[]; byKey: Record<string, Item>;
+  groupCount: Record<string, number>;
   onLabel: (v: string) => void; onSetOption: (oi: number, key: string) => void;
   onAddOption: () => void; onRemoveOption: (oi: number) => void; onRemove: () => void;
 }) {
-  const isChoice = slot.options.length > 1;
+  const filled = slot.options.filter((o) => o.key);
+  const isChoice = filled.length > 1;
   return (
     <div className={cn("rounded-md border p-2", slot.stale ? "border-destructive/50 bg-destructive/5" : "border-border/60")}>
       <div className="mb-2 flex items-center gap-2">
         <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        <Input value={slot.label} placeholder={_L("combo.slot_label_placeholder")} className="h-8 flex-1"
+        <Input value={slot.label} placeholder={_L("combo.slot_label_placeholder", index + 1)} className="h-8 flex-1"
           onChange={(e) => onLabel(e.target.value)} />
         {isChoice && <Badge variant="secondary" className="shrink-0">{_L("combo.choose_one")}</Badge>}
         <Button size="icon" variant="ghost" className="shrink-0" onClick={onRemove}><Trash2 className="h-4 w-4" /></Button>
       </div>
       <div className="space-y-1.5 pl-5">
         {slot.options.map((o, oi) => {
-          const known = !!o.key && (byKey[o.key] || o.valid);
+          const isGroup = isGroupKey(o.key);
+          // a fixed item is "known" if in the catalog; a group is known if it still has members
+          const known = isGroup ? (groupCount[groupOf(o.key)] || 0) > 0 : (!!o.key && (byKey[o.key] || o.valid));
           return (
             <div key={oi} className="flex items-center gap-2">
-              <ItemImage items={sellables} name={o.key} className="h-8 w-8 shrink-0" />
+              <OptionThumb opt={o} sellables={sellables} className="h-8 w-8 shrink-0" />
               <div className="min-w-0 flex-1">
-                <ItemPicker items={sellables} value={o.key} placeholder={_L("combo.pick_item")}
+                <ItemPicker items={pickerItems} value={o.key} placeholder={_L("combo.pick_item")}
                   onChange={(v) => onSetOption(oi, v)} />
+                {isGroup && known && (
+                  <span className="mt-0.5 block pl-0.5 text-[10px] text-muted-foreground">
+                    {_L("combo.group_members", groupCount[groupOf(o.key)] || 0)}
+                  </span>
+                )}
               </div>
               {o.key && !known && (
                 <span title={_L("combo.invalid_option")} className="shrink-0 text-destructive"><TriangleAlert className="h-4 w-4" /></span>
@@ -253,7 +332,7 @@ function SlotRow({
         })}
         <div className="flex items-center gap-2">
           <Button size="sm" variant="ghost" onClick={onAddOption}><Plus className="h-3.5 w-3.5" /> {_L("combo.add_option")}</Button>
-          {isChoice && <span className="text-[10px] text-muted-foreground">{_L("combo.choose_hint")}</span>}
+          <span className="text-[10px] text-muted-foreground">{isChoice ? _L("combo.choose_hint") : _L("combo.choice_hint_single")}</span>
         </div>
       </div>
     </div>

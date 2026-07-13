@@ -26,13 +26,16 @@ function BuildSellableCatalog(rid)
     local out, seen = {}, {}
     -- `cost` is the raw ingredient cost of this sellable; the computed default
     -- menu price is that cost marked up by the global profit margin.
-    local function add(item, variant, label, kind, cost, modifiers)
+    local function add(item, variant, label, kind, cost, modifiers, group)
         variant = variant or ""
         local key = item .. (variant ~= "" and ("::" .. variant) or "")
         if seen[key] then return end
         seen[key] = true
         out[#out + 1] = { key = key, item = item, variant = variant,
                           label = label or GetItemLabel(item), kind = kind,
+                          -- the sellable's ACCESS GROUP (Bakery/Pizza…) so a combo slot can
+                          -- reference "any <group>" and resolve to its live members
+                          group = (type(group) == "string" and group ~= "") and group or nil,
                           image = GetItemImage(item), defaultPrice = MarkupPrice(cost or 0),
                           -- POS customisations the customer can pick (add cheese, no lettuce…)
                           modifiers = (type(modifiers) == "table" and #modifiers > 0) and modifiers or nil }
@@ -73,7 +76,7 @@ function BuildSellableCatalog(rid)
         local outItem = r.output_cooked_item
         if IsRecipeValid(r) and RestaurantHasAccess(rid, r.group)
             and ItemExists(outItem) and not isComponent[outItem] then
-            add(outItem, nil, nil, "recipe", ResolveItemCost(outItem), finishModsFor(outItem))
+            add(outItem, nil, nil, "recipe", ResolveItemCost(outItem), finishModsFor(outItem), r.group)
         end
     end
 
@@ -102,7 +105,36 @@ function BuildSellableCatalog(rid)
                     }
                 end
             end
-            if ok then add(a.output, nil, a.label, "assembly", ResolveItemCost(a.output), mods) end
+            if ok then add(a.output, nil, a.label, "assembly", ResolveItemCost(a.output), mods, a.group) end
+        end
+    end
+
+    -- Crafts: every craft collapses to the ONE bag item, disambiguated by its `id`
+    -- as the POS variant (like a drink flavor). A price row per craft
+    -- (restaurant_bag::soup). Modifiers enriched exactly like the assembly block.
+    local bagItem = BagItemName()
+    if ItemExists(bagItem) then
+        for _, cr in ipairs(GetSetting("crafts", {})) do
+            if cr.id and cr.id ~= "" and cr.components and #cr.components > 0
+                and RestaurantHasAccess(rid, cr.group) then
+                local ok = true
+                for _, comp in ipairs(cr.components) do
+                    if not ItemExists(comp) and not IsProductItem(comp) then ok = false end
+                end
+                local mods
+                if type(cr.modifiers) == "table" and #cr.modifiers > 0 then
+                    mods = {}
+                    for _, m in ipairs(cr.modifiers) do
+                        mods[#mods + 1] = {
+                            id = m.id, label = m.label,
+                            price = math.max(0, math.floor(tonumber(m.price) or 0)),
+                            default = (m.default == true or m.default == 1) or nil,
+                            image = (m.item and m.item ~= "") and GetItemImage(m.item) or nil,
+                        }
+                    end
+                end
+                if ok then add(bagItem, cr.id, cr.label, "craft", CraftCost(cr), mods, cr.group) end
+            end
         end
     end
 
@@ -110,7 +142,7 @@ function BuildSellableCatalog(rid)
     if ItemExists(drinkItem) then
         for _, d in ipairs(GetSetting("drinks", {})) do
             if ItemExists(d.input) and RestaurantHasAccess(rid, d.group) then
-                add(drinkItem, d.output, d.label or d.output, "drink", ResolveItemCost(d.input))
+                add(drinkItem, d.output, d.label or d.output, "drink", ResolveItemCost(d.input), nil, d.group)
             end
         end
     end
@@ -119,7 +151,7 @@ function BuildSellableCatalog(rid)
         if ItemExists(f.tool) and RestaurantHasAccess(rid, f.group) then
             for _, t in ipairs(f.targets or {}) do
                 if ItemExists(t.output) then
-                    add(t.output, nil, nil, "finish", ResolveItemCost(f.tool) + ResolveItemCost(t.item))
+                    add(t.output, nil, nil, "finish", ResolveItemCost(f.tool) + ResolveItemCost(t.item), nil, f.group)
                 end
             end
         end
@@ -183,21 +215,34 @@ end
 -- price > 0, and no slot left with zero valid options). The management editor reads
 -- ComboCache directly for editing + stale annotation.
 function BuildComboCatalog(rid)
+    local catalog = BuildSellableCatalog(rid)
     local index = {}
-    for _, e in ipairs(BuildSellableCatalog(rid)) do index[e.key] = e end
+    for _, e in ipairs(catalog) do index[e.key] = e end
+    local function optView(e)
+        return { key = e.key, item = e.item, variant = e.variant,
+                 label = e.label, image = e.image, kind = e.kind, modifiers = e.modifiers }
+    end
     local out = {}
     for _, c in pairs(ComboCache[rid] or {}) do
         local price = math.max(0, math.floor(tonumber(c.price) or 0))
         if c.enabled ~= false and price > 0 then
             local slots, ok = {}, true
             for _, s in ipairs(c.slots or {}) do
-                local options = {}
+                -- expand each option: a `group:<Name>` option becomes every live sellable
+                -- in that access group; a plain key is looked up directly. Deduped per slot.
+                local options, taken = {}, {}
                 for _, o in ipairs(s.options or {}) do
-                    local e = o.key and index[o.key]
-                    if e then
-                        options[#options + 1] = { key = e.key, item = e.item, variant = e.variant,
-                                                  label = e.label, image = e.image, kind = e.kind,
-                                                  modifiers = e.modifiers }
+                    local g = ComboOptionGroup(o.key)
+                    if g then
+                        for _, e in ipairs(catalog) do
+                            if (e.group or "") == g and not taken[e.key] then
+                                taken[e.key] = true
+                                options[#options + 1] = optView(e)
+                            end
+                        end
+                    elseif o.key and index[o.key] and not taken[o.key] then
+                        taken[o.key] = true
+                        options[#options + 1] = optView(index[o.key])
                     end
                 end
                 if #options == 0 then ok = false end -- a dead slot makes the whole combo unfulfillable
@@ -317,6 +362,11 @@ local function variationKey(item, meta)
         local key = (type(meta) == "table" and meta[1] and meta[1].item) or ""
         return "d:" .. tostring(key)
     end
+    if item == BagItemName() then
+        -- the craft id riding on the bag's first meta layer (its variation identity)
+        local key = (type(meta) == "table" and meta[1] and meta[1].craft) or ""
+        return "c:" .. tostring(key)
+    end
     return "" -- item-name match: any variation of the item fills the line
 end
 
@@ -325,6 +375,7 @@ end
 -- so modifiers/toppings stay ticket instructions and never block completion.
 local function lineVariationKey(line)
     if line.kind == "drink" then return "d:" .. tostring(line.variant or "") end
+    if line.kind == "craft" then return "c:" .. tostring(line.variant or "") end
     return ""
 end
 

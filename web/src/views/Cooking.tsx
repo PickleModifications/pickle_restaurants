@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { Badge } from "@/components/ui/badge";
-import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave, CircleDot, Search, Trash2, ChevronUp, ChevronDown, Timer, Package } from "lucide-react";
+import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave, CircleDot, Search, Trash2, ChevronUp, ChevronDown, Timer, Package, ShoppingBag } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 
@@ -60,7 +60,11 @@ type PrepTip = {
   // a baking tray (cake tin / cookie tray): no Make Meal — a hint to rub the mix in
   // (empty) or drag it to the hotbar (filled).
   bake?: boolean; filled?: boolean;
+  // a Restaurant Bag: "Bag It Up" instead of Make Meal.
+  bag?: boolean;
 };
+// A model-less bag content, anchored over its bag as a 2D pill (no 3D prop).
+type PrepPill = { item: string; label?: string; image?: string; onScreen: boolean; x: number; y: number };
 // A recipe scored against a stack: how many components are satisfied + what's short.
 type Ranked = { rec: RecipeCat; matched: number; ready: boolean; missing: { item: string; label: string; image?: string; short: number }[] };
 type ChipItem = {
@@ -536,18 +540,23 @@ function BakeTrayTooltip({ filled, onPin }: { filled: boolean; onPin: (pinned: b
 // offsets) becomes one meal item; a box's meal is flagged so it sets back down
 // as its box. A box also explains its click-to-toggle lid.
 function MealTooltip({
-  count, box, open, boxing, onMake, onTakeOut, onPin,
+  count, box, bag, open, boxing, onMake, onTakeOut, onPin,
 }: {
   count: number;
   box?: boolean;
+  bag?: boolean;
   open?: boolean;
   boxing?: boolean;
   onMake: () => void;
   onTakeOut: () => void;
   onPin: (pinned: boolean) => void;
 }) {
-  const Icon = box ? Package : UtensilsCrossed;
-  const hint = box
+  const Icon = bag ? ShoppingBag : box ? Package : UtensilsCrossed;
+  const hint = bag
+    ? count === 0
+      ? _L("cook.bag_empty_hint")
+      : _L("cook.bag_full_hint")
+    : box
     ? boxing
       ? _L("cook.box_closing_hint")
       : count === 0
@@ -567,9 +576,9 @@ function MealTooltip({
     >
       <div className="flex items-center gap-2">
         <Icon className="h-4 w-4 shrink-0 text-primary" />
-        <span className="text-sm font-semibold">{box ? _L("cook.pizza_box") : _L("cook.serving_tray")}</span>
+        <span className="text-sm font-semibold">{bag ? _L("cook.restaurant_bag") : box ? _L("cook.pizza_box") : _L("cook.serving_tray")}</span>
         <span className="ml-auto shrink-0 rounded bg-secondary px-1.5 py-0.5 text-[11px] font-semibold tabular-nums">
-          {box
+          {!bag && box
             ? count === 0
               ? _L("cook.box_empty_badge")
               : _L("cook.box_pizza_inside")
@@ -590,7 +599,7 @@ function MealTooltip({
               : "cursor-not-allowed bg-muted text-muted-foreground"
           )}
         >
-          {box ? (boxing ? _L("cook.box_closing") : _L("cook.box_it_up")) : _L("cook.make_meal")}
+          {bag ? _L("cook.bag_it_up") : box ? (boxing ? _L("cook.box_closing") : _L("cook.box_it_up")) : _L("cook.make_meal")}
         </button>
         {box && count > 0 && (
           <button
@@ -615,6 +624,7 @@ export default function Cooking({ data }: { data: any }) {
   const [station, setStation] = useState<string>(data?.station || "fryer");
   const [ingredients, setIngredients] = useState<Ingredient[]>(data?.ingredients || []);
   const [items, setItems] = useState<ChipItem[]>([]);
+  const [prepPills, setPrepPills] = useState<PrepPill[]>([]);
   const [hovered, setHovered] = useState<number | null>(null);
   const [view, setView] = useState<string>("stovetop");
   const [tray, setTray] = useState<TrayEntry[]>([]);
@@ -653,7 +663,7 @@ export default function Cooking({ data }: { data: any }) {
   const bakeMixRef = useRef<string | null>(null); // rubbing the baking mix over an empty baking tray
   const condimentRef = useRef<string | null>(null); // squeezing a condiment bottle over a build stack
   const [finishFlavor, setFinishFlavor] = useState<Record<string, string>>({}); // chosen flavor per finish tool
-  const prepDragRef = useRef<{ source: string; item: string; cheese: number; model?: string | null; decompose?: boolean; sig?: string } | null>(null); // dragging a NEW part (or a product/meal to take apart) onto the prep table
+  const prepDragRef = useRef<{ source: string; item: string; cheese: number; model?: string | null; pill?: boolean; decompose?: boolean; sig?: string } | null>(null); // dragging a NEW part (or a product/meal to take apart) onto the prep table
   const prepHoveredRef = useRef<number | null>(null); // placed prep part under the cursor (grab target)
   const trayHoveredRef = useRef<number | null>(null); // placed serving tray/box under the cursor (grab target)
   const trayHoveredBoxRef = useRef(false); // the hovered tray is a pizza box (click toggles its lid)
@@ -754,6 +764,7 @@ export default function Cooking({ data }: { data: any }) {
     trayHoveredRef.current = d.prepTrayHovered ?? null;
     trayHoveredBoxRef.current = !!d.prepTrayBox;
     setItems(its);
+    setPrepPills(d.prepPills || []);
     setHovered(d.hovered ?? null);
 
     // Prep tooltip: the client sends the hovered stack (or nothing). While a stack
@@ -804,7 +815,7 @@ export default function Cooking({ data }: { data: any }) {
   // kitchen equipment (serving tray, pizza box, baking tray) is its own "Containers &
   // Packaging" category — the gear food gets arranged on/in — split out of both the
   // raw ingredients and the cooked-food tabs so neither is crowded by it
-  const isEquipment = (ing: Ingredient) => ing.kind === "tray" || ing.kind === "pizzabox" || ing.kind === "baketray";
+  const isEquipment = (ing: Ingredient) => ing.kind === "tray" || ing.kind === "pizzabox" || ing.kind === "baketray" || ing.kind === "bag";
   const equipmentCards = isPrep
     ? ingredients.filter((ing) => isEquipment(ing) && (!q || ing.label.toLowerCase().includes(q)))
     : [];
@@ -917,6 +928,7 @@ export default function Cooking({ data }: { data: any }) {
   const ingHint = (ing: Ingredient): string => {
     if (ing.kind === "tray") return _L("cook.inghint_tray");
     if (ing.kind === "pizzabox") return _L("cook.inghint_pizzabox");
+    if (ing.kind === "bag") return _L("cook.inghint_bag");
     if (ing.kind === "topping") return _L("cook.inghint_topping");
     if (ing.kind === "finish") return _L("cook.inghint_finish");
     if (ing.kind === "condiment") return _L("cook.inghint_condiment");
@@ -963,7 +975,7 @@ export default function Cooking({ data }: { data: any }) {
     e.preventDefault();
     trayPlaceRef.current = true;
     setDragging(true);
-    setDragHint(kind === "box" ? _L("cook.draghint_box_down") : _L("cook.draghint_tray_down"));
+    setDragHint(kind === "box" ? _L("cook.draghint_box_down") : kind === "bag" ? _L("cook.draghint_bag_down") : _L("cook.draghint_tray_down"));
     fetchNui("cooking:beginTrayPlace", { kind });
   };
   // the lid (soda machine): dragged as its real 3D prop and released over a
@@ -1062,6 +1074,15 @@ export default function Cooking({ data }: { data: any }) {
         sig, stack: entry.stack, state: entry.stackState, finishTool: entry.finishTool,
       });
     } else {
+      // A model-less component (no prop): still run the Lua drag so it can be dropped
+      // into the Restaurant Bag as an ent-less "pill" part. There's no world prop to
+      // preview, so the 2D ghost gives cursor feedback; `pill` routes release to
+      // endPrepPlace (the pill only lands in a bag; refused elsewhere, server-side).
+      prepDragRef.current = { source, item: entry.item, cheese: entry.cheese || 0, model: null, pill: true, sig };
+      fetchNui("cooking:beginPrepPlace", {
+        item: entry.item, source, cheese: entry.cheese || 0, sig,
+        label: entry.label || entry.item, image: entry.image,
+      });
       setGhost({ x: e.clientX, y: e.clientY, label: entry.label || entry.item, image: entry.image });
     }
   };
@@ -1225,8 +1246,9 @@ export default function Cooking({ data }: { data: any }) {
           // a finished product — take it apart into its component stack on drop
           // (a meal recreates its full tray + arrangement)
           fetchNui("cooking:endPrepDecompose", { cancel: overBar, item: p.item, sig: p.sig, source: p.source });
-        } else if (p.model) {
-          // live 3D placement — commit (or cancel back over the bar)
+        } else if (p.model || p.pill) {
+          // live 3D placement (or a model-less pill destined for a bag) — commit,
+          // or cancel back over the bar
           fetchNui("cooking:endPrepPlace", { cancel: overBar, source: p.source, item: p.item, cheese: p.cheese, sig: p.sig });
         } else if (!overBar) {
           fetchNui("cooking:prepAdd", { source: p.source, item: p.item, cheese: p.cheese, sig: p.sig });
@@ -1290,7 +1312,7 @@ export default function Cooking({ data }: { data: any }) {
 
   const draggable = (ing: Ingredient) =>
     // tray + pizza box + lid are kitchen equipment, never gated on an item count
-    ing.kind === "tray" || ing.kind === "pizzabox" || ing.kind === "lid" ? true : ing.kind === "assembly" ? !!ing.canMake : (ing.count || 0) > 0;
+    ing.kind === "tray" || ing.kind === "pizzabox" || ing.kind === "bag" || ing.kind === "lid" ? true : ing.kind === "assembly" ? !!ing.canMake : (ing.count || 0) > 0;
 
   // One-row strip by default (wheel scrolls it sideways); expanded — or while
   // searching — the strip wraps into a scrollable grid. A drag always collapses
@@ -1389,7 +1411,7 @@ export default function Cooking({ data }: { data: any }) {
           {tip?.bake ? (
             <BakeTrayTooltip filled={!!tip.filled} onPin={onTipPin} />
           ) : tip?.tray ? (
-            <MealTooltip count={tip.count || 0} box={!!tip.box} open={!!tip.open} boxing={!!tip.boxing}
+            <MealTooltip count={tip.count || 0} box={!!tip.box} bag={!!tip.bag} open={!!tip.open} boxing={!!tip.boxing}
               onMake={onMealMake} onTakeOut={onBoxTakeOut} onPin={onTipPin} />
           ) : (
             <BuildTooltip ranked={ranked} selected={selected} onSelect={setSelectedOutput} onMake={onTipMake} onPin={onTipPin} />
@@ -1397,6 +1419,19 @@ export default function Cooking({ data }: { data: any }) {
           <div className="absolute left-1/2 top-full h-0 w-0 -translate-x-1/2 border-x-[6px] border-t-[6px] border-x-transparent border-t-card" />
         </div>
       </div>
+
+      {/* model-less Restaurant Bag contents: a 2D pill anchored over the bag for
+          each item that has no 3D prop (the "pill UI" fallback). Purely visual. */}
+      {prepPills.filter((p) => p.onScreen).map((p, i) => (
+        <div
+          key={p.item + i}
+          style={{ left: `${p.x * 100}%`, top: `${p.y * 100}%` }}
+          className="pointer-events-none fixed z-30 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1.5 rounded-full border border-primary/50 bg-card/95 px-2 py-0.5 text-[11px] font-semibold shadow-lg"
+        >
+          {p.image ? <ItemThumb src={p.image} alt={p.label || p.item} className="h-4 w-4 object-contain" /> : null}
+          <span className="max-w-[8rem] truncate">{p.label || p.item}</span>
+        </div>
+      ))}
 
       {/* hover tooltip for a bar card (tray item / ingredient) */}
       {barTip && !dragging && <BarTooltip tip={barTip} actions={tipActions} onPin={onBarTipPin} />}
@@ -1575,6 +1610,7 @@ export default function Cooking({ data }: { data: any }) {
                 setBarTip(null);
                 if (ing.kind === "tray") startTrayPlace(e);
                 else if (ing.kind === "pizzabox") startTrayPlace(e, "box");
+                else if (ing.kind === "bag") startTrayPlace(e, "bag");
                 else if (ing.kind === "lid") startLid(e, ing);
                 else if (ing.kind === "topping") startTopping(e, ing);
                 else if (ing.kind === "finish") startFinish(e, ing);
@@ -1601,6 +1637,8 @@ export default function Cooking({ data }: { data: any }) {
                     <UtensilsCrossed className="h-10 w-10 text-primary/80" />
                   ) : ing.kind === "pizzabox" ? (
                     <Package className="h-10 w-10 text-primary/80" />
+                  ) : ing.kind === "bag" ? (
+                    <ShoppingBag className="h-10 w-10 text-primary/80" />
                   ) : ing.kind === "lid" ? (
                     <CircleDot className="h-10 w-10 text-primary/80" />
                   ) : (
@@ -1612,6 +1650,9 @@ export default function Cooking({ data }: { data: any }) {
                   )}
                   {ing.kind === "pizzabox" && (
                     <span className="text-[10px] text-muted-foreground">Boxes a pizza</span>
+                  )}
+                  {ing.kind === "bag" && (
+                    <span className="text-[10px] text-muted-foreground">{_L("cook.craft_in_bag")}</span>
                   )}
                   {ing.kind === "lid" && (
                     <span className="text-[10px] text-muted-foreground">{_L("cook.caps_filled_drink")}</span>
@@ -1646,7 +1687,7 @@ export default function Cooking({ data }: { data: any }) {
                       })}
                     </div>
                   )}
-                  {ing.kind !== "assembly" && ing.kind !== "tray" && ing.kind !== "pizzabox" && ing.kind !== "lid" && (
+                  {ing.kind !== "assembly" && ing.kind !== "tray" && ing.kind !== "pizzabox" && ing.kind !== "bag" && ing.kind !== "lid" && (
                     <Badge variant="secondary" className="absolute right-1 top-1">{ing.count ?? 0}</Badge>
                   )}
                   {ing.kind === "assembly" && !ing.canMake && (

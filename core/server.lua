@@ -105,6 +105,16 @@ local DEFAULT_SETTINGS = {
     -- holder. Like meal_item it's what gets GENERATED (itemgen exports it); if the
     -- item isn't installed the POS still works, just without a physical receipt.
     receipt_item    = "receipt",
+    -- The inventory item EVERY crafted "Restaurant Bag" becomes — one item for
+    -- all crafts, the craft identity (`id`) + its component layers riding as
+    -- build-stack metadata, exactly like meal_item/drink_item. `bag_model` is the
+    -- vessel prop dropped on the prep table (kitchen equipment, never an item) and
+    -- the model a finished/held bag renders as. Crafts are code-less combine
+    -- recipes (soup, salad…): drop the components into the bag, bag it up, get one
+    -- restaurant_bag. Component prop models are OPTIONAL — a component with no
+    -- model (via prep_models/itemModel) shows the NUI pill instead of a 3D prop.
+    bag_item        = "restaurant_bag",
+    bag_model       = "pickle_restaurant_bag_01",
     blip            = { sprite = 93, color = 1, scale = 0.8, enabled = true },
     default_roles   = {
         ["0"] = { label = "Trainee", commission = 5,  permissions = { cook = true } },
@@ -201,6 +211,15 @@ local DEFAULT_SETTINGS = {
         { output = "raw_pizza", label = "Pizza (uncooked)", model = "pickle_pizza_dough_01", group = "Pizza",
           components = { "pizza_dough", "pizza_sauce", "pizza_cheese" } },
     },
+    -- Crafts: code-less combine recipes with no bespoke gameplay (soup, salad, a
+    -- wrapped to-go item). Sibling of `assembly` but every craft collapses to the
+    -- ONE `bag_item` (restaurant_bag), the craft `id` being its POS variant (like a
+    -- drink flavor) — so a craft never mints a bespoke item. Built by dropping the
+    -- `components` into the Restaurant Bag equipment at kitchen prep; component prop
+    -- models are OPTIONAL (pill fallback). `modifiers` are the same POS add-ons as
+    -- assembly (ticket instructions + pricing, never a completion gate). No default
+    -- crafts ship — this is a fully admin-authored list.
+    crafts = {},
     -- Gradual "finish tools": an inventory item whose prop the player rubs over a
     -- finished product on the kitchen-prep table. Coverage builds with cursor
     -- movement (rub_dist metres of tool travel = fully applied); at 100% the target
@@ -727,6 +746,7 @@ local function LoadSettings()
         if changed then SetSetting(key, list) end
     end
     mergeListDefaults("assembly", "output")
+    mergeListDefaults("crafts", "id")
     mergeListDefaults("drinks", "output")
     mergeListDefaults("finishes", "tool")
     mergeListDefaults("condiments", "item")
@@ -1345,6 +1365,7 @@ function CollectGroups()
     end
     for _, r in ipairs(RecipeCache) do add(r.group) end
     for _, a in ipairs(GetSetting("assembly", {})) do add(a.group) end
+    for _, cr in ipairs(GetSetting("crafts", {})) do add(cr.group) end
     for _, d in ipairs(GetSetting("drinks", {})) do add(d.group) end
     for _, f in ipairs(GetSetting("finishes", {})) do add(f.group) end
     table.sort(out)
@@ -1493,6 +1514,28 @@ local function assemblyMissing(a)
     return missing
 end
 
+-- The item every crafted Restaurant Bag becomes (one item for all crafts; the
+-- craft id is its POS variant). Mirrors DrinkItemName/MealItem.
+function BagItemName() return GetSetting("bag_item", "restaurant_bag") end
+
+-- A craft's raw ingredient cost = the sum of its component costs (the bag output
+-- itself is free packaging, never an ingredient). Used for the default menu price.
+function CraftCost(cr)
+    local sum = 0
+    for _, c in ipairs(cr.components or {}) do sum = sum + ResolveItemCost(c) end
+    return sum
+end
+
+local function craftMissing(cr)
+    -- like assemblyMissing: the output is always the generic bag item; only the
+    -- components must resolve (a real installed item OR a cooked-pool product).
+    local missing = {}
+    for _, comp in ipairs(cr.components or {}) do
+        if not ItemExists(comp) and not IsProductItem(comp) then missing[#missing + 1] = comp end
+    end
+    return missing
+end
+
 -- Annotate a list with valid/missing without mutating the cached source rows.
 function AnnotateRecipes()
     local out = {}
@@ -1531,6 +1574,22 @@ function AnnotateAssembly()
         local copy = {}; for k, v in pairs(a) do copy[k] = v end
         copy.valid, copy.missing = #missing == 0, missing
         copy.defaultPrice = MarkupPrice(ResolveItemCost(a.output))
+        out[#out + 1] = copy
+    end
+    return out
+end
+
+function AnnotateCrafts()
+    -- Every craft collapses to the ONE generic bag item; if that item isn't
+    -- installed NO craft can be sold, so flag it like AnnotateDrinks does.
+    local bagInstalled = ItemExists(BagItemName())
+    local out = {}
+    for _, cr in ipairs(GetSetting("crafts", {})) do
+        local missing = craftMissing(cr)
+        local copy = {}; for k, v in pairs(cr) do copy[k] = v end
+        copy.valid, copy.missing = #missing == 0, missing
+        copy.bag_item_installed = bagInstalled
+        copy.defaultPrice = MarkupPrice(CraftCost(cr))
         out[#out + 1] = copy
     end
     return out
@@ -1695,6 +1754,18 @@ function ClearOrders(restaurantId)
     NextTicket[restaurantId] = nil
 end
 
+-- A combo slot option whose key is `group:<Name>` references a whole ACCESS GROUP
+-- (any sellable the restaurant can currently make in that group) rather than one
+-- fixed item — resolved to its live members at BuildComboCatalog time. Everything
+-- else is a plain sellable key. Returns the group name, or nil for a normal option.
+COMBO_GROUP_PREFIX = "group:"
+function ComboOptionGroup(key)
+    if type(key) == "string" and key:sub(1, #COMBO_GROUP_PREFIX) == COMBO_GROUP_PREFIX then
+        return key:sub(#COMBO_GROUP_PREFIX + 1)
+    end
+    return nil
+end
+
 -- ─── combo meals (write-through cache) ────────────────────────────────────────
 -- Insert or update one combo. `combo` carries { id?, number, label, price, enabled,
 -- photo_url, photo_crop, slots } already sanitized by the caller (management). On
@@ -1827,6 +1898,12 @@ function TraySig(meta)
             -- variation from the same pizza arranged on a serving tray
             if l.box then
                 part = part .. "^box"
+            end
+            -- a crafted Restaurant Bag carries its craft id (flag on the first
+            -- layer): the bag item is generic, so the craft IS its variation
+            -- identity — two crafts with the same components stay distinct.
+            if l.craft ~= nil then
+                part = part .. "~" .. tostring(l.craft)
             end
             parts[#parts + 1] = part
         end
@@ -2224,6 +2301,19 @@ function BuildSyncPayload()
         end
         if ok then assembly[#assembly + 1] = a end
     end
+    -- Crafts: shipped only when the ONE bag item is installed (every craft collects
+    -- as it — no bag item, nothing to hand out) AND every component resolves (a real
+    -- consumed item OR a cooked-pool product). Mirrors the assembly filter.
+    local crafts = {}
+    if ItemExists(BagItemName()) then
+        for _, cr in ipairs(GetSetting("crafts", {})) do
+            local ok = (cr.id and cr.id ~= "" and cr.components and #cr.components > 0)
+            for _, comp in ipairs(cr.components or {}) do
+                if not ItemExists(comp) and not IsProductItem(comp) then ok = false end
+            end
+            if ok then crafts[#crafts + 1] = cr end
+        end
+    end
     -- Finish tools ship with only their valid targets: the tool must be a real
     -- (consumed) inventory item, but a target/output may be a tray-only PRODUCT
     -- (a frosted doughnut is a finish output, never installed) — FinishItemOk. An
@@ -2274,6 +2364,11 @@ function BuildSyncPayload()
     local payload = { restaurants = {}, props = {}, recipes = recipes, settings = {
         drinks   = drinks,
         assembly = assembly,
+        crafts   = crafts,
+        -- the Restaurant Bag vessel prop + the one item every craft becomes, so the
+        -- client can spawn the bag equipment and render a finished/held bag
+        bag_item  = BagItemName(),
+        bag_model = GetSetting("bag_model", "pickle_restaurant_bag_01"),
         finishes = finishes,
         condiments = condiments,
         baking   = baking,

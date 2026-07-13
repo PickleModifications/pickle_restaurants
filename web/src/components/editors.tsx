@@ -231,3 +231,63 @@ export function AssemblyFields({ asm, onChange, items, groups }: { asm: any; onC
     </>
   );
 }
+
+// ─── craft (Restaurant Bag combine) ────────────────────────────────────────────
+// A craft is one entry in the `crafts` settings array: a code-less combine recipe
+// (soup, salad…). Its components are dropped into the Restaurant Bag at kitchen prep
+// and bagged up into the ONE restaurant_bag item — there is NO output picker (the
+// output is always the bag; the craft `id` is its POS variation identity). Same
+// modifiers as an assembly. `onChange` patches the entry; the parent owns the array.
+
+export function CraftFields({ craft, onChange, items, groups }: { craft: any; onChange: (patch: any) => void; items: Item[]; groups: string[] }) {
+  const comps: string[] = craft.components ?? [];
+  const mods: any[] = craft.modifiers ?? [];
+  const updateMod = (mi: number, patch: any) => {
+    const next = mods.map((m, idx) => {
+      if (idx !== mi) return m;
+      const merged = { ...m, ...patch };
+      merged.id = modSlug(merged.item || merged.label) || `mod${mi}`;
+      return merged;
+    });
+    onChange({ modifiers: next });
+  };
+  return (
+    <>
+      <div className="grid grid-cols-2 gap-3">
+        <TextField label={_L("settings.craft_id")} hint={_L("settings.craft_id_hint")}
+          value={craft.id || ""} onChange={(v) => onChange({ id: modSlug(v) })} />
+        <TextField label={_L("settings.label")} value={craft.label} onChange={(v) => onChange({ label: v })} />
+        <GroupField label={_L("settings.group_field")} hint={_L("settings.group_field_hint")}
+          value={craft.group || ""} groups={groups} onChange={(v) => onChange({ group: v })} />
+      </div>
+      <Field label={_L("settings.components")} className="mt-3">
+        <div className="space-y-2">
+          {comps.map((c, ci) => (
+            <div key={ci} className="flex gap-2">
+              <ItemPicker className="flex-1" items={items} value={c} onChange={(v) => onChange({ components: comps.map((x, idx) => (idx === ci ? v : x)) })} />
+              <Button size="icon" variant="ghost" onClick={() => onChange({ components: comps.filter((_, idx) => idx !== ci) })}><Trash2 className="h-4 w-4" /></Button>
+            </div>
+          ))}
+          <Button size="sm" variant="outline" onClick={() => onChange({ components: [...comps, ""] })}><Plus className="h-4 w-4" /> {_L("settings.add_component")}</Button>
+        </div>
+      </Field>
+      {/* Customer POS modifiers — same as an assembly (ticket instructions + pricing). */}
+      <Field label={_L("settings.modifiers")} hint={_L("settings.modifiers_hint")} className="mt-3">
+        <div className="space-y-2">
+          {mods.map((m, mi) => (
+            <div key={mi} className="flex items-end gap-2 rounded-md border border-border/60 p-2">
+              <TextField label={_L("settings.mod_label")} className="w-24" value={m.label || ""} onChange={(v) => updateMod(mi, { label: v })} />
+              <div className="flex-1"><Field label={_L("settings.mod_item")}><ItemPicker items={items} value={m.item || ""} onChange={(v) => updateMod(mi, { item: v })} /></Field></div>
+              <NumberField label={_L("settings.mod_price")} className="w-20" value={Number(m.price || 0)} min={0} onChange={(v) => updateMod(mi, { price: v })} />
+              <div className="pb-1.5"><Toggle checked={!!m.default} onChange={(v) => updateMod(mi, { default: v })} label={_L("settings.mod_default")} /></div>
+              <Button size="icon" variant="ghost" onClick={() => onChange({ modifiers: mods.filter((_, idx) => idx !== mi) })}><Trash2 className="h-4 w-4" /></Button>
+            </div>
+          ))}
+          <Button size="sm" variant="outline" onClick={() => onChange({ modifiers: [...mods, { id: "", label: "", item: "", price: 0, default: false }] })}>
+            <Plus className="h-4 w-4" /> {_L("settings.add_modifier")}
+          </Button>
+        </div>
+      </Field>
+    </>
+  );
+}

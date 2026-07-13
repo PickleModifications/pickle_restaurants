@@ -103,6 +103,14 @@ local function findAssembly(output)
     end
 end
 
+-- The craft a Restaurant Bag's metadata records, by id (the bag's variation identity).
+local function findCraft(id)
+    if not id or id == "" then return nil end
+    for _, cr in ipairs(GetSetting("crafts", {})) do
+        if cr.id == id then return cr end
+    end
+end
+
 -- ─── finish tools (frosting …) ───────────────────────────────────────────────
 -- A finish tool is an inventory item whose prop the player rubs over a finished
 -- product at kitchen prep (`finishes` setting): pick a flavor on the tool's card,
@@ -473,6 +481,9 @@ function itemModel(item)
     end
     for _, a in ipairs(GetSetting("assembly", {})) do if a.output == item then return a.model end end
     for _, dd in ipairs(GetSetting("drinks", {})) do if dd.output == item then return dd.model end end
+    -- A finished/held Restaurant Bag renders as the vessel prop (a sealed bag; its
+    -- contents aren't re-rendered once bagged, like a closed box).
+    if item == BagItemName() then return GetSetting("bag_model", "pickle_restaurant_bag_01") end
     -- The cheese slice is ALWAYS the unmelted slice (_01). _02 is the melted variant,
     -- used only for the stovetop cook animation — never as a stackable/applied slice.
     if item == "cheese" then return "pickle_cheese_applied_01" end
@@ -836,6 +847,15 @@ local function compSpec(c)
             return spec
         end
     end
+    -- the generic restaurant_bag renders as its SEALED vessel prop — the contents
+    -- aren't shown once bagged (like a closed box). The craft id + component layers
+    -- ride in meta only, for POS matching and un-bagging.
+    if c.item == BagItemName() then
+        spec.model = GetSetting("bag_model", "pickle_restaurant_bag_01")
+        spec.stack = nil
+        if c.stack then spec.sig = TraySig(c.stack) end
+        return spec
+    end
     -- a nested product renders as its whole recorded stack (crust swapped to its
     -- cook state), not its single base model, and addresses that exact variation.
     -- A stackless legacy instance of an assembled cook output (a cooked pizza
@@ -1084,6 +1104,14 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         -- same meal item — flagged so it sets back down as its box, not a tray.
         out[#out + 1] = { kind = "pizzabox", item = MealItem(), label = "Pizza Box",
                           image = GetItemImage(MealItem()) }
+        -- The Restaurant Bag: the same free-equipment pattern. Drag it onto the
+        -- table, drop a craft's components into it (each seats as its 3D prop, or a
+        -- 2D pill if the item has no model), then bag it up into ONE restaurant_bag
+        -- tagged with the matched craft. Only "→ inventory" needs the bag item
+        -- installed; the bag lives in the tray holding either way, like the tray.
+        out[#out + 1] = { kind = "bag", item = BagItemName(), label = "Restaurant Bag",
+                          image = GetItemImage(BagItemName()),
+                          model = GetSetting("bag_model", "pickle_restaurant_bag_01") }
         -- Baking trays (cake tin / cookie tray) follow the same free-equipment
         -- pattern: drag one out, rub the shared baking mix over it to fill it, then
         -- drag the filled tray into the hotbar to collect its oven-ready output
@@ -1194,6 +1222,15 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         for _, asm in ipairs(GetSetting("assembly", {})) do
             if RestaurantHasAccess(prop.restaurant_id, asm.group) then
                 for _, comp in ipairs(asm.components or {}) do addComp(comp) end
+            end
+        end
+        -- Craft components too: a craft's inputs (soup's broth/veg) are draggable
+        -- prep ingredients — the bar is where they come from before going in the bag.
+        -- A component with no prop model still lists (addComp doesn't gate on model);
+        -- it drags into the bag as a 2D pill.
+        for _, cr in ipairs(GetSetting("crafts", {})) do
+            if RestaurantHasAccess(prop.restaurant_id, cr.group) then
+                for _, comp in ipairs(cr.components or {}) do addComp(comp) end
             end
         end
         for comp in pairs(GetSetting("prep_models", {})) do addComp(comp) end
@@ -1729,6 +1766,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
     local list = GetTray(prop.restaurant_id, GetIdentifier(src))
     local mealItem = MealItem()
     local drinkItem = DrinkItem()
+    local bagItem = BagItemName()
     -- At the prep table, cooked items placed on a build are spoken for — subtract
     -- the reservations so the tray shows what's still free to grab.
     local isPrep = StationType(prop) == "kitchen_prep"
@@ -1774,6 +1812,17 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                     e.model = dd.model
                     e.stack = drinkRender(dd)
                 end
+            end
+            -- the generic restaurant_bag: resolve its craft label from the id its
+            -- metadata records and render as the SEALED vessel (contents hidden once
+            -- bagged, like a closed box). Terminal — not decomposable.
+            if e.item == bagItem then
+                local craftId = type(e.meta) == "table" and e.meta[1] and e.meta[1].craft
+                local cr = craftId and findCraft(craftId) or nil
+                if cr then e.label = cr.label or e.label end
+                e.bag = true
+                e.model = GetSetting("bag_model", "pickle_restaurant_bag_01")
+                e.stack = { e.model }
             end
             if isPrep and (findAssembly(e.item) or e.meal) and not isFinished then e.decompose = true end
             -- still-raw items that are a cook-recipe input (e.g. an uncooked pizza) go
@@ -1827,10 +1876,12 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
             -- how this variation differs from the base recipe (its toppings), plus
             -- the full component list for the hover tooltip. A drink's meta is just
             -- its flavor key — already the card label, not a topping.
-            if e.meta and not ftarget and e.item ~= drinkItem then
+            if e.meta and not ftarget and e.item ~= drinkItem and e.item ~= bagItem then
                 e.extras = extrasComponents(e.item, e.meta)
                 e.comps  = stackComponents(e.meta)
             end
+            -- a bag has no base recipe to diff against — just list what's inside
+            if e.item == bagItem and e.meta then e.comps = stackComponents(e.meta) end
             e.meta = nil -- the NUI keys variations by sig; no need to ship the raw stack
             -- freshness clock: SECONDS LEFT until this item spoils (nil = never). Sent as
             -- a remaining count, not an epoch, so the NUI counts down against its own
@@ -1866,6 +1917,15 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                         entry.model = dd.model
                         entry.stack = drinkRender(dd)
                     end
+                end
+                -- the generic restaurant_bag: craft label + sealed-vessel render
+                if item == bagItem then
+                    local craftId = type(v.meta) == "table" and v.meta[1] and v.meta[1].craft
+                    local cr = craftId and findCraft(craftId) or nil
+                    if cr then entry.label = cr.label or entry.label end
+                    entry.bag = true
+                    entry.model = GetSetting("bag_model", "pickle_restaurant_bag_01")
+                    entry.stack = { entry.model }
                 end
                 if dualRecipeForItem(item) then entry.dual = true end
                 if v.cheese >= 1 then
@@ -2207,6 +2267,24 @@ local function bestAssemblyForLayers(layers, rid)
     return best
 end
 
+-- The most specific CRAFT a bag's contents form: among crafts whose required
+-- components are all present (extras ride as variation), the one with the most
+-- components. nil if the contents match no craft. Mirrors bestAssemblyForLayers but
+-- over the `crafts` setting (stackSatisfies reads .components, so it works as-is).
+local function bestCraftForLayers(layers, rid)
+    if #layers == 0 then return nil end
+    local provides = buildProvides(layers)
+    local best, bestScore
+    for _, cr in ipairs(GetSetting("crafts", {})) do
+        if cr.id and cr.id ~= "" and cr.components and #cr.components > 0
+            and stackSatisfies(provides, cr) and (rid == nil or RestaurantHasAccess(rid, cr.group)) then
+            local score = #cr.components
+            if not bestScore or score > bestScore then best, bestScore = cr, score end
+        end
+    end
+    return best
+end
+
 -- Capture each product layer's own build stack off the exact instance being
 -- consumed (BEFORE removal, so the nested variation survives inside the output's
 -- meta), then tally consumption per source (bun halves round up to whole buns),
@@ -2378,6 +2456,44 @@ lib.callback.register("pickle_restaurants:cooking:prepMakeMeal", function(src, d
     AddTray(b.rid, id, mealItem, 0, 1, meta)
     return { ok = true, output = mealItem,
              label = (boxed and "Boxed " or "") .. GetItemLabel(mealItem) }
+end)
+
+-- Turn everything dropped in the Restaurant Bag into ONE restaurant_bag item.
+-- Unlike a meal, arrangement doesn't matter — the bag's contents must MATCH a
+-- defined craft (all its required components present; the most specific craft
+-- wins). The craft id rides the FIRST meta layer (TraySig appends ~craft), so each
+-- craft is its own POS variation; the component layers are recorded so an un-bagged
+-- bag rebuilds 1:1. The bag item is what gets GENERATED — never a requirement; it
+-- lands in the tray holding whether or not installed (only → inventory needs it).
+lib.callback.register("pickle_restaurants:cooking:prepMakeBag", function(src, d)
+    local b = PrepBuilds[src]; if not b then return { ok = false } end
+    if not HasPerm(b.rid, src, "cook") then return { ok = false } end
+    local bagItem = BagItemName()
+    local id = GetIdentifier(src)
+    -- flatten every dropped pile into one component list (arrangement is irrelevant)
+    local layers = {}
+    for _, pile in ipairs((d and d.items) or {}) do
+        for _, l in ipairs(orderedLayers(b, pile.ids)) do layers[#layers + 1] = l end
+    end
+    if #layers == 0 then return { ok = false, error = _L("cook_nothing_in_bag") } end
+    -- must form a defined craft; re-checked server-side (the NUI is untrusted)
+    local cr = bestCraftForLayers(layers, b.rid)
+    if not cr then return { ok = false, error = _L("cook_no_craft_match") } end
+    local ok, err = consumeLayers(src, b, id, layers) -- pins each product layer's nested stack
+    if not ok then return { ok = false, error = err } end
+    dropLayerReservations(src, b, layers)
+
+    -- component layers recorded (each keeping cheese/half/nested stack); the craft
+    -- id flagged on the first layer so TraySig makes it its own variation
+    local meta = {}
+    for _, l in ipairs(layers) do
+        meta[#meta + 1] = { item = l.item, cheese = l.cheese or 0, half = l.half, stack = l.stack }
+    end
+    meta[1].craft = cr.id
+    AddTray(b.rid, id, bagItem, 0, 1, meta)
+    return { ok = true, output = bagItem, craft = cr.id,
+             label = cr.label or GetItemLabel(bagItem),
+             sig = TraySig(meta), spec = compSpec({ item = bagItem, cheese = 0, stack = meta }) }
 end)
 
 -- Build ONE stack into a chosen recipe (the tooltip's Make). The client sends the

@@ -132,6 +132,21 @@ local BOXP = {
     open_ms   = 350,   -- open/close swing duration
     lid_fwd   = 0.1535,   -- lid origin's forward offset from the base's origin (m)
 }
+-- The RESTAURANT BAG: the serving tray's sibling (kind "bag") — a SINGLE vessel
+-- prop placed on the prep table (no paper liner). Drop a craft's components into it
+-- (each seats as its 3D prop, or — when the item has NO prop model — shows as a 2D
+-- pill anchored over the bag) and "Bag It Up" turns the contents into ONE
+-- restaurant_bag tagged with the matched craft. Free equipment like the tray; only
+-- → inventory needs the bag item installed. Accepts loose food like a serving tray
+-- (free 2D drop), never gated on a pizza crust like the box. `base_model` is synced
+-- (BagModel) and resolved live in trayBaseModel. TUNE IN-GAME.
+local BAGP = {
+    food_dz   = 0.02,  -- how high contents seat above the surface the bag sits on
+    rim_inset = 0.05,  -- shrink the droppable area vs the model bounds
+    pick_pad  = 0.03,  -- extra grab margin (m) around the bag's footprint
+    pick_dz   = 0.4,   -- max height diff between the cursor's surface hit and the bag
+}
+local function isBagKind(kind) return kind == "bag" end
 local PrepTrays = {}    -- [tid] = { x, y, z, kind, ents, open?, openT?, animSeq? }
                         -- kind "tray": ents = { trayEnt, paperEnt }; kind "box":
                         -- ents = { baseEnt, lidEnt } + lid open state/progress
@@ -1694,6 +1709,19 @@ local function makePart(spec)
         return part
     end
 
+    -- A component with NO prop model (and no build stack) seats as an ent-less
+    -- "pill" part: tracked and reservable like any part, but shown as a 2D chip
+    -- anchored over the Restaurant Bag instead of a 3D prop. height 0 so it never
+    -- lifts anything sharing its pile.
+    if not spec.model or spec.model == "" then
+        part.pill   = true
+        part.item   = spec.item
+        part.label  = spec.label
+        part.image  = spec.image
+        part.height = 0.0
+        return part
+    end
+
     if spec.dual then
         local e1 = SpawnProp(spec.model, base.x, base.y, base.z)
         local e2 = SpawnProp(spec.model, base.x, base.y, base.z)
@@ -1893,18 +1921,21 @@ end
 
 local function trayCfg(kind)
     if isBakeKind(kind) then return BAKEP end
+    if isBagKind(kind) then return BAGP end
     return kind == "box" and BOXP or TRAYP
 end
 local function trayBaseModel(kind)
     local be = bakeEntryFor(kind)
     if be then return be.tray_model end
+    if isBagKind(kind) then return BagModel or "pickle_restaurant_bag_01" end
     return kind == "box" and BOXP.base_model or TRAYP.tray_model
 end
 
--- Food rests on the paper liner (tray) / the box bed: bed height + a hair so it
--- doesn't z-fight the surface under it.
+-- Food rests on the paper liner (tray) / the box bed / the bag: bed height + a hair
+-- so it doesn't z-fight the surface under it.
 local function trayFoodDz(kind)
     if kind == "box" then return BOXP.food_dz end
+    if isBagKind(kind) then return BAGP.food_dz end
     if isBakeKind(kind) then return BAKEP.food_dz end
     return TRAYP.paper_dz + 0.002
 end
@@ -1984,6 +2015,15 @@ local function layoutTrayAt(ents, x, y, z, kind, openT, storedOffs)
         boxLidSwing(base, ents and ents[2], openT)
         return
     end
+    if isBagKind(kind) then
+        -- one vessel prop; contents are ordinary PrepStacks piles seated on top
+        local base = ents and ents[1]
+        if base and DoesEntityExist(base) then
+            SetEntityCoordsNoOffset(base, x, y, z + modelBaseLift(trayBaseModel(kind)), false, false, false)
+            SetEntityRotation(base, 0.0, 0.0, yaw, 2, true)
+        end
+        return
+    end
     local zs = {
         z + modelBaseLift(TRAYP.tray_model),
         z + TRAYP.paper_dz + modelBaseLift(TRAYP.paper_model),
@@ -1997,7 +2037,7 @@ local function layoutTrayAt(ents, x, y, z, kind, openT, storedOffs)
 end
 
 local function spawnTrayEnts(x, y, z, kind, openT)
-    if isBakeKind(kind) then
+    if isBakeKind(kind) or isBagKind(kind) then
         local base = SpawnProp(trayBaseModel(kind), x, y, z)
         if not base then return nil end
         local ents = { base }
@@ -2346,13 +2386,21 @@ end
 -- consumes the reserved parts and records each layer's offset; a box flags the
 -- meal so it sets back down as its box). On success the tray and its stacks are
 -- torn down. Returns the server result, or nil for an empty tray.
+-- The make callback for a piece of equipment: a Restaurant Bag consolidates its
+-- contents into ONE restaurant_bag (craft-matched, server-side); a serving tray /
+-- pizza box makes a meal. Both take the same { items } payload of reserved pile ids.
+local function trayMakeCallback(kind)
+    return isBagKind(kind) and "pickle_restaurants:cooking:prepMakeBag"
+        or "pickle_restaurants:cooking:prepMakeMeal"
+end
+
 local function makeMealFromTray(tid, silent)
     local t = PrepTrays[tid]; if not t then return nil end
     local piles = collectTrayPiles(tid)
     if #piles == 0 then return nil end
     local items = {}
     for _, p in ipairs(piles) do items[#items + 1] = { ids = p.ids, dx = p.dx, dy = p.dy } end
-    local res = lib.callback.await("pickle_restaurants:cooking:prepMakeMeal", false,
+    local res = lib.callback.await(trayMakeCallback(t.kind), false,
         { items = items, box = (t.kind == "box") or nil })
     if res and res.ok then
         for _, p in ipairs(piles) do removePrepStack(p.sid) end
@@ -2430,11 +2478,11 @@ local function runDragThread(drag)
                         setTrayOutline(tid, 80, 200, 120)
                         layoutParts(drag.parts, t.x, t.y, fz, false)
                     end
-                elseif tid and hit and coords and PrepTrays[tid].kind == "tray" then
-                    -- over a SERVING tray: anchor to the paper where the cursor points,
-                    -- clamped inside the rim; release starts a new pile at that exact
-                    -- offset. (Baking trays never accept loose food — they fall through
-                    -- to plain table placement below.)
+                elseif tid and hit and coords and (PrepTrays[tid].kind == "tray" or PrepTrays[tid].kind == "bag") then
+                    -- over a SERVING tray or a RESTAURANT BAG: anchor to it where the
+                    -- cursor points, clamped inside the rim; release starts a new pile at
+                    -- that exact offset. (Baking trays never accept loose food — they
+                    -- fall through to plain table placement below.)
                     local t = PrepTrays[tid]
                     local hx, hy = trayHalfExtents(t.kind)
                     local dx = math.min(math.max(coords.x - t.x, -hx), hx)
@@ -2669,9 +2717,11 @@ function OpenCookingStation(prop)
                     local t = PrepTrays[prepHoverTid]
                     local isBox = t.kind == "box"
                     local isBake = isBakeKind(t.kind)
+                    local isBag = isBagKind(t.kind)
                     prepHoverBox = isBox
                     local on, sx, sy = GetScreenCoordFromWorldCoord(t.x, t.y, t.z + trayFoodDz(t.kind) + 0.06)
-                    prepTip = { tray = true, box = isBox or nil, open = isBox and (t.open and true or false) or nil,
+                    prepTip = { tray = true, box = isBox or nil, bag = isBag or nil,
+                                open = isBox and (t.open and true or false) or nil,
                                 boxing = (isBox and t.boxing) and true or nil,
                                 -- a baking tray shows a rub/collect hint (never a Make Meal)
                                 bake = isBake or nil, filled = (isBake and t.filled) or nil,
@@ -2681,13 +2731,31 @@ function OpenCookingStation(prop)
             prepHovered = prepHoverPid
             trayHovered = prepHoverTid
 
+            -- Model-less bag contents (ent-less pill parts) have no 3D prop, so they're
+            -- surfaced as 2D chips anchored over their Restaurant Bag: project each to
+            -- screen (stacked upward so several read as a small list). The NUI resolves
+            -- each chip's label/image from its inventory catalogue by item name.
+            local prepPills = {}
+            for _, stack in pairs(PrepStacks) do
+                if stack.tid and PrepTrays[stack.tid] and isBagKind(PrepTrays[stack.tid].kind) then
+                    local idx = 0
+                    for _, p in ipairs(stack.parts) do
+                        if p.pill then
+                            local on, sx, sy = GetScreenCoordFromWorldCoord(stack.x, stack.y, stack.z0 + 0.06 + idx * 0.05)
+                            prepPills[#prepPills + 1] = { item = p.item, label = p.label, image = p.image, onScreen = on, x = sx, y = sy }
+                            idx = idx + 1
+                        end
+                    end
+                end
+            end
+
             -- (Soda taps carry no on-screen label: the fountain model already
             -- prints each flavor, so clicking the printed nozzle — resolved
             -- world-side by hoveredTapSlot on worldClick — is all that's needed.)
 
             SendNUIMessage({ action = "cookingItems", items = items, hovered = hoveredUid,
                              prepHovered = prepHoverPid, prepTrayHovered = prepHoverTid,
-                             prepTrayBox = prepHoverBox, prepTip = prepTip })
+                             prepTrayBox = prepHoverBox, prepTip = prepTip, prepPills = prepPills })
 
             -- Stovetop: outline the hovered patty (click flips it); otherwise
             -- highlight the oven door under the cursor (click toggles it).
@@ -3063,13 +3131,16 @@ RegisterNUICallback("cooking:beginPrepPlace", function(d, cb)
         specs[2] = { item = "bun", half = "top",    model = BUN.top,    source = d.source }
     else
         local stack = (type(d.stack) == "table" and #d.stack > 1) and d.stack or nil
-        if not d.model and not stack then return cb({ ok = false }) end
+        -- a model-less component (no prop, no stack) is allowed: makePart builds an
+        -- ent-less "pill" part for it, which only lands in the Restaurant Bag (guarded
+        -- on release in endPrepPlace) and shows as a 2D chip anchored over the bag.
         -- cheese only rides a two-faced patty, matching the stovetop. A product with
         -- a build stack (cooked pizza) renders as its whole layer tower; `sig` keeps
         -- the reservation pinned to that exact build variation.
         specs[1] = { item = d.item, model = d.model, source = d.source, half = d.half,
                      dual = dual, cheese = cheeseVal, sig = d.sig,
                      stack = stack, state = d.state, finishTool = d.finishTool,
+                     label = d.label, image = d.image, -- carried for a model-less pill chip
                      cheeseModel = (cheeseOn and dual) and d.cheeseModel or nil }
     end
 
@@ -3100,6 +3171,19 @@ RegisterNUICallback("cooking:endPrepPlace", function(d, cb)
         deleteParts(drag.parts)
         ShowNotification(drag.boxBlock)
         return cb({ ok = false })
+    end
+    -- a model-less pill part only belongs dropped INTO a Restaurant Bag (its own new
+    -- pile) — anywhere else it would be an invisible, meaningless drop, so refuse it.
+    for _, p in ipairs(drag.parts) do
+        if p.pill then
+            local ontoBag = drag.targetTid and PrepTrays[drag.targetTid] and PrepTrays[drag.targetTid].kind == "bag"
+            if not ontoBag then
+                deleteParts(drag.parts)
+                ShowNotification(_L("cook_pill_bag_only"))
+                return cb({ ok = false })
+            end
+            break
+        end
     end
     -- The authoritative source ("inv"/"tray") arrives on release, so stamp it onto
     -- each carried part before reserving (a bun's two halves share it).
@@ -3325,7 +3409,7 @@ RegisterNUICallback("cooking:prepDrop", function(d, cb)
                 drag.open, drag.openT = false, 0.0
                 Wait(1000)
             end
-            local res = lib.callback.await("pickle_restaurants:cooking:prepMakeMeal", false,
+            local res = lib.callback.await(trayMakeCallback(drag.trayKind), false,
                 { items = items, box = (drag.trayKind == "box") or nil })
             if res and res.ok then
                 deleteDrag(drag)
@@ -3477,6 +3561,7 @@ RegisterNUICallback("cooking:beginTrayPlace", function(d, cb)
     if not base or base.prop_type ~= "kitchen_prep" then return cb({ ok = false }) end
     local kind = "tray"
     if d and d.kind == "box" then kind = "box"
+    elseif d and d.kind == "bag" then kind = "bag"
     elseif d and isBakeKind(d.kind) then kind = d.kind
     elseif d and d.kind then return cb({ ok = false }) end -- an unknown (e.g. unsynced bake) kind: refuse, never a stray serving tray
     local ents = spawnTrayEnts(base.x, base.y, base.z, kind, 0.0)

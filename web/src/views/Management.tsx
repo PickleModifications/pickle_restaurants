@@ -67,6 +67,7 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
               id={id}
               combos={data?.combos || []}
               sellables={(data?.priceList || []).map((e: any) => ({ name: e.key, label: e.label, image: e.image }))}
+              groups={data?.comboGroups || []}
             />
           </TabsContent>
         )}

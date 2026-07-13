@@ -123,6 +123,7 @@ export function ComboThumb({ photo, label, className }: { photo?: { url: string;
 export const KIND_LABEL: Record<string, string> = {
   recipe: "register.kind_recipe",
   assembly: "register.kind_assembly",
+  craft: "register.kind_craft",
   drink: "register.kind_drink",
   finish: "register.kind_finish",
 };

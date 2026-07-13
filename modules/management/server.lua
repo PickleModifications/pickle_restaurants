@@ -43,8 +43,11 @@ end
 -- points at something the restaurant can no longer make. A combo is `stale` if any
 -- slot has no valid option left (that's when the ORDER path hides it).
 local function buildComboEditorList(id)
-    local index = {}
-    for _, e in ipairs(BuildSellableCatalog(id)) do index[e.key] = e end
+    local index, groupCount = {}, {}
+    for _, e in ipairs(BuildSellableCatalog(id)) do
+        index[e.key] = e
+        if e.group then groupCount[e.group] = (groupCount[e.group] or 0) + 1 end
+    end
     local out = {}
     for _, c in pairs(ComboCache[id] or {}) do
         local slots, stale = {}, false
@@ -52,15 +55,23 @@ local function buildComboEditorList(id)
             local options, dead = {}, 0
             for _, o in ipairs(s.options or {}) do
                 local key = o.key
-                local e = key and index[key]
-                if not e then dead = dead + 1 end
-                options[#options + 1] = {
-                    key = key,
-                    label = e and e.label or (key and PrettyItemName((key:gsub("::.*$", "")))) or "?",
-                    image = e and e.image or nil,
-                    kind = e and e.kind or nil,
-                    valid = e ~= nil,
-                }
+                local g = ComboOptionGroup(key)
+                if g then
+                    -- an "any <group>" reference: valid while the group has ≥1 live member
+                    local n = groupCount[g] or 0
+                    if n == 0 then dead = dead + 1 end
+                    options[#options + 1] = { key = key, group = g, count = n, valid = n > 0 }
+                else
+                    local e = key and index[key]
+                    if not e then dead = dead + 1 end
+                    options[#options + 1] = {
+                        key = key,
+                        label = e and e.label or (key and PrettyItemName((key:gsub("::.*$", "")))) or "?",
+                        image = e and e.image or nil,
+                        kind = e and e.kind or nil,
+                        valid = e ~= nil,
+                    }
+                end
             end
             local slotStale = (#options == 0) or (dead >= #options)
             if slotStale then stale = true end
@@ -78,6 +89,21 @@ local function buildComboEditorList(id)
         if (a.number or 0) ~= (b.number or 0) then return (a.number or 0) < (b.number or 0) end
         return (a.id or 0) < (b.id or 0)
     end)
+    return out
+end
+
+-- The access groups a combo slot can reference as "any <group>", each with how many
+-- live sellables this restaurant can currently make in it. Only groups with ≥1
+-- member are offered (an empty group is a dead slot). Drives the editor's group
+-- options; a group option resolves to its members at BuildComboCatalog time.
+local function buildComboGroups(id)
+    local counts = {}
+    for _, e in ipairs(BuildSellableCatalog(id)) do
+        if e.group then counts[e.group] = (counts[e.group] or 0) + 1 end
+    end
+    local out = {}
+    for g, n in pairs(counts) do out[#out + 1] = { group = g, count = n } end
+    table.sort(out, function(a, b) return a.group:lower() < b.group:lower() end)
     return out
 end
 
@@ -157,6 +183,7 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
         priceList = priceList,
         stale     = stale,
         combos    = effective.manage_menu and buildComboEditorList(id) or {},
+        comboGroups = effective.manage_menu and buildComboGroups(id) or {},
         supplies  = supplies,
         props     = props,
         nearby    = effective.manage_employees and NearbyPlayers(src, 10.0) or {},
