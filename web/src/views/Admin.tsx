@@ -15,6 +15,7 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
   const crafts = data?.crafts || [];
   const drinks = data?.drinks || [];
   const finishes = data?.finishes || [];
+  const condiments = data?.condiments || [];
   const settings = data?.settings || {};
   const players = data?.players || [];
   const items = data?.items || [];
@@ -52,7 +53,7 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
         </TabsContent>
 
         <TabsContent value="recipes" className="flex min-h-0 flex-1 flex-col">
-          <Menu recipes={recipes} assembly={assembly} crafts={crafts} drinks={drinks} finishes={finishes} settings={settings} items={items} groups={groups} onSaved={refresh} />
+          <Menu recipes={recipes} assembly={assembly} crafts={crafts} drinks={drinks} finishes={finishes} condiments={condiments} settings={settings} items={items} groups={groups} onSaved={refresh} />
         </TabsContent>
 
         <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">

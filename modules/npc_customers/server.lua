@@ -189,14 +189,25 @@ end
 -- Build one POS line from a priced-catalog entry, in the exact shape sales:createOrder
 -- produces, so PlanFulfillment / completeOrder read an NPC line identically to a player's.
 local function lineFromEntry(e, qty)
+    local variant, mods = e.variant, nil
+    -- Drinks are ONE sellable with the flavor as a single-choice modifier; an NPC
+    -- picks a random flavor so its ticket pins one (kitchen matching + a chip on the
+    -- receipt), mirroring what resolveLineModifiers records for a player's order.
+    if e.kind == "drink" and type(e.modifiers) == "table" and #e.modifiers > 0 then
+        local m = e.modifiers[math.random(#e.modifiers)]
+        variant = m.variant or e.variant
+        local label = m.group and (tostring(m.group) .. ": " .. tostring(m.label)) or m.label
+        mods = { { id = m.id, label = label, price = 0, added = true, image = m.image, color = m.color } }
+    end
     return {
         item    = e.item,
-        variant = e.variant,
+        variant = variant,
         label   = e.label,
         image   = e.image or GetItemImage(e.item),
         price   = e.price,
         qty     = qty or 1,
         kind    = e.kind,
+        mods    = mods,
     }
 end
 

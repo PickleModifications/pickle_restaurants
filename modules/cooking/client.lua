@@ -144,7 +144,9 @@ local BAGP = {
     food_dz   = 0.02,  -- how high contents seat above the surface the bag sits on
     rim_inset = 0.05,  -- shrink the droppable area vs the model bounds
     pick_pad  = 0.03,  -- extra grab margin (m) around the bag's footprint
-    pick_dz   = 0.4,   -- max height diff between the cursor's surface hit and the bag
+    pick_dz   = 0.4,   -- FLOOR for the vertical grab window; trayPickDz grows it to the
+                       -- bag's full model height so aiming up its body (not just the
+                       -- base) still targets it. Raise only if a hit BELOW the base needs room.
 }
 local function isBagKind(kind) return kind == "bag" end
 local PrepTrays = {}    -- [tid] = { x, y, z, kind, ents, open?, openT?, animSeq? }
@@ -1866,6 +1868,30 @@ local function stackProvides(stack)
     return out
 end
 
+-- The Restaurant Bag's contents, aggregated across every pile sitting in it: a
+-- compact list for its tooltip ({ item, label, image, qty }, insertion order) PLUS a
+-- provides multiset ({ item = count }) the NUI ranks the craft catalogue against —
+-- exactly like a stack's stackProvides drives the recipe guide. Labels/images ride
+-- along when the part has them (pills do); the NUI fills the rest from its catalogue.
+local function bagContents(tid)
+    local order, byItem, provides = {}, {}, {}
+    for _, stack in pairs(PrepStacks) do
+        if stack.tid == tid then
+            for _, p in ipairs(stack.parts) do
+                provides[p.item] = (provides[p.item] or 0) + 1
+                local row = byItem[p.item]
+                if not row then
+                    row = { item = p.item, label = p.label, image = p.image, qty = 0 }
+                    byItem[p.item] = row
+                    order[#order + 1] = row
+                end
+                row.qty = row.qty + 1
+            end
+        end
+    end
+    return order, provides
+end
+
 -- ─── serving tray helpers ────────────────────────────────────────────────────
 
 -- The tray + paper models do NOT share the food props' centre-bottom origin, so
@@ -2065,6 +2091,24 @@ local function trayPickExtents(kind)
            (mx.y - mn.y) * 0.5 - TRAY_PHYS_MARGIN + pad
 end
 
+-- Vertical grab window: how far the cursor's surface hit may sit from the tray's
+-- BASE z and still count as "over" it. Flat trays/boxes use their tuned pick_dz. The
+-- Restaurant Bag is a TALL standing vessel, so its window must span the whole bag
+-- height (base → mouth); with only the flat 0.4 window, aiming anywhere up the bag's
+-- body lands the cursor ray on a surface well above the base and only the very bottom
+-- registers. Derived from the live model so a swapped bag_model self-tunes.
+local function trayPickDz(kind)
+    local dz = trayCfg(kind).pick_dz
+    if isBagKind(kind) then
+        local mn, mx = GetModelDimensions(EnsureModel(trayBaseModel(kind)))
+        if mn and mx then
+            local h = (mx.z - mn.z) + 0.15   -- full bag height + a little reach past the mouth
+            if h > dz then return h end
+        end
+    end
+    return dz
+end
+
 -- The tray under the cursor: raycast the cursor to the surface (tray props have
 -- collision off, so the ray lands right under the cursor) and test that world
 -- point against each tray's rectangular footprint. A screen-radius test around
@@ -2079,7 +2123,7 @@ local function pickTray(coords)
     end
     local best, bd
     for tid, t in pairs(PrepTrays) do
-        if math.abs(coords.z - t.z) <= trayCfg(t.kind).pick_dz then
+        if math.abs(coords.z - t.z) <= trayPickDz(t.kind) then
             local hx, hy = trayPickExtents(t.kind)
             local dx, dy = coords.x - t.x, coords.y - t.y
             if math.abs(dx) <= hx and math.abs(dy) <= hy then
@@ -2598,6 +2642,10 @@ function OpenCookingStation(prop)
     if prop.prop_type == "kitchen_prep" then
         local recipes = lib.callback.await("pickle_restaurants:cooking:getRecipes", false, { prop_id = prop.id })
         SendNUIMessage({ action = "cookingRecipes", recipes = recipes or {} })
+        -- The Restaurant Bag tooltip ranks its contents against the CRAFT catalogue
+        -- the same way stacks rank against recipes — fetched once on open.
+        local crafts = lib.callback.await("pickle_restaurants:cooking:getCrafts", false, { prop_id = prop.id })
+        SendNUIMessage({ action = "cookingCrafts", crafts = crafts or {} })
     end
 
     -- per-frame projection of every world food prop -> NUI chip positions, the
@@ -2726,28 +2774,17 @@ function OpenCookingStation(prop)
                                 -- a baking tray shows a rub/collect hint (never a Make Meal)
                                 bake = isBake or nil, filled = (isBake and t.filled) or nil,
                                 tid = prepHoverTid, onScreen = on, x = sx, y = sy, count = trayPileCount(prepHoverTid) }
+                    -- the bag lists its contents + a craft-match ranking right in the
+                    -- tooltip (no floating pills): what's in it, and which craft it forms
+                    if isBag then prepTip.contents, prepTip.provides = bagContents(prepHoverTid) end
                 end
             end
             prepHovered = prepHoverPid
             trayHovered = prepHoverTid
 
-            -- Model-less bag contents (ent-less pill parts) have no 3D prop, so they're
-            -- surfaced as 2D chips anchored over their Restaurant Bag: project each to
-            -- screen (stacked upward so several read as a small list). The NUI resolves
-            -- each chip's label/image from its inventory catalogue by item name.
-            local prepPills = {}
-            for _, stack in pairs(PrepStacks) do
-                if stack.tid and PrepTrays[stack.tid] and isBagKind(PrepTrays[stack.tid].kind) then
-                    local idx = 0
-                    for _, p in ipairs(stack.parts) do
-                        if p.pill then
-                            local on, sx, sy = GetScreenCoordFromWorldCoord(stack.x, stack.y, stack.z0 + 0.06 + idx * 0.05)
-                            prepPills[#prepPills + 1] = { item = p.item, label = p.label, image = p.image, onScreen = on, x = sx, y = sy }
-                            idx = idx + 1
-                        end
-                    end
-                end
-            end
+            -- (Model-less bag contents used to float as 2D pills over the bag; they now
+            -- live in the bag's tooltip alongside its craft-match ranking — see the
+            -- bag prepTip.contents above.)
 
             -- (Soda taps carry no on-screen label: the fountain model already
             -- prints each flavor, so clicking the printed nozzle — resolved
@@ -2755,7 +2792,7 @@ function OpenCookingStation(prop)
 
             SendNUIMessage({ action = "cookingItems", items = items, hovered = hoveredUid,
                              prepHovered = prepHoverPid, prepTrayHovered = prepHoverTid,
-                             prepTrayBox = prepHoverBox, prepTip = prepTip, prepPills = prepPills })
+                             prepTrayBox = prepHoverBox, prepTip = prepTip })
 
             -- Stovetop: outline the hovered patty (click flips it); otherwise
             -- highlight the oven door under the cursor (click toggles it).

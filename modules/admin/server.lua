@@ -14,6 +14,7 @@ local function buildAdminData()
         assembly    = AnnotateAssembly(),
         crafts      = AnnotateCrafts(),    -- Restaurant Bag combine recipes, flagged
         finishes    = AnnotateFinishes(),  -- finish tools (frosting…), flagged too
+        condiments  = AnnotateCondiments(),-- squeeze-bottle sauces, flagged too
         items       = BuildItemList(),     -- catalogue for item-pickers
         groups      = CollectGroups(),     -- every group name in use (UI suggestions)
         players     = {},

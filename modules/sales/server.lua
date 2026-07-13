@@ -13,6 +13,16 @@ local function ReceiptItem() return GetSetting("receipt_item", "receipt") end
 local function DrinkItemName() return GetSetting("drink_item", "drink") end
 local function MealItemName() return GetSetting("meal_item", "meal") end
 
+-- A drink's `color` is stored as an { r, g, b } triplet (soda-machine tint); the NUI
+-- swatch needs a CSS string. Passes a hex string through unchanged.
+local function drinkColorCss(c)
+    if type(c) == "table" and c[1] then
+        return ("rgb(%d, %d, %d)"):format(
+            math.floor(tonumber(c[1]) or 0), math.floor(tonumber(c[2]) or 0), math.floor(tonumber(c[3]) or 0))
+    end
+    return (type(c) == "string" and c ~= "") and c or nil
+end
+
 -- ─── sellable catalog ────────────────────────────────────────────────────────
 -- Everything a restaurant may put a price on: cooked recipe outputs, assembled
 -- products, drink flavors and finish outputs — group-filtered per restaurant and
@@ -138,12 +148,37 @@ function BuildSellableCatalog(rid)
         end
     end
 
+    -- Drinks collapse to ONE sellable: the drink item, with every accessible flavor a
+    -- single-choice modifier (a coloured "pick one" group, exactly like the finish
+    -- flavors above). The chosen flavor rides the order line as its `variant` (its menu
+    -- identity), so kitchen fulfillment still pins the exact flavor — a Cola order is
+    -- never filled by a Sprite. One price covers every flavor (modifier price 0).
     local drinkItem = DrinkItemName()
     if ItemExists(drinkItem) then
+        local flavors, cost, grp, mixed = {}, nil, nil, false
         for _, d in ipairs(GetSetting("drinks", {})) do
-            if ItemExists(d.input) and RestaurantHasAccess(rid, d.group) then
-                add(drinkItem, d.output, d.label or d.output, "drink", ResolveItemCost(d.input), nil, d.group)
+            if ItemExists(d.input) and d.output and d.output ~= ""
+                and RestaurantHasAccess(rid, d.group) then
+                -- the flavor tile reads the drink's own metadata: the output key's
+                -- item image if one is installed (the grace-retained legacy flavor
+                -- items, or an admin-picked real drink), else its configured colour
+                -- swatch — so the picker is never a blank tile.
+                flavors[#flavors + 1] = { id = "flavor:" .. d.output, variant = d.output,
+                                          label = d.label or GetItemLabel(d.output),
+                                          group = _L("order_drink_flavor_group"),
+                                          image = ItemExists(d.output) and GetItemImage(d.output) or nil,
+                                          color = drinkColorCss(d.color), price = 0 }
+                local c = ResolveItemCost(d.input)
+                if not cost or c < cost then cost = c end
+                -- the sellable's access group is the flavors' common group (nil if they
+                -- differ), so a combo "any <group>" slot still resolves the drink
+                local g = (type(d.group) == "string" and d.group) or ""
+                if #flavors == 1 then grp = g elseif g ~= grp then mixed = true end
             end
+        end
+        if #flavors > 0 then
+            add(drinkItem, "", GetItemLabel(drinkItem), "drink", cost or 0, flavors,
+                (not mixed and grp ~= "") and grp or nil)
         end
     end
 
@@ -305,10 +340,10 @@ end
 -- burger order, a cake any cake, regardless of modifiers/toppings — customisations
 -- (cheese, frosting, no-lettuce…) are ticket instructions the cook should honour,
 -- never a hard completion gate, so an honest mistake still fulfils the order.
--- DRINKS are the one exception: each flavor is its OWN menu product (a distinct
--- sellable/variant), so a drink line matches only its flavor — a Cola order is never
--- filled by a Sprite. At most ONE meal may be used, covering the lines its layers'
--- items match.
+-- DRINKS are the one exception: a drink line pins the flavor the customer picked (the
+-- chosen flavor modifier is threaded into the line's `variant`), so a drink matches
+-- only its flavor — a Cola order is never filled by a Sprite. At most ONE meal may be
+-- used, covering the lines its layers' items match.
 
 -- The MODIFIER items an assembly output offers (cheese, lettuce…) → the parts that
 -- make a customised build differ from the plain one, keyed by item AND by modifier
@@ -705,9 +740,23 @@ end
 -- Mods are ticket instructions + pricing; the kitchen match is item-only. Returns the
 -- recorded mod list + the price EXTRA the additions add on top of the base. Shared by
 -- the à la carte path and every combo component so validation is identical.
+-- The `variant` an order line carries: the flavor modifier the customer picked
+-- (`modVariant`), else the sellable's own variant. A drink MUST pin a flavor, so if
+-- the cart somehow sent none, default to the sellable's first flavor — a variant-less
+-- drink line ("d:") matches no cooked flavor and would leave the order unfulfillable.
+function DrinkLineVariant(e, modVariant)
+    if modVariant and modVariant ~= "" then return modVariant end
+    if e.kind == "drink" then
+        for _, m in ipairs(e.modifiers or {}) do
+            if m.variant and m.variant ~= "" then return m.variant end
+        end
+    end
+    return e.variant or ""
+end
+
 local function resolveLineModifiers(e, selMods)
-    local mods, extra = {}, 0
-    if type(e.modifiers) ~= "table" then return mods, extra end
+    local mods, extra, variant = {}, 0, nil
+    if type(e.modifiers) ~= "table" then return mods, extra, variant end
     local sel, groupTaken = {}, {}
     if type(selMods) == "table" then
         for _, mid in ipairs(selMods) do sel[tostring(mid)] = true end
@@ -718,7 +767,20 @@ local function resolveLineModifiers(e, selMods)
         -- a grouped modifier is single-choice — only the first selected in its group
         -- counts (the NUI enforces this; re-enforced here)
         if on and m.group and groupTaken[m.group] then on = false end
-        if on and not isDefault then
+        if m.variant and m.variant ~= "" then
+            -- a VARIANT modifier (a drink flavor): the selected one is the line's menu
+            -- IDENTITY (threaded into `variant` by the callers, used for kitchen matching)
+            -- — it always prints as a chip and is never a "removed" default
+            if on then
+                if m.group then groupTaken[m.group] = true end
+                variant = tostring(m.variant)
+                local price = math.max(0, math.floor(tonumber(m.price) or 0))
+                extra = extra + price
+                local label = m.group and (tostring(m.group) .. ": " .. tostring(m.label)) or m.label
+                mods[#mods + 1] = { id = m.id, label = label, price = price, added = true,
+                                    image = m.image, color = m.color }
+            end
+        elseif on and not isDefault then
             if m.group then groupTaken[m.group] = true end
             local price = math.max(0, math.floor(tonumber(m.price) or 0))
             extra = extra + price
@@ -732,7 +794,7 @@ local function resolveLineModifiers(e, selMods)
                                 image = m.image, color = m.color }
         end
     end
-    return mods, extra
+    return mods, extra, variant
 end
 
 -- Expand ONE combo cart entry { combo=id, qty, slots={ {key, mods}, ... } } into
@@ -755,10 +817,10 @@ local function resolveComboEntry(c, combo, inst)
         end
         if not chosen and not key and #slot.options == 1 then chosen = slot.options[1] end
         if not chosen then return nil, _L("order_combo_bad_option") end
-        local mods, extra = resolveLineModifiers(chosen, pick and pick.mods or nil)
+        local mods, extra, variant = resolveLineModifiers(chosen, pick and pick.mods or nil)
         local base = (i == 1) and combo.price or 0
         out[#out + 1] = {
-            item = chosen.item, variant = chosen.variant, label = chosen.label,
+            item = chosen.item, variant = DrinkLineVariant(chosen, variant), label = chosen.label,
             image = chosen.image or GetItemImage(chosen.item),
             price = base + extra, qty = qty, kind = chosen.kind,
             mods = (#mods > 0) and mods or nil,
@@ -796,9 +858,9 @@ local function resolveOrderLines(id, cart)
             local e = type(c) == "table" and byKey[c.key] or nil
             if not e then return nil, nil, _L("order_not_priced") end
             local qty = math.max(1, math.min(10, math.floor(tonumber(c.qty) or 1)))
-            local mods, extra = resolveLineModifiers(e, c.mods)
+            local mods, extra, variant = resolveLineModifiers(e, c.mods)
             local unit = e.price + extra
-            lines[#lines + 1] = { item = e.item, variant = e.variant, label = e.label,
+            lines[#lines + 1] = { item = e.item, variant = DrinkLineVariant(e, variant), label = e.label,
                                   image = e.image or GetItemImage(e.item),
                                   price = unit, qty = qty, kind = e.kind,
                                   mods = (#mods > 0) and mods or nil }

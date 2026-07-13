@@ -60,11 +60,13 @@ type PrepTip = {
   // a baking tray (cake tin / cookie tray): no Make Meal — a hint to rub the mix in
   // (empty) or drag it to the hotbar (filled).
   bake?: boolean; filled?: boolean;
-  // a Restaurant Bag: "Bag It Up" instead of Make Meal.
+  // a Restaurant Bag: "Bag It Up" instead of Make Meal, and its contents are listed
+  // right in the tooltip (with a craft-match ranking) rather than floating as pills.
   bag?: boolean;
+  contents?: PrepContent[];
 };
-// A model-less bag content, anchored over its bag as a 2D pill (no 3D prop).
-type PrepPill = { item: string; label?: string; image?: string; onScreen: boolean; x: number; y: number };
+// One aggregated item sitting in the Restaurant Bag (shown in its tooltip).
+type PrepContent = { item: string; label?: string; image?: string; qty: number };
 // A recipe scored against a stack: how many components are satisfied + what's short.
 type Ranked = { rec: RecipeCat; matched: number; ready: boolean; missing: { item: string; label: string; image?: string; short: number }[] };
 type ChipItem = {
@@ -620,11 +622,115 @@ function MealTooltip({
   );
 }
 
+// Floating tooltip over a hovered Restaurant Bag. Lists what's in the bag (was a
+// floating pill per item) and, like the burger build guide, ranks the CRAFTS its
+// contents most relate to — closest first, each showing what it still needs — and
+// reveals "Bag It Up" once the bag forms one. The server always bags the best match;
+// the ranking just makes the match (and any shortfall) visible instead of a blind
+// "nothing happens" on click.
+function BagTooltip({
+  contents, ranked, selected, count, onSelect, onBag, onPin,
+}: {
+  contents: PrepContent[];
+  ranked: Ranked[];
+  selected: Ranked | null;
+  count: number;
+  onSelect: (output: string) => void;
+  onBag: () => void;
+  onPin: (pinned: boolean) => void;
+}) {
+  const ready = !!selected?.ready;
+  return (
+    <div
+      onPointerEnter={() => onPin(true)}
+      onPointerLeave={() => onPin(false)}
+      className="w-64 rounded-xl border border-border bg-card p-3 shadow-2xl"
+    >
+      <div className="flex items-center gap-2">
+        <ShoppingBag className="h-4 w-4 shrink-0 text-primary" />
+        <span className="text-sm font-semibold">{_L("cook.restaurant_bag")}</span>
+        <span className="ml-auto shrink-0 rounded bg-secondary px-1.5 py-0.5 text-[11px] font-semibold tabular-nums">
+          {count === 1 ? _L("cook.item_one", count) : _L("cook.items_other", count)}
+        </span>
+      </div>
+
+      {/* what's in the bag right now — the contents list, in place of floating pills */}
+      {contents.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {contents.map((c) => (
+            <span key={c.item} className="flex items-center gap-1 rounded bg-secondary px-1.5 py-0.5 text-[11px]">
+              {c.image ? <ItemThumb src={c.image} alt={c.label || c.item} className="h-4 w-4 object-contain" /> : null}
+              {c.label || c.item}{c.qty > 1 ? ` ×${c.qty}` : ""}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* craft-match ranking — the crafts the contents most closely form */}
+      {ranked.length === 0 ? (
+        <div className="mt-2 text-[11px] leading-snug text-muted-foreground">
+          {count === 0 ? _L("cook.bag_empty_hint") : _L("cook.bag_no_craft")}
+        </div>
+      ) : (
+        <>
+          <div className="mb-1.5 mt-3 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            {_L("cook.bag_makes")}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {ranked.map((r) => {
+              const active = selected?.rec.output === r.rec.output;
+              return (
+                <button
+                  key={r.rec.output}
+                  onClick={() => onSelect(r.rec.output)}
+                  className={cn(
+                    "flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition",
+                    active ? "border-primary ring-2 ring-primary/40" : "border-border hover:border-primary/60"
+                  )}
+                >
+                  {r.rec.label}
+                  {r.ready && <span className="text-emerald-400">✓</span>}
+                </button>
+              );
+            })}
+          </div>
+
+          {selected && !selected.ready && (
+            <>
+              <div className="mt-2.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                {_L("cook.still_needs")}
+              </div>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {selected.missing.map((m) => (
+                  <span key={m.item} className="flex items-center gap-1 rounded bg-secondary px-1.5 py-0.5 text-[11px]">
+                    <ItemThumb src={m.image} alt={m.label} className="h-4 w-4 object-contain" />
+                    {m.label}{m.short > 1 ? ` ×${m.short}` : ""}
+                  </span>
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      <button
+        disabled={!ready}
+        onClick={onBag}
+        className={cn(
+          "mt-3 w-full rounded-md px-3 py-1.5 text-xs font-semibold transition",
+          ready ? "bg-primary text-primary-foreground hover:opacity-90" : "cursor-not-allowed bg-muted text-muted-foreground"
+        )}
+      >
+        {_L("cook.bag_it_up")}
+      </button>
+    </div>
+  );
+}
+
 export default function Cooking({ data }: { data: any }) {
   const [station, setStation] = useState<string>(data?.station || "fryer");
   const [ingredients, setIngredients] = useState<Ingredient[]>(data?.ingredients || []);
   const [items, setItems] = useState<ChipItem[]>([]);
-  const [prepPills, setPrepPills] = useState<PrepPill[]>([]);
   const [hovered, setHovered] = useState<number | null>(null);
   const [view, setView] = useState<string>("stovetop");
   const [tray, setTray] = useState<TrayEntry[]>([]);
@@ -635,11 +741,13 @@ export default function Cooking({ data }: { data: any }) {
   const [expanded, setExpanded] = useState(false);
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
   const confirmTimer = useRef<number | null>(null);
-  // kitchen-prep recipe catalogue + the hovered stack's live tooltip snapshot
+  // kitchen-prep recipe + craft catalogues + the hovered stack/bag's tooltip snapshot
   const [recipes, setRecipes] = useState<RecipeCat[]>([]);
+  const [crafts, setCrafts] = useState<RecipeCat[]>([]);
   const [tip, setTip] = useState<PrepTip | null>(null);
   const [tipShow, setTipShow] = useState(false);
   const [selectedOutput, setSelectedOutput] = useState<string | null>(null);
+  const [selectedCraftId, setSelectedCraftId] = useState<string | null>(null);
   // last hovered uid — keeps the tooltip's (live) content during fade-out
   const [lastUid, setLastUid] = useState<number | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -756,6 +864,7 @@ export default function Cooking({ data }: { data: any }) {
     }
   }, [nowMs, tray, trayAt]);
   useNuiEvent("cookingRecipes", (d) => setRecipes(d.recipes || []));
+  useNuiEvent("cookingCrafts", (d) => setCrafts(d.crafts || []));
   useNuiEvent("cookingItems", (d) => {
     const its: ChipItem[] = d.items || [];
     itemsRef.current = its;
@@ -764,7 +873,6 @@ export default function Cooking({ data }: { data: any }) {
     trayHoveredRef.current = d.prepTrayHovered ?? null;
     trayHoveredBoxRef.current = !!d.prepTrayBox;
     setItems(its);
-    setPrepPills(d.prepPills || []);
     setHovered(d.hovered ?? null);
 
     // Prep tooltip: the client sends the hovered stack (or nothing). While a stack
@@ -850,6 +958,45 @@ export default function Cooking({ data }: { data: any }) {
   }, [ranked, selectedOutput]);
   // A fresh stack resets the pick to its top recipe.
   useEffect(() => { setSelectedOutput(null); }, [tip?.sid]);
+
+  // ── the Restaurant Bag tooltip: rank CRAFTS against the bag's contents exactly the
+  //    way recipes rank against a stack, so the closest craft (and what it still needs)
+  //    shows the same "Minecraft-style" way burgers do; keep a selection to compare. ──
+  const bagRanked = useMemo(
+    () => (tip?.bag ? rankRecipes(crafts, tip.provides || {}) : []),
+    [crafts, tip]
+  );
+  // Prop-based bag contents don't carry a label/image (only model-less pills do), so
+  // resolve them from the catalogues (bar ingredients + craft/recipe components) for a
+  // readable contents list.
+  const itemMeta = useMemo(() => {
+    const m: Record<string, { label?: string; image?: string }> = {};
+    const add = (item?: string, label?: string, image?: string) => {
+      if (!item) return;
+      const cur = m[item] || {};
+      m[item] = { label: cur.label ?? label, image: cur.image ?? image };
+    };
+    ingredients.forEach((i) => add(i.item, i.label, i.image));
+    crafts.forEach((c) => c.components.forEach((k) => add(k.item, k.label, k.image)));
+    recipes.forEach((r) => r.components.forEach((k) => add(k.item, k.label, k.image)));
+    return m;
+  }, [ingredients, crafts, recipes]);
+  const bagContentsResolved = useMemo(
+    () => (tip?.contents || []).map((c) => ({
+      ...c,
+      label: c.label || itemMeta[c.item]?.label,
+      image: c.image || itemMeta[c.item]?.image,
+    })),
+    [tip?.contents, itemMeta]
+  );
+  const craftSelected = bagRanked.find((r) => r.rec.output === selectedCraftId) || bagRanked[0] || null;
+  useEffect(() => {
+    if (bagRanked.length && !bagRanked.some((r) => r.rec.output === selectedCraftId)) {
+      setSelectedCraftId(bagRanked[0].rec.output);
+    }
+  }, [bagRanked, selectedCraftId]);
+  // A fresh bag resets the pick to its top craft.
+  useEffect(() => { setSelectedCraftId(null); }, [tip?.tid]);
 
   const tipVisible = isPrep && tipShow && !!tip && !!tip.onScreen && !dragging && (tip.tray ? true : ranked.length > 0);
   const onTipPin = (pinned: boolean) => {
@@ -1410,6 +1557,9 @@ export default function Cooking({ data }: { data: any }) {
         <div className="relative">
           {tip?.bake ? (
             <BakeTrayTooltip filled={!!tip.filled} onPin={onTipPin} />
+          ) : tip?.bag ? (
+            <BagTooltip contents={bagContentsResolved} ranked={bagRanked} selected={craftSelected}
+              count={tip.count || 0} onSelect={setSelectedCraftId} onBag={onMealMake} onPin={onTipPin} />
           ) : tip?.tray ? (
             <MealTooltip count={tip.count || 0} box={!!tip.box} bag={!!tip.bag} open={!!tip.open} boxing={!!tip.boxing}
               onMake={onMealMake} onTakeOut={onBoxTakeOut} onPin={onTipPin} />
@@ -1419,19 +1569,6 @@ export default function Cooking({ data }: { data: any }) {
           <div className="absolute left-1/2 top-full h-0 w-0 -translate-x-1/2 border-x-[6px] border-t-[6px] border-x-transparent border-t-card" />
         </div>
       </div>
-
-      {/* model-less Restaurant Bag contents: a 2D pill anchored over the bag for
-          each item that has no 3D prop (the "pill UI" fallback). Purely visual. */}
-      {prepPills.filter((p) => p.onScreen).map((p, i) => (
-        <div
-          key={p.item + i}
-          style={{ left: `${p.x * 100}%`, top: `${p.y * 100}%` }}
-          className="pointer-events-none fixed z-30 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1.5 rounded-full border border-primary/50 bg-card/95 px-2 py-0.5 text-[11px] font-semibold shadow-lg"
-        >
-          {p.image ? <ItemThumb src={p.image} alt={p.label || p.item} className="h-4 w-4 object-contain" /> : null}
-          <span className="max-w-[8rem] truncate">{p.label || p.item}</span>
-        </div>
-      ))}
 
       {/* hover tooltip for a bar card (tray item / ingredient) */}
       {barTip && !dragging && <BarTooltip tip={barTip} actions={tipActions} onPin={onBarTipPin} />}
@@ -1715,6 +1852,7 @@ export default function Cooking({ data }: { data: any }) {
                   setBarTip(null);
                   if (ing.kind === "tray") startTrayPlace(e);
                   else if (ing.kind === "baketray") startTrayPlace(e, ing.subkind);
+                  else if (ing.kind === "bag") startTrayPlace(e, "bag");
                   else startTrayPlace(e, "box");
                 }}
                 onPointerEnter={(ev) => showBarTip(ev, { ing, hint: ingHint(ing) })}
@@ -1725,12 +1863,14 @@ export default function Cooking({ data }: { data: any }) {
                   <UtensilsCrossed className="h-10 w-10 text-primary/80" />
                 ) : ing.kind === "baketray" ? (
                   <CookingPot className="h-10 w-10 text-primary/80" />
+                ) : ing.kind === "bag" ? (
+                  <ShoppingBag className="h-10 w-10 text-primary/80" />
                 ) : (
                   <Package className="h-10 w-10 text-primary/80" />
                 )}
                 <span className="w-full truncate px-1.5 leading-tight">{ing.label}</span>
                 <span className="text-[10px] text-muted-foreground">
-                  {ing.kind === "tray" ? "Build a meal" : ing.kind === "baketray" ? "Rub in the mix" : "Boxes a pizza"}
+                  {ing.kind === "tray" ? "Build a meal" : ing.kind === "baketray" ? "Rub in the mix" : ing.kind === "bag" ? _L("cook.craft_in_bag") : "Boxes a pizza"}
                 </span>
               </div>
             ))}

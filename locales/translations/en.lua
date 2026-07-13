@@ -116,6 +116,7 @@ Language["en"] = {
     ["order_charged"] = "Ticket #%d — charged %s.",
     ["order_declined"] = "The customer declined the charge.",
     ["order_nothing_selected"] = "Nothing selected.",
+    ["order_drink_flavor_group"] = "Flavor",
     ["order_failed"] = "Something went wrong placing that order.",
     ["order_not_priced"] = "That item isn't on the menu.",
     ["order_combo_unavailable"] = "That combo isn't available.",

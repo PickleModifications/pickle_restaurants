@@ -297,7 +297,10 @@ the NUI is untrusted.
   finished items are deliberately NOT decomposable). Sync ships only `ItemExists`-valid
   entries (`BuildSyncPayload` → client `Finishes` global); itemgen collects finish
   tools/targets/outputs + `prep_models` keys. A sprinkles tool is one more config row —
-  no code. There is no admin-panel editor for finishes yet (settings table only).
+  no code. Finishes now HAVE a full admin-panel editor (admin Menu tab → New Finish;
+  `FinishFields` in `web/src/components/editors.tsx` edits tool/tool_model/rub_dist/
+  group/cost + a nested targets→flavors editor incl. per-flavor hex colour). Fed by
+  `AnnotateFinishes()` in the admin payload; saved whole via `admin:saveSettings`.
 
 - **Condiments (ketchup / mustard / mayo) — the `condiments` setting.** A squeeze-bottle
   applicator that lays a sauce LAYER on a build stack. Config is a list of
@@ -317,7 +320,9 @@ the NUI is untrusted.
   once (`CONDIMENT` tunables — `flip_ms`/`squeeze_ms`/`dip`/`hover_gap`, TUNE IN-GAME); the
   sauce fades in and commits at the squeeze's end. A condiment can NEVER be a stack's first
   layer (nothing under it to sauce) — enforced client-side (the applicator only engages over
-  a stack with ≥1 existing part). No admin-panel editor (settings table only, like finishes).
+  a stack with ≥1 existing part). Condiments now HAVE an admin-panel editor (admin Menu tab →
+  New Condiment; `CondimentFields` edits item/container_model/applied_model + ingredient cost),
+  fed by `AnnotateCondiments()` and saved whole via `admin:saveSettings`, like finishes.
 
 ## One-item consolidation rule
 

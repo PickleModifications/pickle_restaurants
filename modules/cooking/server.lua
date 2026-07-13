@@ -2226,6 +2226,38 @@ lib.callback.register("pickle_restaurants:cooking:getRecipes", function(src, d)
     return out
 end)
 
+-- The CRAFT catalogue the Restaurant Bag's tooltip ranks its contents against —
+-- mirrors getRecipes but over the `crafts` setting. Every craft collapses to the ONE
+-- bag item, so the craft `id` is its display identity and the bag item supplies the
+-- thumbnail; components are resolved to labels/images (the NUI can't resolve item
+-- images itself). Crafts with no id / no components, gated out by group, or naming a
+-- missing component (that isn't a cooked-pool product) are hidden until fixed.
+lib.callback.register("pickle_restaurants:cooking:getCrafts", function(src, d)
+    local prop = PropCache[tonumber(d and d.prop_id)]
+    if not prop or StationType(prop) ~= "kitchen_prep" then return {} end
+    if not HasPerm(prop.restaurant_id, src, "cook") then return {} end
+    local bagImg = GetItemImage(BagItemName())
+    local out = {}
+    for _, cr in ipairs(GetSetting("crafts", {})) do
+        if cr.id and cr.id ~= "" and cr.components and #cr.components > 0
+            and RestaurantHasAccess(prop.restaurant_id, cr.group) then
+            local valid = true
+            local comps = {}
+            for _, c in ipairs(cr.components) do
+                if not ItemExists(c) and not IsProductItem(c) then valid = false end
+                comps[#comps + 1] = { item = c, label = GetItemLabel(c), image = GetItemImage(c) }
+            end
+            if valid then
+                out[#out + 1] = {
+                    output = cr.id, label = cr.label or cr.id,
+                    image = bagImg, components = comps,
+                }
+            end
+        end
+    end
+    return out
+end)
+
 -- The layers of `b` whose reservation id is in `ids`, in the SAME order as ids
 -- (which arrive bottom-to-top from the client stack).
 local function orderedLayers(b, ids)

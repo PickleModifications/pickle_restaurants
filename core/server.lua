@@ -1612,6 +1612,21 @@ function AnnotateFinishes()
     return out
 end
 
+-- Condiments (squeeze-bottle sauces). Flagged like the others: the bottle `item`
+-- must be an installed inventory item or the applicator card can't appear on the
+-- prep bar (the sauce props are visual-only, so only `item` gates validity).
+function AnnotateCondiments()
+    local out = {}
+    for _, c in ipairs(GetSetting("condiments", {})) do
+        local missing = {}
+        if not ItemExists(c.item) then missing[#missing + 1] = c.item end
+        local copy = {}; for k, v in pairs(c) do copy[k] = v end
+        copy.valid, copy.missing = #missing == 0, missing
+        out[#out + 1] = copy
+    end
+    return out
+end
+
 -- Diagnostic: a finish tool card only appears on the prep bar when its tool AND
 -- at least one target's (item + output) are all installed inventory items — so a
 -- tool you're carrying still stays hidden if its target/output items are missing.

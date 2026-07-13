@@ -268,22 +268,30 @@ export function OrderBuilder({
   });
   const removeEntry = (ck: string) => setCart((c) => { const n = { ...c }; delete n[ck]; return n; });
 
+  // The modifier ids a freshly-opened option starts with: its defaults, plus — for a
+  // drink (a single-choice flavor group with no default) — the first flavor, so the
+  // picker always opens with a flavor chosen (a drink must carry one).
+  const seedSel = (c?: { kind?: string; modifiers?: Mod[] }): string[] => {
+    const base = (c?.modifiers || []).filter((m) => m.default).map((m) => m.id);
+    if (c?.kind === "drink" && !base.length && c.modifiers && c.modifiers.length) base.push(c.modifiers[0].id);
+    return base;
+  };
   // Click a card: customise it if it has modifiers, else drop it straight in.
   const clickCard = (c: Cat) => {
     if (c.modifiers && c.modifiers.length) {
       setModFor(c);
-      setModSel((c.modifiers || []).filter((m) => m.default).map((m) => m.id));
+      setModSel(seedSel(c));
     } else {
       addItemEntry(c.key, []);
     }
   };
   // Click a combo: open the builder seeded with each slot's first option + that
-  // option's default modifiers.
+  // option's default modifiers (and a drink slot's first flavor).
   const clickCombo = (combo: Combo) => {
     setComboFor(combo);
     setComboPicks(combo.slots.map((slot) => {
       const opt = slot.options[0];
-      return { key: opt?.key || "", sel: (opt?.modifiers || []).filter((m) => m.default).map((m) => m.id) };
+      return { key: opt?.key || "", sel: seedSel(opt) };
     }));
   };
   // Ungrouped modifiers toggle freely; a grouped modifier is single-choice —
@@ -297,7 +305,7 @@ export function OrderBuilder({
   const toggleMod = (m: Mod) => setModSel((s) => toggleModOn(modFor?.modifiers || [], s, m));
   // combo slot: pick a different option (resets that slot's modifiers to its defaults)
   const pickComboOption = (si: number, opt: ComboOpt) => setComboPicks((ps) =>
-    ps.map((p, i) => (i === si ? { key: opt.key, sel: (opt.modifiers || []).filter((m) => m.default).map((m) => m.id) } : p)));
+    ps.map((p, i) => (i === si ? { key: opt.key, sel: seedSel(opt) } : p)));
   const toggleComboMod = (si: number, opt: ComboOpt, m: Mod) => setComboPicks((ps) =>
     ps.map((p, i) => (i === si ? { ...p, sel: toggleModOn(opt.modifiers || [], p.sel, m) } : p)));
 

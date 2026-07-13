@@ -142,7 +142,25 @@ export function RecipeForm({ form, setForm, items, groups }: { form: Recipe; set
 // A drink is one entry in the `drinks` settings array. `onChange` patches the
 // entry; the parent owns the array and auto-saves it whole.
 
+// The drink's `color` is stored as an { r, g, b } triplet (the soda-machine pour
+// stream reads it, AND it's the order-UI flavor swatch). Convert to/from the hex
+// the native colour picker speaks.
+const rgbToHex = (c: any): string => {
+  if (Array.isArray(c) && c.length >= 3) {
+    const h = (n: number) => Math.max(0, Math.min(255, Math.floor(Number(n) || 0))).toString(16).padStart(2, "0");
+    return "#" + h(c[0]) + h(c[1]) + h(c[2]);
+  }
+  return "#8899aa";
+};
+const hexToRgb = (hex: string): [number, number, number] => {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec((hex || "").trim());
+  if (!m) return [136, 153, 170];
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+
 export function DrinkFields({ drink, onChange, items, groups }: { drink: any; onChange: (patch: any) => void; items: Item[]; groups: string[] }) {
+  const hex = rgbToHex(drink.color);
   return (
     <div className="grid grid-cols-2 gap-3">
       <Field label={_L("settings.cup_input")}><ItemPicker items={items} value={drink.input} onChange={(v) => onChange({ input: v })} /></Field>
@@ -150,6 +168,13 @@ export function DrinkFields({ drink, onChange, items, groups }: { drink: any; on
       <TextField label={_L("settings.label")} value={drink.label} onChange={(v) => onChange({ label: v })} />
       <TextField label={_L("settings.prop_model")} value={drink.model} onChange={(v) => onChange({ model: v })} />
       <NumberField label={_L("settings.fill_time")} value={Number(drink.fill_ms ?? 3000)} min={0} step={500} onChange={(v) => onChange({ fill_ms: v })} />
+      <Field label={_L("settings.drink_color")} hint={_L("settings.drink_color_hint")}>
+        <div className="flex items-center gap-2">
+          <input type="color" value={hex} onChange={(e) => onChange({ color: hexToRgb(e.target.value) })}
+            className="h-9 w-12 shrink-0 cursor-pointer rounded border border-input bg-transparent p-0.5" />
+          <span className="font-mono text-xs uppercase text-muted-foreground">{hex}</span>
+        </div>
+      </Field>
       <GroupField label={_L("settings.group_field")} hint={_L("settings.group_field_hint")}
         value={drink.group || ""} groups={groups} onChange={(v) => onChange({ group: v })} />
     </div>
@@ -157,19 +182,113 @@ export function DrinkFields({ drink, onChange, items, groups }: { drink: any; on
 }
 
 // ─── finish (frosting/sprinkles) ────────────────────────────────────────────────
-// A finish's full config (tool, targets, flavors, models) is authored in the
-// settings table — the panel exposes only the two things a boss tunes day-to-day:
-// its stock/ingredient cost (drives the buy price in Supplies AND the default menu
-// price) and the access group. There is deliberately no delete here.
+// A finish is a "rub a tool over a product" recipe: a tool item + one or more
+// TARGETS (which cooked product it decorates → what it becomes), each with a list
+// of FLAVORS (the pick-one toppings: strawberry/chocolate/…, a prop model + swatch
+// colour per flavor). All of it is editable here now; the ingredient cost rides the
+// separate `ingredient_costs` map (drives the buy price AND default menu price).
 
-export function FinishFields({ finish, cost, onChangeFinish, onChangeCost, groups }:
-  { finish: any; cost: number; onChangeFinish: (patch: any) => void; onChangeCost: (v: number) => void; groups: string[] }) {
+const modSlug2 = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+
+// One flavor row inside a target: id/label/model + a hex colour swatch. Finish
+// flavor colours are stored as hex strings (unlike drink colours' rgb triplets).
+function FlavorRow({ fl, onChange, onRemove }: { fl: any; onChange: (patch: any) => void; onRemove: () => void }) {
+  const hex = /^#?[0-9a-fA-F]{6}$/.test(fl.color || "") ? (fl.color[0] === "#" ? fl.color : "#" + fl.color) : "#cccccc";
+  return (
+    <div className="flex items-end gap-2 rounded-md border border-border/60 p-2">
+      <TextField label={_L("settings.flavor_label")} className="w-28" value={fl.label || ""}
+        onChange={(v) => onChange({ label: v, id: fl.id || modSlug2(v) })} />
+      <TextField label={_L("settings.flavor_id")} className="w-24" value={fl.id || ""} onChange={(v) => onChange({ id: modSlug2(v) })} />
+      <div className="flex-1"><TextField label={_L("settings.flavor_model")} value={fl.model || ""} onChange={(v) => onChange({ model: v })} /></div>
+      <label className="flex shrink-0 flex-col gap-1">
+        <span className="text-xs text-muted-foreground">{_L("settings.flavor_color")}</span>
+        <input type="color" value={hex} onChange={(e) => onChange({ color: e.target.value })}
+          className="h-9 w-10 cursor-pointer rounded border border-input bg-transparent p-0.5" />
+      </label>
+      <Button size="icon" variant="ghost" onClick={onRemove}><Trash2 className="h-4 w-4" /></Button>
+    </div>
+  );
+}
+
+// One target card: which cooked item this finish decorates, what it produces, the
+// apply mode, an optional pre-requisite finish, and the flavor list.
+function TargetCard({ target, items, onChange, onRemove }:
+  { target: any; items: Item[]; onChange: (patch: any) => void; onRemove: () => void }) {
+  const flavors: any[] = target.flavors ?? [];
+  const updateFlavor = (fi: number, patch: any) => onChange({ flavors: flavors.map((f, i) => (i === fi ? { ...f, ...patch } : f)) });
+  return (
+    <div className="rounded-lg border border-border/70 p-2.5">
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div className="grid flex-1 grid-cols-2 gap-2">
+          <Field label={_L("settings.finish_target_item")}><ItemPicker items={items} value={target.item || ""} onChange={(v) => onChange({ item: v })} /></Field>
+          <Field label={_L("settings.finish_target_output")}><ItemPicker items={items} value={target.output || ""} onChange={(v) => onChange({ output: v })} /></Field>
+          <Select label={_L("settings.finish_mode")} value={target.mode || "overlay"} onChange={(v) => onChange({ mode: v })}
+            options={[{ value: "overlay", label: _L("settings.finish_mode_overlay") }, { value: "replace", label: _L("settings.finish_mode_replace") }]} />
+          <TextField label={_L("settings.finish_requires")} hint={_L("settings.finish_requires_hint")}
+            value={target.requires_finish || ""} onChange={(v) => onChange({ requires_finish: v || undefined })} />
+        </div>
+        <Button size="icon" variant="ghost" onClick={onRemove}><Trash2 className="h-4 w-4" /></Button>
+      </div>
+      <Field label={_L("settings.finish_flavors")}>
+        <div className="space-y-2">
+          {flavors.map((fl, fi) => (
+            <FlavorRow key={fi} fl={fl} onChange={(p) => updateFlavor(fi, p)}
+              onRemove={() => onChange({ flavors: flavors.filter((_, i) => i !== fi) })} />
+          ))}
+          <Button size="sm" variant="outline" onClick={() => onChange({ flavors: [...flavors, { id: "", label: "", model: "", color: "#cccccc" }] })}>
+            <Plus className="h-4 w-4" /> {_L("settings.finish_add_flavor")}
+          </Button>
+        </div>
+      </Field>
+    </div>
+  );
+}
+
+export function FinishFields({ finish, cost, onChangeFinish, onChangeCost, items, groups }:
+  { finish: any; cost: number; onChangeFinish: (patch: any) => void; onChangeCost: (v: number) => void; items: Item[]; groups: string[] }) {
+  const targets: any[] = finish.targets ?? [];
+  const updateTarget = (ti: number, patch: any) => onChangeFinish({ targets: targets.map((t, i) => (i === ti ? { ...t, ...patch } : t)) });
+  return (
+    <>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label={_L("settings.finish_tool")}><ItemPicker items={items} value={finish.tool || ""} onChange={(v) => onChangeFinish({ tool: v })} /></Field>
+        <TextField label={_L("settings.finish_tool_model")} value={finish.tool_model || ""} onChange={(v) => onChangeFinish({ tool_model: v })} />
+        <NumberField label={_L("settings.finish_rub_dist")} hint={_L("settings.finish_rub_dist_hint")}
+          value={Number(finish.rub_dist ?? 1.2)} min={0} step={0.1} onChange={(v) => onChangeFinish({ rub_dist: v })} />
+        <NumberField label={_L("settings.finish_cost")} hint={_L("settings.finish_cost_hint")}
+          value={cost} min={0} onChange={onChangeCost} />
+        <GroupField label={_L("settings.group_field")} hint={_L("settings.group_field_hint")}
+          value={finish.group || ""} groups={groups} onChange={(v) => onChangeFinish({ group: v })} />
+      </div>
+      <Field label={_L("settings.finish_targets")} hint={_L("settings.finish_targets_hint")} className="mt-3">
+        <div className="space-y-2">
+          {targets.map((t, ti) => (
+            <TargetCard key={ti} target={t} items={items} onChange={(p) => updateTarget(ti, p)}
+              onRemove={() => onChangeFinish({ targets: targets.filter((_, i) => i !== ti) })} />
+          ))}
+          <Button size="sm" variant="outline" onClick={() => onChangeFinish({ targets: [...targets, { item: "", output: "", mode: "overlay", flavors: [] }] })}>
+            <Plus className="h-4 w-4" /> {_L("settings.finish_add_target")}
+          </Button>
+        </div>
+      </Field>
+    </>
+  );
+}
+
+// ─── condiment (squeeze-bottle sauce) ───────────────────────────────────────────
+// A condiment is one entry in the `condiments` settings array: the bottle `item`
+// (consumed at Make + priced via ingredient_costs) plus two visual-only props — the
+// held bottle (`container_model`) and the sauce left on the food (`applied_model`).
+
+export function CondimentFields({ condiment, cost, onChange, onChangeCost, items }:
+  { condiment: any; cost: number; onChange: (patch: any) => void; onChangeCost: (v: number) => void; items: Item[] }) {
   return (
     <div className="grid grid-cols-2 gap-3">
+      <Field label={_L("settings.condiment_item")}><ItemPicker items={items} value={condiment.item || ""} onChange={(v) => onChange({ item: v })} /></Field>
       <NumberField label={_L("settings.finish_cost")} hint={_L("settings.finish_cost_hint")}
         value={cost} min={0} onChange={onChangeCost} />
-      <GroupField label={_L("settings.group_field")} hint={_L("settings.group_field_hint")}
-        value={finish.group || ""} groups={groups} onChange={(v) => onChangeFinish({ group: v })} />
+      <TextField label={_L("settings.condiment_container")} value={condiment.container_model || ""} onChange={(v) => onChange({ container_model: v })} />
+      <TextField label={_L("settings.condiment_applied")} value={condiment.applied_model || ""} onChange={(v) => onChange({ applied_model: v })} />
     </div>
   );
 }

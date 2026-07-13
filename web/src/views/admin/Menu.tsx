@@ -6,19 +6,19 @@ import { Badge } from "@/components/ui/badge";
 import { type Item } from "@/components/ItemPicker";
 import {
   ItemImage, labelOf, type Recipe, BLANK_RECIPE, STATION_LABEL,
-  RecipeForm, DrinkFields, AssemblyFields, CraftFields, FinishFields,
+  RecipeForm, DrinkFields, AssemblyFields, CraftFields, FinishFields, CondimentFields,
 } from "@/components/editors";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { Plus, Trash2, Pencil, X, TriangleAlert, EyeOff, Check, Loader2, Tags, ChevronDown } from "lucide-react";
 
 type Props = {
-  recipes: Recipe[]; assembly: any[]; crafts: any[]; drinks: any[]; finishes: any[];
+  recipes: Recipe[]; assembly: any[]; crafts: any[]; drinks: any[]; finishes: any[]; condiments: any[];
   settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void;
 };
 
 const KIND_LABEL: Record<string, string> = {
-  recipe: "menu.kind_recipe", assembly: "menu.kind_assembly", craft: "menu.kind_craft", drink: "menu.kind_drink", finish: "menu.kind_finish",
+  recipe: "menu.kind_recipe", assembly: "menu.kind_assembly", craft: "menu.kind_craft", drink: "menu.kind_drink", finish: "menu.kind_finish", condiment: "menu.kind_condiment",
 };
 
 // strip the server-side annotations (valid/missing/defaultPrice) so we never
@@ -26,28 +26,31 @@ const KIND_LABEL: Record<string, string> = {
 // local state for display; removed only on the way out to the server.
 const clean = (e: any) => { const { valid, missing, defaultPrice, ...rest } = e; return rest; };
 
-export default function Menu({ recipes, assembly, crafts, drinks, finishes, settings, items, groups, onSaved }: Props) {
-  // Assembly + crafts + drinks live in the `settings` blob and save as a whole array.
+export default function Menu({ recipes, assembly, crafts, drinks, finishes, condiments, settings, items, groups, onSaved }: Props) {
+  // Assembly + crafts + drinks + finishes + condiments all live in the `settings`
+  // blob and save as a whole array (per key).
   const [asm, setAsm] = useState<any[]>(() => (Array.isArray(assembly) ? assembly : []));
   const [craftList, setCraftList] = useState<any[]>(() => (Array.isArray(crafts) ? crafts : []));
   const [drinkList, setDrinkList] = useState<any[]>(() => (Array.isArray(drinks) ? drinks : []));
-  // Finishes are authored in Settings; here only their group is editable (saved as
-  // the whole finishes array) and their stock/ingredient cost (the ingredient_costs
-  // map, keyed by the finish tool — saved whole so other costs aren't clobbered).
   const [finishList, setFinishList] = useState<any[]>(() => (Array.isArray(finishes) ? finishes : []));
+  const [condimentList, setCondimentList] = useState<any[]>(() => (Array.isArray(condiments) ? condiments : []));
+  // Finish tools + condiment bottles buy their stock via the ingredient_costs map
+  // (keyed by the tool/bottle item — saved whole so other costs aren't clobbered).
   const [costs, setCosts] = useState<Record<string, number>>(() => ({ ...(settings?.ingredient_costs || {}) }));
   const asmStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { assembly: asm.map(clean) } }).then(onSaved), [asm]);
   const craftStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { crafts: craftList.map(clean) } }).then(onSaved), [craftList]);
   const drinkStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { drinks: drinkList.map(clean) } }).then(onSaved), [drinkList]);
   const finishStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { finishes: finishList.map(clean) } }).then(onSaved), [finishList]);
+  const condimentStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { condiments: condimentList.map(clean) } }).then(onSaved), [condimentList]);
   const costStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { ingredient_costs: costs } }).then(onSaved), [costs]);
-  const listStatus = [asmStatus, craftStatus, drinkStatus, finishStatus, costStatus].includes("saving") ? "saving"
-    : [asmStatus, craftStatus, drinkStatus, finishStatus, costStatus].includes("saved") ? "saved" : "idle";
+  const allStatus = [asmStatus, craftStatus, drinkStatus, finishStatus, condimentStatus, costStatus];
+  const listStatus = allStatus.includes("saving") ? "saving" : allStatus.includes("saved") ? "saved" : "idle";
 
   const updateAsm = (i: number, patch: any) => setAsm((l) => l.map((a, idx) => (idx === i ? { ...a, ...patch } : a)));
   const updateCraft = (i: number, patch: any) => setCraftList((l) => l.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
   const updateDrink = (i: number, patch: any) => setDrinkList((l) => l.map((d, idx) => (idx === i ? { ...d, ...patch } : d)));
   const updateFinish = (i: number, patch: any) => setFinishList((l) => l.map((f, idx) => (idx === i ? { ...f, ...patch } : f)));
+  const updateCondiment = (i: number, patch: any) => setCondimentList((l) => l.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
 
   // One row is expanded/edited at a time. `editKey` = which; recipes edit a
   // working copy (`draft`) auto-saved per-row, assembly/drinks edit the array.
@@ -80,6 +83,14 @@ export default function Menu({ recipes, assembly, crafts, drinks, finishes, sett
     setNewOpen(false);
     setDrinkList((l) => { const next = [...l, { input: "", output: "", label: "", model: "pickle_drink_container_01", fill_ms: 3000 }]; setEditKey(`drink:${next.length - 1}`); return next; });
   };
+  const addFinish = () => {
+    setNewOpen(false);
+    setFinishList((l) => { const next = [...l, { tool: "", tool_model: "", rub_dist: 1.2, group: "", targets: [] }]; setEditKey(`finish:${next.length - 1}`); return next; });
+  };
+  const addCondiment = () => {
+    setNewOpen(false);
+    setCondimentList((l) => { const next = [...l, { item: "", container_model: "", applied_model: "" }]; setEditKey(`condiment:${next.length - 1}`); return next; });
+  };
 
   // Build the unified, grouped row list.
   const groupsOut = useMemo(() => {
@@ -90,22 +101,24 @@ export default function Menu({ recipes, assembly, crafts, drinks, finishes, sett
     craftList.forEach((c, i) => rows.push({ kind: "craft", key: `craft:${i}`, group: c.group || "", sortLabel: c.label || c.id || "", index: i, data: c }));
     drinkList.forEach((d, i) => rows.push({ kind: "drink", key: `drink:${i}`, group: d.group || "", sortLabel: d.label || d.output || "", index: i, data: d }));
     finishList.forEach((f, i) => rows.push({ kind: "finish", key: `finish:${i}`, group: f.group || "", sortLabel: f.tool ? labelOf(items, f.tool) : "", index: i, data: f }));
+    condimentList.forEach((c, i) => rows.push({ kind: "condiment", key: `condiment:${i}`, group: "", sortLabel: c.item ? labelOf(items, c.item) : "", index: i, data: c }));
 
     const by: Record<string, Row[]> = {};
     rows.forEach((r) => { (by[r.group] ||= []).push(r); });
-    const order = ["recipe", "assembly", "craft", "drink", "finish"];
+    const order = ["recipe", "assembly", "craft", "drink", "finish", "condiment"];
     const names = Object.keys(by).sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b)));
     return names.map((g) => ({
       name: g,
       rows: by[g].sort((a, b) => (order.indexOf(a.kind) - order.indexOf(b.kind)) || a.sortLabel.localeCompare(b.sortLabel)),
     }));
-  }, [recipes, asm, drinkList, finishList, items]);
+  }, [recipes, asm, craftList, drinkList, finishList, condimentList, items]);
 
   const imgItem = (row: any) =>
     row.kind === "recipe" ? row.data.output_cooked_item || row.data.input_item
     : row.kind === "assembly" ? row.data.output
     : row.kind === "craft" ? (settings?.bag_item || "restaurant_bag")
     : row.kind === "drink" ? row.data.input
+    : row.kind === "condiment" ? row.data.item
     : row.data.tool;
 
   return (
@@ -123,6 +136,8 @@ export default function Menu({ recipes, assembly, crafts, drinks, finishes, sett
                 <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addAssembly}>{_L("menu.new_assembly")}</button>
                 <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addCraft}>{_L("menu.new_craft")}</button>
                 <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addDrink}>{_L("menu.new_drink")}</button>
+                <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addFinish}>{_L("menu.new_finish")}</button>
+                <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addCondiment}>{_L("menu.new_condiment")}</button>
               </div>
             )}
           </div>
@@ -188,15 +203,16 @@ export default function Menu({ recipes, assembly, crafts, drinks, finishes, sett
                         if (isEditing) { close(); return; }
                         if (row.kind === "recipe") openRecipe(d, row.key); else setEditKey(row.key);
                       }}><Pencil className="h-4 w-4" /></Button>
-                      {/* Finishes are defined in Settings — editable (cost/group) but not deletable here. */}
-                      {row.kind !== "finish" && (
-                        <Button size="sm" variant="destructive" onClick={async () => {
-                          if (row.kind === "recipe") { await fetchNui("admin:deleteRecipe", { input_item: d.input_item }); onSaved(); }
-                          else if (row.kind === "assembly") { close(); setAsm((l) => l.filter((_, i) => i !== row.index)); }
-                          else if (row.kind === "craft") { close(); setCraftList((l) => l.filter((_, i) => i !== row.index)); }
-                          else if (row.kind === "drink") { close(); setDrinkList((l) => l.filter((_, i) => i !== row.index)); }
-                        }}><Trash2 className="h-4 w-4" /></Button>
-                      )}
+                      {/* A deleted DEFAULT topping/flavor re-seeds on next restart (the
+                          embedded default menu is recoverable); admin-added ones stay gone. */}
+                      <Button size="sm" variant="destructive" onClick={async () => {
+                        if (row.kind === "recipe") { await fetchNui("admin:deleteRecipe", { input_item: d.input_item }); onSaved(); }
+                        else if (row.kind === "assembly") { close(); setAsm((l) => l.filter((_, i) => i !== row.index)); }
+                        else if (row.kind === "craft") { close(); setCraftList((l) => l.filter((_, i) => i !== row.index)); }
+                        else if (row.kind === "drink") { close(); setDrinkList((l) => l.filter((_, i) => i !== row.index)); }
+                        else if (row.kind === "finish") { close(); setFinishList((l) => l.filter((_, i) => i !== row.index)); }
+                        else if (row.kind === "condiment") { close(); setCondimentList((l) => l.filter((_, i) => i !== row.index)); }
+                      }}><Trash2 className="h-4 w-4" /></Button>
                     </div>
                   </div>
 
@@ -212,7 +228,17 @@ export default function Menu({ recipes, assembly, crafts, drinks, finishes, sett
                           cost={Number(costs[finishList[row.index].tool] ?? 0)}
                           onChangeFinish={(p) => updateFinish(row.index!, p)}
                           onChangeCost={(v) => setCosts((c) => ({ ...c, [finishList[row.index!].tool]: Math.max(0, Math.floor(v || 0)) }))}
+                          items={items}
                           groups={groups}
+                        />
+                      )}
+                      {row.kind === "condiment" && row.index !== undefined && (
+                        <CondimentFields
+                          condiment={condimentList[row.index]}
+                          cost={Number(costs[condimentList[row.index].item] ?? 0)}
+                          onChange={(p) => updateCondiment(row.index!, p)}
+                          onChangeCost={(v) => setCosts((c) => ({ ...c, [condimentList[row.index!].item]: Math.max(0, Math.floor(v || 0)) }))}
+                          items={items}
                         />
                       )}
                       <div className="mt-3 flex justify-end">
