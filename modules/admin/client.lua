@@ -23,16 +23,56 @@ local function modelInvalid(model)
     return not IsModelInCdimage(GetHashKey(model))
 end
 
-local function annotateModels(res)
-    if type(res) == "table" and type(res.recipes) == "table" then
-        for _, r in ipairs(res.recipes) do
-            local bad = {}
-            for _, m in ipairs({ r.raw_model, r.cooked_model, r.burnt_model }) do
-                if modelInvalid(m) then bad[#bad + 1] = m end
-            end
-            r.invalid_models = bad
+-- Collect every prop model an entry references, flagging the ones that aren't in
+-- the game's cdimage (a typo'd model fails silently in-world, so surface it in the
+-- panel). Walks the three authored kinds' shapes: a food's steps, a tool's mode
+-- payload, an ingredient's behavior props.
+local function foodModels(f)
+    local out = {}
+    for _, st in ipairs(type(f.steps) == "table" and f.steps or {}) do
+        for _, m in ipairs({ st.raw_model, st.cooked_model, st.burnt_model, st.container_model,
+                             st.serving_model, st.serving_burnt_model, st.model }) do
+            out[#out + 1] = m
         end
     end
+    return out
+end
+
+local function toolModels(t)
+    local out = { t.tool_model, t.applied_model }
+    for _, tg in ipairs(type(t.targets) == "table" and t.targets or {}) do
+        for _, fl in ipairs(type(tg.flavors) == "table" and tg.flavors or {}) do
+            out[#out + 1] = fl.model
+        end
+    end
+    for _, tr in ipairs(type(t.trays) == "table" and t.trays or {}) do
+        out[#out + 1] = tr.tray_model
+        out[#out + 1] = tr.raw_model
+    end
+    return out
+end
+
+local function ingredientModels(ing)
+    local out = { ing.model }
+    if type(ing.halves) == "table" then out[#out + 1] = ing.halves.top_model; out[#out + 1] = ing.halves.bottom_model end
+    if type(ing.melts) == "table" then out[#out + 1] = ing.melts.applied_model; out[#out + 1] = ing.melts.melted_model end
+    return out
+end
+
+local function annotateModels(res)
+    if type(res) ~= "table" then return res end
+    local function flag(list, modelsOf)
+        for _, e in ipairs(type(list) == "table" and list or {}) do
+            local bad = {}
+            for _, m in ipairs(modelsOf(e)) do
+                if modelInvalid(m) then bad[#bad + 1] = m end
+            end
+            e.invalid_models = bad
+        end
+    end
+    flag(res.foods, foodModels)
+    flag(res.tools, toolModels)
+    flag(res.ingredients, ingredientModels)
     return res
 end
 
@@ -60,8 +100,6 @@ RegisterNUICallback("admin:setTheme",     relay("pickle_restaurants:admin:setThe
 RegisterNUICallback("admin:setAppTheme",  relay("pickle_restaurants:admin:setAppTheme"))
 RegisterNUICallback("admin:saveSetting",  relay("pickle_restaurants:admin:saveSetting"))
 RegisterNUICallback("admin:saveSettings", relay("pickle_restaurants:admin:saveSettings"))
-RegisterNUICallback("admin:saveRecipe",   relay("pickle_restaurants:admin:saveRecipe"))
-RegisterNUICallback("admin:deleteRecipe", relay("pickle_restaurants:admin:deleteRecipe"))
 RegisterNUICallback("admin:resetRecipes", relay("pickle_restaurants:admin:resetRecipes"))
 
 -- Admins resolve to full permissions, so the placement remove callback accepts

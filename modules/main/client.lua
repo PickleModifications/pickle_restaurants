@@ -11,8 +11,13 @@ Drinks           = {}    -- soda definitions
 Assembly         = {}    -- kitchen-prep definitions
 Finishes         = {}    -- finish tools (frosting…): tool -> targets -> flavors
 Condiments       = {}    -- squeeze-bottle condiments: { item, container_model, applied_model }
-Baking           = {}    -- baking mix + trays: { mix_item, mix_model, rub_dist, trays = {...} }
+Baking           = {}    -- fill tools, a LIST: one { mix_item, mix_model, rub_dist, trays } per tool
 Crafts           = {}    -- code-less combine recipes: { id, label, group, components, modifiers }
+Ingredients      = {}    -- [item]  = synced ingredient config { item, model, group?, box_base?, halves?, melts? }
+IngredientsByModel = {}  -- [model] = its ingredient entry (reverse lookup incl. halves/melt models)
+BoxBaseModels    = {}    -- model names the pizza box accepts as a carried pile's BOTTOM layer
+StackTweaks      = {}    -- [model] = { sink?, rise? } manual stacking corrections (synced setting)
+ConfigGen        = 0     -- bumped every sync so lazily-built hash caches invalidate
 BagItem          = "restaurant_bag" -- the ONE item every craft becomes
 BagModel         = "pickle_restaurant_bag_01" -- the Restaurant Bag vessel prop
 
@@ -269,6 +274,28 @@ local function ApplySync(payload)
         BagItem  = payload.settings.bag_item or "restaurant_bag"
         BagModel = payload.settings.bag_model or "pickle_restaurant_bag_01"
         SideContainerModel = payload.settings.side_container_model or ""
+        -- Synced ingredient config (only installed items ship): the item map plus a
+        -- reverse map from EVERY model an ingredient can render as (its base model,
+        -- its halves pair, its melt topping's applied/melted looks) back to the entry.
+        Ingredients, IngredientsByModel = {}, {}
+        for _, ing in ipairs(payload.settings.ingredients or {}) do
+            if ing.item then Ingredients[ing.item] = ing end
+            if ing.model then IngredientsByModel[ing.model] = ing end
+            local hv = ing.halves
+            if hv then
+                if hv.top_model then IngredientsByModel[hv.top_model] = ing end
+                if hv.bottom_model then IngredientsByModel[hv.bottom_model] = ing end
+            end
+            local ml = ing.melts
+            if ml then
+                if ml.applied_model then IngredientsByModel[ml.applied_model] = ing end
+                if ml.melted_model then IngredientsByModel[ml.melted_model] = ing end
+            end
+        end
+        BoxBaseModels = payload.settings.box_base_models or {}
+        StackTweaks   = payload.settings.stack_tweaks or {}
+        -- invalidate lazily-built hash caches (e.g. the cooking module's boxable set)
+        ConfigGen = (ConfigGen or 0) + 1
     end
 
     propsById = {}

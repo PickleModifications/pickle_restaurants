@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { PanelContentContext } from "@/components/ui/panel-content";
 
 /**
  * Fixed-size shell for every management panel — a piece of the restaurant's
@@ -24,6 +26,10 @@ export default function Panel({
   width?: string;
 }) {
   const monogram = (title.trim()[0] || "•").toUpperCase();
+  // Published to nested Modals so a dialog's scrim covers only the content area
+  // below the header. A callback ref into state so the value updates once the
+  // element mounts (a Modal opened later then portals into it).
+  const [contentEl, setContentEl] = useState<HTMLElement | null>(null);
   return (
     <div className="fixed inset-0 flex items-center justify-center">
       <div
@@ -47,9 +53,14 @@ export default function Panel({
             </Button>
           </div>
         </div>
-        {/* Flex column so tabbed views can claim flex-1 and scroll internally;
-            overflow-y-auto so simpler views (order/register) still scroll. */}
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-5">{children}</div>
+        {/* Content region below the header. A non-scrolling `relative` wrapper
+            bounds it so a nested Modal (portaled into it via context) overlays
+            exactly this area and stays put while the inner list scrolls. */}
+        <div ref={setContentEl} className="relative flex min-h-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-5">
+            <PanelContentContext.Provider value={contentEl}>{children}</PanelContentContext.Provider>
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -9,9 +9,9 @@
 --  the *real* world prop live under the cursor (collision off, so the cursor
 --  ray passes through it).
 --
---  Beef patties are dual-sided: one logical item rendered as two stacked props
---  (the down face rolled 180 so it faces the pan). Only the down face cooks;
---  clicking the patty flips it to cook the other side. Each side's cook state
+--  Dual-sided items (beef patties…) are one logical item rendered as two stacked
+--  props (the down face rolled 180 so it faces the pan). Only the down face cooks;
+--  clicking the item flips it to cook the other side. Each side's cook state
 --  is independent.
 -- =============================================
 
@@ -61,14 +61,10 @@ local DUAL = {
     tween_ms    = 250,
 }
 
--- A slice of cheese melted on the patty's visible (up) face. Sits a hair above
--- the top face; the model swaps from applied -> melted. z/roll need in-game tuning.
-local CHEESE = {
-    model_applied = "pickle_cheese_applied_01",
-    model_melted  = "pickle_cheese_applied_02",
-    z    = 0.01,
-    roll = 180.0,
-}
+-- Where a flat melting topping (a cheese slice…) seats on a dual item's up-face:
+-- a hair above the top face; the model comes from the ingredient's melts config
+-- (applied -> melted). TUNE IN-GAME.
+local MELT_SEAT = { z = 0.01, roll = 180.0 }
 
 -- Interactive prep build. The STACK is the first-class object: an ordered array
 -- of parts sharing one (x,y) anchor and a table-surface z0. A part's z is never
@@ -76,13 +72,13 @@ local CHEESE = {
 -- each part's flush height, so relayout() assigns every z and stacks are flush by
 -- construction.
 --   PrepStacks[sid] = { x, y, z0, parts = { part, part, ... } }  -- parts[1] on table
---   part = { pid, ents = {…}, height, item, half, source, cheese, id,
---            patty?, faces = {e1,e2}, cheeseEnt? }
--- Most parts are one prop on their centre-bottom origin. A beef patty is a `patty`
--- part: the same two-faced patty (+ cheese) the stovetop renders, so it looks
--- identical in a burger. A bun is dragged as a bottom+top PAIR; a lone top bun sits
--- flipped.
-local BUN = { bottom = "pickle_bread_bun_02", top = "pickle_bread_bun_01" }
+--   part = { pid, ents = {…}, height, item, half, source, cheese, top, id,
+--            dual?, faces = {e1,e2}, meltEnt?, meltModel? }
+-- Most parts are one prop on their centre-bottom origin. A dual-sided item (beef
+-- patty) is a `dual` part: the same two-faced item (+ melt topping) the stovetop
+-- renders, so it looks identical in a burger. A halves ingredient (a bun) is
+-- dragged as a bottom+top PAIR; a lone top half sits flipped. (The `cheese`
+-- numeric is legacy reservation plumbing only — models never derive from it.)
 local PrepStacks = {}
 local prepSid = 0        -- monotonic stack id
 local prepPid = 0        -- monotonic part id (stable handle for NUI hover/grab)
@@ -106,18 +102,16 @@ local TRAYP = {
 }
 -- The PIZZA BOX: the serving tray's sibling (kind "box") — a base + hinged-lid
 -- pair placed on the prep table. Clicking the lid swings it open/closed (a
--- smooth hinged rotation, never a pop); only a pizza goes inside (the carried
--- pile's BOTTOM layer must be a pizza crust, any cook state), ONE per box, and
--- boxing it up makes the same meal item a serving tray does — flagged so it
--- sets back down as its box.
+-- smooth hinged rotation, never a pop); only a BOXABLE pile goes inside (the
+-- carried pile's BOTTOM layer must render one of the synced BoxBaseModels, any
+-- cook state), ONE per box, and boxing it up makes the same meal item a serving
+-- tray does — flagged so it sets back down as its box.
 local BOXP = {
     base_model = "pickle_pizza_box_01",
     lid_model  = "pickle_pizza_box_02",
-    -- the pizza crust at every cook state (raw/cooked/burnt) — what the box accepts
-    dough_models = { "pickle_pizza_dough_01", "pickle_pizza_dough_02", "pickle_pizza_dough_03" },
-    -- Where the pizza SEATS inside the box: height of the pile's base above the
-    -- surface the box sits on. This is THE pizza-in-box offset — raise it if the
-    -- pizza clips the bed, lower it (negative allowed) if it floats/rides the
+    -- Where the food SEATS inside the box: height of the pile's base above the
+    -- surface the box sits on. This is THE food-in-box offset — raise it if the
+    -- contents clip the bed, lower it (negative allowed) if they float/ride the
     -- rim. Applies to drops, moves, set-down meals and previews alike (all food
     -- z's come through trayFoodDz). TUNE IN-GAME.
     food_dz   = 0.0,
@@ -232,8 +226,9 @@ end
 local STACK_MIN_GAP = 0.008
 
 -- Manual per-model stacking corrections, applied on top of the measured model
--- heights — modelHeight/stackLayerHeight are ALWAYS the baseline; add an entry
--- here only when a specific prop needs a nudge. TUNE IN-GAME.
+-- heights — modelHeight/stackLayerHeight are ALWAYS the baseline. The map is the
+-- SYNCED `stack_tweaks` setting (client global StackTweaks, edited in the admin
+-- panel, seeded server-side with the pizza values), empty until the first sync.
 --   sink = shift THIS layer's seat by this much (negative sinks it into the layer
 --          below); everything stacked on top of it follows it down/up. Clamped so
 --          a layer can never sink to (or below) the seat of the one under it —
@@ -241,25 +236,54 @@ local STACK_MIN_GAP = 0.008
 --          that or the clamp eats the difference.
 --   rise = REPLACE the model's measured layer height (how far the NEXT layer sits
 --          above this one) instead of the computed value.
-local STACK_TWEAKS = {
-    -- the shredded-cheese sheet reads a touch high over the sauce on a pizza
-    ["pickle_pizza_sauce_01"] = { sink = -0.004 },
-    ["pickle_pizza_cheese_01"] = { sink = -0.004 },
-    ["pickle_pizza_cheese_02"] = { sink = -0.004 },
-}
+local function tweakFor(model)
+    return model and StackTweaks and StackTweaks[model] or nil
+end
 local function stackSink(model)
-    local t = model and STACK_TWEAKS[model]
+    local t = tweakFor(model)
     return (t and t.sink) or 0.0
 end
 
 local function stackLayerHeight(model)
-    local t = model and STACK_TWEAKS[model]
+    local t = tweakFor(model)
     if t and t.rise then return t.rise end
     -- The side-serving container (fries box) holds its food at its OWN base — both
     -- are bottom-origin, so the serving sits INSIDE the box, not stacked on top of
     -- it. Zero stacking height means the next layer keeps the same base Z.
     if SideContainerModel and SideContainerModel ~= "" and model == SideContainerModel then return 0.03 end
     return math.max(modelHeight(model), STACK_MIN_GAP)
+end
+
+-- ─── synced ingredient config lookups ─────────────────────────────────────────
+-- `Ingredients` / `IngredientsByModel` / `BoxBaseModels` are client globals filled
+-- by the sync (modules/main). ALL food-specific behavior — halves pairs (buns),
+-- melt toppings (cheese), boxable bases (pizza crusts) — is data resolved through
+-- these; item and model names are never hardcoded here.
+-- The halves pair of an ingredient dragged as bottom+top (nil for single-prop items).
+local function halvesFor(item)
+    local ing = item and Ingredients and Ingredients[item]
+    return ing and ing.halves or nil
+end
+-- The model one half of a halves ingredient renders as; falls back to the
+-- ingredient's base model for non-halves items.
+local function halfModel(item, half)
+    local hv = halvesFor(item)
+    if hv then return (half == "top") and hv.top_model or hv.bottom_model end
+    local ing = Ingredients and Ingredients[item]
+    return ing and ing.model or nil
+end
+-- The model a melt topping renders as: `top` = { item, state } ("applied"|"melted"),
+-- resolved via the ingredient's melts config; a payload-resolved `top.model` is the
+-- fallback when the config entry is missing (e.g. the item was uninstalled).
+local function toppingModel(top)
+    if type(top) ~= "table" then return nil end
+    local ing = top.item and Ingredients and Ingredients[top.item]
+    local melts = ing and ing.melts
+    if melts then
+        if top.state == "melted" then return melts.melted_model or melts.applied_model end
+        return melts.applied_model
+    end
+    return top.model
 end
 
 -- Recipe containers (cake tin…) are authored like the serving tray: their origin
@@ -756,25 +780,13 @@ local POUR = {
     cycle_ms    = 220,   -- time a droplet takes to fall the stream (visual speed)
     min_fall    = 0.03,  -- skip drawing the stream if the mouth-to-surface gap is tiny
 }
--- Fallback pour colors by drink OUTPUT for the seeded flavors, so the stream is
--- colored even on configs predating the per-drink `color` field. A synced config
--- color always wins over these.
-local POUR_COLORS = {
-    water      = { 160, 205, 230 }, -- Pure Aqua: pale icy blue
-    lemonade   = { 235, 215, 90 },  -- Lemonade Bliss: yellow
-    soda       = { 90, 50, 25 },    -- Classic Cola: dark cola
-    diet_cola  = { 120, 80, 55 },   -- Diet Cola: lighter cola
-    grape_soda = { 135, 70, 170 },  -- Grape Zap: purple
-    coffee     = { 80, 50, 30 },    -- Coffee: brown
-}
 local SodaPour = {} -- [uid] = token (nil = not pouring)
 
--- The pour color for a cup's tap: its drink's config `color`, else the seeded
--- fallback by output, else a pale default.
+-- The pour color for a cup's tap: its drink's config `color`, else a pale default.
 local function pourColor(uid)
     local s = CookSlot[uid]
     local d = s and sodaFlavorForSlot(s.slot)
-    local c = d and (d.color or (d.output and POUR_COLORS[d.output]))
+    local c = d and d.color
     if type(c) == "table" then return c[1] or 200, c[2] or 200, c[3] or 210 end
     return 200, 200, 210
 end
@@ -1210,26 +1222,26 @@ local function orientPair(ents, x, y, z, flipped, yaw)
     end
 end
 
--- Seat a cheese slice on a patty's visible (up) face, given the patty's base
--- (x,y,z). Pure + shared by the stovetop and the prep table; no-op without a slice.
-local function placeCheeseAt(ent, x, y, z, yaw)
+-- Seat a melt-topping slice on a dual item's visible (up) face, given the item's
+-- base (x,y,z). Pure + shared by the stovetop and the prep table; no-op without one.
+local function placeMeltAt(ent, x, y, z, yaw)
     if not ent or not DoesEntityExist(ent) then return end
-    SetEntityCoordsNoOffset(ent, x, y, z + DUAL.base_lift + DUAL.face_gap + CHEESE.z, false, false, false)
-    SetEntityRotation(ent, 0.0, DUAL.top_roll + CHEESE.roll, yaw or 0.0, 2, true)
+    SetEntityCoordsNoOffset(ent, x, y, z + DUAL.base_lift + DUAL.face_gap + MELT_SEAT.z, false, false, false)
+    SetEntityRotation(ent, 0.0, DUAL.top_roll + MELT_SEAT.roll, yaw or 0.0, 2, true)
 end
 
--- Keep the stovetop patty's cheese slice (if any) sitting on its visible face.
-local function placeCheese(uid)
+-- Keep the stovetop dual item's melt topping (if any) sitting on its visible face.
+local function placeMelt(uid)
     local rec, c = CookDual[uid], CookCoords[uid]
     if not rec or not c then return end
-    placeCheeseAt(rec.cheeseEnt, c.x, c.y, c.z, CookYaw[uid])
+    placeMeltAt(rec.meltEnt, c.x, c.y, c.z, CookYaw[uid])
 end
 
 local function orientDualSnap(uid)
     local rec, c = CookDual[uid], CookCoords[uid]
     if not rec or not c then return end
     orientPair(rec.ent, c.x, c.y, c.z, rec.flipped, CookYaw[uid])
-    placeCheese(uid)
+    placeMelt(uid)
 end
 
 -- Animate a flip: the patty turns over as one rigid body, so BOTH faces rotate
@@ -1270,7 +1282,7 @@ local function tweenDualFlip(uid)
     end)
 end
 
--- Spawn or update a dual patty from a server payload: (re)create each face prop
+-- Spawn or update a dual item from a server payload: (re)create each face prop
 -- whose model changed, keep both at the shared coords, orient (animating on
 -- flip), and stash the live cook-progress so the hover panel can count up.
 local function RebuildDual(p)
@@ -1304,30 +1316,28 @@ local function RebuildDual(p)
         end
     end
 
-    -- melted/applied cheese on the visible face (spawn/swap/remove as needed)
-    local cheese = p.cheese or "none"
-    if cheese ~= "none" then
-        local model = (cheese == "melted") and CHEESE.model_melted or CHEESE.model_applied
-        if (not rec.cheeseEnt) or (not DoesEntityExist(rec.cheeseEnt)) or rec.cheeseModel ~= model then
-            if rec.cheeseEnt then SafeDeleteEntity(rec.cheeseEnt) end
-            rec.cheeseEnt = SpawnProp(model, x, y, z)
-            if rec.cheeseEnt then
-                rec.cheeseModel = model
-            else
-                rec.cheeseEnt = nil
-            end
+    -- melted/applied topping on the visible face (spawn/swap/remove as needed):
+    -- `topping` = { item, state = "applied"|"melted", model } | nil, the model
+    -- server-resolved (toppingModel re-derives it from the ingredient config).
+    local topping = p.topping
+    if topping and topping.item then
+        local model = topping.model or toppingModel(topping)
+        if model and ((not rec.meltEnt) or (not DoesEntityExist(rec.meltEnt)) or rec.meltModel ~= model) then
+            if rec.meltEnt then SafeDeleteEntity(rec.meltEnt) end
+            rec.meltEnt = SpawnProp(model, x, y, z)
+            rec.meltModel = rec.meltEnt and model or nil
         end
-    elseif rec.cheeseEnt then
-        SafeDeleteEntity(rec.cheeseEnt); rec.cheeseEnt, rec.cheeseModel = nil, nil
+    elseif rec.meltEnt then
+        SafeDeleteEntity(rec.meltEnt); rec.meltEnt, rec.meltModel = nil, nil
     end
 
     local flipChanged = rec.flipped ~= flipped
-    rec.sides, rec.input, rec.flipped, rec.cheese = sides, input, flipped, cheese
+    rec.sides, rec.input, rec.flipped, rec.topping = sides, input, flipped, topping
     -- live cook progress per face, timestamped against our own clock so the grill
     -- side's % counts up smoothly between server messages (the other is frozen).
     rec.prog = {
         cooking = p.cooking or 1, start = GetGameTimer(),
-        sides = { ps[1] or {}, ps[2] or {} }, cheese = cheese,
+        sides = { ps[1] or {}, ps[2] or {} }, topping = topping,
         give = p.give, giveLabel = p.giveLabel, giveImage = p.giveImage,
     }
     -- chips project from the visible top face (the side NOT on the grill)
@@ -1344,7 +1354,7 @@ local function RemoveDual(uid)
         local ent = rec.ent[s]
         if ent then CookEntityUid[ent] = nil; SafeDeleteEntity(ent) end
     end
-    if rec.cheeseEnt then SafeDeleteEntity(rec.cheeseEnt) end
+    if rec.meltEnt then SafeDeleteEntity(rec.meltEnt) end
     CookDual[uid], DualTween[uid] = nil, nil
     return true
 end
@@ -1362,7 +1372,7 @@ local function MoveCookObjectLocal(uid, x, y, z)
                 SetEntityRotation(ent, 0.0, dualTargetRoll(rec, s), CookYaw[uid] or 0.0, 2, true)
             end
         end
-        placeCheese(uid)
+        placeMelt(uid)
     else
         local ent = CookObjects[uid]
         if ent and DoesEntityExist(ent) then
@@ -1442,7 +1452,7 @@ local function deletePreview(p)
     else
         SafeDeleteEntity(p.entity)
     end
-    if p.cheeseEnt then SafeDeleteEntity(p.cheeseEnt) end
+    if p.meltEnt then SafeDeleteEntity(p.meltEnt) end
 end
 
 local function cancelPlace()
@@ -1493,7 +1503,7 @@ RegisterNetEvent("pickle_restaurants:cooking:update", function(uid, model, state
     SpawnCookObject(uid, model, c.x, c.y, c.z, state)
 end)
 
--- spawn or update a dual-sided patty (both faces + live status in one payload)
+-- spawn or update a dual-sided item (both faces + live status in one payload)
 RegisterNetEvent("pickle_restaurants:cooking:dual", function(p)
     if not p or not gateSpawn(p.uid, p.prop_id) then return end
     RebuildDual(p)
@@ -1609,9 +1619,9 @@ end
 
 -- ─── click-to-flip hover ─────────────────────────────────────────────────────
 
-local hoveredPatty = nil
+local hoveredDual = nil
 
-local function setPattyOutline(uid, on)
+local function setDualOutline(uid, on)
     local rec = CookDual[uid]; if not rec then return end
     for s = 1, 2 do
         local ent = rec.ent[s]
@@ -1622,11 +1632,11 @@ local function setPattyOutline(uid, on)
     end
 end
 
-local function HoverPatty(uid)
-    if hoveredPatty == uid then return end
-    if hoveredPatty then setPattyOutline(hoveredPatty, false) end
-    hoveredPatty = uid
-    if uid then setPattyOutline(uid, true) end
+local function HoverDual(uid)
+    if hoveredDual == uid then return end
+    if hoveredDual then setDualOutline(hoveredDual, false) end
+    hoveredDual = uid
+    if uid then setDualOutline(uid, true) end
 end
 
 -- ─── open / close ────────────────────────────────────────────────────────────
@@ -1672,17 +1682,17 @@ end)
 -- ─── interactive prep build (free-form stacking) ─────────────────────────────
 
 -- Spawn one part and cache its stacking height. Most parts are a SINGLE prop on
--- their centre-bottom origin. A beef patty is a `dual` part: two face props (the
--- same two-faced patty the stovetop renders, via orientPair) plus, if cheesed, a
--- slice seated on the visible face by placeCheeseAt — one code path, so a patty in
--- a burger looks identical to one on the grill. Every prop spawns at the prep prop
--- and is positioned later by layoutParts.
+-- their centre-bottom origin. A dual-sided item (beef patty) is a `dual` part: two
+-- face props (the same two-faced item the stovetop renders, via orientPair) plus,
+-- if topped, a melt slice seated on the visible face by placeMeltAt — one code
+-- path, so a patty in a burger looks identical to one on the grill. Every prop
+-- spawns at the prep prop and is positioned later by layoutParts.
 local function makePart(spec)
     local base = currentCookProp; if not base then return nil end
     prepPid = prepPid + 1
     local part = { pid = prepPid, item = spec.item, half = spec.half,
                    source = spec.source, cheese = spec.cheese or 0, sig = spec.sig,
-                   finishTool = spec.finishTool, ents = {} }
+                   top = spec.top, finishTool = spec.finishTool, ents = {} }
 
     if type(spec.stack) == "table" and #spec.stack > 1 then
         -- A product that carries a build stack (e.g. a cooked pizza) is ONE logical
@@ -1728,22 +1738,29 @@ local function makePart(spec)
         local e1 = SpawnProp(spec.model, base.x, base.y, base.z)
         local e2 = SpawnProp(spec.model, base.x, base.y, base.z)
         if not e1 or not e2 then SafeDeleteEntity(e1); SafeDeleteEntity(e2); return nil end
-        part.patty  = true
+        part.dual   = true
         part.faces  = { e1, e2 }
         part.ents   = { e1, e2 }
         -- The next part rests where a topping sits on the visible face — the EXACT
-        -- spot placeCheeseAt seats cheese (base_lift + face_gap above the base, plus
-        -- the topping float) — so a topping stacked on the patty matches a patty-borne
-        -- one. We do NOT use modelHeight(patty model): the two-faced patty is a stovetop
-        -- cook prop, not a centre-bottom stack prop, so its measured height is bogus.
-        part.height = DUAL.base_lift + DUAL.face_gap + CHEESE.z
-        if spec.cheeseModel then
-            local ce = SpawnProp(spec.cheeseModel, base.x, base.y, base.z)
+        -- spot placeMeltAt seats a melt slice (base_lift + face_gap above the base,
+        -- plus the topping float) — so a topping stacked on the item matches an
+        -- item-borne one. We do NOT use modelHeight(the dual model): the two-faced
+        -- item is a stovetop cook prop, not a centre-bottom stack prop, so its
+        -- measured height is bogus.
+        part.height = DUAL.base_lift + DUAL.face_gap + MELT_SEAT.z
+        -- A melt topping riding the visible face: new specs carry `top` ({ item,
+        -- state }, model server-resolved on `topModel`); LEGACY decompose specs
+        -- (old inventory slot metadata) instead carry the resolved model directly
+        -- as `cheeseModel` — tolerate both, models never derive from the numeric.
+        local meltModel = spec.topModel or toppingModel(spec.top) or spec.cheeseModel
+        if meltModel then
+            local ce = SpawnProp(meltModel, base.x, base.y, base.z)
             if ce then
-                part.cheeseEnt = ce
+                part.meltEnt   = ce
+                part.meltModel = meltModel
                 part.ents[#part.ents + 1] = ce
                 part.height = math.max(part.height,
-                    DUAL.base_lift + DUAL.face_gap + CHEESE.z + modelHeight(spec.cheeseModel))
+                    DUAL.base_lift + DUAL.face_gap + MELT_SEAT.z + modelHeight(meltModel))
             end
         end
     else
@@ -1766,22 +1783,23 @@ local function deleteParts(parts)
     end
 end
 
--- Place a part so its BASE sits at world (x,y,z). A patty is laid flat (unflipped —
--- fully cooked, both faces shown) via the shared stovetop orientPair, with its
--- cheese seated by placeCheeseAt, so it matches the grill exactly. Other parts are a
--- single prop on their centre-bottom origin (z is the origin directly); `flip`
--- renders a lone top bun upturned — flipping 180° about the bottom origin would sink
--- it, so it's raised by its own height to keep resting on the surface.
+-- Place a part so its BASE sits at world (x,y,z). A dual item is laid flat
+-- (unflipped — fully cooked, both faces shown) via the shared stovetop orientPair,
+-- with its melt topping seated by placeMeltAt, so it matches the grill exactly.
+-- Other parts are a single prop on their centre-bottom origin (z is the origin
+-- directly); `flip` renders a lone top half upturned — flipping 180° about the
+-- bottom origin would sink it, so it's raised by its own height to keep resting
+-- on the surface.
 local function orientPart(part, x, y, z, flip)
     local yaw = curYaw() -- parts face the prep station, not the world axes
-    if part.patty then
+    if part.dual then
         orientPair(part.faces, x, y, z, false, yaw)
-        placeCheeseAt(part.cheeseEnt, x, y, z, yaw)
+        placeMeltAt(part.meltEnt, x, y, z, yaw)
         return
     end
     if part.stacked then
         -- a build-stack part lays its layers flush bottom-to-top from the base z;
-        -- a patty face in the tower keeps its own roll (the two-faced flip)
+        -- a dual face in the tower keeps its own roll (the two-faced flip)
         for i, e in ipairs(part.ents) do
             if e and DoesEntityExist(e) then
                 SetEntityCoordsNoOffset(e, x, y, z + (part.lifts[i] or 0.0), false, false, false)
@@ -1804,15 +1822,15 @@ end
 
 -- THE single source of truth for every part's z: walk bottom→top from z0, summing
 -- heights so each part sits flush on the one below. `lone` (stack has one part)
--- makes a top bun render flipped. A part's manual seat correction (part.sink,
--- from STACK_TWEAKS) shifts it and everything above it.
+-- makes a lone top half render flipped. A part's manual seat correction (part.sink,
+-- from the synced stack tweaks) shifts it and everything above it.
 local function layoutParts(parts, x, y, z0, lone)
     local z, prevSeat = z0, nil
     for i, part in ipairs(parts) do
         -- the base part rests on the surface; a sunk part is clamped so it never
         -- drops to/below the seat of the part under it (it would vanish inside)
         if i > 1 then z = math.max(z + (part.sink or 0.0), prevSeat + 0.001) end
-        local flip = lone and part.item == "bun" and part.half == "top"
+        local flip = lone and part.half == "top" -- only halves ingredients carry half
         orientPart(part, x, y, z, flip)
         prevSeat = z
         z = z + (part.height or 0.0)
@@ -1854,14 +1872,22 @@ local function stackSnapZ(s, first)
 end
 
 -- What a stack provides, as a component multiset (mirrors the server's
--- buildProvides): bun halves count as half a bun (rounded up), and any cheese on a
--- patty counts as one "cheese" component. The NUI ranks recipes against this.
+-- buildProvides): halves count as half their ingredient (rounded up), and a melt
+-- topping riding a dual part counts as one component of its OWN item. The NUI
+-- ranks recipes against this.
 local function stackProvides(stack)
     local units = {}
     for _, p in ipairs(stack.parts) do
-        local u = (p.item == "bun" and p.half) and 0.5 or 1.0
+        local u = p.half and 0.5 or 1.0
         units[p.item] = (units[p.item] or 0) + u
-        if (p.cheese or 0) >= 1 then units.cheese = (units.cheese or 0) + 1 end
+        -- new parts carry `top` = { item, state }; a LEGACY part (numeric-only
+        -- reservation) resolves its topping item from its rendered melt model
+        local mi = p.top and p.top.item
+        if not mi and p.meltModel then
+            local ing = IngredientsByModel and IngredientsByModel[p.meltModel]
+            mi = ing and ing.item
+        end
+        if mi then units[mi] = (units[mi] or 0) + 1 end
     end
     local out = {}
     for k, v in pairs(units) do out[k] = math.ceil(v) end
@@ -1915,23 +1941,28 @@ end
 -- `kind` ("tray" | "box", nil = "tray") picks which pair of props and which
 -- config drives the footprint maths.
 -- Baking trays (cake tin / cookie tray) are FREE prep equipment like the serving
--- tray: a single container prop you drag onto the table, rub the shared baking mix
--- into (coverage accrues, the raw sheet/dough fades in), then drag into the hotbar
+-- tray: a single container prop you drag onto the table, rub its baking mix
+-- into (coverage accrues, the raw sheet fades in), then drag into the hotbar
 -- to collect its oven-ready output. They live in PrepTrays keyed by their config
--- `kind` (from the synced Baking.trays), so placement, hover, outline and grab all
--- reuse the tray machinery; food-drop and meal-making are gated off (a bake tray
--- never accepts loose food and never makes a meal — see runDragThread / prepDrop).
+-- `kind` (from the synced Baking list's per-tool trays), so placement, hover,
+-- outline and grab all reuse the tray machinery; food-drop and meal-making are
+-- gated off (a bake tray never accepts loose food and never makes a meal — see
+-- runDragThread / prepDrop).
 local BAKEP = {
     food_dz   = 0.0,   -- raw sheet/dough lift above the tray bed. TUNE IN-GAME.
     rim_inset = 0.05,  -- (unused for food-drop, kept for trayCfg parity)
     pick_pad  = 0.03,  -- extra grab margin (m) around the tray footprint
     pick_dz   = 0.4,   -- max height diff between the cursor's surface hit and the tray
 }
--- The synced Baking.trays entry for a kind (nil if it isn't a baking-tray kind).
+-- The synced tray entry for a kind, searched across EVERY fill tool (`Baking` is
+-- a LIST of { mix_item, mix_model, rub_dist, trays }). Returns the tray entry
+-- plus its owning tool; nil if it isn't a baking-tray kind.
 local function bakeEntryFor(kind)
     if not kind then return nil end
-    for _, t in ipairs((type(Baking) == "table" and Baking.trays) or {}) do
-        if t.kind == kind then return t end
+    for _, b in ipairs(Baking or {}) do
+        for _, t in ipairs(b.trays or {}) do
+            if t.kind == kind then return t, b end
+        end
     end
 end
 local function isBakeKind(kind) return bakeEntryFor(kind) ~= nil end
@@ -2293,19 +2324,21 @@ local function trayPileCount(tid)
     return n
 end
 
--- What the pizza box accepts: the carried pile's BOTTOM layer must render a
--- pizza crust. Matched by MODEL so every cook state qualifies — the raw dough
--- component, an assembled uncooked pizza, and a cooked/burnt one all base on a
--- dough_models prop (the server re-validates by item on make).
-local BoxDough = nil
-local function partsArePizza(parts)
-    if not BoxDough then
-        BoxDough = {}
-        for _, m in ipairs(BOXP.dough_models) do BoxDough[GetHashKey(m)] = true end
+-- What the box accepts: the carried pile's BOTTOM layer must render one of the
+-- synced BoxBaseModels (box_base ingredients + their linked recipes' raw/cooked/
+-- burnt models). Matched by MODEL so every cook state qualifies — the raw base
+-- component, an assembled uncooked pile, and a cooked/burnt one all base on a
+-- boxable prop (the server re-validates by item on make). The hash set is built
+-- lazily and rebuilt whenever the sync bumps ConfigGen.
+local boxable = { set = nil, gen = nil } -- cached hash set + the ConfigGen it was built at
+local function partsAreBoxable(parts)
+    if not boxable.set or boxable.gen ~= ConfigGen then
+        boxable.set, boxable.gen = {}, ConfigGen
+        for _, m in ipairs(BoxBaseModels or {}) do boxable.set[GetHashKey(m)] = true end
     end
     local p = parts and parts[1]
     local e = p and p.ents and p.ents[1]
-    return (e and DoesEntityExist(e) and BoxDough[GetEntityModel(e)]) and true or false
+    return (e and DoesEntityExist(e) and boxable.set[GetEntityModel(e)]) and true or false
 end
 
 -- Delete a prep drag's props — the carried parts plus, for a tray drag (a grabbed
@@ -2497,15 +2530,15 @@ local function runDragThread(drag)
                     setTrayOutline(nil)
                     layoutParts(drag.parts, s.x, s.y, z0, false)
                 elseif tid and hit and coords and PrepTrays[tid].kind == "box" then
-                    -- over a pizza box: it takes exactly ONE pizza — lid open, box
-                    -- empty, and the carried pile sitting on a pizza crust (any cook
+                    -- over a box: it takes exactly ONE boxable pile — lid open, box
+                    -- empty, and the carried pile sitting on a boxable base (any cook
                     -- state). A qualifying drop seats it in the CENTRE of the box;
                     -- anything else outlines the box red and refuses on release.
                     local t = PrepTrays[tid]
                     local block
                     if not t.open then block = "Open the box first."
-                    elseif trayPileCount(tid) > 0 then block = "There's already a pizza in there."
-                    elseif not partsArePizza(drag.parts) then block = _L("cook_only_pizza_in_box")
+                    elseif trayPileCount(tid) > 0 then block = "There's already something in there."
+                    elseif not partsAreBoxable(drag.parts) then block = _L("cook_only_boxable_in_box")
                     end
                     if block then
                         drag.hit, drag.targetSid, drag.targetTid = true, nil, nil
@@ -2595,7 +2628,7 @@ local function StopCooking()
     cancelFinish() -- drop any in-progress finish-tool (frosting) drag
     cancelBakeMix() -- drop any in-progress baking-mix drag
     cancelCondiment() -- drop any in-progress condiment-bottle drag
-    HoverPatty(nil)
+    HoverDual(nil)
     if HoverOvenDoor then HoverOvenDoor(nil, nil) end -- clear any door outline
     clearPrepStacks()
     if wasPrep then TriggerServerEvent("pickle_restaurants:cooking:prepClose") end -- drop unfinished build
@@ -2685,7 +2718,7 @@ function OpenCookingStation(prop)
                         items[#items + 1] = {
                             uid = uid, dual = true, onScreen = onScreen, x = sx, y = sy,
                             sides = { sideOut(1), sideOut(2) }, cooking = cookS,
-                            cheese = prog.cheese,
+                            topping = prog.topping,
                             give = prog.give, giveLabel = prog.giveLabel, giveImage = prog.giveImage,
                         }
                     elseif CookSlot[uid] then
@@ -2794,14 +2827,14 @@ function OpenCookingStation(prop)
                              prepHovered = prepHoverPid, prepTrayHovered = prepHoverTid,
                              prepTrayBox = prepHoverBox, prepTip = prepTip })
 
-            -- Stovetop: outline the hovered patty (click flips it); otherwise
+            -- Stovetop: outline the hovered dual item (click flips it); otherwise
             -- highlight the oven door under the cursor (click toggles it).
             if not placing and not moving and currentCookProp and currentCookProp.prop_type == "stovetop" then
                 if hoveredUid and CookDual[hoveredUid] then
-                    HoverPatty(hoveredUid)
+                    HoverDual(hoveredUid)
                     if HoverOvenDoor then HoverOvenDoor(currentCookProp.id, nil) end
                 else
-                    HoverPatty(nil)
+                    HoverDual(nil)
                     local hit, _, entity = CursorToWorld()
                     local door
                     if hit and entity and entity ~= 0 and GetOvenDoorIndexByEntity then
@@ -3148,37 +3181,38 @@ end)
 
 -- ─── interactive prep build (free-form stacking) ─────────────────────────────
 
--- Drag from the bar. A bun spawns as a bottom+top PAIR; everything else is one
--- part. The carried parts follow the cursor and stack onto the pile under it, or
--- start a new pile on empty table (runDragThread).
+-- Drag from the bar. A halves ingredient spawns as a bottom+top PAIR; everything
+-- else is one part. The carried parts follow the cursor and stack onto the pile
+-- under it, or start a new pile on empty table (runDragThread).
 RegisterNUICallback("cooking:beginPrepPlace", function(d, cb)
     cancelPlace(); cancelMove()
     if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
     if not currentCookProp then return cb({ ok = false }) end
 
     local dual      = (d.dual == 1 or d.dual == true)
-    -- cheese carries its melt state (1 = applied, 2 = melted); keep the exact value so
-    -- a tray reservation matches, but any value > 0 means "render a slice".
+    -- the numeric `cheese` is LEGACY reservation plumbing (it addresses old inventory
+    -- slots server-side); keep the exact value so a tray reservation matches, but
+    -- rendering NEVER derives a model from it — that's `top` / `topModel`'s job.
     local cheeseVal = tonumber(d.cheese) or 0
-    local cheeseOn  = cheeseVal > 0
 
     local specs = {}
-    if d.item == "bun" then
-        specs[1] = { item = "bun", half = "bottom", model = BUN.bottom, source = d.source }
-        specs[2] = { item = "bun", half = "top",    model = BUN.top,    source = d.source }
+    local hv = halvesFor(d.item)
+    if hv then
+        specs[1] = { item = d.item, half = "bottom", model = hv.bottom_model, source = d.source }
+        specs[2] = { item = d.item, half = "top",    model = hv.top_model,    source = d.source }
     else
         local stack = (type(d.stack) == "table" and #d.stack > 1) and d.stack or nil
         -- a model-less component (no prop, no stack) is allowed: makePart builds an
         -- ent-less "pill" part for it, which only lands in the Restaurant Bag (guarded
         -- on release in endPrepPlace) and shows as a 2D chip anchored over the bag.
-        -- cheese only rides a two-faced patty, matching the stovetop. A product with
-        -- a build stack (cooked pizza) renders as its whole layer tower; `sig` keeps
+        -- a melt topping only rides a two-faced dual item, matching the stovetop. A
+        -- product with a build stack renders as its whole layer tower; `sig` keeps
         -- the reservation pinned to that exact build variation.
         specs[1] = { item = d.item, model = d.model, source = d.source, half = d.half,
                      dual = dual, cheese = cheeseVal, sig = d.sig,
                      stack = stack, state = d.state, finishTool = d.finishTool,
                      label = d.label, image = d.image, -- carried for a model-less pill chip
-                     cheeseModel = (cheeseOn and dual) and d.cheeseModel or nil }
+                     top = dual and d.top or nil, topModel = dual and d.topModel or nil }
     end
 
     local parts = {}
@@ -3259,16 +3293,19 @@ RegisterNUICallback("cooking:endPrepPlace", function(d, cb)
     cb(res or { ok = false })
 end)
 
--- Spawn one prep part per decompose spec (a bun layer picks its bottom/top prop, as
--- when built). Reservation ids ride along on committed specs and are nil on a preview.
--- A meal layer's (dx, dy) tray offset rides onto the part for pile grouping.
+-- Spawn one prep part per decompose spec (a halves layer picks its bottom/top prop,
+-- as when built). Reservation ids ride along on committed specs and are nil on a
+-- preview. A meal layer's (dx, dy) tray offset rides onto the part for pile grouping.
 local function partsFromDecomposeSpecs(specs)
     local parts = {}
     for _, spec in ipairs(specs or {}) do
         local model = spec.model
-        if spec.item == "bun" and spec.half and BUN[spec.half] then model = BUN[spec.half] end
+        if spec.half then model = halfModel(spec.item, spec.half) or model end
         local p = makePart({ item = spec.item, model = model, source = spec.source,
-                             dual = spec.dual, cheese = spec.cheese, cheeseModel = spec.cheeseModel, half = spec.half,
+                             dual = spec.dual, cheese = spec.cheese, half = spec.half,
+                             -- melt topping: new specs ship top/topModel; LEGACY ones
+                             -- (old inventory metadata) still ship a raw cheeseModel
+                             top = spec.top, topModel = spec.topModel, cheeseModel = spec.cheeseModel,
                              sig = spec.sig, stack = spec.stack, state = spec.state, finishTool = spec.finishTool })
         if p then p.id = spec.id; p.dx, p.dy = spec.dx, spec.dy; parts[#parts + 1] = p end
     end
@@ -3766,12 +3803,12 @@ RegisterNUICallback("cooking:flip", function(d, cb)
     cb({ ok = true })
 end)
 
--- The dual patty under the cursor that can still take a cheese slice (none yet),
+-- The dual item under the cursor that can still take a melt topping (none yet),
 -- within the slot snap radius — so a dragged slice previews seated on its face,
--- exactly like the soda lid snapping onto a cup. Screen-projects each patty's cheese
--- seat and picks the nearest; restricted to patties at the station being worked so a
--- second grill's patties can't steal the snap.
-local function cheeseSnapPatty()
+-- exactly like the soda lid snapping onto a cup. Screen-projects each item's melt
+-- seat and picks the nearest; restricted to items at the station being worked so a
+-- second grill's items can't steal the snap.
+local function meltSnapTarget()
     local prop = currentCookProp; if not prop then return nil end
     local cxp, cyp = GetNuiCursorPosition()
     local sw, sh = GetActiveScreenResolution()
@@ -3780,10 +3817,10 @@ local function cheeseSnapPatty()
     local bestUid, bestD
     for uid, rec in pairs(CookDual) do
         local c = CookCoords[uid]
-        if c and rec and not rec.cheeseEnt then
+        if c and rec and not rec.meltEnt and not rec.topping then
             local dx0, dy0 = c.x - prop.x, c.y - prop.y
             if dx0 * dx0 + dy0 * dy0 <= 6.25 then -- within ~2.5m of the station
-                local sz = c.z + DUAL.base_lift + DUAL.face_gap + CHEESE.z
+                local sz = c.z + DUAL.base_lift + DUAL.face_gap + MELT_SEAT.z
                 local on, sx, sy = GetScreenCoordFromWorldCoord(c.x, c.y, sz)
                 if on then
                     local dx, dy = sx - curx, sy - cury
@@ -3798,10 +3835,10 @@ local function cheeseSnapPatty()
     return bestUid
 end
 
--- begin dragging a cheese slice: spawn the real slice prop and follow the cursor
--- in 3D (no 2D pill), exactly like placing a patty. TARGETING a patty snaps the
--- slice onto its visible face right away (previews seated, not only on release),
--- matching the soda lid. Release over the snapped patty applies it.
+-- begin dragging a melt-topping slice: spawn the real slice prop and follow the
+-- cursor in 3D (no 2D pill), exactly like placing a dual item. TARGETING an item
+-- snaps the slice onto its visible face right away (previews seated, not only on
+-- release), matching the soda lid. Release over the snapped item applies it.
 RegisterNUICallback("cooking:beginTopping", function(d, cb)
     cancelPlace()
     cancelMove()
@@ -3814,13 +3851,13 @@ RegisterNUICallback("cooking:beginTopping", function(d, cb)
     placing = p
     CreateThread(function()
         while placing == p do
-            local uid = cheeseSnapPatty()
+            local uid = meltSnapTarget()
             if uid then
-                -- hovering a cheese-able patty: seat the slice on its face exactly
-                -- where the melted cheese renders (placeCheeseAt), so it previews on top
+                -- hovering a topping-able dual item: seat the slice on its face exactly
+                -- where the melted topping renders (placeMeltAt), so it previews on top
                 p.hit, p.snapUid = true, uid
                 local c = CookCoords[uid]
-                placeCheeseAt(ent, c.x, c.y, c.z, CookYaw[uid])
+                placeMeltAt(ent, c.x, c.y, c.z, CookYaw[uid])
             else
                 p.snapUid = nil
                 local hit, coords = CursorToWorld()
@@ -3837,15 +3874,16 @@ RegisterNUICallback("cooking:beginTopping", function(d, cb)
     cb({ ok = true })
 end)
 
--- release a cheese drag: drop the preview slice and, if it was snapped onto a patty
--- (or the NUI reports one hovered), apply it — the server spawns the stuck-on slice.
--- The client's snapped patty wins so the apply matches exactly what previewed.
+-- release a topping drag: drop the preview slice and, if it was snapped onto a dual
+-- item (or the NUI reports one hovered), apply it — the server spawns the stuck-on
+-- slice. The client's snapped item wins so the apply matches exactly what previewed.
 RegisterNUICallback("cooking:endTopping", function(d, cb)
     local p = placing; placing = nil
     deletePreview(p)
     local uid = (p and p.snapUid) or (d and d.uid)
     if not (d and d.cancel) and uid and CookDual[uid] then
-        local res = lib.callback.await("pickle_restaurants:cooking:applyCheese", false, { uid = uid })
+        local res = lib.callback.await("pickle_restaurants:cooking:applyTopping", false,
+            { uid = uid, item = (p and p.item) or (d and d.item) })
         if res and res.error then ShowNotification(res.error) end
         if res and res.ok then RefreshBar() end
         return cb(res or { ok = false })
@@ -3936,11 +3974,12 @@ RegisterNUICallback("cooking:endLid", function(d, cb)
     cb({ ok = false })
 end)
 
--- drop cheese on a dual patty's cooked up-face (server validates + consumes cheese)
-RegisterNUICallback("cooking:applyCheese", function(d, cb)
+-- drop a melt topping on a dual item's cooked up-face (server validates + consumes it)
+RegisterNUICallback("cooking:applyTopping", function(d, cb)
     local uid = d and d.uid
     if uid and CookDual[uid] then
-        local res = lib.callback.await("pickle_restaurants:cooking:applyCheese", false, { uid = uid })
+        local res = lib.callback.await("pickle_restaurants:cooking:applyTopping", false,
+            { uid = uid, item = d.item })
         if res and res.error then ShowNotification(res.error) end
         if res and res.ok then RefreshBar() end
     end
@@ -4322,11 +4361,19 @@ RegisterNUICallback("cooking:beginBakeMix", function(d, cb)
     if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
     local base = currentCookProp
     if not base or base.prop_type ~= "kitchen_prep" then return cb({ ok = false }) end
-    if type(Baking) ~= "table" or not Baking.mix_model then return cb({ ok = false }) end
-    local mix = SpawnProp(Baking.mix_model, base.x, base.y, base.z)
+    -- `Baking` is a LIST of fill tools; the dragged card names its own mix_item — find
+    -- that tool's gesture config (mix_model + rub_dist), falling back to the card's model.
+    local tool
+    for _, b in ipairs(Baking or {}) do
+        if b.mix_item == (d and d.item) then tool = b break end
+    end
+    local mixModel = (tool and tool.mix_model) or (d and d.model)
+    if not mixModel then return cb({ ok = false }) end
+    local rubDist = tonumber(tool and tool.rub_dist) or 1.2
+    local mix = SpawnProp(mixModel, base.x, base.y, base.z)
     if not mix then return cb({ ok = false }) end
     SetEntityRotation(mix, 0.0, 0.0, curYaw(), 2, true)
-    local mixLift = meshBottomLift(Baking.mix_model) + FINISH.tool_lift
+    local mixLift = meshBottomLift(mixModel) + FINISH.tool_lift
     local f = { prop = mix, ghosts = {}, coverage = {}, applying = false }
     bakeMixing = f
     CreateThread(function()
@@ -4373,7 +4420,7 @@ RegisterNUICallback("cooking:beginBakeMix", function(d, cb)
                     end
                     if #ents > 0 then g = { ents = ents, offs = entOffs }; f.ghosts[tid] = g end
                 end
-                local progress = math.min((f.coverage[tid] or 0.0) / (tonumber(Baking.rub_dist) or 1.2), 1.0)
+                local progress = math.min((f.coverage[tid] or 0.0) / rubDist, 1.0)
                 if g and g.ents then
                     local a = math.floor(progress * 255 + 0.5)
                     for _, e in ipairs(g.ents) do if DoesEntityExist(e) then SetEntityAlpha(e, a, false) end end

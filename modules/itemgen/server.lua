@@ -76,37 +76,23 @@ local KNOWN = {
 
 local DEFAULT_WEIGHT = 200
 
--- ─── tray-only cook outputs (never real inventory items) ──────────────────────
--- A few cook outputs are intermediate build components, not standalone food: a
--- cooked patty only exists to be assembled into a burger/sandwich, so it lives
--- purely in the per-player "Cooked Items" tray and is deliberately NOT exported
--- as an inventory item. Their RAW inputs (raw_beef_patty, raw_chicken_patty) stay
--- real items — you carry those to the grill. (trayToInventory already refuses to
--- move an un-installed item, so these can never leave the tray.)
-local TRAY_ONLY = {
-    cooked_beef_patty    = true, burnt_beef_patty    = true,
-    cooked_chicken_patty = true, burnt_chicken_patty = true,
-}
-
 -- ─── retired items kept for a grace release ───────────────────────────────────
--- Doughnut variants collapsed into the single `cooked_doughnut` item (frosting/
--- sprinkles are metadata now), so nothing references these two outputs anymore.
--- `raw_pizza` followed: an assembled-but-uncooked INTERMEDIATE (an assembly output
--- that's some recipe's input) is tray-only now — it lives in the kitchen with its
--- build metadata until it's baked; the cooked output is the real item.
--- Keep exporting their definitions for one release so ox_inventory doesn't PURGE
--- any legacy stacks players still hold. Drop this set (and their KNOWN rows) once
--- the grace window has passed.
---   cheeseburger / deluxe_burger: the burger family collapsed into ONE `burger`
---   item (the extras are customer MODIFIERS now), so these two outputs are no
---   longer produced or sold — retained one release for legacy stacks.
---   decorated_cake: the cake collapsed into ONE `cooked_cake` item (frosting flavor
---   is a customer MODIFIER / build metadata now), so this output is no longer
---   produced or sold — retained one release for legacy stacks.
---   raw_cake / raw_cookie: the baking-tray outputs became tray-only uncooked
---   INTERMEDIATES (produced by rubbing mix into a tray, dragged straight to the oven),
---   so they're no longer carried items — retained one release for legacy stacks.
-local RETAIN = { "frosted_doughnut", "sprinkled_doughnut", "raw_pizza", "cheeseburger", "deluxe_burger", "decorated_cake", "raw_cake", "raw_cookie" }
+-- Outputs no code references anymore after various one-item consolidations
+-- (collapsed doughnut/cake/burger variants, retired intermediates). Exported one
+-- more release so ox_inventory doesn't PURGE legacy stacks players still hold.
+-- Stored as a self-seeded `itemgen_retained_items` setting so it's admin-visible
+-- config before it sunsets (a later release empties it). The list literal here is
+-- the seed only — read the setting at generate time.
+local RETAIN_SEED = { "frosted_doughnut", "sprinkled_doughnut", "raw_pizza", "cheeseburger", "deluxe_burger", "decorated_cake", "raw_cake", "raw_cookie" }
+
+local function retainedItems()
+    local r = GetSetting("itemgen_retained_items", nil)
+    if type(r) ~= "table" then
+        r = RETAIN_SEED
+        SetSetting("itemgen_retained_items", r)
+    end
+    return r
+end
 
 -- ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -115,25 +101,46 @@ local function humanize(name)
     return (s:gsub("(%a)([%w]*)", function(a, b) return a:upper() .. b end))
 end
 
+-- Cook outputs that only ever exist to be assembled into something else (a cooked
+-- patty → burger) are tray-only intermediates, never standalone inventory items.
+-- Derived rather than hardcoded: an output tray-only iff it's an assembly component
+-- (its burnt sibling too — burnt food is never handed out), MINUS anything a
+-- restaurant sells directly (safety valve: never drop a sold item from the export).
+local function trayOnlyOutputs(menuItems)
+    local set = {}
+    for _, r in ipairs(RecipeCache) do
+        if IsAssemblyComponent(r.output_cooked_item) then
+            set[r.output_cooked_item] = true
+            if r.output_burnt_item and r.output_burnt_item ~= "" then set[r.output_burnt_item] = true end
+        end
+    end
+    for it in pairs(menuItems or {}) do set[it] = nil end
+    return set
+end
+
 -- Build a de-duplicated, sorted list of every item the system references.
 local function collectItems()
+    -- Menu items are queried FIRST so the tray-only derivation can exempt anything
+    -- a restaurant sells directly.
+    local menuItems = {}
+    local menu = MySQL.query.await("SELECT DISTINCT item FROM pickle_restaurant_menu") or {}
+    for _, m in ipairs(menu) do if m.item and m.item ~= "" then menuItems[m.item] = true end end
+
+    local trayOnly = trayOnlyOutputs(menuItems)
     local set = {}
-    local function add(n) if n and n ~= "" and not TRAY_ONLY[n] then set[n] = true end end
+    local function add(n) if n and n ~= "" and not trayOnly[n] then set[n] = true end end
     local assembled = {}
-    for _, a in ipairs(GetSetting("assembly", {})) do assembled[a.output] = true end
-    -- baking-tray outputs (raw_cake / raw_cookie) are tray-only uncooked intermediates
-    -- too — produced by rubbing mix into a tray, never carried — so exclude them from
-    -- the carried-input export below (they're grace-retained via RETAIN for one release)
+    for _, a in ipairs(GetAssembly()) do assembled[a.output] = true end
+    -- bake-tray outputs (raw_cake / raw_cookie) are tray-only uncooked intermediates
+    -- too — produced by rubbing a fill tool's mix into a tray, never carried — so
+    -- exclude them from the carried-input export (grace-retained one release instead)
     local bakeOnly = {}
-    do
-        local baking = GetSetting("baking", {})
-        if type(baking) == "table" then
-            for _, t in ipairs(baking.trays or {}) do if t.output then bakeOnly[t.output] = true end end
-        end
+    for _, b in ipairs(GetBakingList()) do
+        for _, t in ipairs(b.trays or {}) do if t.output then bakeOnly[t.output] = true end end
     end
 
     for _, r in ipairs(RecipeCache) do
-        -- an ASSEMBLED cook input (raw_pizza) or a baking-tray output (raw_cookie) is
+        -- an ASSEMBLED cook input (raw_pizza) or a bake-tray output (raw_cookie) is
         -- tray-only, never an item — you build/fill it at prep and bake it; only true
         -- raw inputs are carried as items
         if not assembled[r.input_item] and not bakeOnly[r.input_item] then add(r.input_item) end
@@ -144,63 +151,64 @@ local function collectItems()
     -- cup (input) and the generic item export. GRACE: keep exporting the flavor
     -- outputs one release so legacy stacks players still hold aren't purged — drop
     -- the `add(d.output)` (and their KNOWN rows) once the window has passed.
-    for _, d in ipairs(GetSetting("drinks", {})) do add(d.input); add(d.output) end
+    for _, d in ipairs(GetDrinks()) do add(d.input); add(d.output) end
     add(GetSetting("drink_item", "drink"))
     -- (no lid item: the cup lid is kitchen equipment — cups come with lids)
-    for _, a in ipairs(GetSetting("assembly", {})) do
+    for _, a in ipairs(GetAssembly()) do
         -- an assembled-but-uncooked INTERMEDIATE (raw_pizza: an assembly output that
         -- is some recipe's input) is never an item — it stays in the cooked-items
         -- tray, metadata intact, until it's cooked into the real output item
         if not RecipeByInput[a.output] then add(a.output) end
         for _, c in ipairs(a.components or {}) do add(c) end
     end
-    -- crafts: every craft collapses to the ONE bag item (per-craft variants are NEVER
-    -- separate items — one-item consolidation), so export the bag item once plus each
-    -- craft's components. Modifier items ride along too (like assembly modifiers).
-    add(GetSetting("bag_item", "restaurant_bag"))
-    for _, cr in ipairs(GetSetting("crafts", {})) do
+    -- bag foods: every bag food collapses to the ONE bag item (per-food variants are
+    -- NEVER separate items — one-item consolidation), so export the bag item once
+    -- plus each food's components. Modifier items ride along too. `display_item`s are
+    -- NOT exported (they must already be installed to be picked).
+    add(BagItemName())
+    for _, cr in ipairs(GetCrafts()) do
         for _, c in ipairs(cr.components or {}) do add(c) end
         for _, m in ipairs(cr.modifiers or {}) do if m.item then add(m.item) end end
     end
-    -- finish tools (frosting…) + their targets/outputs
-    for _, f in ipairs(GetSetting("finishes", {})) do
+    -- decorate tools (frosting…) + their targets/outputs
+    for _, f in ipairs(GetFinishes()) do
         add(f.tool)
         for _, t in ipairs(f.targets or {}) do add(t.item); add(t.output) end
     end
-    -- condiment bottles (ketchup / mustard / mayo): each is a real consumed pool item,
+    -- layer tools (ketchup / mustard / mayo): each is a real consumed pool item,
     -- laid as a sauce layer on a build stack (the applied prop is visual-only, no item)
-    for _, c in ipairs(GetSetting("condiments", {})) do add(c.item) end
-    -- baking mix: the shared mix is a real (consumed) raw ingredient — a recipe input
-    -- the loop above wouldn't pick up on its own. (The trays themselves are free
-    -- equipment, and their outputs are tray-only intermediates — see bakeOnly above.)
-    do
-        local baking = GetSetting("baking", {})
-        if type(baking) == "table" then
-            add(baking.mix_item)
-        end
-    end
-    -- any item an admin mapped to a prep prop is a real item too (sprinkles etc.,
-    -- optional toppings that aren't a required component of any recipe)
-    for item in pairs(GetSetting("prep_models", {})) do add(item) end
-    local menu = MySQL.query.await("SELECT DISTINCT item FROM pickle_restaurant_menu") or {}
-    for _, m in ipairs(menu) do add(m.item) end
+    for _, c in ipairs(GetCondiments()) do add(c.item) end
+    -- fill tools (baking mix): each mix is a real (consumed) raw ingredient — a recipe
+    -- input the loop above wouldn't pick up on its own. (The trays are free equipment,
+    -- their outputs are tray-only intermediates — see bakeOnly above.)
+    for _, b in ipairs(GetBakingList()) do add(b.mix_item) end
+    -- any item mapped to a prep prop is a real item too (sprinkles etc., optional
+    -- toppings that aren't a required component of any recipe)
+    for item in pairs(GetPrepModels()) do add(item) end
+    for it in pairs(menuItems) do add(it) end
     -- the serving-tray meal item (kitchen prep) isn't a recipe/assembly output
     add(GetSetting("meal_item", "meal"))
     -- the POS receipt handed to a paying customer (metadata carries the ticket)
     add(GetSetting("receipt_item", "receipt"))
-    -- retired doughnut outputs: no longer referenced, exported one more release so
-    -- players' existing stacks aren't purged (see RETAIN above)
-    for _, n in ipairs(RETAIN) do add(n) end
+    -- retired outputs: no longer referenced, exported one more release so players'
+    -- existing stacks aren't purged (see retainedItems above)
+    for _, n in ipairs(retainedItems()) do add(n) end
+
+    -- Admin-authored ingredient cosmetics take precedence over the KNOWN seed table,
+    -- so a custom ingredient exports with its own label.
+    local ingCos = {}
+    for _, ing in ipairs(GetIngredientsCfg()) do if ing.item then ingCos[ing.item] = ing end end
 
     local list = {}
     for name in pairs(set) do
         local k = KNOWN[name] or {}
+        local ing = ingCos[name]
         list[#list + 1] = {
             name   = name,
-            label  = k.label or humanize(name),
-            weight = k.weight or DEFAULT_WEIGHT,
-            hunger = k.hunger,
-            thirst = k.thirst,
+            label  = (ing and ing.label) or k.label or humanize(name),
+            weight = (ing and ing.weight) or k.weight or DEFAULT_WEIGHT,
+            hunger = (ing and ing.hunger) or k.hunger,
+            thirst = (ing and ing.thirst) or k.thirst,
         }
     end
     table.sort(list, function(a, b) return a.name < b.name end)

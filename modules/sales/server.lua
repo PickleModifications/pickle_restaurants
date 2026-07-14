@@ -53,7 +53,7 @@ function BuildSellableCatalog(rid)
 
     -- components of any assembly recipe are kitchen-internal (patties, buns…)
     local isComponent = {}
-    for _, a in ipairs(GetSetting("assembly", {})) do
+    for _, a in ipairs(GetAssembly()) do
         for _, c in ipairs(a.components or {}) do isComponent[c] = true end
     end
 
@@ -65,7 +65,7 @@ function BuildSellableCatalog(rid)
     -- stays ONE sellable. Ticket instructions only — the cook applies the finish.
     local function finishModsFor(item)
         local mods = {}
-        for _, f in ipairs(GetSetting("finishes", {})) do
+        for _, f in ipairs(GetFinishes()) do
             if ItemExists(f.tool) then
                 local groupLabel = GetItemLabel(f.tool)
                 for _, t in ipairs(f.targets or {}) do
@@ -90,7 +90,7 @@ function BuildSellableCatalog(rid)
         end
     end
 
-    for _, a in ipairs(GetSetting("assembly", {})) do
+    for _, a in ipairs(GetAssembly()) do
         -- an assembly output that is some recipe's input is tray-only (raw_pizza)
         if not RecipeByInput[a.output] and ItemExists(a.output)
             and RestaurantHasAccess(rid, a.group) then
@@ -124,7 +124,7 @@ function BuildSellableCatalog(rid)
     -- (restaurant_bag::soup). Modifiers enriched exactly like the assembly block.
     local bagItem = BagItemName()
     if ItemExists(bagItem) then
-        for _, cr in ipairs(GetSetting("crafts", {})) do
+        for _, cr in ipairs(GetCrafts()) do
             if cr.id and cr.id ~= "" and cr.components and #cr.components > 0
                 and RestaurantHasAccess(rid, cr.group) then
                 local ok = true
@@ -156,7 +156,7 @@ function BuildSellableCatalog(rid)
     local drinkItem = DrinkItemName()
     if ItemExists(drinkItem) then
         local flavors, cost, grp, mixed = {}, nil, nil, false
-        for _, d in ipairs(GetSetting("drinks", {})) do
+        for _, d in ipairs(GetDrinks()) do
             if ItemExists(d.input) and d.output and d.output ~= ""
                 and RestaurantHasAccess(rid, d.group) then
                 -- the flavor tile reads the drink's own metadata: the output key's
@@ -182,7 +182,7 @@ function BuildSellableCatalog(rid)
         end
     end
 
-    for _, f in ipairs(GetSetting("finishes", {})) do
+    for _, f in ipairs(GetFinishes()) do
         if ItemExists(f.tool) and RestaurantHasAccess(rid, f.group) then
             for _, t in ipairs(f.targets or {}) do
                 if ItemExists(t.output) then
@@ -353,7 +353,7 @@ end
 -- read a plain burger as "two buns" and never match a one-bun order. Only the
 -- presence of an actual modifier item (a cheese slice) is a variation.
 local function modifierSpec(item)
-    for _, a in ipairs(GetSetting("assembly", {})) do
+    for _, a in ipairs(GetAssembly()) do
         if a.output == item then
             local byItem, byId = {}, {}
             for _, m in ipairs(a.modifiers or {}) do
@@ -369,18 +369,21 @@ local function modifierSpec(item)
 end
 
 -- The modifier items a built assembly stack actually carries, as item→count. Two
--- forms count as the "cheese" modifier: a cheese SLICE item layer, OR a patty MELTED
--- with cheese (cheese field ≥ 1) — a burger's cheese is the grill melt on the patty,
--- never a separate slice, so without this a grill-made cheeseburger reads as plain and
--- never matches a "+Cheese" order.
+-- forms count toward a modifier: the modifier item as a stack LAYER, OR the same
+-- item riding a layer as a melting TOPPING (a burger's cheese is the grill melt on
+-- the patty, never a separate slice, so without the second form a grill-made
+-- cheeseburger reads as plain and never matches its "+Cheese" order). Fully generic
+-- via LayerTopping — the modifier item is whatever the assembly configured.
 local function assemblyModCounts(spec, stack)
     local count = {}
     if type(stack) == "table" then
         for _, s in ipairs(stack) do
             if spec.byItem[s.item] then
                 count[s.item] = (count[s.item] or 0) + 1
-            elseif spec.byItem["cheese"] and (tonumber(s.cheese) or 0) >= 1 then
-                count["cheese"] = (count["cheese"] or 0) + 1
+            end
+            local topv = LayerTopping(s) -- a melting topping (or a legacy numeric cheese)
+            if topv and spec.byItem[topv.item] then
+                count[topv.item] = (count[topv.item] or 0) + 1
             end
         end
     end
@@ -434,7 +437,7 @@ end
 -- Resolve a finish tool:flavor to a display view (label like "Frosting: Strawberry"
 -- + the flavor's colour swatch), matching how the POS renders a finish modifier.
 local function finishFlavorView(toolId, flavorId)
-    for _, f in ipairs(GetSetting("finishes", {})) do
+    for _, f in ipairs(GetFinishes()) do
         if f.tool == toolId then
             for _, t in ipairs(f.targets or {}) do
                 for _, fl in ipairs(t.flavors or {}) do
@@ -451,7 +454,7 @@ end
 
 -- Resolve a drink flavor key to a display view (label + colour).
 local function drinkFlavorView(key)
-    for _, d in ipairs(GetSetting("drinks", {})) do
+    for _, d in ipairs(GetDrinks()) do
         if d.output == key then return { label = d.label or key, color = d.color } end
     end
     return { label = tostring(key) }
@@ -1189,13 +1192,13 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
         if plan.mealSig then
             local taken = PoolConsume(id, mealItem, plan.mealSig, 1)
             if not taken or #taken < 1 then error(GetItemLabel(mealItem), 0) end
-            Inventory.AddItem(customerSrc, mealItem, 1, BuildInvMeta(0, taken[1].meta))
+            Inventory.AddItem(customerSrc, mealItem, 1, BuildInvMeta(0, taken[1].meta, mealItem))
         end
         for _, g in ipairs(plan.singles) do
             local taken = PoolConsumeMatch(id, g.item, variationMatcher(g.item, g.key), g.count)
             if not taken or #taken < g.count then error(GetItemLabel(g.item), 0) end
             for _, inst in ipairs(taken) do
-                Inventory.AddItem(customerSrc, g.item, 1, BuildInvMeta(inst.cheese, inst.meta))
+                Inventory.AddItem(customerSrc, g.item, 1, BuildInvMeta(inst.cheese, inst.meta, g.item))
             end
         end
         takeReceipt(customerSrc, o, true) -- verified above; best-effort by now

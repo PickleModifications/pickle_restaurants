@@ -169,8 +169,10 @@ function Employees({ id, roles, employees, nearby }: any) {
 const KIND_LABEL: Record<string, string> = {
   recipe: "register.kind_recipe",
   assembly: "register.kind_assembly",
+  craft: "register.kind_craft",
   drink: "register.kind_drink",
   finish: "register.kind_finish",
+  condiment: "register.kind_condiment",
 };
 
 // The POS price list: one row per sellable the restaurant can access. A price of

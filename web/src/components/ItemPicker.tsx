@@ -10,6 +10,10 @@ export type Item = { name: string; label: string; image?: string };
  * from the server's live item catalogue. If `value` is set to something that
  * isn't in the catalogue the control renders in an error state so it's obvious
  * what needs fixing.
+ *
+ * `allowFree`: a value outside the catalogue is a legitimate KITCHEN item
+ * (a tray-only intermediate like `raw_pizza`) — render it neutrally instead of
+ * as a missing-item error, and let free text from the search box be committed.
  */
 export default function ItemPicker({
   items,
@@ -18,6 +22,7 @@ export default function ItemPicker({
   placeholder = _L("itempicker.select_placeholder"),
   className,
   allowEmpty = false,
+  allowFree = false,
 }: {
   items: Item[];
   value: string;
@@ -25,6 +30,7 @@ export default function ItemPicker({
   placeholder?: string;
   className?: string;
   allowEmpty?: boolean;
+  allowFree?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -32,7 +38,8 @@ export default function ItemPicker({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const selected = useMemo(() => items.find((i) => i.name === value), [items, value]);
-  const missing = !!value && !selected;
+  const free = !!value && !selected && allowFree; // a kitchen-only (non-inventory) item
+  const missing = !!value && !selected && !allowFree;
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -71,6 +78,11 @@ export default function ItemPicker({
           ) : (
             <span className="text-muted-foreground">{placeholder}</span>
           )}
+          {free && (
+            <span className="shrink-0 rounded border border-border bg-secondary px-1 py-px text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
+              {_L("itempicker.kitchen_item")}
+            </span>
+          )}
         </span>
         <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 opacity-50" />
       </button>
@@ -96,7 +108,16 @@ export default function ItemPicker({
                 onClick={() => { onChange(""); setOpen(false); setQuery(""); }}
               />
             )}
-            {filtered.length === 0 && (
+            {/* free-text commit: use whatever was typed as a kitchen-only codename */}
+            {allowFree && query.trim() && !items.some((i) => i.name === query.trim()) && (
+              <Option
+                label={_L("itempicker.free_use", query.trim())}
+                sub={_L("itempicker.kitchen_item")}
+                active={query.trim() === value}
+                onClick={() => { onChange(query.trim()); setOpen(false); setQuery(""); }}
+              />
+            )}
+            {filtered.length === 0 && !(allowFree && query.trim()) && (
               <div className="px-3 py-3 text-center text-xs text-muted-foreground">{_L("itempicker.no_match", query)}</div>
             )}
             {filtered.map((i) => (

@@ -9,12 +9,12 @@ local function buildAdminData()
         restaurants = {},
         theme       = GetSetting("app_theme", nil), -- App-level: skins /restaurants itself
         settings    = SettingsCache,
-        recipes     = AnnotateRecipes(),   -- each row flagged valid/missing
-        drinks      = AnnotateDrinks(),
-        assembly    = AnnotateAssembly(),
-        crafts      = AnnotateCrafts(),    -- Restaurant Bag combine recipes, flagged
-        finishes    = AnnotateFinishes(),  -- finish tools (frosting…), flagged too
-        condiments  = AnnotateCondiments(),-- squeeze-bottle sauces, flagged too
+        -- The three authored creation kinds, each flagged valid/missing + per-entry
+        -- annotations (defaultPrice, tap, duplicate_input, *_installed). The NUI
+        -- strips the annotations before saving the array back.
+        foods       = AnnotateFoods(),
+        tools       = AnnotateTools(),
+        ingredients = AnnotateIngredients(),
         items       = BuildItemList(),     -- catalogue for item-pickers
         groups      = CollectGroups(),     -- every group name in use (UI suggestions)
         players     = {},
@@ -186,11 +186,30 @@ end)
 
 -- ─── settings ────────────────────────────────────────────────────────────────
 
+-- The authored menu arrays (foods/tools/ingredients) are settings like any other,
+-- but each is sanitized on the way in (the NUI is untrusted) and triggers a
+-- derivation rebuild so the runtime caches (RecipeCache, derived assembly/drinks/
+-- crafts/finishes/condiments/baking, prep models) reflect the edit immediately.
+local MENU_SANITIZERS = {
+    foods       = SanitizeFoods,
+    tools       = SanitizeTools,
+    ingredients = SanitizeIngredients,
+}
+
+-- Apply a settings write, routing the three authored menu keys through their
+-- sanitizer. Returns true if a menu key was written (caller rebuilds derived).
+local function applySetting(key, value)
+    local san = MENU_SANITIZERS[key]
+    if san then SetSetting(key, san(value)); return true end
+    SetSetting(key, value)
+    return false
+end
+
 lib.callback.register("pickle_restaurants:admin:saveSetting", function(src, d)
     if not IsPlayerAdmin(src) then return { ok = false } end
     if not d.key then return { ok = false } end
-    SetSetting(d.key, d.value)
-    SyncToClient(-1) -- drinks/assembly/blip may have changed
+    if applySetting(d.key, d.value) then RebuildDerived() end
+    SyncToClient(-1) -- foods/tools/blip may have changed
     ShowNotification(src, _L("admin_settings_saved"))
     return { ok = true }
 end)
@@ -201,68 +220,25 @@ end)
 lib.callback.register("pickle_restaurants:admin:saveSettings", function(src, d)
     if not IsPlayerAdmin(src) then return { ok = false } end
     if type(d.settings) ~= "table" then return { ok = false } end
-    local n = 0
-    for k, v in pairs(d.settings) do SetSetting(k, v); n = n + 1 end
+    local n, rebuild = 0, false
+    for k, v in pairs(d.settings) do
+        if applySetting(k, v) then rebuild = true end
+        n = n + 1
+    end
     if n == 0 then return { ok = false } end
+    if rebuild then RebuildDerived() end
     SyncToClient(-1)
     ShowNotification(src, _L("admin_settings_saved"))
     return { ok = true }
 end)
 
--- ─── recipes ─────────────────────────────────────────────────────────────────
+-- ─── menu ────────────────────────────────────────────────────────────────────
 
-lib.callback.register("pickle_restaurants:admin:saveRecipe", function(src, r)
-    if not IsPlayerAdmin(src) then return { ok = false } end
-    if not r.input_item or r.input_item == "" then return { ok = false, error = _L("admin_input_item_required") } end
-    local method = (r.method == "oven" or r.method == "fry") and r.method or "grill"
-    -- optional container prop the food cooks in (cake tin…); empty clears it
-    local container = (type(r.container_model) == "string" and r.container_model ~= "") and r.container_model or nil
-    -- per-recipe freshness window: blank clears it (NULL = use the global default),
-    -- a number is clamped to >= 0 (0 = never expires)
-    local expire = nil
-    if r.expire_seconds ~= nil and r.expire_seconds ~= "" then
-        expire = math.max(0, math.floor(tonumber(r.expire_seconds) or 0))
-    end
-    -- optional access group ("bakery"…); blank clears it (NULL = every restaurant)
-    local group = (type(r.group) == "string" and r.group:gsub("^%s+", ""):gsub("%s+$", "") ~= "")
-        and r.group:gsub("^%s+", ""):gsub("%s+$", "") or nil
-    MySQL.update.await([[
-        INSERT INTO pickle_restaurant_recipes
-            (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count, container_model, expire_seconds, `group`)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-            station = VALUES(station), raw_model = VALUES(raw_model), cooked_model = VALUES(cooked_model),
-            burnt_model = VALUES(burnt_model), output_cooked_item = VALUES(output_cooked_item),
-            output_burnt_item = VALUES(output_burnt_item), cook_ms = VALUES(cook_ms), burn_ms = VALUES(burn_ms),
-            dual_sided = VALUES(dual_sided), method = VALUES(method), output_count = VALUES(output_count),
-            container_model = VALUES(container_model), expire_seconds = VALUES(expire_seconds), `group` = VALUES(`group`)
-    ]], {
-        r.input_item, r.station or "fryer", r.raw_model or "", r.cooked_model or "", r.burnt_model or "",
-        r.output_cooked_item or "", r.output_burnt_item or "",
-        tonumber(r.cook_ms) or 15000, tonumber(r.burn_ms) or 15000,
-        (r.dual_sided == true or r.dual_sided == 1) and 1 or 0, method,
-        math.max(1, math.floor(tonumber(r.output_count) or 1)),
-        container, expire, group,
-    })
-    LoadRecipes()
-    SyncToClient(-1)
-    ShowNotification(src, _L("admin_recipe_saved"))
-    return { ok = true }
-end)
-
-lib.callback.register("pickle_restaurants:admin:deleteRecipe", function(src, d)
-    if not IsPlayerAdmin(src) then return { ok = false } end
-    MySQL.update.await("DELETE FROM pickle_restaurant_recipes WHERE input_item = ?", { d.input_item })
-    LoadRecipes()
-    SyncToClient(-1)
-    ShowNotification(src, _L("admin_recipe_deleted"))
-    return { ok = true }
-end)
-
--- Wipe all recipes and restore the built-in defaults (Settings → General).
+-- Reset the whole authored menu (foods + tools + ingredients) to the shipped
+-- defaults (Settings → General). Rebuilds derived caches + syncs.
 lib.callback.register("pickle_restaurants:admin:resetRecipes", function(src)
     if not IsPlayerAdmin(src) then return { ok = false } end
-    ResetRecipesToDefault()
+    ResetMenuToDefault()
     SyncToClient(-1)
     ShowNotification(src, _L("admin_recipes_reset"))
     return { ok = true }

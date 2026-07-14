@@ -40,12 +40,18 @@ export default {
       keyframes: {
         "fade-in": { from: { opacity: "0", transform: "translateY(8px)" }, to: { opacity: "1", transform: "translateY(0)" } },
         "pop-in": { from: { opacity: "0", transform: "scale(0.975)" }, to: { opacity: "1", transform: "scale(1)" } },
+        // a modal scrim fading in (opacity only — no translate, it's full-bleed)
+        "scrim": { from: { opacity: "0" }, to: { opacity: "1" } },
+        // a dialog rising + scaling into place over the scrim
+        "dialog-in": { from: { opacity: "0", transform: "translateY(10px) scale(0.97)" }, to: { opacity: "1", transform: "translateY(0) scale(1)" } },
         // a receipt sliding out of the printer
         "print": { from: { opacity: "0", transform: "translateY(-14px)" }, to: { opacity: "1", transform: "translateY(0)" } },
       },
       animation: {
         "fade-in": "fade-in 0.18s ease-out",
         "pop-in": "pop-in 0.16s ease-out",
+        "scrim": "scrim 0.15s ease-out",
+        "dialog-in": "dialog-in 0.19s cubic-bezier(0.2, 0.9, 0.3, 1)",
         "print": "print 0.28s cubic-bezier(0.2, 0.9, 0.3, 1)",
       },
     },

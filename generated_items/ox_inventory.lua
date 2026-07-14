@@ -69,6 +69,12 @@
         stack  = true,
         close  = true,
     },
+    ['cheese'] = {
+        label  = 'Cheese Slice',
+        weight = 60,
+        stack  = true,
+        close  = true,
+    },
     ['cheeseburger'] = {
         label  = 'Cheeseburger',
         weight = 380,
@@ -101,6 +107,12 @@
             anim = { dict = 'mp_player_intdrink', clip = 'loop_bottle' }, usetime = 2500,
         },
         consume = 1,
+    },
+    ['cokebaggy'] = {
+        label  = 'Cokebaggy',
+        weight = 200,
+        stack  = true,
+        close  = true,
     },
     ['cooked_cake'] = {
         label  = 'Cake',
@@ -257,6 +269,12 @@
         },
         consume = 1,
     },
+    ['ketchup'] = {
+        label  = 'Ketchup',
+        weight = 200,
+        stack  = true,
+        close  = true,
+    },
     ['lemonade'] = {
         label  = 'Lemonade Bliss',
         weight = 300,
@@ -274,6 +292,12 @@
         stack  = true,
         close  = true,
     },
+    ['mayo'] = {
+        label  = 'Mayo',
+        weight = 200,
+        stack  = true,
+        close  = true,
+    },
     ['meal'] = {
         label  = 'Meal',
         weight = 800,
@@ -285,6 +309,12 @@
         },
         consume = 1,
     },
+    ['mustard'] = {
+        label  = 'Mustard',
+        weight = 200,
+        stack  = true,
+        close  = true,
+    },
     ['pepperoni'] = {
         label  = 'Pepperoni',
         weight = 80,
@@ -294,6 +324,18 @@
     ['pickle'] = {
         label  = 'Pickle',
         weight = 40,
+        stack  = true,
+        close  = true,
+    },
+    ['pickle_weed_bud'] = {
+        label  = 'Pickle Weed Bud',
+        weight = 200,
+        stack  = true,
+        close  = true,
+    },
+    ['pickle_weed_seed'] = {
+        label  = 'Pickle Weed Seed',
+        weight = 200,
         stack  = true,
         close  = true,
     },
@@ -374,6 +416,17 @@
         weight = 10,
         stack  = true,
         close  = true,
+    },
+    ['restaurant_bag'] = {
+        label  = 'Restaurant Bag',
+        weight = 800,
+        stack  = true,
+        close  = true,
+        client = {
+            status = { hunger = 300000, },
+            anim = { dict = 'mp_player_inteat@burger', clip = 'mp_player_int_eat_burger' }, usetime = 2500,
+        },
+        consume = 1,
     },
     ['soda'] = {
         label  = 'Classic Cola',

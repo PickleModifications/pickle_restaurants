@@ -1,125 +1,193 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { fetchNui } from "@/lib/nui";
 import { useAutoSave } from "@/lib/autosave";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { type Item } from "@/components/ItemPicker";
 import {
-  ItemImage, labelOf, type Recipe, BLANK_RECIPE, STATION_LABEL,
-  RecipeForm, DrinkFields, AssemblyFields, CraftFields, FinishFields, CondimentFields,
+  ItemImage, labelOf, prettyName, foodSubBadge, foodImageItem,
+  FoodForm, ToolForm, IngredientForm,
+  type Food, type Step, type Tool, type IngredientDef,
 } from "@/components/editors";
+import { Modal } from "@/components/ui/modal";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { Plus, Trash2, Pencil, X, TriangleAlert, EyeOff, Check, Loader2, Tags, ChevronDown } from "lucide-react";
+import { Plus, Trash2, Pencil, TriangleAlert, EyeOff, Check, Loader2, Tags, ChevronDown, UtensilsCrossed, Wrench, Layers } from "lucide-react";
 
 type Props = {
-  recipes: Recipe[]; assembly: any[]; crafts: any[]; drinks: any[]; finishes: any[]; condiments: any[];
+  foods: Food[]; tools: Tool[]; ingredients: IngredientDef[];
   settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void;
 };
 
-const KIND_LABEL: Record<string, string> = {
-  recipe: "menu.kind_recipe", assembly: "menu.kind_assembly", craft: "menu.kind_craft", drink: "menu.kind_drink", finish: "menu.kind_finish", condiment: "menu.kind_condiment",
+// strip the server-side annotations (valid/missing/defaultPrice/tap/…) so we
+// never persist them back into the settings blob when saving the whole array.
+// Kept in local state for display; removed only on the way out to the server.
+const clean = (e: any) => {
+  const {
+    valid, missing, defaultPrice, invalid_models,
+    bag_item_installed, drink_item_installed, tap, duplicate_input,
+    ...rest
+  } = e;
+  return rest;
 };
 
-// strip the server-side annotations (valid/missing/defaultPrice) so we never
-// persist them back into the settings blob when saving the whole array. Kept in
-// local state for display; removed only on the way out to the server.
-const clean = (e: any) => { const { valid, missing, defaultPrice, ...rest } = e; return rest; };
+// The New Recipe presets: each seeds a steps skeleton (or the bag kind) so the
+// editor opens already shaped like the dish being made. The one-line description
+// is the point — the menu explains itself.
+const PRESETS: { key: string; label: string; desc: string; make: () => Partial<Food> }[] = [
+  {
+    key: "cook", label: _L("menu.preset_cook"), desc: _L("menu.preset_cook_desc"),
+    make: () => ({ kind: "interactive", steps: [{ type: "cook", station: "fryer", method: "fry", cook_ms: 15000, burn_ms: 15000 }] }),
+  },
+  {
+    key: "assemble", label: _L("menu.preset_assemble"), desc: _L("menu.preset_assemble_desc"),
+    make: () => ({ kind: "interactive", steps: [{ type: "assemble", components: [] }] }),
+  },
+  {
+    key: "cook_assemble", label: _L("menu.preset_cook_assemble"), desc: _L("menu.preset_cook_assemble_desc"),
+    make: () => ({
+      kind: "interactive",
+      steps: [
+        { type: "cook", station: "stovetop", method: "grill", cook_ms: 15000, burn_ms: 15000 },
+        { type: "assemble", components: [] },
+      ],
+    }),
+  },
+  {
+    key: "assemble_bake", label: _L("menu.preset_assemble_bake"), desc: _L("menu.preset_assemble_bake_desc"),
+    make: () => ({
+      kind: "interactive",
+      steps: [
+        { type: "assemble", components: [] },
+        { type: "cook", station: "stovetop", method: "oven", cook_ms: 15000, burn_ms: 15000 },
+      ],
+    }),
+  },
+  {
+    key: "pour", label: _L("menu.preset_pour"), desc: _L("menu.preset_pour_desc"),
+    make: () => ({ kind: "interactive", steps: [{ type: "pour", fill_ms: 3000 }] }),
+  },
+  {
+    key: "bag", label: _L("menu.preset_bag"), desc: _L("menu.preset_bag_desc"),
+    make: () => ({ kind: "bag", components: [] }),
+  },
+];
 
-export default function Menu({ recipes, assembly, crafts, drinks, finishes, condiments, settings, items, groups, onSaved }: Props) {
-  // Assembly + crafts + drinks + finishes + condiments all live in the `settings`
-  // blob and save as a whole array (per key).
-  const [asm, setAsm] = useState<any[]>(() => (Array.isArray(assembly) ? assembly : []));
-  const [craftList, setCraftList] = useState<any[]>(() => (Array.isArray(crafts) ? crafts : []));
-  const [drinkList, setDrinkList] = useState<any[]>(() => (Array.isArray(drinks) ? drinks : []));
-  const [finishList, setFinishList] = useState<any[]>(() => (Array.isArray(finishes) ? finishes : []));
-  const [condimentList, setCondimentList] = useState<any[]>(() => (Array.isArray(condiments) ? condiments : []));
-  // Finish tools + condiment bottles buy their stock via the ingredient_costs map
-  // (keyed by the tool/bottle item — saved whole so other costs aren't clobbered).
+export default function Menu({ foods, tools, ingredients, settings, items, groups, onSaved }: Props) {
+  // The whole menu lives in the settings blob as three arrays, each saved whole
+  // via the batched settings autosave (the server sanitizes + rebuilds + syncs).
+  const [foodList, setFoodList] = useState<Food[]>(() => (Array.isArray(foods) ? foods : []));
+  const [toolList, setToolList] = useState<Tool[]>(() => (Array.isArray(tools) ? tools : []));
+  const [ingList, setIngList] = useState<IngredientDef[]>(() => (Array.isArray(ingredients) ? ingredients : []));
+  // Tools + ingredients buy their stock via the ingredient_costs map (keyed by
+  // the item — saved whole so other costs aren't clobbered).
   const [costs, setCosts] = useState<Record<string, number>>(() => ({ ...(settings?.ingredient_costs || {}) }));
-  const asmStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { assembly: asm.map(clean) } }).then(onSaved), [asm]);
-  const craftStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { crafts: craftList.map(clean) } }).then(onSaved), [craftList]);
-  const drinkStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { drinks: drinkList.map(clean) } }).then(onSaved), [drinkList]);
-  const finishStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { finishes: finishList.map(clean) } }).then(onSaved), [finishList]);
-  const condimentStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { condiments: condimentList.map(clean) } }).then(onSaved), [condimentList]);
+  const foodStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { foods: foodList.map(clean) } }).then(onSaved), [foodList]);
+  const toolStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { tools: toolList.map(clean) } }).then(onSaved), [toolList]);
+  const ingStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { ingredients: ingList.map(clean) } }).then(onSaved), [ingList]);
   const costStatus = useAutoSave(() => fetchNui("admin:saveSettings", { settings: { ingredient_costs: costs } }).then(onSaved), [costs]);
-  const allStatus = [asmStatus, craftStatus, drinkStatus, finishStatus, condimentStatus, costStatus];
+  const allStatus = [foodStatus, toolStatus, ingStatus, costStatus];
   const listStatus = allStatus.includes("saving") ? "saving" : allStatus.includes("saved") ? "saved" : "idle";
 
-  const updateAsm = (i: number, patch: any) => setAsm((l) => l.map((a, idx) => (idx === i ? { ...a, ...patch } : a)));
-  const updateCraft = (i: number, patch: any) => setCraftList((l) => l.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
-  const updateDrink = (i: number, patch: any) => setDrinkList((l) => l.map((d, idx) => (idx === i ? { ...d, ...patch } : d)));
-  const updateFinish = (i: number, patch: any) => setFinishList((l) => l.map((f, idx) => (idx === i ? { ...f, ...patch } : f)));
-  const updateCondiment = (i: number, patch: any) => setCondimentList((l) => l.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
+  const updateFood = (i: number, patch: any) => setFoodList((l) => l.map((f, idx) => (idx === i ? { ...f, ...patch } : f)));
+  const updateTool = (i: number, patch: any) => setToolList((l) => l.map((t, idx) => (idx === i ? { ...t, ...patch } : t)));
+  const updateIng = (i: number, patch: any) => setIngList((l) => l.map((g, idx) => (idx === i ? { ...g, ...patch } : g)));
+  const setCost = (item: string | undefined, v: number) => {
+    if (!item) return;
+    setCosts((c) => ({ ...c, [item]: Math.max(0, Math.floor(v || 0)) }));
+  };
 
-  // One row is expanded/edited at a time. `editKey` = which; recipes edit a
-  // working copy (`draft`) auto-saved per-row, assembly/drinks edit the array.
+  // Creating/editing happens in a modal dialog (an inline editor fought the
+  // scrolling list). `editKey` ("food:3" / "tool:1" / …) names the open entry;
+  // `picking` shows the New-Recipe preset chooser instead. At most one is set.
   const [editKey, setEditKey] = useState<string | null>(null);
-  const [draft, setDraft] = useState<Recipe | null>(null);
-  const lastSaved = useRef<string>("");
   const [newOpen, setNewOpen] = useState(false);
+  // "New Recipe" first asks WHAT it is (kind + preset) before showing any fields.
+  const [picking, setPicking] = useState(false);
+  const close = () => { setEditKey(null); setPicking(false); };
 
-  const recipeStatus = useAutoSave(() => {
-    if (!draft || !draft.input_item) return;
-    const json = JSON.stringify(draft);
-    if (json === lastSaved.current) return;
-    lastSaved.current = json;
-    return Promise.resolve(fetchNui("admin:saveRecipe", draft)).then(() => onSaved());
-  }, [draft]);
-
-  const openRecipe = (r: Recipe, key: string) => { lastSaved.current = JSON.stringify(r); setDraft({ ...BLANK_RECIPE, ...r }); setEditKey(key); };
-  const close = () => { setEditKey(null); setDraft(null); };
-
-  const addRecipe = () => { setNewOpen(false); openRecipe({ ...BLANK_RECIPE }, "recipe:__new__"); };
-  const addAssembly = () => {
-    setNewOpen(false);
-    setAsm((l) => { const next = [...l, { output: "", label: "", model: "pickle_bread_bun_01", components: [] }]; setEditKey(`assembly:${next.length - 1}`); return next; });
+  const addFood = (preset: (typeof PRESETS)[number]) => {
+    setPicking(false);
+    setFoodList((l) => {
+      const next = [...l, { label: "", group: "", modifiers: [], ...preset.make() } as Food];
+      setEditKey(`food:${next.length - 1}`);
+      return next;
+    });
   };
-  const addCraft = () => {
+  const addTool = () => {
     setNewOpen(false);
-    setCraftList((l) => { const next = [...l, { id: "", label: "", components: [], modifiers: [] }]; setEditKey(`craft:${next.length - 1}`); return next; });
+    setToolList((l) => {
+      const next = [...l, { item: "", tool_model: "", mode: "layer", applied_model: "", group: "" } as Tool];
+      setEditKey(`tool:${next.length - 1}`);
+      return next;
+    });
   };
-  const addDrink = () => {
+  const addIngredient = () => {
     setNewOpen(false);
-    setDrinkList((l) => { const next = [...l, { input: "", output: "", label: "", model: "pickle_drink_container_01", fill_ms: 3000 }]; setEditKey(`drink:${next.length - 1}`); return next; });
-  };
-  const addFinish = () => {
-    setNewOpen(false);
-    setFinishList((l) => { const next = [...l, { tool: "", tool_model: "", rub_dist: 1.2, group: "", targets: [] }]; setEditKey(`finish:${next.length - 1}`); return next; });
-  };
-  const addCondiment = () => {
-    setNewOpen(false);
-    setCondimentList((l) => { const next = [...l, { item: "", container_model: "", applied_model: "" }]; setEditKey(`condiment:${next.length - 1}`); return next; });
+    setIngList((l) => {
+      const next = [...l, { item: "", model: "", group: "" } as IngredientDef];
+      setEditKey(`ing:${next.length - 1}`);
+      return next;
+    });
   };
 
   // Build the unified, grouped row list.
   const groupsOut = useMemo(() => {
-    type Row = { kind: string; key: string; group: string; sortLabel: string; index?: number; data: any };
+    type Row = { kind: string; key: string; group: string; sortLabel: string; index: number; data: any };
     const rows: Row[] = [];
-    recipes.forEach((r) => rows.push({ kind: "recipe", key: `recipe:${r.input_item}`, group: (r.group as string) || "", sortLabel: labelOf(items, r.output_cooked_item || r.input_item), data: r }));
-    asm.forEach((a, i) => rows.push({ kind: "assembly", key: `assembly:${i}`, group: a.group || "", sortLabel: a.label || a.output || "", index: i, data: a }));
-    craftList.forEach((c, i) => rows.push({ kind: "craft", key: `craft:${i}`, group: c.group || "", sortLabel: c.label || c.id || "", index: i, data: c }));
-    drinkList.forEach((d, i) => rows.push({ kind: "drink", key: `drink:${i}`, group: d.group || "", sortLabel: d.label || d.output || "", index: i, data: d }));
-    finishList.forEach((f, i) => rows.push({ kind: "finish", key: `finish:${i}`, group: f.group || "", sortLabel: f.tool ? labelOf(items, f.tool) : "", index: i, data: f }));
-    condimentList.forEach((c, i) => rows.push({ kind: "condiment", key: `condiment:${i}`, group: "", sortLabel: c.item ? labelOf(items, c.item) : "", index: i, data: c }));
+    foodList.forEach((f, i) => rows.push({
+      kind: "food", key: `food:${i}`, group: (f.group as string) || "",
+      sortLabel: f.label || (f.id ? prettyName(f.id) : labelOf(items, foodImageItem(f))), index: i, data: f,
+    }));
+    toolList.forEach((t, i) => rows.push({
+      kind: "tool", key: `tool:${i}`, group: (t.group as string) || "",
+      sortLabel: t.item ? labelOf(items, t.item) : "", index: i, data: t,
+    }));
+    ingList.forEach((g, i) => rows.push({
+      kind: "ing", key: `ing:${i}`, group: (g.group as string) || "",
+      sortLabel: g.label || (g.item ? labelOf(items, g.item) : ""), index: i, data: g,
+    }));
 
     const by: Record<string, Row[]> = {};
     rows.forEach((r) => { (by[r.group] ||= []).push(r); });
-    const order = ["recipe", "assembly", "craft", "drink", "finish", "condiment"];
+    const order = ["food", "tool", "ing"];
     const names = Object.keys(by).sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b)));
     return names.map((g) => ({
       name: g,
       rows: by[g].sort((a, b) => (order.indexOf(a.kind) - order.indexOf(b.kind)) || a.sortLabel.localeCompare(b.sortLabel)),
     }));
-  }, [recipes, asm, craftList, drinkList, finishList, condimentList, items]);
+  }, [foodList, toolList, ingList, items]);
 
+  const KIND_LABEL: Record<string, string> = { food: "menu.kind_recipe", tool: "menu.kind_tool", ing: "menu.kind_ingredient" };
   const imgItem = (row: any) =>
-    row.kind === "recipe" ? row.data.output_cooked_item || row.data.input_item
-    : row.kind === "assembly" ? row.data.output
-    : row.kind === "craft" ? (settings?.bag_item || "restaurant_bag")
-    : row.kind === "drink" ? row.data.input
-    : row.kind === "condiment" ? row.data.item
-    : row.data.tool;
+    row.kind === "food" ? foodImageItem(row.data)
+    : row.kind === "tool" ? row.data.item
+    : row.data.item;
+
+  // The entry the dialog is editing, resolved live from the lists by index (the
+  // lists only change via the dialog's own patches or a delete that closes it,
+  // so the index stays valid while open).
+  const editing = editKey ? (() => {
+    const [kind, idxStr] = editKey.split(":");
+    const index = Number(idxStr);
+    // `data` is a plain union across the three kinds; the `kind` tag guards each
+    // use, so treat it as any (matching how the row list already types data).
+    const data: any = kind === "food" ? foodList[index] : kind === "tool" ? toolList[index] : ingList[index];
+    return data ? { kind, index, data } : null;
+  })() : null;
+
+  const KIND_ICON: Record<string, JSX.Element> = {
+    food: <UtensilsCrossed className="h-4 w-4" />,
+    tool: <Wrench className="h-4 w-4" />,
+    ing: <Layers className="h-4 w-4" />,
+  };
+  const editTitle = editing
+    ? editing.kind === "food"
+      ? (editing.data.label || (editing.data.id ? prettyName(editing.data.id) : _L("menu.kind_recipe")))
+      : editing.kind === "tool"
+        ? (editing.data.item ? labelOf(items, editing.data.item) : _L("menu.kind_tool"))
+        : (editing.data.label || (editing.data.item ? labelOf(items, editing.data.item) : _L("menu.kind_ingredient")))
+    : "";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -132,12 +200,9 @@ export default function Menu({ recipes, assembly, crafts, drinks, finishes, cond
             <Button size="sm" onClick={() => setNewOpen((v) => !v)}><Plus className="h-4 w-4" /> {_L("menu.new")} <ChevronDown className="h-3 w-3" /></Button>
             {newOpen && (
               <div className="absolute right-0 z-10 mt-1 w-52 overflow-hidden rounded-md border border-border bg-popover shadow-md">
-                <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addRecipe}>{_L("menu.new_recipe")}</button>
-                <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addAssembly}>{_L("menu.new_assembly")}</button>
-                <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addCraft}>{_L("menu.new_craft")}</button>
-                <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addDrink}>{_L("menu.new_drink")}</button>
-                <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addFinish}>{_L("menu.new_finish")}</button>
-                <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addCondiment}>{_L("menu.new_condiment")}</button>
+                <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={() => { setNewOpen(false); setPicking(true); setEditKey(null); }}>{_L("menu.new_recipe")}</button>
+                <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addTool}>{_L("menu.new_tool")}</button>
+                <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addIngredient}>{_L("menu.new_ingredient")}</button>
               </div>
             )}
           </div>
@@ -145,13 +210,6 @@ export default function Menu({ recipes, assembly, crafts, drinks, finishes, cond
       </div>
 
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-        {/* New-recipe editor (has no row yet) shows at the top while open. */}
-        {editKey === "recipe:__new__" && draft && (
-          <EditorShell title={_L("recipes.new_recipe")} status={recipeStatus} onClose={close}>
-            <RecipeForm form={draft} setForm={setDraft} items={items} groups={groups} />
-          </EditorShell>
-        )}
-
         {groupsOut.length === 0 && <div className="py-6 text-center text-sm text-muted-foreground">{_L("menu.none_yet")}</div>}
 
         {groupsOut.map((grp) => (
@@ -173,12 +231,15 @@ export default function Menu({ recipes, assembly, crafts, drinks, finishes, cond
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="truncate font-medium">{row.sortLabel || "—"}</span>
                           <Badge variant="secondary">{_L(KIND_LABEL[row.kind])}</Badge>
-                          {row.kind === "recipe" && <Badge variant="outline">{STATION_LABEL[d.station] || d.station}</Badge>}
-                          {row.kind === "drink" && d.drink_item_installed === false && (
+                          {row.kind === "food" && <Badge variant="outline">{foodSubBadge(d)}</Badge>}
+                          {row.kind === "food" && d.drink_item_installed === false && (
                             <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("menu.drink_not_installed")}</Badge>
                           )}
-                          {row.kind === "craft" && d.bag_item_installed === false && (
+                          {row.kind === "food" && d.bag_item_installed === false && (
                             <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("menu.bag_not_installed")}</Badge>
+                          )}
+                          {row.kind === "food" && !!d.duplicate_input && (
+                            <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("menu.duplicate_input")}</Badge>
                           )}
                           {typeof d.defaultPrice === "number" && d.defaultPrice > 0 && (
                             <Badge variant="outline" className="text-emerald-500">{_L("menu.default_price", d.defaultPrice)}</Badge>
@@ -199,75 +260,82 @@ export default function Menu({ recipes, assembly, crafts, drinks, finishes, cond
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
-                      <Button size="sm" variant={isEditing ? "secondary" : "outline"} onClick={() => {
-                        if (isEditing) { close(); return; }
-                        if (row.kind === "recipe") openRecipe(d, row.key); else setEditKey(row.key);
-                      }}><Pencil className="h-4 w-4" /></Button>
-                      {/* A deleted DEFAULT topping/flavor re-seeds on next restart (the
-                          embedded default menu is recoverable); admin-added ones stay gone. */}
-                      <Button size="sm" variant="destructive" onClick={async () => {
-                        if (row.kind === "recipe") { await fetchNui("admin:deleteRecipe", { input_item: d.input_item }); onSaved(); }
-                        else if (row.kind === "assembly") { close(); setAsm((l) => l.filter((_, i) => i !== row.index)); }
-                        else if (row.kind === "craft") { close(); setCraftList((l) => l.filter((_, i) => i !== row.index)); }
-                        else if (row.kind === "drink") { close(); setDrinkList((l) => l.filter((_, i) => i !== row.index)); }
-                        else if (row.kind === "finish") { close(); setFinishList((l) => l.filter((_, i) => i !== row.index)); }
-                        else if (row.kind === "condiment") { close(); setCondimentList((l) => l.filter((_, i) => i !== row.index)); }
+                      <Button size="sm" variant={isEditing ? "secondary" : "outline"} onClick={() => { setPicking(false); setEditKey(row.key); }}><Pencil className="h-4 w-4" /></Button>
+                      {/* A deleted DEFAULT entry re-seeds on next restart (the embedded
+                          default menu is recoverable); admin-added ones stay gone. */}
+                      <Button size="sm" variant="destructive" onClick={() => {
+                        close();
+                        if (row.kind === "food") setFoodList((l) => l.filter((_, i) => i !== row.index));
+                        else if (row.kind === "tool") setToolList((l) => l.filter((_, i) => i !== row.index));
+                        else setIngList((l) => l.filter((_, i) => i !== row.index));
                       }}><Trash2 className="h-4 w-4" /></Button>
                     </div>
                   </div>
-
-                  {isEditing && (
-                    <div className="mt-3 border-t border-border pt-3">
-                      {row.kind === "recipe" && draft && <RecipeForm form={draft} setForm={setDraft} items={items} groups={groups} />}
-                      {row.kind === "assembly" && row.index !== undefined && <AssemblyFields asm={asm[row.index]} onChange={(p) => updateAsm(row.index!, p)} items={items} groups={groups} />}
-                      {row.kind === "craft" && row.index !== undefined && <CraftFields craft={craftList[row.index]} onChange={(p) => updateCraft(row.index!, p)} items={items} groups={groups} />}
-                      {row.kind === "drink" && row.index !== undefined && <DrinkFields drink={drinkList[row.index]} onChange={(p) => updateDrink(row.index!, p)} items={items} groups={groups} />}
-                      {row.kind === "finish" && row.index !== undefined && (
-                        <FinishFields
-                          finish={finishList[row.index]}
-                          cost={Number(costs[finishList[row.index].tool] ?? 0)}
-                          onChangeFinish={(p) => updateFinish(row.index!, p)}
-                          onChangeCost={(v) => setCosts((c) => ({ ...c, [finishList[row.index!].tool]: Math.max(0, Math.floor(v || 0)) }))}
-                          items={items}
-                          groups={groups}
-                        />
-                      )}
-                      {row.kind === "condiment" && row.index !== undefined && (
-                        <CondimentFields
-                          condiment={condimentList[row.index]}
-                          cost={Number(costs[condimentList[row.index].item] ?? 0)}
-                          onChange={(p) => updateCondiment(row.index!, p)}
-                          onChangeCost={(v) => setCosts((c) => ({ ...c, [condimentList[row.index!].item]: Math.max(0, Math.floor(v || 0)) }))}
-                          items={items}
-                        />
-                      )}
-                      <div className="mt-3 flex justify-end">
-                        <Button size="sm" variant="outline" onClick={close}>{_L("recipes.done")}</Button>
-                      </div>
-                    </div>
-                  )}
                 </div>
               );
             })}
           </div>
         ))}
       </div>
-    </div>
-  );
-}
 
-function EditorShell({ title, status, onClose, children }: { title: string; status: string; onClose: () => void; children: React.ReactNode }) {
-  return (
-    <div className="rounded-lg border border-primary/40 bg-primary/5 p-3">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="flex items-center gap-2 text-sm font-semibold">
-          {title}
-          {status === "saving" && <span className="flex items-center gap-1 text-xs font-normal text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> {_L("recipes.saving")}</span>}
-          {status === "saved" && <span className="flex items-center gap-1 text-xs font-normal text-muted-foreground"><Check className="h-3 w-3 text-primary" /> {_L("recipes.saved")}</span>}
-        </span>
-        <Button size="icon" variant="ghost" onClick={onClose}><X className="h-4 w-4" /></Button>
-      </div>
-      {children}
+      {/* New Recipe: pick what kind of thing it is FIRST — each preset seeds the
+          right step skeleton, so the editor opens already making sense. */}
+      <Modal
+        open={picking}
+        onClose={close}
+        title={_L("menu.new_recipe")}
+        subtitle={_L("menu.preset_title")}
+        icon={<UtensilsCrossed className="h-4 w-4" />}
+        size="lg"
+      >
+        <div className="grid grid-cols-2 gap-2">
+          {PRESETS.map((p) => (
+            <button
+              key={p.key}
+              onClick={() => addFood(p)}
+              className="rounded-lg border border-border bg-card p-3 text-left transition-colors hover:border-primary/60 hover:bg-accent/60"
+            >
+              <div className="text-sm font-semibold">{p.label}</div>
+              <div className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{p.desc}</div>
+            </button>
+          ))}
+        </div>
+      </Modal>
+
+      {/* Create / edit an entry in a dialog (replaces the old inline editor). */}
+      <Modal
+        open={!!editing}
+        onClose={close}
+        title={editTitle}
+        subtitle={editing ? _L(KIND_LABEL[editing.kind]) : ""}
+        icon={editing ? KIND_ICON[editing.kind] : null}
+        size={editing?.kind === "food" ? "xl" : "lg"}
+        footer={<Button size="sm" onClick={close}>{_L("recipes.done")}</Button>}
+      >
+        {editing?.kind === "food" && (
+          <FoodForm food={editing.data} onChange={(p) => updateFood(editing.index, p)} items={items} groups={groups} />
+        )}
+        {editing?.kind === "tool" && (
+          <ToolForm
+            tool={editing.data}
+            cost={Number(costs[editing.data.item || ""] ?? 0)}
+            onChange={(p) => updateTool(editing.index, p)}
+            onChangeCost={(v) => setCost(editing.data.item, v)}
+            items={items}
+            groups={groups}
+          />
+        )}
+        {editing?.kind === "ing" && (
+          <IngredientForm
+            ing={editing.data}
+            cost={Number(costs[editing.data.item || ""] ?? 0)}
+            onChange={(p) => updateIng(editing.index, p)}
+            onChangeCost={(v) => setCost(editing.data.item, v)}
+            items={items}
+            groups={groups}
+          />
+        )}
+      </Modal>
     </div>
   );
 }

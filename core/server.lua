@@ -83,7 +83,24 @@ local DEFAULT_SETTINGS = {
         empty_cup = 1, frosting = 2, sprinkles = 1,
         ketchup = 2, mustard = 2, mayo = 2,
     },
-    cheese_melt_ms  = 8000, -- how long applied cheese takes to melt on a patty
+    -- Fallback melt duration for a melting topping whose ingredient entry has no
+    -- melt_ms of its own (the seeded cheese carries 8000 directly; this survives
+    -- for configs written before per-ingredient melts).
+    cheese_melt_ms  = 8000,
+    -- Decodes tray/inventory metadata written BEFORE toppings were generic: a bare
+    -- numeric `cheese` field on a layer/row is resolved to this ingredient. Seed
+    -- data only — gameplay code never names the item itself.
+    legacy_cheese_item = "cheese",
+    -- Manual per-model stacking corrections applied on top of the measured model
+    -- heights (client cooking render). sink = shift a layer's seat (negative sinks
+    -- it into the layer below, dragging everything above it along); rise = REPLACE
+    -- the measured layer height. Synced to the client; TUNE IN-GAME.
+    stack_tweaks = {
+        -- the shredded-cheese sheet reads a touch high over the sauce on a pizza
+        ["pickle_pizza_sauce_01"]  = { sink = -0.004 },
+        ["pickle_pizza_cheese_01"] = { sink = -0.004 },
+        ["pickle_pizza_cheese_02"] = { sink = -0.004 },
+    },
     -- Global default freshness window (seconds) for collected cooked items in the
     -- tray before they spoil and are swept. Default 900 = 15 minutes; 0 = never
     -- expire. A recipe's own `expire_seconds` overrides this per item (NULL on a
@@ -124,20 +141,6 @@ local DEFAULT_SETTINGS = {
             manage_employees = true, view_finances = true, manage_stock = true,
         } },
     },
-    -- Soda machine taps: dragged cup item -> filled drink item. The first SIX
-    -- valid entries appear left-to-right as the fountain's flavor taps (the
-    -- middle nozzle always dispenses ice, so the physical order is 1,2,3, ICE,
-    -- 4,5,6). Order here = tap order; reorder to re-arrange the fountain.
-    -- `color` = the {r,g,b} of the poured liquid stream (marker droplets), sampled
-    -- from each tap's flavor art on the fountain model.
-    drinks = {
-        { input = "empty_cup", output = "water",      label = "Pure Aqua",      model = "pickle_drink_container_01", fill_ms = 3000, color = { 160, 205, 230 } },
-        { input = "empty_cup", output = "lemonade",   label = "Lemonade Bliss", model = "pickle_drink_container_01", fill_ms = 3000, color = { 235, 215, 90 } },
-        { input = "empty_cup", output = "soda",       label = "Classic Cola",   model = "pickle_drink_container_01", fill_ms = 3000, color = { 90, 50, 25 } },
-        { input = "empty_cup", output = "diet_cola",  label = "Diet Cola",      model = "pickle_drink_container_01", fill_ms = 3000, color = { 120, 80, 55 } },
-        { input = "empty_cup", output = "grape_soda", label = "Grape Zap",      model = "pickle_drink_container_01", fill_ms = 3000, color = { 135, 70, 170 } },
-        { input = "empty_cup", output = "coffee",     label = "Coffee",         model = "pickle_drink_container_01", fill_ms = 3000, color = { 80, 50, 30 } },
-    },
     -- The lid pressed onto a filled cup before it can be collected — kitchen
     -- equipment like the serving tray (no inventory item; cups come with lids),
     -- only its world model is configurable.
@@ -151,171 +154,6 @@ local DEFAULT_SETTINGS = {
     side_container_model = "pickle_side_container_01",
     side_container_items = { "cooked_fries", "burnt_fries" },
     soda_ice_ms     = 1500, -- how long the middle (ice) nozzle takes to dispense
-    -- World prop for a prep component that isn't a cook/assembly/drink output (raw
-    -- veg, toppings, doughs…). Any item mapped here becomes a real 3D prop you can
-    -- drag out and stack on the kitchen-prep table; add a row for any new item.
-    prep_models = {
-        bun          = "pickle_bread_bun_01",
-        -- cheese is handled in itemModel (always the unmelted _01 slice), not here
-        lettuce      = "pickle_lettuce_applied_01",
-        tomato       = "pickle_tomato_applied_01",
-        pickle       = "pickle_pickle_applied_01",
-        pizza_dough  = "pickle_pizza_dough_01",
-        pizza_sauce  = "pickle_pizza_sauce_01",
-        pizza_cheese = "pickle_pizza_cheese_01",
-        pepperoni    = "pickle_pizza_pepperoni_01",
-        frosting     = "pickle_frosting_tube_01",
-        sprinkles    = "pickle_sprinkles_tube_01",
-        -- Single-serving props for the fryer batch outputs: the batch cooks as the
-        -- basket pile (the recipe's models) but each collected item is held/stacked
-        -- as one serving. An explicit mapping here overrides the recipe-derived
-        -- model in itemModel.
-        cooked_drumstick = "pickle_chicken_drumstick_02",
-        burnt_drumstick  = "pickle_chicken_drumstick_03",
-        cooked_fries     = "pickle_side_fries_02",
-        burnt_fries      = "pickle_side_fries_03",
-        cooked_nuggets   = "pickle_side_nuggets_02",
-        burnt_nuggets    = "pickle_side_nuggets_03",
-        -- (Cookies need no override: pickle_cookie_02/03 are already single cooked/burnt
-        -- cookies, so a collected cookie matches what baked on the tray. The six-cookie
-        -- tray layout is done by the batch-grid render, not the item model.)
-    },
-    -- Kitchen-prep assembly: combine components -> output item. ONE base item per
-    -- food family (one-item consolidation rule): a cheeseburger / deluxe burger is
-    -- just a Burger with modifiers, not a separate item. `modifiers` are the POS
-    -- customisations a customer can pick (add cheese, no lettuce…): each has an
-    -- optional `price` delta and an optional `default` (included on the base build,
-    -- so toggling it off reads as "no X"). `item` names the referenced component so
-    -- the kitchen ticket knows what to build; modifiers are ticket instructions +
-    -- pricing, never a completion gate (food orders match by item).
-    assembly = {
-        { output = "burger", label = "Burger", model = "pickle_bread_bun_01", group = "Fast Food",
-          components = { "bun", "cooked_beef_patty" },
-          modifiers = {
-            { id = "cheese",  label = "Cheese",  item = "cheese",  price = 2 },
-            { id = "lettuce", label = "Lettuce", item = "lettuce", price = 0 },
-            { id = "tomato",  label = "Tomato",  item = "tomato",  price = 0 },
-            { id = "pickle",  label = "Pickle",  item = "pickle",  price = 0 },
-          } },
-        { output = "chicken_sandwich", label = "Chicken Sandwich", model = "pickle_bread_bun_01", group = "Fast Food",
-          components = { "bun", "cooked_chicken_patty" },
-          modifiers = {
-            { id = "cheese",  label = "Cheese",  item = "cheese",  price = 2 },
-            { id = "lettuce", label = "Lettuce", item = "lettuce", price = 0 },
-            { id = "tomato",  label = "Tomato",  item = "tomato",  price = 0 },
-            { id = "pickle",  label = "Pickle",  item = "pickle",  price = 0 },
-          } },
-        -- Pizza: a cheese base (dough + sauce + cheese) assembled at kitchen prep, then
-        -- baked in the oven. Pepperoni (and any other prep topping) is optional — add it
-        -- on the stack as an alteration; it rides along as a variation.
-        { output = "raw_pizza", label = "Pizza (uncooked)", model = "pickle_pizza_dough_01", group = "Pizza",
-          components = { "pizza_dough", "pizza_sauce", "pizza_cheese" } },
-    },
-    -- Crafts: code-less combine recipes with no bespoke gameplay (soup, salad, a
-    -- wrapped to-go item). Sibling of `assembly` but every craft collapses to the
-    -- ONE `bag_item` (restaurant_bag), the craft `id` being its POS variant (like a
-    -- drink flavor) — so a craft never mints a bespoke item. Built by dropping the
-    -- `components` into the Restaurant Bag equipment at kitchen prep; component prop
-    -- models are OPTIONAL (pill fallback). `modifiers` are the same POS add-ons as
-    -- assembly (ticket instructions + pricing, never a completion gate). No default
-    -- crafts ship — this is a fully admin-authored list.
-    crafts = {},
-    -- Gradual "finish tools": an inventory item whose prop the player rubs over a
-    -- finished product on the kitchen-prep table. Coverage builds with cursor
-    -- movement (rub_dist metres of tool travel = fully applied); at 100% the target
-    -- is consumed together with 1 tool item and the output lands in the tray with
-    -- the chosen flavor recorded as build-stack metadata (so it survives every
-    -- tray/inventory round trip as its own variation).
-    --   mode = "replace": the target's props (e.g. container + batter sheet) are
-    --          deleted and the flavor model IS the whole finished product.
-    --   mode = "overlay": the flavor model stacks on top of the target's prop,
-    --          which stays (e.g. frosting coats a doughnut).
-    finishes = {
-        { tool = "frosting", tool_model = "pickle_frosting_tube_01", rub_dist = 1.2, group = "Bakery",
-          targets = {
-            -- A decorated cake is NOT a separate item (same collapse as doughnuts):
-            -- it stays `cooked_cake` and the frosting flavor rides as build-stack
-            -- metadata (distinguished by TraySig), so the ordering terminal shows
-            -- ONE "Cake" with a pick-one frosting flavor (finishModsFor). Replace-mode:
-            -- the chosen whole-cake model IS the finished product.
-            { item = "cooked_cake", output = "cooked_cake", mode = "replace",
-              -- color drives the flavor swatch on the NUI card (falls back to a
-              -- built-in palette by flavor id when omitted)
-              flavors = {
-                { id = "strawberry", label = "Strawberry", model = "pickle_cake_01", color = "#f472b6" },
-                { id = "chocolate",  label = "Chocolate",  model = "pickle_cake_02", color = "#8b5a2b" },
-                { id = "vanilla",    label = "Vanilla",    model = "pickle_cake_03", color = "#f3e5ab" },
-                { id = "pickle",     label = "Pickle",     model = "pickle_cake_04", color = "#65a30d" },
-              } },
-            -- A frosted doughnut is NOT a separate item: it stays `cooked_doughnut`
-            -- and the frosting rides as build-stack metadata (flavor recorded on the
-            -- layer, distinguished by TraySig). Overlay-mode, so the frosting model
-            -- stacks on the fried-doughnut prop. All doughnut variants collapse to
-            -- the one `cooked_doughnut` item.
-            { item = "cooked_doughnut", output = "cooked_doughnut", mode = "overlay",
-              flavors = {
-                { id = "strawberry", label = "Strawberry", model = "pickle_doughnut_topping_01", color = "#f472b6" },
-                { id = "chocolate",  label = "Chocolate",  model = "pickle_doughnut_topping_02", color = "#8b5a2b" },
-                { id = "glazed",     label = "Glazed",     model = "pickle_doughnut_topping_03", color = "#f0c36d" },
-                { id = "vanilla",    label = "Vanilla",    model = "pickle_doughnut_topping_04", color = "#f3e5ab" },
-                { id = "pickle",     label = "Pickle",     model = "pickle_doughnut_topping_05", color = "#65a30d" },
-              } },
-          } },
-        -- Sprinkles: a second finish tool, DONUTS ONLY, and only AFTER frosting. It
-        -- also targets `cooked_doughnut` (all doughnuts are one item now), but
-        -- `requires_finish = "frosting"` gates it so it applies ONLY to a doughnut
-        -- whose metadata already carries a frosting layer — a plain fried doughnut is
-        -- rejected. Overlay-mode: the sprinkles stack over the frosting (finishRender
-        -- composes the nested tower from the meta). Output is again `cooked_doughnut`;
-        -- the frosting+sprinkles flavors live entirely in build metadata. Variant prop
-        -- prefix `pickle_doughnut_sprinkles_NN` — 01 vanilla, 02 chocolate.
-        { tool = "sprinkles", tool_model = "pickle_sprinkles_tube_01", rub_dist = 1.2, group = "Bakery",
-          targets = {
-            { item = "cooked_doughnut", output = "cooked_doughnut", mode = "overlay",
-              requires_finish = "frosting",
-              flavors = {
-                { id = "vanilla",   label = "Vanilla",   model = "pickle_doughnut_sprinkles_01", color = "#f3e5ab" },
-                { id = "chocolate", label = "Chocolate", model = "pickle_doughnut_sprinkles_02", color = "#8b5a2b" },
-              } },
-          } },
-    },
-    -- Condiments (ketchup / mustard / mayo). A squeeze-bottle applicator, sibling to
-    -- the finish tools but with a distinct gesture and a distinct EFFECT. Drag the
-    -- bottle out of the prep bar and hold it over a build stack: the `container_model`
-    -- flips 180° (nozzle down) and squeezes DOWN-and-UP once, laying its `applied_model`
-    -- sauce on top as a new build-stack LAYER. Unlike a finish (which consumes a
-    -- FINISHED tray product and re-trays a decorated one), a condiment adds a layer to
-    -- an in-progress prep BUILD exactly like adding pepperoni — it rides along as a
-    -- build-stack variation (TraySig) and is consumed from the shared stock pool at
-    -- Make. A condiment can NEVER be a stack's FIRST layer (there'd be nothing to sauce)
-    -- — enforced client-side in the applicator loop. `item` is the consumed inventory
-    -- item; every condiment prop shares a CENTRE-BOTTOM origin (bottle contains the
-    -- sauce, so only the two props per flavor are needed — no separate sauce item).
-    condiments = {
-        { item = "ketchup", container_model = "pickle_ketchup_container_01", applied_model = "pickle_ketchup_applied_01" },
-        { item = "mustard", container_model = "pickle_mustard_container_01", applied_model = "pickle_mustard_applied_01" },
-        { item = "mayo",    container_model = "pickle_mayo_container_01",    applied_model = "pickle_mayo_applied_01" },
-    },
-    -- Baking mix + trays. One shared `mix_item` (a raw ingredient bought into the
-    -- shared stock pool, like any `ingredient_costs` entry) is rubbed into a tray to
-    -- produce that tray's `output` (an oven-ready raw bake). The trays themselves are
-    -- FREE kitchen equipment (like the serving tray / pizza box — never an item, never
-    -- consumed): drag a tray card out of the prep station's equipment strip, rub the
-    -- mix over it (coverage accrues with cursor travel, `rub_dist` metres = full),
-    -- then drag the filled tray into the hotbar to collect its `output`. The oven then
-    -- bakes it inside its `container_model` (set on the matching recipe). `raw_model`
-    -- is the raw sheet/dough shown in the tray as it fills.
-    baking = {
-        mix_item  = "baking_mix",
-        mix_model = "pickle_cake_mix_01",  -- the mix bowl that follows the cursor while rubbing
-        rub_dist  = 1.2,                   -- metres of cursor travel over the tray to fill it
-        trays = {
-            { kind = "caketin",    label = "Cake Tin",    tray_model = "pickle_cake_container_01",
-              output = "raw_cake",   raw_model = "pickle_cake_mix_pour_02", group = "Bakery" },
-            { kind = "cookietray", label = "Cookie Tray", tray_model = "pickle_cookie_tray_01",
-              output = "raw_cookie", raw_model = "pickle_cookie_01", slots = 6, group = "Bakery" },
-        },
-    },
     -- NPC customers. AI customers walk up to a restaurant's counter, queue, place a
     -- REAL POS ticket (a random pick off the restaurant's priced menu), wait for staff
     -- to cook + serve them at the register, pay into the balance, and walk away — a
@@ -394,6 +232,283 @@ local DEFAULT_RECIPES = {
     { input = "raw_pizza", station = "stovetop", method = "oven", group = "Pizza",
       raw = "pickle_pizza_dough_01", cooked = "pickle_pizza_dough_02", burnt = "pickle_pizza_dough_03",
       out_cooked = "cooked_pizza", out_burnt = "burnt_pizza", cook_ms = 25000, burn_ms = 20000 },
+}
+
+-- ─── legacy (pre-unified-menu) settings defaults ──────────────────────────────
+-- The six retired config kinds (drinks / prep_models / assembly / crafts /
+-- finishes / condiments / baking). Referenced ONLY by the pre-migration seeding
+-- + one-time backfills in LoadSettings so an old DB upgrades exactly as it always
+-- did before MigrateUnifiedMenu converts it. Fresh installs never create these
+-- keys — they are seeded straight from DEFAULT_FOODS / DEFAULT_TOOLS /
+-- DEFAULT_INGREDIENTS below. Delete this table when the legacy keys sunset.
+
+local LEGACY_SETTINGS = {
+    drinks = {
+        { input = "empty_cup", output = "water",      label = "Pure Aqua",      model = "pickle_drink_container_01", fill_ms = 3000, color = { 160, 205, 230 } },
+        { input = "empty_cup", output = "lemonade",   label = "Lemonade Bliss", model = "pickle_drink_container_01", fill_ms = 3000, color = { 235, 215, 90 } },
+        { input = "empty_cup", output = "soda",       label = "Classic Cola",   model = "pickle_drink_container_01", fill_ms = 3000, color = { 90, 50, 25 } },
+        { input = "empty_cup", output = "diet_cola",  label = "Diet Cola",      model = "pickle_drink_container_01", fill_ms = 3000, color = { 120, 80, 55 } },
+        { input = "empty_cup", output = "grape_soda", label = "Grape Zap",      model = "pickle_drink_container_01", fill_ms = 3000, color = { 135, 70, 170 } },
+        { input = "empty_cup", output = "coffee",     label = "Coffee",         model = "pickle_drink_container_01", fill_ms = 3000, color = { 80, 50, 30 } },
+    },
+    prep_models = {
+        bun          = "pickle_bread_bun_01",
+        lettuce      = "pickle_lettuce_applied_01",
+        tomato       = "pickle_tomato_applied_01",
+        pickle       = "pickle_pickle_applied_01",
+        pizza_dough  = "pickle_pizza_dough_01",
+        pizza_sauce  = "pickle_pizza_sauce_01",
+        pizza_cheese = "pickle_pizza_cheese_01",
+        pepperoni    = "pickle_pizza_pepperoni_01",
+        frosting     = "pickle_frosting_tube_01",
+        sprinkles    = "pickle_sprinkles_tube_01",
+        cooked_drumstick = "pickle_chicken_drumstick_02",
+        burnt_drumstick  = "pickle_chicken_drumstick_03",
+        cooked_fries     = "pickle_side_fries_02",
+        burnt_fries      = "pickle_side_fries_03",
+        cooked_nuggets   = "pickle_side_nuggets_02",
+        burnt_nuggets    = "pickle_side_nuggets_03",
+    },
+    assembly = {
+        { output = "burger", label = "Burger", model = "pickle_bread_bun_01", group = "Fast Food",
+          components = { "bun", "cooked_beef_patty" },
+          modifiers = {
+            { id = "cheese",  label = "Cheese",  item = "cheese",  price = 2 },
+            { id = "lettuce", label = "Lettuce", item = "lettuce", price = 0 },
+            { id = "tomato",  label = "Tomato",  item = "tomato",  price = 0 },
+            { id = "pickle",  label = "Pickle",  item = "pickle",  price = 0 },
+          } },
+        { output = "chicken_sandwich", label = "Chicken Sandwich", model = "pickle_bread_bun_01", group = "Fast Food",
+          components = { "bun", "cooked_chicken_patty" },
+          modifiers = {
+            { id = "cheese",  label = "Cheese",  item = "cheese",  price = 2 },
+            { id = "lettuce", label = "Lettuce", item = "lettuce", price = 0 },
+            { id = "tomato",  label = "Tomato",  item = "tomato",  price = 0 },
+            { id = "pickle",  label = "Pickle",  item = "pickle",  price = 0 },
+          } },
+        { output = "raw_pizza", label = "Pizza (uncooked)", model = "pickle_pizza_dough_01", group = "Pizza",
+          components = { "pizza_dough", "pizza_sauce", "pizza_cheese" } },
+    },
+    crafts = {},
+    finishes = {
+        { tool = "frosting", tool_model = "pickle_frosting_tube_01", rub_dist = 1.2, group = "Bakery",
+          targets = {
+            { item = "cooked_cake", output = "cooked_cake", mode = "replace",
+              flavors = {
+                { id = "strawberry", label = "Strawberry", model = "pickle_cake_01", color = "#f472b6" },
+                { id = "chocolate",  label = "Chocolate",  model = "pickle_cake_02", color = "#8b5a2b" },
+                { id = "vanilla",    label = "Vanilla",    model = "pickle_cake_03", color = "#f3e5ab" },
+                { id = "pickle",     label = "Pickle",     model = "pickle_cake_04", color = "#65a30d" },
+              } },
+            { item = "cooked_doughnut", output = "cooked_doughnut", mode = "overlay",
+              flavors = {
+                { id = "strawberry", label = "Strawberry", model = "pickle_doughnut_topping_01", color = "#f472b6" },
+                { id = "chocolate",  label = "Chocolate",  model = "pickle_doughnut_topping_02", color = "#8b5a2b" },
+                { id = "glazed",     label = "Glazed",     model = "pickle_doughnut_topping_03", color = "#f0c36d" },
+                { id = "vanilla",    label = "Vanilla",    model = "pickle_doughnut_topping_04", color = "#f3e5ab" },
+                { id = "pickle",     label = "Pickle",     model = "pickle_doughnut_topping_05", color = "#65a30d" },
+              } },
+          } },
+        { tool = "sprinkles", tool_model = "pickle_sprinkles_tube_01", rub_dist = 1.2, group = "Bakery",
+          targets = {
+            { item = "cooked_doughnut", output = "cooked_doughnut", mode = "overlay",
+              requires_finish = "frosting",
+              flavors = {
+                { id = "vanilla",   label = "Vanilla",   model = "pickle_doughnut_sprinkles_01", color = "#f3e5ab" },
+                { id = "chocolate", label = "Chocolate", model = "pickle_doughnut_sprinkles_02", color = "#8b5a2b" },
+              } },
+          } },
+    },
+    condiments = {
+        { item = "ketchup", container_model = "pickle_ketchup_container_01", applied_model = "pickle_ketchup_applied_01" },
+        { item = "mustard", container_model = "pickle_mustard_container_01", applied_model = "pickle_mustard_applied_01" },
+        { item = "mayo",    container_model = "pickle_mayo_container_01",    applied_model = "pickle_mayo_applied_01" },
+    },
+    baking = {
+        mix_item  = "baking_mix",
+        mix_model = "pickle_cake_mix_01",
+        rub_dist  = 1.2,
+        trays = {
+            { kind = "caketin",    label = "Cake Tin",    tray_model = "pickle_cake_container_01",
+              output = "raw_cake",   raw_model = "pickle_cake_mix_pour_02", group = "Bakery" },
+            { kind = "cookietray", label = "Cookie Tray", tray_model = "pickle_cookie_tray_01",
+              output = "raw_cookie", raw_model = "pickle_cookie_01", slots = 6, group = "Bakery" },
+        },
+    },
+}
+
+-- ─── unified menu seed data (foods / tools / ingredients) ─────────────────────
+-- THE creation system. Everything the resource ships is expressed here as plain
+-- config — no food has bespoke gameplay code. Three kinds:
+--   • FOOD ("New Recipe"): a sellable, made either as an interactive experience
+--     (ordered `steps`: assemble at prep / cook at a station / pour at the
+--     fountain — a multi-step food like pizza is ONE entry) or as a combinable
+--     `kind = "bag"` (components dropped into the Restaurant Bag; `display_item`'s
+--     label+image ride the bag's slot metadata so it reads as the food itself).
+--   • TOOL ("New Tool"): a quantity-based item applied over food. `mode` picks the
+--     gesture/effect: "layer" squeezes its `applied_model` onto a build stack
+--     (condiments), "decorate" rubs over a finished product (frosting targets +
+--     flavors), "fill" rubs into a free bake tray to produce an oven-ready input.
+--   • INGREDIENT ("New Ingredient"): a stackable component (item + prep prop +
+--     behavior properties): `halves` = renders/splits as top+bottom half props,
+--     each worth 0.5 units; `melts` = can be dropped onto a cooking dual-sided
+--     item and melts applied_model → melted_model; `box_base` = a build whose
+--     bottom layer is (or derives from) this ingredient fits the pizza box.
+-- Seeded once and merged idempotently by id/item — admin edits are never
+-- clobbered; deleting a default re-seeds on restart (matching legacy behavior).
+
+DEFAULT_INGREDIENTS = {
+    { item = "bun", model = "pickle_bread_bun_01",
+      halves = { top_model = "pickle_bread_bun_01", bottom_model = "pickle_bread_bun_02" } },
+    { item = "cheese", model = "pickle_cheese_applied_01",
+      melts = { applied_model = "pickle_cheese_applied_01", melted_model = "pickle_cheese_applied_02", melt_ms = 8000 } },
+    { item = "lettuce", model = "pickle_lettuce_applied_01" },
+    { item = "tomato",  model = "pickle_tomato_applied_01" },
+    { item = "pickle",  model = "pickle_pickle_applied_01" },
+    { item = "pizza_dough",  model = "pickle_pizza_dough_01", box_base = true },
+    { item = "pizza_sauce",  model = "pickle_pizza_sauce_01" },
+    { item = "pizza_cheese", model = "pickle_pizza_cheese_01" },
+    { item = "pepperoni",    model = "pickle_pizza_pepperoni_01" },
+}
+
+DEFAULT_TOOLS = {
+    { id = "frosting", item = "frosting", tool_model = "pickle_frosting_tube_01",
+      mode = "decorate", rub_dist = 1.2, group = "Bakery",
+      targets = {
+        { item = "cooked_cake", output = "cooked_cake", mode = "replace",
+          flavors = {
+            { id = "strawberry", label = "Strawberry", model = "pickle_cake_01", color = "#f472b6" },
+            { id = "chocolate",  label = "Chocolate",  model = "pickle_cake_02", color = "#8b5a2b" },
+            { id = "vanilla",    label = "Vanilla",    model = "pickle_cake_03", color = "#f3e5ab" },
+            { id = "pickle",     label = "Pickle",     model = "pickle_cake_04", color = "#65a30d" },
+          } },
+        { item = "cooked_doughnut", output = "cooked_doughnut", mode = "overlay",
+          flavors = {
+            { id = "strawberry", label = "Strawberry", model = "pickle_doughnut_topping_01", color = "#f472b6" },
+            { id = "chocolate",  label = "Chocolate",  model = "pickle_doughnut_topping_02", color = "#8b5a2b" },
+            { id = "glazed",     label = "Glazed",     model = "pickle_doughnut_topping_03", color = "#f0c36d" },
+            { id = "vanilla",    label = "Vanilla",    model = "pickle_doughnut_topping_04", color = "#f3e5ab" },
+            { id = "pickle",     label = "Pickle",     model = "pickle_doughnut_topping_05", color = "#65a30d" },
+          } },
+      } },
+    { id = "sprinkles", item = "sprinkles", tool_model = "pickle_sprinkles_tube_01",
+      mode = "decorate", rub_dist = 1.2, group = "Bakery",
+      targets = {
+        { item = "cooked_doughnut", output = "cooked_doughnut", mode = "overlay",
+          requires_finish = "frosting",
+          flavors = {
+            { id = "vanilla",   label = "Vanilla",   model = "pickle_doughnut_sprinkles_01", color = "#f3e5ab" },
+            { id = "chocolate", label = "Chocolate", model = "pickle_doughnut_sprinkles_02", color = "#8b5a2b" },
+          } },
+      } },
+    { id = "ketchup", item = "ketchup", mode = "layer",
+      tool_model = "pickle_ketchup_container_01", applied_model = "pickle_ketchup_applied_01" },
+    { id = "mustard", item = "mustard", mode = "layer",
+      tool_model = "pickle_mustard_container_01", applied_model = "pickle_mustard_applied_01" },
+    { id = "mayo", item = "mayo", mode = "layer",
+      tool_model = "pickle_mayo_container_01", applied_model = "pickle_mayo_applied_01" },
+    { id = "baking_mix", item = "baking_mix", tool_model = "pickle_cake_mix_01",
+      mode = "fill", rub_dist = 1.2, group = "Bakery",
+      trays = {
+        { kind = "caketin",    label = "Cake Tin",    tray_model = "pickle_cake_container_01",
+          output = "raw_cake",   raw_model = "pickle_cake_mix_pour_02", group = "Bakery" },
+        { kind = "cookietray", label = "Cookie Tray", tray_model = "pickle_cookie_tray_01",
+          output = "raw_cookie", raw_model = "pickle_cookie_01", slots = 6, group = "Bakery" },
+      } },
+}
+
+DEFAULT_FOODS = {
+    -- fryer batches: the basket cooks as a pile (the step's models); each collected
+    -- serving is held/stacked as one item (serving_model / serving_burnt_model)
+    { id = "cooked_drumstick", label = "Drumsticks", kind = "interactive", group = "Fast Food",
+      steps = { { type = "cook", input = "raw_drumstick", station = "fryer", method = "fry",
+        raw_model = "pickle_fryer_drumstick_01", cooked_model = "pickle_fryer_drumstick_02", burnt_model = "pickle_fryer_drumstick_03",
+        output = "cooked_drumstick", output_burnt = "burnt_drumstick", cook_ms = 15000, burn_ms = 15000,
+        output_count = 4, serving_model = "pickle_chicken_drumstick_02", serving_burnt_model = "pickle_chicken_drumstick_03" } } },
+    { id = "cooked_fries", label = "Fries", kind = "interactive", group = "Fast Food",
+      steps = { { type = "cook", input = "raw_fries", station = "fryer", method = "fry",
+        raw_model = "pickle_fryer_fries_01", cooked_model = "pickle_fryer_fries_02", burnt_model = "pickle_fryer_fries_03",
+        output = "cooked_fries", output_burnt = "burnt_fries", cook_ms = 12000, burn_ms = 12000,
+        output_count = 4, serving_model = "pickle_side_fries_02", serving_burnt_model = "pickle_side_fries_03" } } },
+    { id = "cooked_nuggets", label = "Nuggets", kind = "interactive", group = "Fast Food",
+      steps = { { type = "cook", input = "raw_nuggets", station = "fryer", method = "fry",
+        raw_model = "pickle_fryer_nuggets_01", cooked_model = "pickle_fryer_nuggets_02", burnt_model = "pickle_fryer_nuggets_03",
+        output = "cooked_nuggets", output_burnt = "burnt_nuggets", cook_ms = 12000, burn_ms = 12000,
+        output_count = 20, serving_model = "pickle_side_nuggets_02", serving_burnt_model = "pickle_side_nuggets_03" } } },
+    -- cook-then-assemble: the patty grills dual-sided, then builds into the burger
+    -- at kitchen prep. ONE entry — the intermediate patty is implied by the steps.
+    { id = "burger", label = "Burger", kind = "interactive", group = "Fast Food",
+      steps = {
+        { type = "cook", input = "raw_beef_patty", station = "stovetop", method = "grill", dual_sided = 1,
+          raw_model = "pickle_patty_beef_01", cooked_model = "pickle_patty_beef_02", burnt_model = "pickle_patty_beef_03",
+          output = "cooked_beef_patty", output_burnt = "burnt_beef_patty", cook_ms = 18000, burn_ms = 15000 },
+        { type = "assemble", output = "burger", model = "pickle_bread_bun_01",
+          components = { "bun", "cooked_beef_patty" } },
+      },
+      modifiers = {
+        { id = "cheese",  label = "Cheese",  item = "cheese",  price = 2 },
+        { id = "lettuce", label = "Lettuce", item = "lettuce", price = 0 },
+        { id = "tomato",  label = "Tomato",  item = "tomato",  price = 0 },
+        { id = "pickle",  label = "Pickle",  item = "pickle",  price = 0 },
+      } },
+    { id = "chicken_sandwich", label = "Chicken Sandwich", kind = "interactive", group = "Fast Food",
+      steps = {
+        { type = "cook", input = "raw_chicken_patty", station = "fryer", method = "fry",
+          raw_model = "pickle_patty_friedchicken_01", cooked_model = "pickle_patty_friedchicken_02", burnt_model = "pickle_patty_friedchicken_03",
+          output = "cooked_chicken_patty", output_burnt = "burnt_chicken_patty", cook_ms = 18000, burn_ms = 15000 },
+        { type = "assemble", output = "chicken_sandwich", model = "pickle_bread_bun_01",
+          components = { "bun", "cooked_chicken_patty" } },
+      },
+      modifiers = {
+        { id = "cheese",  label = "Cheese",  item = "cheese",  price = 2 },
+        { id = "lettuce", label = "Lettuce", item = "lettuce", price = 0 },
+        { id = "tomato",  label = "Tomato",  item = "tomato",  price = 0 },
+        { id = "pickle",  label = "Pickle",  item = "pickle",  price = 0 },
+      } },
+    { id = "cooked_doughnut", label = "Doughnut", kind = "interactive", group = "Bakery",
+      steps = { { type = "cook", input = "raw_doughnut", station = "fryer", method = "fry",
+        raw_model = "pickle_doughnut_01", cooked_model = "pickle_doughnut_02", burnt_model = "pickle_doughnut_03",
+        output = "cooked_doughnut", output_burnt = "burnt_doughnut", cook_ms = 12000, burn_ms = 12000 } } },
+    -- baked goods: the raw input is produced by the baking-mix FILL tool (see
+    -- DEFAULT_TOOLS) rubbed into the matching free tray; the oven bakes it inside
+    -- its container prop (visual only, never an item).
+    { id = "cooked_cookie", label = "Cookies", kind = "interactive", group = "Bakery",
+      steps = { { type = "cook", input = "raw_cookie", station = "stovetop", method = "oven",
+        raw_model = "pickle_cookie_01", cooked_model = "pickle_cookie_02", burnt_model = "pickle_cookie_03",
+        container_model = "pickle_cookie_tray_01", output_count = 6,
+        output = "cooked_cookie", output_burnt = "burnt_cookie", cook_ms = 20000, burn_ms = 18000 } } },
+    { id = "cooked_cake", label = "Cake", kind = "interactive", group = "Bakery",
+      steps = { { type = "cook", input = "raw_cake", station = "stovetop", method = "oven",
+        raw_model = "pickle_cake_mix_pour_02", cooked_model = "pickle_cake_mix_pour_03", burnt_model = "pickle_cake_mix_pour_04",
+        container_model = "pickle_cake_container_01",
+        output = "cooked_cake", output_burnt = "burnt_cake", cook_ms = 30000, burn_ms = 25000 } } },
+    -- assemble-then-cook: the raw pizza is built at kitchen prep (dough + sauce +
+    -- cheese sheet; pepperoni is an optional topping alteration) then oven-baked.
+    -- ONE entry — `raw_pizza` is a kitchen intermediate, never an installed item.
+    { id = "cooked_pizza", label = "Pizza", kind = "interactive", group = "Pizza",
+      steps = {
+        { type = "assemble", output = "raw_pizza", label = "Pizza (uncooked)", model = "pickle_pizza_dough_01",
+          components = { "pizza_dough", "pizza_sauce", "pizza_cheese" } },
+        { type = "cook", input = "raw_pizza", station = "stovetop", method = "oven",
+          raw_model = "pickle_pizza_dough_01", cooked_model = "pickle_pizza_dough_02", burnt_model = "pickle_pizza_dough_03",
+          output = "cooked_pizza", output_burnt = "burnt_pizza", cook_ms = 25000, burn_ms = 20000 },
+      } },
+    -- poured drinks: one food per fountain flavor. Position among the pour foods =
+    -- tap order (first six hold the taps); `flavor` is a KEY, not an item — every
+    -- poured drink collects as the ONE `drink_item` item with the flavor as
+    -- build-stack metadata. `color` tints the poured liquid stream.
+    { id = "water", label = "Pure Aqua", kind = "interactive",
+      steps = { { type = "pour", input = "empty_cup", flavor = "water", model = "pickle_drink_container_01", fill_ms = 3000, color = { 160, 205, 230 } } } },
+    { id = "lemonade", label = "Lemonade Bliss", kind = "interactive",
+      steps = { { type = "pour", input = "empty_cup", flavor = "lemonade", model = "pickle_drink_container_01", fill_ms = 3000, color = { 235, 215, 90 } } } },
+    { id = "soda", label = "Classic Cola", kind = "interactive",
+      steps = { { type = "pour", input = "empty_cup", flavor = "soda", model = "pickle_drink_container_01", fill_ms = 3000, color = { 90, 50, 25 } } } },
+    { id = "diet_cola", label = "Diet Cola", kind = "interactive",
+      steps = { { type = "pour", input = "empty_cup", flavor = "diet_cola", model = "pickle_drink_container_01", fill_ms = 3000, color = { 120, 80, 55 } } } },
+    { id = "grape_soda", label = "Grape Zap", kind = "interactive",
+      steps = { { type = "pour", input = "empty_cup", flavor = "grape_soda", model = "pickle_drink_container_01", fill_ms = 3000, color = { 135, 70, 170 } } } },
+    { id = "coffee", label = "Coffee", kind = "interactive",
+      steps = { { type = "pour", input = "empty_cup", flavor = "coffee", model = "pickle_drink_container_01", fill_ms = 3000, color = { 80, 50, 30 } } } },
 }
 
 -- ─── DB bootstrap ────────────────────────────────────────────────────────────
@@ -726,21 +841,71 @@ local function LoadSettings()
     for _, row in ipairs(rows) do
         SettingsCache[row.setting_key] = dec(row.setting_value, nil)
     end
+    -- A DB with NO settings rows at all has never booted any version: it starts
+    -- straight on the unified menu (foods/tools/ingredients) — the legacy keys and
+    -- their backfills below are never created for it.
+    local freshInstall = next(SettingsCache) == nil
     -- Seed any missing defaults (idempotent; only writes keys that don't exist).
     for key, value in pairs(DEFAULT_SETTINGS) do
         if SettingsCache[key] == nil then SetSetting(key, value) end
     end
+
+    -- Back-fill any newly-added npc_customers sub-key (a new tunable in a later
+    -- release) without clobbering an admin's edits. `models` is a list value inside
+    -- the map — this only adds it if the whole key is missing, which is correct (an
+    -- admin who edited the list keeps theirs).
+    do
+        local map = SettingsCache.npc_customers
+        if type(map) == "table" then
+            local changed = false
+            for k, v in pairs(DEFAULT_SETTINGS.npc_customers or {}) do
+                if map[k] == nil then map[k] = v; changed = true end
+            end
+            if changed then SetSetting("npc_customers", map) end
+        end
+    end
+
+    -- One-time: the cooked-item expiry default shipped as 0 (never) before it became
+    -- 15 minutes. Bump servers still on the old 0 default up to the real default —
+    -- flag-gated so an admin who deliberately sets 0 later isn't overridden.
+    if not GetSetting("cooked_expire_default_seeded", false) then
+        if (tonumber(GetSetting("cooked_expire_seconds", 0)) or 0) == 0 then
+            SetSetting("cooked_expire_seconds", DEFAULT_SETTINGS.cooked_expire_seconds or 900)
+        end
+        SetSetting("cooked_expire_default_seeded", true)
+    end
+
+    -- One-time: the default NPC patience grew from 4 to 5 minutes. Bump a stored
+    -- npc_customers map that still holds the OLD 240s default up to the new 300s —
+    -- gated, and only when it's still exactly the old default, so an admin who tuned
+    -- patience to any other value keeps theirs.
+    if not GetSetting("npc_patience_default_seeded", false) then
+        local npc = SettingsCache.npc_customers
+        if type(npc) == "table" and (tonumber(npc.patience_seconds) or 0) == 240 then
+            npc.patience_seconds = 300
+            SetSetting("npc_customers", npc)
+        end
+        SetSetting("npc_patience_default_seeded", true)
+    end
+
+    if freshInstall then SetSetting("unified_menu_v1", true) end
+    -- Everything below is LEGACY-ERA seeding + one-time transforms for the six
+    -- retired config kinds. They run only on a DB that predates the unified menu,
+    -- exactly as they always did, so MigrateUnifiedMenu converts fully-updated
+    -- legacy data. Once migrated (or on a fresh install) they never run again.
+    if GetSetting("unified_menu_v1", false) then return end
 
     -- Merge in any newly-added default assembly/drink entries (matched by their
     -- output/input) so fresh defaults appear on restart without clobbering ones
     -- an admin customised — mirrors how SeedRecipes upserts missing recipes.
     local function mergeListDefaults(key, idField)
         local list = SettingsCache[key]
+        if list == nil then list = {}; SettingsCache[key] = list end
         if type(list) ~= "table" then return end
         local seen = {}
         for _, entry in ipairs(list) do seen[entry[idField]] = true end
         local changed = false
-        for _, def in ipairs(DEFAULT_SETTINGS[key] or {}) do
+        for _, def in ipairs(LEGACY_SETTINGS[key] or {}) do
             if not seen[def[idField]] then list[#list + 1] = def; changed = true end
         end
         if changed then SetSetting(key, list) end
@@ -753,21 +918,18 @@ local function LoadSettings()
 
     -- Same idea for the item->model map: add any newly-defaulted entries without
     -- overwriting models an admin remapped.
-    local function mergeMapDefaults(key)
-        local map = SettingsCache[key]
-        if type(map) ~= "table" then return end
-        local changed = false
-        for k, v in pairs(DEFAULT_SETTINGS[key] or {}) do
-            if map[k] == nil then map[k] = v; changed = true end
+    do
+        local map = SettingsCache.prep_models
+        if map == nil then map = {}; SettingsCache.prep_models = map end
+        if type(map) == "table" then
+            local changed = false
+            for k, v in pairs(LEGACY_SETTINGS.prep_models or {}) do
+                if map[k] == nil then map[k] = v; changed = true end
+            end
+            if changed then SetSetting("prep_models", map) end
         end
-        if changed then SetSetting(key, map) end
     end
-    mergeMapDefaults("prep_models")
-    -- Back-fill any newly-added npc_customers sub-key (a new tunable in a later
-    -- release) without clobbering an admin's edits. `models` is a list value inside
-    -- the map — mergeMapDefaults only adds it if the whole key is missing, which is
-    -- correct (an admin who edited the list keeps theirs).
-    mergeMapDefaults("npc_customers")
+    if SettingsCache.baking == nil then SetSetting("baking", LEGACY_SETTINGS.baking) end
 
     -- One-time: the soda machine grew per-tap flavors; the original single default
     -- drink ("Soda") becomes the Classic Cola tap. Only relabels an entry still
@@ -794,7 +956,7 @@ local function LoadSettings()
         local dr = SettingsCache.drinks
         if type(dr) == "table" and #dr > 1 then
             local wantOrder = {}
-            for i, d in ipairs(DEFAULT_SETTINGS.drinks) do wantOrder[d.output] = i end
+            for i, d in ipairs(LEGACY_SETTINGS.drinks) do wantOrder[d.output] = i end
             local defaults, extras = {}, {}
             for _, d in ipairs(dr) do
                 if wantOrder[d.output] then defaults[#defaults + 1] = d else extras[#extras + 1] = d end
@@ -813,7 +975,7 @@ local function LoadSettings()
         local dr = SettingsCache.drinks
         if type(dr) == "table" then
             local want = {}
-            for _, d in ipairs(DEFAULT_SETTINGS.drinks) do want[d.output] = d.color end
+            for _, d in ipairs(LEGACY_SETTINGS.drinks) do want[d.output] = d.color end
             local changed = false
             for _, d in ipairs(dr) do
                 if d.color == nil and want[d.output] then d.color = want[d.output]; changed = true end
@@ -821,29 +983,6 @@ local function LoadSettings()
             if changed then SetSetting("drinks", dr) end
         end
         SetSetting("soda_colors_seeded", true)
-    end
-
-    -- One-time: the cooked-item expiry default shipped as 0 (never) before it became
-    -- 15 minutes. Bump servers still on the old 0 default up to the real default —
-    -- flag-gated so an admin who deliberately sets 0 later isn't overridden.
-    if not GetSetting("cooked_expire_default_seeded", false) then
-        if (tonumber(GetSetting("cooked_expire_seconds", 0)) or 0) == 0 then
-            SetSetting("cooked_expire_seconds", DEFAULT_SETTINGS.cooked_expire_seconds or 900)
-        end
-        SetSetting("cooked_expire_default_seeded", true)
-    end
-
-    -- One-time: the default NPC patience grew from 4 to 5 minutes. Bump a stored
-    -- npc_customers map that still holds the OLD 240s default up to the new 300s —
-    -- gated, and only when it's still exactly the old default, so an admin who tuned
-    -- patience to any other value keeps theirs.
-    if not GetSetting("npc_patience_default_seeded", false) then
-        local npc = SettingsCache.npc_customers
-        if type(npc) == "table" and (tonumber(npc.patience_seconds) or 0) == 240 then
-            npc.patience_seconds = 300
-            SetSetting("npc_customers", npc)
-        end
-        SetSetting("npc_patience_default_seeded", true)
     end
 
     -- One-time: the sprinkles finish shipped with a single generic "Sprinkles"
@@ -855,7 +994,7 @@ local function LoadSettings()
         local fs = SettingsCache.finishes
         if type(fs) == "table" then
             local defFlavors
-            for _, def in ipairs(DEFAULT_SETTINGS.finishes) do
+            for _, def in ipairs(LEGACY_SETTINGS.finishes) do
                 if def.tool == "sprinkles" then defFlavors = (def.targets[1] or {}).flavors end
             end
             local changed = false
@@ -979,7 +1118,7 @@ local function LoadSettings()
                 deluxe_burger = { "bun", "cooked_beef_patty", "cheese", "lettuce", "tomato", "pickle" },
             }
             local defMods
-            for _, a in ipairs(DEFAULT_SETTINGS.assembly) do
+            for _, a in ipairs(LEGACY_SETTINGS.assembly) do
                 if a.output == "burger" then defMods = a.modifiers end
             end
             local kept, changed = {}, false
@@ -1049,6 +1188,11 @@ local function LoadSettings()
 end
 
 local function SeedRecipes()
+    -- LEGACY-ERA gap-fill for the retired SQL recipes table. Runs only on a DB
+    -- that predates the unified menu so MigrateUnifiedMenu converts a fully
+    -- updated table; post-migration (and on fresh installs) the table is dead —
+    -- foods are the source of truth and RebuildDerived supplies RecipeCache.
+    if GetSetting("unified_menu_v1", false) then return end
     -- Insert any default recipe that isn't present yet (keyed by the unique
     -- input_item). This means newly-added defaults show up on the next restart
     -- without wiping the table or overwriting recipes an admin has customised.
@@ -1182,23 +1326,19 @@ local function SeedRecipes()
     end
 end
 
--- Wipe every recipe and re-insert the built-in defaults verbatim (the admin
--- "Reset all recipes" action). Unlike SeedRecipes (which only fills gaps), this
--- deliberately discards customisations. DEFAULT_RECIPES already holds the
--- corrected cake/chicken models, so no post-insert backfills are needed.
-function ResetRecipesToDefault()
-    MySQL.query.await("DELETE FROM pickle_restaurant_recipes")
-    for _, r in ipairs(DEFAULT_RECIPES) do
-        MySQL.insert.await([[
-            INSERT INTO pickle_restaurant_recipes
-                (input_item, station, raw_model, cooked_model, burnt_model, output_cooked_item, output_burnt_item, cook_ms, burn_ms, dual_sided, method, output_count, container_model, `group`)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ]], { r.input, r.station, r.raw, r.cooked, r.burnt, r.out_cooked, r.out_burnt, r.cook_ms, r.burn_ms, r.dual_sided or 0, r.method or "grill", r.output_count or 1, r.container, r.group })
-    end
-    LoadRecipes()
+-- Reset the whole authored menu (foods / tools / ingredients) to the shipped
+-- defaults verbatim (the admin "Reset menu" action). Unlike the boot-time seed
+-- merge (which only fills gaps), this deliberately discards customisations.
+function ResetMenuToDefault()
+    SetSetting("foods", dec(json.encode(DEFAULT_FOODS), {}))
+    SetSetting("tools", dec(json.encode(DEFAULT_TOOLS), {}))
+    SetSetting("ingredients", dec(json.encode(DEFAULT_INGREDIENTS), {}))
+    RebuildDerived()
 end
 
-function LoadRecipes()
+-- LEGACY: read the retired SQL recipes table (pre-migration only — the rows feed
+-- MigrateUnifiedMenu, after which RebuildDerived owns RecipeCache).
+local function LoadLegacyRecipes()
     RecipeCache, RecipeByInput, RecipeByOutput = {}, {}, {}
     local rows = MySQL.query.await("SELECT * FROM pickle_restaurant_recipes") or {}
     for _, row in ipairs(rows) do
@@ -1208,6 +1348,647 @@ function LoadRecipes()
             RecipeByOutput[row.output_cooked_item] = row
         end
     end
+end
+
+-- ─── unified menu: authored config accessors ─────────────────────────────────
+-- The three authored settings arrays (the ONLY authoring surface). Everything the
+-- runtime consumes is DERIVED from these by RebuildDerived() below.
+
+function GetFoods()          return GetSetting("foods", {}) end
+function GetTools()          return GetSetting("tools", {}) end
+function GetIngredientsCfg() return GetSetting("ingredients", {}) end
+
+-- The ingredient entry for `item` (nil when unconfigured). Linear scan — the
+-- list is tiny and authored, like findAssembly.
+function IngredientDef(item)
+    if not item or item == "" then return nil end
+    for _, ing in ipairs(GetIngredientsCfg()) do
+        if ing.item == item then return ing end
+    end
+    return nil
+end
+
+-- `halves` property: the ingredient renders/splits as two half props (top +
+-- bottom), each worth 0.5 stack units (buns).
+function IngredientHalves(item)
+    local d = IngredientDef(item)
+    return d and type(d.halves) == "table" and d.halves or nil
+end
+
+-- `melts` property: the ingredient can be dropped onto a cooking dual-sided item
+-- and transitions applied_model -> melted_model on its melt timer (cheese).
+function MeltingToppingFor(item)
+    local d = IngredientDef(item)
+    if d and type(d.melts) == "table" and d.melts.applied_model then return d end
+    return nil
+end
+
+-- Decodes metadata written before toppings were generic: a bare numeric `cheese`
+-- field maps to this seeded ingredient. The item name lives in seed data only.
+function LegacyCheeseItem() return GetSetting("legacy_cheese_item", "cheese") end
+
+-- The topping riding a build-stack layer (or a cook/tray record), normalized:
+-- { item, state = "applied"|"melted" }. Reads the modern `top` field first, then
+-- synthesizes from a legacy numeric `cheese` (old tray metas / inventory slots).
+function LayerTopping(l)
+    if type(l) ~= "table" then return nil end
+    if type(l.top) == "table" and l.top.item then
+        return { item = l.top.item, state = (l.top.state == "melted") and "melted" or "applied" }
+    end
+    local c = CheeseVal(l.cheese)
+    if c >= 1 then
+        return { item = LegacyCheeseItem(), state = (c == 2) and "melted" or "applied" }
+    end
+    return nil
+end
+
+-- The prop a topping renders as at its current melt state, from its ingredient's
+-- `melts` models. nil when the ingredient is unconfigured (caller falls back).
+function ToppingModel(top)
+    if type(top) ~= "table" or not top.item then return nil end
+    local d = IngredientDef(top.item)
+    local m = d and d.melts
+    if type(m) ~= "table" then return d and d.model or nil end
+    if top.state == "melted" then return m.melted_model or m.applied_model end
+    return m.applied_model or d.model
+end
+
+-- The melt duration for a topping ingredient (its own melt_ms, else the global
+-- fallback setting).
+function ToppingMeltMs(item)
+    local d = MeltingToppingFor(item)
+    local ms = d and d.melts and tonumber(d.melts.melt_ms)
+    return ms or tonumber(GetSetting("cheese_melt_ms", 8000)) or 8000
+end
+
+-- ─── unified menu: sanitizers ─────────────────────────────────────────────────
+-- Applied to every admin save (the NUI is untrusted) and to migration output.
+-- Liberal: clamp types and drop structurally-empty entries; validity (missing
+-- items / models) is annotation, not rejection — a half-built entry must survive
+-- the round trip so it can be finished later.
+
+local function trimStr(v) return (type(v) == "string" and v ~= "") and v or nil end
+local function numOr(v, d) local n = tonumber(v); return n ~= nil and n or d end
+
+local function sanitizeModifiers(mods)
+    if type(mods) ~= "table" then return nil end
+    local out = {}
+    for _, m in ipairs(mods) do
+        if type(m) == "table" and (trimStr(m.id) or trimStr(m.item) or trimStr(m.label)) then
+            out[#out + 1] = {
+                id      = trimStr(m.id) or trimStr(m.item) or trimStr(m.label),
+                label   = trimStr(m.label) or trimStr(m.item) or trimStr(m.id),
+                item    = trimStr(m.item),
+                price   = RoundMoney(numOr(m.price, 0)),
+                default = m.default == true or nil,
+            }
+        end
+    end
+    return #out > 0 and out or nil
+end
+
+local function sanitizeComponents(comps)
+    local out = {}
+    for _, c in ipairs(type(comps) == "table" and comps or {}) do
+        if type(c) == "string" and c ~= "" then out[#out + 1] = c end
+    end
+    return out
+end
+
+function SanitizeFoods(list)
+    local out, seen = {}, {}
+    for _, f in ipairs(type(list) == "table" and list or {}) do
+        if type(f) == "table" then
+            local food = {
+                id    = trimStr(f.id),
+                label = trimStr(f.label),
+                kind  = (f.kind == "bag") and "bag" or "interactive",
+                group = trimStr(f.group),
+                modifiers = sanitizeModifiers(f.modifiers),
+            }
+            if food.kind == "bag" then
+                food.components   = sanitizeComponents(f.components)
+                food.display_item = trimStr(f.display_item)
+                food.id = food.id or food.display_item
+            else
+                local steps, cooks, pours = {}, 0, 0
+                local prevOutput = nil
+                for _, st in ipairs(type(f.steps) == "table" and f.steps or {}) do
+                    if type(st) == "table" then
+                        if st.type == "cook" and cooks == 0 then
+                            cooks = cooks + 1
+                            local station = (st.station == "fryer") and "fryer" or "stovetop"
+                            local method = st.method
+                            if station == "fryer" then method = "fry"
+                            elseif method ~= "oven" then method = "grill" end
+                            steps[#steps + 1] = {
+                                type = "cook",
+                                input = trimStr(st.input) or prevOutput,
+                                station = station, method = method,
+                                raw_model = trimStr(st.raw_model), cooked_model = trimStr(st.cooked_model),
+                                burnt_model = trimStr(st.burnt_model),
+                                output = trimStr(st.output), output_burnt = trimStr(st.output_burnt),
+                                cook_ms = math.max(1000, math.floor(numOr(st.cook_ms, 15000))),
+                                burn_ms = math.max(1000, math.floor(numOr(st.burn_ms, 15000))),
+                                dual_sided = (st.dual_sided == 1 or st.dual_sided == true) and 1 or nil,
+                                output_count = math.max(1, math.floor(numOr(st.output_count, 1))),
+                                container_model = trimStr(st.container_model),
+                                expire_seconds = st.expire_seconds ~= nil and st.expire_seconds ~= ""
+                                    and math.max(0, math.floor(numOr(st.expire_seconds, 0))) or nil,
+                                serving_model = trimStr(st.serving_model),
+                                serving_burnt_model = trimStr(st.serving_burnt_model),
+                            }
+                            prevOutput = steps[#steps].output or prevOutput
+                        elseif st.type == "assemble" then
+                            steps[#steps + 1] = {
+                                type = "assemble",
+                                output = trimStr(st.output),
+                                label = trimStr(st.label),
+                                model = trimStr(st.model),
+                                components = sanitizeComponents(st.components),
+                            }
+                            prevOutput = steps[#steps].output or prevOutput
+                        elseif st.type == "pour" and pours == 0 and #steps == 0 then
+                            -- a pour step stands alone (the fountain IS the whole make)
+                            pours = pours + 1
+                            steps[#steps + 1] = {
+                                type = "pour",
+                                input = trimStr(st.input),
+                                flavor = trimStr(st.flavor),
+                                model = trimStr(st.model),
+                                fill_ms = math.max(500, math.floor(numOr(st.fill_ms, 3000))),
+                                color = (type(st.color) == "table") and {
+                                    math.floor(numOr(st.color[1] or st.color.r, 200)),
+                                    math.floor(numOr(st.color[2] or st.color.g, 200)),
+                                    math.floor(numOr(st.color[3] or st.color.b, 210)),
+                                } or nil,
+                            }
+                            prevOutput = steps[#steps].flavor or prevOutput
+                        end
+                    end
+                end
+                food.steps = steps
+                -- deterministic identity: the final step's output / flavor (this is
+                -- what lets the default merge + migration agree on the same id)
+                food.id = food.id or prevOutput
+            end
+            if food.id and not seen[food.id] then
+                seen[food.id] = true
+                food.label = food.label or GetItemLabel(food.id)
+                out[#out + 1] = food
+            end
+        end
+    end
+    return out
+end
+
+function SanitizeTools(list)
+    local out, seen = {}, {}
+    for _, t in ipairs(type(list) == "table" and list or {}) do
+        if type(t) == "table" and (trimStr(t.item) or trimStr(t.id)) then
+            local mode = (t.mode == "layer" or t.mode == "decorate" or t.mode == "fill") and t.mode or "layer"
+            local tool = {
+                id = trimStr(t.id) or trimStr(t.item),
+                item = trimStr(t.item) or trimStr(t.id),
+                tool_model = trimStr(t.tool_model),
+                mode = mode,
+                group = trimStr(t.group),
+            }
+            if mode == "layer" then
+                tool.applied_model = trimStr(t.applied_model)
+            elseif mode == "decorate" then
+                tool.rub_dist = math.max(0.1, numOr(t.rub_dist, 1.2))
+                local targets = {}
+                for _, tg in ipairs(type(t.targets) == "table" and t.targets or {}) do
+                    if type(tg) == "table" and trimStr(tg.item) then
+                        local flavors = {}
+                        for _, fl in ipairs(type(tg.flavors) == "table" and tg.flavors or {}) do
+                            if type(fl) == "table" and (trimStr(fl.id) or trimStr(fl.label)) then
+                                flavors[#flavors + 1] = {
+                                    id = trimStr(fl.id) or trimStr(fl.label),
+                                    label = trimStr(fl.label) or trimStr(fl.id),
+                                    model = trimStr(fl.model),
+                                    color = trimStr(fl.color),
+                                }
+                            end
+                        end
+                        targets[#targets + 1] = {
+                            item = trimStr(tg.item),
+                            output = trimStr(tg.output) or trimStr(tg.item),
+                            mode = (tg.mode == "replace") and "replace" or "overlay",
+                            requires_finish = trimStr(tg.requires_finish),
+                            flavors = flavors,
+                        }
+                    end
+                end
+                tool.targets = targets
+            elseif mode == "fill" then
+                tool.rub_dist = math.max(0.1, numOr(t.rub_dist, 1.2))
+                local trays = {}
+                for _, tr in ipairs(type(t.trays) == "table" and t.trays or {}) do
+                    if type(tr) == "table" and trimStr(tr.kind) then
+                        trays[#trays + 1] = {
+                            kind = trimStr(tr.kind),
+                            label = trimStr(tr.label) or trimStr(tr.kind),
+                            tray_model = trimStr(tr.tray_model),
+                            output = trimStr(tr.output),
+                            raw_model = trimStr(tr.raw_model),
+                            slots = tonumber(tr.slots) and math.max(1, math.floor(tonumber(tr.slots))) or nil,
+                            group = trimStr(tr.group),
+                        }
+                    end
+                end
+                tool.trays = trays
+            end
+            if not seen[tool.id] then
+                seen[tool.id] = true
+                out[#out + 1] = tool
+            end
+        end
+    end
+    return out
+end
+
+function SanitizeIngredients(list)
+    local out, seen = {}, {}
+    for _, ing in ipairs(type(list) == "table" and list or {}) do
+        if type(ing) == "table" and trimStr(ing.item) and not seen[ing.item] then
+            seen[ing.item] = true
+            local e = {
+                item = ing.item,
+                model = trimStr(ing.model),
+                group = trimStr(ing.group),
+                box_base = ing.box_base == true or nil,
+                label = trimStr(ing.label),
+            }
+            if type(ing.halves) == "table" and (trimStr(ing.halves.top_model) or trimStr(ing.halves.bottom_model)) then
+                e.halves = { top_model = trimStr(ing.halves.top_model),
+                             bottom_model = trimStr(ing.halves.bottom_model) }
+            end
+            if type(ing.melts) == "table" and trimStr(ing.melts.applied_model) then
+                e.melts = { applied_model = trimStr(ing.melts.applied_model),
+                            melted_model = trimStr(ing.melts.melted_model) or trimStr(ing.melts.applied_model),
+                            melt_ms = tonumber(ing.melts.melt_ms) and math.max(500, math.floor(tonumber(ing.melts.melt_ms))) or nil }
+            end
+            out[#out + 1] = e
+        end
+    end
+    return out
+end
+
+-- ─── unified menu: derivation layer ──────────────────────────────────────────
+-- Rebuilds the exact legacy runtime shapes the 5k-line cooking engine / sales /
+-- itemgen / sync consume — RecipeCache rows, assembly/drinks/crafts/finishes/
+-- condiments lists, the baking config (now a LIST, one per fill tool) and the
+-- item->prep-prop map — from the three authored arrays. Run at boot and after
+-- every save of foods/tools/ingredients. Gameplay code never reads the authored
+-- arrays directly (except IngredientDef, which IS the authored surface).
+
+DerivedAssembly   = {}
+DerivedDrinks     = {}
+DerivedCrafts     = {}
+DerivedFinishes   = {}
+DerivedCondiments = {}
+DerivedBaking     = {}
+DerivedPrepModels = {}
+
+function GetAssembly()   return DerivedAssembly end
+function GetDrinks()     return DerivedDrinks end
+function GetCrafts()     return DerivedCrafts end
+function GetFinishes()   return DerivedFinishes end
+function GetCondiments() return DerivedCondiments end
+function GetBakingList() return DerivedBaking end
+function GetPrepModels() return DerivedPrepModels end
+
+function RebuildDerived()
+    RecipeCache, RecipeByInput, RecipeByOutput = {}, {}, {}
+    DerivedAssembly, DerivedDrinks, DerivedCrafts = {}, {}, {}
+    DerivedFinishes, DerivedCondiments, DerivedBaking = {}, {}, {}
+    DerivedPrepModels = {}
+
+    for _, ing in ipairs(GetIngredientsCfg()) do
+        if ing.item and ing.model then DerivedPrepModels[ing.item] = ing.model end
+    end
+
+    for _, food in ipairs(GetFoods()) do
+        if food.kind == "bag" then
+            if food.id then
+                DerivedCrafts[#DerivedCrafts + 1] = {
+                    id = food.id, label = food.label or food.id, group = food.group,
+                    components = food.components or {}, modifiers = food.modifiers,
+                    display_item = food.display_item, food_id = food.id,
+                }
+            end
+        else
+            local steps = food.steps or {}
+            local prevOutput = nil
+            for si, st in ipairs(steps) do
+                local isLast = (si == #steps)
+                if st.type == "cook" then
+                    local input = st.input or prevOutput
+                    if input and st.output and not RecipeByInput[input] then
+                        local row = {
+                            id = #RecipeCache + 1,
+                            input_item = input,
+                            station = st.station or "stovetop",
+                            method = st.method or "grill",
+                            raw_model = st.raw_model, cooked_model = st.cooked_model,
+                            burnt_model = st.burnt_model,
+                            output_cooked_item = st.output,
+                            output_burnt_item = st.output_burnt or "",
+                            cook_ms = tonumber(st.cook_ms) or 15000,
+                            burn_ms = tonumber(st.burn_ms) or 15000,
+                            dual_sided = (st.dual_sided == 1 or st.dual_sided == true) and 1 or 0,
+                            output_count = math.max(1, math.floor(tonumber(st.output_count) or 1)),
+                            container_model = st.container_model,
+                            expire_seconds = st.expire_seconds,
+                            group = food.group,
+                            food_id = food.id,
+                        }
+                        RecipeCache[#RecipeCache + 1] = row
+                        RecipeByInput[input] = row
+                        RecipeByOutput[st.output] = row
+                        if st.serving_model then DerivedPrepModels[st.output] = st.serving_model end
+                        if st.serving_burnt_model and st.output_burnt then
+                            DerivedPrepModels[st.output_burnt] = st.serving_burnt_model
+                        end
+                    end
+                    prevOutput = st.output or prevOutput
+                elseif st.type == "assemble" then
+                    if st.output then
+                        DerivedAssembly[#DerivedAssembly + 1] = {
+                            output = st.output,
+                            label = isLast and (food.label or st.output)
+                                or (st.label or ((food.label or st.output) .. " (uncooked)")),
+                            model = st.model, group = food.group,
+                            components = st.components or {},
+                            modifiers = isLast and food.modifiers or nil,
+                            food_id = food.id,
+                        }
+                    end
+                    prevOutput = st.output or prevOutput
+                elseif st.type == "pour" then
+                    if st.flavor then
+                        DerivedDrinks[#DerivedDrinks + 1] = {
+                            input = st.input, output = st.flavor,
+                            label = food.label or st.flavor,
+                            model = st.model, fill_ms = tonumber(st.fill_ms) or 3000,
+                            color = st.color, group = food.group, food_id = food.id,
+                        }
+                    end
+                end
+            end
+        end
+    end
+
+    for _, t in ipairs(GetTools()) do
+        if t.mode == "decorate" then
+            DerivedFinishes[#DerivedFinishes + 1] = {
+                tool = t.item, tool_model = t.tool_model, rub_dist = t.rub_dist,
+                group = t.group, targets = t.targets or {}, tool_id = t.id,
+            }
+        elseif t.mode == "layer" then
+            DerivedCondiments[#DerivedCondiments + 1] = {
+                item = t.item, container_model = t.tool_model,
+                applied_model = t.applied_model, tool_id = t.id,
+            }
+        elseif t.mode == "fill" then
+            DerivedBaking[#DerivedBaking + 1] = {
+                mix_item = t.item, mix_model = t.tool_model, rub_dist = t.rub_dist,
+                trays = t.trays or {}, group = t.group, tool_id = t.id,
+            }
+        end
+    end
+end
+
+-- ─── unified menu: one-time migration from the six legacy kinds ──────────────
+-- Converts a legacy DB's SQL recipes + assembly/crafts/drinks/finishes/
+-- condiments/baking/prep_models settings into foods/tools/ingredients, exactly
+-- once (flag `unified_menu_v1`). Chained entries merge into ONE multi-step food:
+--   • an assembly whose output is some recipe's input  -> [assemble, cook] (pizza)
+--   • a recipe whose cooked output feeds EXACTLY ONE assembly -> [cook, assemble]
+--     (burger / chicken sandwich); a component shared by 2+ assemblies is NOT
+--     merged — each side stays its own food, which derives identically.
+-- Identity is deterministic (final output / craft id / flavor key), so the
+-- post-migration default merge recognises the shipped entries and never dupes.
+local function MigrateUnifiedMenu()
+    if GetSetting("unified_menu_v1", false) then return end
+
+    local defaultLabel = {}
+    for _, f in ipairs(DEFAULT_FOODS) do defaultLabel[f.id] = f.label end
+
+    local prep = GetSetting("prep_models", {})
+    if type(prep) ~= "table" then prep = {} end
+    local usedPrep = {}
+
+    local assemblies = GetSetting("assembly", {})
+    if type(assemblies) ~= "table" then assemblies = {} end
+
+    local recipeUsed, asmUsed = {}, {}
+    local foods = {}
+
+    local function cookStep(r)
+        local st = {
+            type = "cook", input = r.input_item, station = r.station,
+            method = r.method or "grill",
+            raw_model = r.raw_model, cooked_model = r.cooked_model, burnt_model = r.burnt_model,
+            output = r.output_cooked_item,
+            output_burnt = (r.output_burnt_item ~= "" and r.output_burnt_item) or nil,
+            cook_ms = r.cook_ms, burn_ms = r.burn_ms,
+            dual_sided = (r.dual_sided == 1 or r.dual_sided == true) and 1 or nil,
+            container_model = r.container_model,
+            expire_seconds = r.expire_seconds,
+        }
+        if (tonumber(r.output_count) or 1) > 1 then st.output_count = r.output_count end
+        if prep[r.output_cooked_item] then
+            st.serving_model = prep[r.output_cooked_item]; usedPrep[r.output_cooked_item] = true
+        end
+        if st.output_burnt and prep[st.output_burnt] then
+            st.serving_burnt_model = prep[st.output_burnt]; usedPrep[st.output_burnt] = true
+        end
+        return st
+    end
+    local function asmStep(a, isFinal)
+        return {
+            type = "assemble", output = a.output,
+            label = (not isFinal) and a.label or nil,
+            model = a.model, components = a.components or {},
+        }
+    end
+    local function foodLabel(id, fallback)
+        return defaultLabel[id] or fallback or GetItemLabel(id)
+    end
+
+    -- assemble-then-cook (pizza pattern)
+    for _, a in ipairs(assemblies) do
+        local r = a.output and RecipeByInput[a.output] or nil
+        if r and not recipeUsed[r.input_item] then
+            recipeUsed[r.input_item], asmUsed[a.output] = true, true
+            foods[#foods + 1] = {
+                id = r.output_cooked_item, label = foodLabel(r.output_cooked_item),
+                kind = "interactive", group = a.group or r.group,
+                steps = { asmStep(a, false), cookStep(r) },
+                modifiers = (type(a.modifiers) == "table" and #a.modifiers > 0) and a.modifiers or nil,
+            }
+        end
+    end
+
+    -- cook-then-assemble (burger pattern)
+    for _, r in ipairs(RecipeCache) do
+        if not recipeUsed[r.input_item] then
+            local matches = {}
+            for _, a in ipairs(assemblies) do
+                if not asmUsed[a.output] then
+                    for _, c in ipairs(a.components or {}) do
+                        if c == r.output_cooked_item then matches[#matches + 1] = a break end
+                    end
+                end
+            end
+            if #matches == 1 then
+                local a = matches[1]
+                recipeUsed[r.input_item], asmUsed[a.output] = true, true
+                foods[#foods + 1] = {
+                    id = a.output, label = foodLabel(a.output, a.label),
+                    kind = "interactive", group = a.group or r.group,
+                    steps = { cookStep(r), asmStep(a, true) },
+                    modifiers = (type(a.modifiers) == "table" and #a.modifiers > 0) and a.modifiers or nil,
+                }
+            end
+        end
+    end
+
+    -- remaining single-step cooks / assemblies
+    for _, r in ipairs(RecipeCache) do
+        if not recipeUsed[r.input_item] then
+            foods[#foods + 1] = {
+                id = r.output_cooked_item, label = foodLabel(r.output_cooked_item),
+                kind = "interactive", group = r.group,
+                steps = { cookStep(r) },
+            }
+        end
+    end
+    for _, a in ipairs(assemblies) do
+        if a.output and not asmUsed[a.output] then
+            foods[#foods + 1] = {
+                id = a.output, label = foodLabel(a.output, a.label),
+                kind = "interactive", group = a.group,
+                steps = { asmStep(a, true) },
+                modifiers = (type(a.modifiers) == "table" and #a.modifiers > 0) and a.modifiers or nil,
+            }
+        end
+    end
+
+    -- drinks, in stored array order (relative order = tap order)
+    for _, d in ipairs(GetSetting("drinks", {})) do
+        if d.output then
+            foods[#foods + 1] = {
+                id = d.output, label = foodLabel(d.output, d.label),
+                kind = "interactive", group = d.group,
+                steps = { { type = "pour", input = d.input, flavor = d.output,
+                            model = d.model, fill_ms = d.fill_ms, color = d.color } },
+            }
+        end
+    end
+
+    -- crafts -> bag foods (id verbatim: the ~id variation sigs must stay stable)
+    for _, cr in ipairs(GetSetting("crafts", {})) do
+        if cr.id then
+            foods[#foods + 1] = {
+                id = cr.id, label = cr.label or cr.id, kind = "bag", group = cr.group,
+                components = cr.components or {},
+                modifiers = (type(cr.modifiers) == "table" and #cr.modifiers > 0) and cr.modifiers or nil,
+            }
+        end
+    end
+
+    -- finishes + condiments + baking -> tools
+    local tools, toolItems = {}, {}
+    for _, f in ipairs(GetSetting("finishes", {})) do
+        if f.tool then
+            toolItems[f.tool] = true
+            tools[#tools + 1] = {
+                id = f.tool, item = f.tool, tool_model = f.tool_model,
+                mode = "decorate", rub_dist = f.rub_dist, group = f.group,
+                targets = f.targets or {},
+            }
+        end
+    end
+    for _, c in ipairs(GetSetting("condiments", {})) do
+        if c.item then
+            toolItems[c.item] = true
+            tools[#tools + 1] = {
+                id = c.item, item = c.item, tool_model = c.container_model,
+                mode = "layer", applied_model = c.applied_model,
+            }
+        end
+    end
+    do
+        local b = GetSetting("baking", nil)
+        if type(b) == "table" and b.mix_item then
+            toolItems[b.mix_item] = true
+            tools[#tools + 1] = {
+                id = b.mix_item, item = b.mix_item, tool_model = b.mix_model,
+                mode = "fill", rub_dist = b.rub_dist, trays = b.trays or {},
+                group = "Bakery",
+            }
+        end
+    end
+
+    -- prep_models remainder -> ingredients (serving overrides + tool props were
+    -- consumed above). Default behavior properties (halves / melts / box_base)
+    -- are stamped from DEFAULT_INGREDIENTS by item so a legacy bun still splits.
+    local defaultIng = {}
+    for _, ing in ipairs(DEFAULT_INGREDIENTS) do defaultIng[ing.item] = ing end
+    local ingredients = {}
+    local prepKeys = {}
+    for k in pairs(prep) do
+        if not usedPrep[k] and not toolItems[k] then prepKeys[#prepKeys + 1] = k end
+    end
+    table.sort(prepKeys)
+    for _, k in ipairs(prepKeys) do
+        local e = { item = k, model = prep[k] }
+        local def = defaultIng[k]
+        if def then
+            e.halves = def.halves
+            e.melts = def.melts
+            e.box_base = def.box_base
+        end
+        ingredients[#ingredients + 1] = e
+    end
+
+    SetSetting("foods", SanitizeFoods(foods))
+    SetSetting("tools", SanitizeTools(tools))
+    SetSetting("ingredients", SanitizeIngredients(ingredients))
+    SetSetting("unified_menu_v1", true)
+    print(("[pickle_restaurants] Migrated legacy menu config -> unified menu (%d foods, %d tools, %d ingredients)."):format(
+        #GetFoods(), #GetTools(), #GetIngredientsCfg()))
+end
+
+-- Idempotent default merge for the three authored arrays: create a missing key
+-- outright, else append shipped entries whose id/item isn't present. An admin's
+-- customised entry (same id) is never touched; a deleted default re-seeds on
+-- restart, matching how the legacy kinds always behaved.
+local function SeedUnifiedMenu()
+    local function merge(key, defaults, idField)
+        local list = GetSetting(key, nil)
+        if type(list) ~= "table" then
+            SetSetting(key, dec(json.encode(defaults), {}))
+            return
+        end
+        local seen = {}
+        for _, e in ipairs(list) do if e[idField] then seen[e[idField]] = true end end
+        local changed = false
+        for _, def in ipairs(defaults) do
+            if not seen[def[idField]] then
+                list[#list + 1] = dec(json.encode(def), nil)
+                changed = true
+            end
+        end
+        if changed then SetSetting(key, list) end
+    end
+    merge("foods", DEFAULT_FOODS, "id")
+    merge("tools", DEFAULT_TOOLS, "id")
+    merge("ingredients", DEFAULT_INGREDIENTS, "item")
 end
 
 local function LoadEmployees()
@@ -1288,6 +2069,62 @@ local function LoadCookedItems()
     end
 end
 
+-- One-time: fold the tray's row-level cheese dimension into build-stack metadata.
+-- Toppings are generic now — a topped instance carries `top = { item, state }` on
+-- its carrier layer and TraySig canonicalizes it, so the `cheese` column's only
+-- remaining job is addressing rows written by old versions. Every cheese>0 row is
+-- converted into a cheese-0 row whose instances carry the topping in their stacks
+-- (a bare topped patty becomes a one-layer "self stack"); all new writes pass 0,
+-- so the column stays dormant from here on (dropped in a later release once
+-- proven). Runs at boot, after LoadCookedItems, before any player connects.
+local function MigrateTrayCheese()
+    if GetSetting("tray_cheese_migrated", false) then return end
+    local moves = {}
+    for rid, byId in pairs(TrayCache) do
+        for identifier, byKey in pairs(byId) do
+            for _, e in pairs(byKey) do
+                if (e.cheese or 0) > 0 and (e.count or 0) > 0 then
+                    moves[#moves + 1] = { rid = rid, identifier = identifier, e = e }
+                end
+            end
+        end
+    end
+    for _, mv in ipairs(moves) do
+        local e = mv.e
+        local top = { item = LegacyCheeseItem(), state = (e.cheese == 2) and "melted" or "applied" }
+        local count = e.count
+        local metas = {}
+        for i = 1, count do
+            local m = e.metas and e.metas[i]
+            metas[i] = (type(m) == "table") and m or false
+        end
+        -- drop the old keyed row first (cache + DB), then re-add each instance as
+        -- a cheese-0 row with the topping stamped into its stack
+        RemoveTray(mv.rid, mv.identifier, e.item, e.cheese, count)
+        for i = 1, count do
+            local m = metas[i]
+            local newMeta
+            if m and #m > 0 then
+                newMeta = dec(json.encode(m), {}) -- independent copy
+                local stamped = false
+                for _, l in ipairs(newMeta) do
+                    if not stamped and l.item == e.item and not l.top and CheeseVal(l.cheese) == 0 then
+                        l.top = top; stamped = true
+                    end
+                end
+                if not stamped then newMeta[1].top = top end
+            else
+                newMeta = { { item = e.item, top = top } }
+            end
+            AddTray(mv.rid, mv.identifier, e.item, 0, 1, newMeta)
+        end
+    end
+    SetSetting("tray_cheese_migrated", true)
+    if #moves > 0 then
+        print(("[pickle_restaurants] Migrated %d topped tray rows into build-stack metadata."):format(#moves))
+    end
+end
+
 local function LoadProps()
     PropCache = {}
     local rows = MySQL.query.await("SELECT * FROM pickle_restaurant_props") or {}
@@ -1363,11 +2200,9 @@ function CollectGroups()
             out[#out + 1] = g
         end
     end
-    for _, r in ipairs(RecipeCache) do add(r.group) end
-    for _, a in ipairs(GetSetting("assembly", {})) do add(a.group) end
-    for _, cr in ipairs(GetSetting("crafts", {})) do add(cr.group) end
-    for _, d in ipairs(GetSetting("drinks", {})) do add(d.group) end
-    for _, f in ipairs(GetSetting("finishes", {})) do add(f.group) end
+    for _, f in ipairs(GetFoods()) do add(f.group) end
+    for _, t in ipairs(GetTools()) do add(t.group) end
+    for _, ing in ipairs(GetIngredientsCfg()) do add(ing.group) end
     table.sort(out)
     return out
 end
@@ -1390,19 +2225,18 @@ function ResolveItemCost(item, seen)
         local per = math.max(1, tonumber(rec.output_count) or 1)
         return ResolveItemCost(rec.input_item, seen) / per
     end
-    for _, a in ipairs(GetSetting("assembly", {})) do
+    for _, a in ipairs(GetAssembly()) do
         if a.output == item then
             local sum = 0
             for _, c in ipairs(a.components or {}) do sum = sum + ResolveItemCost(c, seen) end
             return sum
         end
     end
-    -- A baking-tray output (raw_cake / raw_cookie) is produced by rubbing the shared
-    -- baking mix into a free tray, so it costs one baking mix.
-    local baking = GetSetting("baking", {})
-    if type(baking) == "table" then
-        for _, t in ipairs(baking.trays or {}) do
-            if t.output == item then return ResolveItemCost(baking.mix_item, seen) end
+    -- A bake-tray output (raw_cake / raw_cookie) is produced by rubbing a fill
+    -- tool's mix into a free tray, so it costs one mix item.
+    for _, b in ipairs(GetBakingList()) do
+        for _, t in ipairs(b.trays or {}) do
+            if t.output == item then return ResolveItemCost(b.mix_item, seen) end
         end
     end
     return 0
@@ -1461,7 +2295,7 @@ end
 -- installed inventory item. See memory: cooked-intermediate-not-an-item.
 function IsAssemblyComponent(item)
     if not item or item == "" then return false end
-    for _, a in ipairs(GetSetting("assembly", {})) do
+    for _, a in ipairs(GetAssembly()) do
         for _, c in ipairs(a.components or {}) do
             if c == item then return true end
         end
@@ -1480,7 +2314,11 @@ end
 --     when binned, so it's never required to be installed.
 function RecipeMissingItems(r)
     local missing = {}
-    if not ItemExists(r.input_item) then missing[#missing + 1] = r.input_item end
+    -- the input must be an installed consumed item UNLESS it's itself a kitchen
+    -- product (an assembled/baked intermediate like raw_pizza — tray-only)
+    if not ItemExists(r.input_item) and not IsProductItem(r.input_item) then
+        missing[#missing + 1] = r.input_item
+    end
     if not IsAssemblyComponent(r.output_cooked_item) and not ItemExists(r.output_cooked_item) then
         missing[#missing + 1] = r.output_cooked_item
     end
@@ -1493,134 +2331,116 @@ function IsRecipeValid(r) return #RecipeMissingItems(r) == 0 end
 -- "fry" (fryer basket). Defaults to grill for legacy/untagged rows.
 function RecipeMethod(r) return (r and r.method) or "grill" end
 
--- Drinks / assembly entries reference items too; same validity rules apply.
-local function drinkMissing(d)
-    -- only the cup (input) is a real item — the output is a flavor KEY: every
-    -- poured drink collects as the ONE `drink_item` item, flavor as metadata
-    local missing = {}
-    if not ItemExists(d.input) then missing[#missing + 1] = d.input end
-    return missing
-end
-
-local function assemblyMissing(a)
-    -- the output is a kitchen product (tray-held) — never required to be an installed
-    -- item (raw_pizza isn't one). A component is a real consumed item UNLESS it's itself
-    -- a kitchen PRODUCT (a cooked patty pulled from the cooked pool) — those are valid
-    -- without being installed, exactly like the recipe outputs that make them.
-    local missing = {}
-    for _, comp in ipairs(a.components or {}) do
-        if not ItemExists(comp) and not IsProductItem(comp) then missing[#missing + 1] = comp end
-    end
-    return missing
-end
-
--- The item every crafted Restaurant Bag becomes (one item for all crafts; the
--- craft id is its POS variant). Mirrors DrinkItemName/MealItem.
+-- The item every crafted Restaurant Bag becomes (one item for all bag foods; the
+-- food id is its POS variant). Mirrors DrinkItemName/MealItem.
 function BagItemName() return GetSetting("bag_item", "restaurant_bag") end
 
--- A craft's raw ingredient cost = the sum of its component costs (the bag output
--- itself is free packaging, never an ingredient). Used for the default menu price.
+-- A bag food's raw ingredient cost = the sum of its component costs (the bag
+-- output itself is free packaging, never an ingredient). Default menu price.
 function CraftCost(cr)
     local sum = 0
     for _, c in ipairs(cr.components or {}) do sum = sum + ResolveItemCost(c) end
     return sum
 end
 
-local function craftMissing(cr)
-    -- like assemblyMissing: the output is always the generic bag item; only the
-    -- components must resolve (a real installed item OR a cooked-pool product).
-    local missing = {}
-    for _, comp in ipairs(cr.components or {}) do
-        if not ItemExists(comp) and not IsProductItem(comp) then missing[#missing + 1] = comp end
-    end
-    return missing
-end
+-- ─── unified menu: annotation (admin panel payloads) ─────────────────────────
+-- Shallow-copied so annotations never leak back into the stored config (the NUI
+-- strips them before save regardless). Validity is per the legacy rules:
+--   • a raw consumed item (cook input, component, cup, tool bottle) must be an
+--     installed inventory item — UNLESS it's itself a kitchen product (an
+--     intermediate like raw_pizza / a cooked patty), which is tray-only;
+--   • a cook output handed to customers directly must be installed; one that only
+--     feeds an assembly is a pool-only intermediate and needn't be;
+--   • burnt outputs are never required.
 
--- Annotate a list with valid/missing without mutating the cached source rows.
-function AnnotateRecipes()
-    local out = {}
-    for _, r in ipairs(RecipeCache) do
-        local missing = RecipeMissingItems(r)
-        local copy = {}
-        for k, v in pairs(r) do copy[k] = v end
-        copy.valid, copy.missing = #missing == 0, missing
-        copy.defaultPrice = MarkupPrice(ResolveItemCost(r.output_cooked_item))
-        out[#out + 1] = copy
-    end
-    return out
-end
-
-function AnnotateDrinks()
-    -- Every poured drink collects as the ONE generic drink item; if that item
-    -- isn't installed in the framework inventory NO drink can be sold (the POS
-    -- filters them all out), so flag it so the admin panel can say why.
+function AnnotateFoods()
     local drinkInstalled = ItemExists(GetSetting("drink_item", "drink"))
-    local out = {}
-    for _, d in ipairs(GetSetting("drinks", {})) do
-        local missing = drinkMissing(d)
-        local copy = {}; for k, v in pairs(d) do copy[k] = v end
-        copy.valid, copy.missing = #missing == 0, missing
-        copy.drink_item_installed = drinkInstalled
-        copy.defaultPrice = MarkupPrice(ResolveItemCost(d.input))
-        out[#out + 1] = copy
-    end
-    return out
-end
-
-function AnnotateAssembly()
-    local out = {}
-    for _, a in ipairs(GetSetting("assembly", {})) do
-        local missing = assemblyMissing(a)
-        local copy = {}; for k, v in pairs(a) do copy[k] = v end
-        copy.valid, copy.missing = #missing == 0, missing
-        copy.defaultPrice = MarkupPrice(ResolveItemCost(a.output))
-        out[#out + 1] = copy
-    end
-    return out
-end
-
-function AnnotateCrafts()
-    -- Every craft collapses to the ONE generic bag item; if that item isn't
-    -- installed NO craft can be sold, so flag it like AnnotateDrinks does.
     local bagInstalled = ItemExists(BagItemName())
+    local inputOwner = {}  -- duplicate cook-input detection (replaces the SQL unique key)
+    local pourIndex = 0
     local out = {}
-    for _, cr in ipairs(GetSetting("crafts", {})) do
-        local missing = craftMissing(cr)
-        local copy = {}; for k, v in pairs(cr) do copy[k] = v end
-        copy.valid, copy.missing = #missing == 0, missing
-        copy.bag_item_installed = bagInstalled
-        copy.defaultPrice = MarkupPrice(CraftCost(cr))
-        out[#out + 1] = copy
-    end
-    return out
-end
-
-function AnnotateFinishes()
-    local out = {}
-    for _, f in ipairs(GetSetting("finishes", {})) do
-        local missing = {}
-        if not ItemExists(f.tool) then missing[#missing + 1] = f.tool end
-        for _, t in ipairs(f.targets or {}) do
-            -- a target/output that's a tray PRODUCT is valid without being installed
-            if not IsProductItem(t.item)   and not ItemExists(t.item)   then missing[#missing + 1] = t.item end
-            if not IsProductItem(t.output) and not ItemExists(t.output) then missing[#missing + 1] = t.output end
-        end
+    for _, f in ipairs(GetFoods()) do
         local copy = {}; for k, v in pairs(f) do copy[k] = v end
+        local missing = {}
+        local function needItem(item)
+            if item and not ItemExists(item) and not IsProductItem(item) then
+                missing[#missing + 1] = item
+            end
+        end
+        if f.kind == "bag" then
+            for _, c in ipairs(f.components or {}) do needItem(c) end
+            if f.display_item and not ItemExists(f.display_item) then
+                missing[#missing + 1] = f.display_item
+            end
+            copy.bag_item_installed = bagInstalled
+            copy.defaultPrice = MarkupPrice(CraftCost(f))
+        else
+            local prevOutput, priceItem = nil, nil
+            for _, st in ipairs(f.steps or {}) do
+                if st.type == "cook" then
+                    local input = st.input or prevOutput
+                    needItem(input)
+                    if input then
+                        if inputOwner[input] and inputOwner[input] ~= f.id then
+                            copy.duplicate_input = input
+                        else
+                            inputOwner[input] = f.id
+                        end
+                    end
+                    if st.output and not IsAssemblyComponent(st.output) and not ItemExists(st.output) then
+                        missing[#missing + 1] = st.output
+                    end
+                    prevOutput, priceItem = st.output, st.output
+                elseif st.type == "assemble" then
+                    for _, c in ipairs(st.components or {}) do needItem(c) end
+                    prevOutput, priceItem = st.output, st.output
+                elseif st.type == "pour" then
+                    if st.input and not ItemExists(st.input) then missing[#missing + 1] = st.input end
+                    copy.drink_item_installed = drinkInstalled
+                    pourIndex = pourIndex + 1
+                    copy.tap = (pourIndex <= 6) and pourIndex or nil
+                    priceItem = st.input
+                end
+            end
+            copy.defaultPrice = MarkupPrice(ResolveItemCost(priceItem))
+        end
         copy.valid, copy.missing = #missing == 0, missing
         out[#out + 1] = copy
     end
     return out
 end
 
--- Condiments (squeeze-bottle sauces). Flagged like the others: the bottle `item`
--- must be an installed inventory item or the applicator card can't appear on the
--- prep bar (the sauce props are visual-only, so only `item` gates validity).
-function AnnotateCondiments()
+function AnnotateTools()
     local out = {}
-    for _, c in ipairs(GetSetting("condiments", {})) do
+    for _, t in ipairs(GetTools()) do
+        local copy = {}; for k, v in pairs(t) do copy[k] = v end
         local missing = {}
-        if not ItemExists(c.item) then missing[#missing + 1] = c.item end
-        local copy = {}; for k, v in pairs(c) do copy[k] = v end
+        if not ItemExists(t.item) then missing[#missing + 1] = t.item end
+        if t.mode == "decorate" then
+            for _, tg in ipairs(t.targets or {}) do
+                -- a target/output that's a tray PRODUCT is valid without being installed
+                if not IsProductItem(tg.item)   and not ItemExists(tg.item)   then missing[#missing + 1] = tg.item end
+                if not IsProductItem(tg.output) and not ItemExists(tg.output) then missing[#missing + 1] = tg.output end
+            end
+        elseif t.mode == "fill" then
+            for _, tr in ipairs(t.trays or {}) do
+                if tr.output and not ItemExists(tr.output) and not IsProductItem(tr.output) then
+                    missing[#missing + 1] = tr.output
+                end
+            end
+        end
+        copy.valid, copy.missing = #missing == 0, missing
+        out[#out + 1] = copy
+    end
+    return out
+end
+
+function AnnotateIngredients()
+    local out = {}
+    for _, ing in ipairs(GetIngredientsCfg()) do
+        local copy = {}; for k, v in pairs(ing) do copy[k] = v end
+        local missing = {}
+        if not ItemExists(ing.item) then missing[#missing + 1] = ing.item end
         copy.valid, copy.missing = #missing == 0, missing
         out[#out + 1] = copy
     end
@@ -1638,7 +2458,7 @@ CreateThread(function()
         if src ~= 0 and not IsPlayerAdmin(src) then return ShowNotification(src, _L("no_permission")) end
         local function line(s) print(s); if src ~= 0 then ShowNotification(src, s) end end
         line("[pickle_restaurants] Finish tools:")
-        for _, f in ipairs(GetSetting("finishes", {})) do
+        for _, f in ipairs(GetFinishes()) do
             local toolOk = ItemExists(f.tool)
             line((" • %s  tool=%s%s"):format(f.tool or "?", tostring(f.tool), toolOk and " ✓" or " ✗ NOT INSTALLED"))
             for _, t in ipairs(f.targets or {}) do
@@ -1892,7 +2712,18 @@ function TraySig(meta)
     for _, l in ipairs(meta) do
         -- tolerate the older aggregated `count` layer format
         for _ = 1, (tonumber(l.count) or 1) do
-            local part = tostring(l.item) .. "|" .. CheeseVal(l.cheese) .. "|" .. tostring(l.half or "")
+            -- the middle field is a historical artifact (the layer's numeric cheese
+            -- state) — toppings are canonicalized into the "+item:state" token below,
+            -- so it's pinned to 0 and legacy/modern encodings of the same build
+            -- produce IDENTICAL sigs (plain layers are byte-identical to always)
+            local part = tostring(l.item) .. "|0|" .. tostring(l.half or "")
+            -- a melting topping riding this layer (modern `top` field, or a legacy
+            -- numeric `cheese` decoded via LayerTopping): its item + melt state are
+            -- part of the variation identity
+            local topv = LayerTopping(l)
+            if topv then
+                part = part .. "+" .. tostring(topv.item) .. ":" .. tostring(topv.state)
+            end
             -- a layer that is itself a product carries its own nested build stack
             -- (a burger holding a pepperoni pizza ≠ one holding a plain pizza)
             if type(l.stack) == "table" and #l.stack > 0 then
@@ -2258,19 +3089,18 @@ function IsProductItem(item)
     for _, r in ipairs(RecipeCache) do
         if r.output_cooked_item == item or r.output_burnt_item == item then return true end
     end
-    for _, a in ipairs(GetSetting("assembly", {})) do
+    for _, a in ipairs(GetAssembly()) do
         if a.output == item then return true end
     end
-    for _, f in ipairs(GetSetting("finishes", {})) do
+    for _, f in ipairs(GetFinishes()) do
         for _, t in ipairs(f.targets or {}) do
             if t.output == item then return true end
         end
     end
-    -- a baking-tray output (raw_cake / raw_cookie) is a tray-only uncooked
+    -- a bake-tray output (raw_cake / raw_cookie) is a tray-only uncooked
     -- intermediate (like raw_pizza) — a kitchen product, never a carried item
-    local baking = GetSetting("baking", {})
-    if type(baking) == "table" then
-        for _, t in ipairs(baking.trays or {}) do
+    for _, b in ipairs(GetBakingList()) do
+        for _, t in ipairs(b.trays or {}) do
             if t.output == item then return true end
         end
     end
@@ -2290,13 +3120,12 @@ function BuildSyncPayload()
         if IsRecipeValid(r) then recipes[#recipes + 1] = r end
     end
     local drinks = {}
-    for i, d in ipairs(GetSetting("drinks", {})) do
+    for i, d in ipairs(GetDrinks()) do
         -- only the cup (input) must be an installed item — the output is a flavor
         -- KEY (poured drinks collect as the one `drink_item` item, flavor in meta)
         if ItemExists(d.input) then
             -- `tap` = the entry's RAW config position: the fountain tap it holds
-            -- (first six only). Stamped on a copy so the cached setting row never
-            -- carries the derived field back into the DB.
+            -- (first six only). Stamped on a copy so the derived row stays clean.
             local copy = {}
             for k, v in pairs(d) do copy[k] = v end
             copy.tap = (i <= 6) and i or nil
@@ -2304,7 +3133,7 @@ function BuildSyncPayload()
         end
     end
     local assembly = {}
-    for _, a in ipairs(GetSetting("assembly", {})) do
+    for _, a in ipairs(GetAssembly()) do
         -- the OUTPUT is a kitchen product (tray-held, IsProductItem) — it works
         -- without being an installed item (raw_pizza never is; only taking it out
         -- via trayToInventory would need one). Components are real consumed items.
@@ -2316,12 +3145,12 @@ function BuildSyncPayload()
         end
         if ok then assembly[#assembly + 1] = a end
     end
-    -- Crafts: shipped only when the ONE bag item is installed (every craft collects
-    -- as it — no bag item, nothing to hand out) AND every component resolves (a real
-    -- consumed item OR a cooked-pool product). Mirrors the assembly filter.
+    -- Bag foods: shipped only when the ONE bag item is installed (every bag food
+    -- collects as it — no bag item, nothing to hand out) AND every component
+    -- resolves (a real consumed item OR a cooked-pool product).
     local crafts = {}
     if ItemExists(BagItemName()) then
-        for _, cr in ipairs(GetSetting("crafts", {})) do
+        for _, cr in ipairs(GetCrafts()) do
             local ok = (cr.id and cr.id ~= "" and cr.components and #cr.components > 0)
             for _, comp in ipairs(cr.components or {}) do
                 if not ItemExists(comp) and not IsProductItem(comp) then ok = false end
@@ -2329,12 +3158,12 @@ function BuildSyncPayload()
             if ok then crafts[#crafts + 1] = cr end
         end
     end
-    -- Finish tools ship with only their valid targets: the tool must be a real
+    -- Decorate tools ship with only their valid targets: the tool must be a real
     -- (consumed) inventory item, but a target/output may be a tray-only PRODUCT
     -- (a frosted doughnut is a finish output, never installed) — FinishItemOk. An
     -- entry with no surviving targets is dropped entirely.
     local finishes = {}
-    for _, f in ipairs(GetSetting("finishes", {})) do
+    for _, f in ipairs(GetFinishes()) do
         if ItemExists(f.tool) then
             local targets = {}
             for _, t in ipairs(f.targets or {}) do
@@ -2348,30 +3177,65 @@ function BuildSyncPayload()
         end
     end
 
-    -- Condiments: shipped only when the bottle's inventory item is real (consumed) and
-    -- both of its props are configured. An entry missing any of these is dropped — the
-    -- client's applicator would have nothing to spawn otherwise.
+    -- Layer tools (condiments): shipped only when the bottle's inventory item is
+    -- real (consumed) and both of its props are configured. An entry missing any
+    -- of these is dropped — the applicator would have nothing to spawn otherwise.
     local condiments = {}
-    for _, c in ipairs(GetSetting("condiments", {})) do
+    for _, c in ipairs(GetCondiments()) do
         if c.item and ItemExists(c.item) and c.container_model and c.applied_model then
             condiments[#condiments + 1] = c
         end
     end
 
-    -- Baking mix + trays: shipped only when the shared mix is a real (consumed)
-    -- inventory item; individual trays are dropped unless their output is a usable
-    -- item/product (raw_cake/raw_cookie are real items — needed for bakeTrayToInv).
-    local baking = nil
-    do
-        local b = GetSetting("baking", {})
-        if type(b) == "table" and b.mix_item and ItemExists(b.mix_item) then
+    -- Fill tools (baking): a LIST now (one entry per fill tool). Each ships only
+    -- when its mix is a real (consumed) inventory item; individual trays are
+    -- dropped unless their output is a usable item/product (raw_cake/raw_cookie
+    -- are real items — needed for bakeTrayToInv).
+    local baking = {}
+    for _, b in ipairs(GetBakingList()) do
+        if b.mix_item and ItemExists(b.mix_item) then
             local trays = {}
             for _, t in ipairs(b.trays or {}) do
                 if t.kind and t.tray_model and FinishItemOk(t.output) then trays[#trays + 1] = t end
             end
             if #trays > 0 then
-                baking = { mix_item = b.mix_item, mix_model = b.mix_model,
-                           rub_dist = b.rub_dist, trays = trays }
+                baking[#baking + 1] = { mix_item = b.mix_item, mix_model = b.mix_model,
+                                        rub_dist = b.rub_dist, trays = trays }
+            end
+        end
+    end
+
+    -- Ingredients: the client's per-item behavior config (prep prop + halves /
+    -- melts properties). Only entries whose item is installed are shipped —
+    -- everything the client needs to render toppings, split halves, etc.
+    local ingredients = {}
+    for _, ing in ipairs(GetIngredientsCfg()) do
+        if ing.item and ItemExists(ing.item) then
+            ingredients[#ingredients + 1] = ing
+        end
+    end
+
+    -- Pizza-box acceptance, resolved server-side into a plain MODEL list so the
+    -- client's drag preview can hash-match the carried pile's bottom prop: every
+    -- box_base ingredient's own prop, plus the cook-state models of any recipe fed
+    -- by an assembly whose FIRST component is that ingredient (raw pizza at every
+    -- cook state), plus a recipe cooking the ingredient directly.
+    local boxSeen, box_base_models = {}, {}
+    local function addBoxModel(m)
+        if m and m ~= "" and not boxSeen[m] then boxSeen[m] = true; box_base_models[#box_base_models + 1] = m end
+    end
+    for _, ing in ipairs(GetIngredientsCfg()) do
+        if ing.box_base then
+            addBoxModel(ing.model)
+            local function addRecipeModels(r)
+                if r then addBoxModel(r.raw_model); addBoxModel(r.cooked_model); addBoxModel(r.burnt_model) end
+            end
+            addRecipeModels(RecipeByInput[ing.item])
+            for _, a in ipairs(GetAssembly()) do
+                if (a.components or {})[1] == ing.item then
+                    if a.model then addBoxModel(a.model) end
+                    addRecipeModels(RecipeByInput[a.output])
+                end
             end
         end
     end
@@ -2380,13 +3244,18 @@ function BuildSyncPayload()
         drinks   = drinks,
         assembly = assembly,
         crafts   = crafts,
-        -- the Restaurant Bag vessel prop + the one item every craft becomes, so the
-        -- client can spawn the bag equipment and render a finished/held bag
+        -- the Restaurant Bag vessel prop + the one item every bag food becomes, so
+        -- the client can spawn the bag equipment and render a finished/held bag
         bag_item  = BagItemName(),
         bag_model = GetSetting("bag_model", "pickle_restaurant_bag_01"),
         finishes = finishes,
         condiments = condiments,
         baking   = baking,
+        ingredients = ingredients,
+        box_base_models = box_base_models,
+        -- per-model manual stacking corrections for the client render (see the
+        -- stack_tweaks setting seed)
+        stack_tweaks = GetSetting("stack_tweaks", {}),
         -- the side-serving container box (fries…) — shipped so the client can apply
         -- the mesh-bottom base-lift correction when it's the base of a build stack
         side_container_model = GetSetting("side_container_model", ""),
@@ -2418,14 +3287,22 @@ CreateThread(function()
     MySQL.ready(function()
         CreateTables()
         LoadSettings()
-        SeedRecipes()
-        LoadRecipes()
+        if not GetSetting("unified_menu_v1", false) then
+            -- legacy DB: bring the retired kinds fully up to date, then convert
+            -- them into the unified menu exactly once
+            SeedRecipes()
+            LoadLegacyRecipes()
+            MigrateUnifiedMenu()
+        end
+        SeedUnifiedMenu()
+        RebuildDerived()
         LoadRestaurants()
         LoadProps()
         LoadEmployees()
         LoadStock()
         LoadOrders()
         LoadCookedItems()
+        MigrateTrayCheese()
         LoadCombos()
         RestaurantsReady = true
         debugPrint(("Booted: %d restaurants, %d props, %d recipes."):format(

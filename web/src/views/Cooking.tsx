@@ -23,9 +23,14 @@ const flavorColor = (fl: { id: string; color?: string }) => fl.color || FLAVOR_C
 type SideInfo = { state: string; percent: number; cooking?: boolean };
 // One aggregated component of a build stack (bun halves collapse to one bun).
 type TrayComp = { item: string; label: string; image?: string; count: number };
+// The melted-topping state riding a tray/inventory entry: which ingredient sits
+// on it and how far along the melt is (1 = applied, 2 = melted in). The numeric
+// `cheese` field STAYS on every entry/payload purely as the legacy inventory
+// addressing key — display comes from `top`/`topModel` only.
+type TopState = { item: string; state: number | string };
 type TrayEntry = {
   item: string; cheese?: number; count: number; label?: string; image?: string; model?: string;
-  dual?: boolean; cheeseModel?: string; decompose?: boolean; uncooked?: boolean; cookStation?: string;
+  dual?: boolean; top?: TopState; topModel?: string; decompose?: boolean; uncooked?: boolean; cookStation?: string;
   // per-build-variation identity: sig addresses exactly this variation on the server;
   // stack/stackState render its full layer tower; extras (toppings over the base
   // recipe) and comps (full component list) tell otherwise-identical entries apart.
@@ -78,9 +83,18 @@ type ChipItem = {
   percent?: number; gate?: boolean; method?: string; burningSoon?: boolean;
   ice?: boolean; needLid?: boolean;       // soda cups: ice dispensed / lid still required
   sides?: SideInfo[]; cooking?: number;   // per-face progress + which face is on the grill
-  cheese?: string;                        // "none" | "applied" | "melted"
+  // a melting ingredient sitting on a dual-sided item: which one + its melt state
+  topping?: { item: string; state: string; model?: string }; // state "none" | "applied" | "melted"
   give?: string; giveLabel?: string; giveImage?: string;
 };
+
+// Resolve a topping ingredient's display label/image from whatever catalogue
+// entry mentions it; falls back to a prettified codename so it never reads raw.
+type ItemMetaMap = Record<string, { label?: string; image?: string }>;
+const prettyItem = (name: string) => name.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const metaLabel = (meta: ItemMetaMap | undefined, item: string) => meta?.[item]?.label || prettyItem(item);
+const metaImage = (meta: ItemMetaMap | undefined, item: string) => meta?.[item]?.image;
+const topMelted = (state: number | string) => state === 2 || state === "2" || state === "melted";
 
 // The stovetop's camera views as icon tabs (sidebar left of the item listings):
 // a cooktop for the stovetop, the same oven icon twice with a #1/#2 badge.
@@ -169,7 +183,7 @@ function ToppingsRow({ e }: { e: TrayEntry }) {
 
 type BarTip = { x: number; y: number; tray?: TrayEntry; ing?: Ingredient; hint?: string };
 
-function BarTooltip({ tip, actions, onPin }: { tip: BarTip; actions?: ReactNode; onPin: (pinned: boolean) => void }) {
+function BarTooltip({ tip, actions, onPin, meta }: { tip: BarTip; actions?: ReactNode; onPin: (pinned: boolean) => void; meta?: ItemMetaMap }) {
   const e = tip.tray;
   const ing = tip.ing;
   const label = e ? e.label || e.item : ing?.label || "";
@@ -229,9 +243,10 @@ function BarTooltip({ tip, actions, onPin }: { tip: BarTip; actions?: ReactNode;
           )}
         </div>
 
-        {!!e?.cheese && (
+        {e?.top && (
           <div className="mt-2 flex items-center gap-1.5 text-[11px] text-amber-300">
-            🧀 {e.cheese === 2 ? _L("cook.cheese_melted_in") : _L("cook.cheese_applied")}
+            <ItemThumb src={e.topModel ? undefined : metaImage(meta, e.top.item)} alt="" className="h-3.5 w-3.5 object-contain" />
+            {topMelted(e.top.state) ? _L("cook.top_melted_in", metaLabel(meta, e.top.item)) : _L("cook.top_applied", metaLabel(meta, e.top.item))}
           </div>
         )}
 
@@ -303,7 +318,7 @@ function SideRow({ name, side }: { name: string; side?: SideInfo }) {
   );
 }
 
-function StatusPanel({ c }: { c: ChipItem }) {
+function StatusPanel({ c, meta }: { c: ChipItem; meta?: ItemMetaMap }) {
   if (!c.dual) {
     // oven / fryer / soda item: live progress bar, collect-now, next-step hints
     if (c.single) {
@@ -381,9 +396,10 @@ function StatusPanel({ c }: { c: ChipItem }) {
         <SideRow name={_L("cook.side_2")} side={sides[1]} />
       </div>
 
-      {c.cheese && c.cheese !== "none" && (
+      {c.topping && c.topping.state !== "none" && (
         <div className="mt-2 flex items-center gap-1.5 text-[11px] text-amber-300">
-          🧀 {c.cheese === "melted" ? _L("cook.cheese_melted") : _L("cook.cheese_melting")}
+          <ItemThumb src={metaImage(meta, c.topping.item)} alt="" className="h-3.5 w-3.5 object-contain" />
+          {c.topping.state === "melted" ? _L("cook.top_melted", metaLabel(meta, c.topping.item)) : _L("cook.top_melting", metaLabel(meta, c.topping.item))}
         </div>
       )}
     </div>
@@ -765,7 +781,7 @@ export default function Cooking({ data }: { data: any }) {
   const itemsRef = useRef<ChipItem[]>([]);
   const hoveredRef = useRef<number | null>(null);
   const placingRef = useRef(false);          // dragging an ingredient out of the bar
-  const toppingRef = useRef<string | null>(null); // dragging a topping (cheese) onto a patty
+  const toppingRef = useRef<{ item: string; model?: string } | null>(null); // dragging a melting topping onto a patty
   const lidRef = useRef<string | null>(null);     // dragging a lid onto a filled soda cup
   const finishRef = useRef<string | null>(null); // rubbing a finish tool (frosting) over a target
   const bakeMixRef = useRef<string | null>(null); // rubbing the baking mix over an empty baking tray
@@ -1139,7 +1155,7 @@ export default function Cooking({ data }: { data: any }) {
   // over a cooked patty applies it.
   const startTopping = (e: React.PointerEvent, ing: Ingredient) => {
     e.preventDefault();
-    toppingRef.current = ing.item;
+    toppingRef.current = { item: ing.item, model: ing.model };
     setTab("ingredients");
     setDragging(true);
     fetchNui("cooking:beginTopping", { item: ing.item, model: ing.model });
@@ -1184,7 +1200,7 @@ export default function Cooking({ data }: { data: any }) {
   // stovetop); without one it falls back to a 2D ghost + auto-stack.
   const startPrepDrag = (
     e: React.PointerEvent, source: string,
-    entry: { item: string; cheese?: number; model?: string; label?: string; image?: string; dual?: boolean; cheeseModel?: string; decompose?: boolean; uncooked?: boolean; sig?: string; stack?: string[]; stackState?: string; finishTool?: string }
+    entry: { item: string; cheese?: number; model?: string; label?: string; image?: string; dual?: boolean; top?: TopState; topModel?: string; decompose?: boolean; uncooked?: boolean; sig?: string; stack?: string[]; stackState?: string; finishTool?: string }
   ) => {
     e.preventDefault();
     // A bun is one item spawned as a bottom+top pair (handled client-side), so no
@@ -1217,7 +1233,7 @@ export default function Cooking({ data }: { data: any }) {
       // layer tower, not just the base model
       fetchNui("cooking:beginPrepPlace", {
         item: entry.item, model: entry.model,
-        dual: entry.dual ? 1 : 0, cheese: entry.cheese || 0, cheeseModel: entry.cheeseModel,
+        dual: entry.dual ? 1 : 0, cheese: entry.cheese || 0, top: entry.top, topModel: entry.topModel,
         sig, stack: entry.stack, state: entry.stackState, finishTool: entry.finishTool,
       });
     } else {
@@ -1378,9 +1394,10 @@ export default function Cooking({ data }: { data: any }) {
       // topping (cheese) dropped onto a patty — the live 3D slice ends here; the
       // server sticks it on the hovered patty (or it just cancels).
       if (toppingRef.current) {
+        const t = toppingRef.current;
         toppingRef.current = null;
         const uid = hoveredRef.current;
-        fetchNui("cooking:endTopping", { uid: overBar ? null : uid, cancel: overBar });
+        fetchNui("cooking:endTopping", { uid: overBar ? null : uid, cancel: overBar, item: t.item });
         return;
       }
 
@@ -1539,7 +1556,7 @@ export default function Cooking({ data }: { data: any }) {
         style={{ left: `${(shownChip?.x ?? 0.5) * 100}%`, top: `${(shownChip?.y ?? 0.5) * 100}%` }}
       >
         <div className="relative">
-          {shownChip && <StatusPanel c={shownChip} />}
+          {shownChip && <StatusPanel c={shownChip} meta={itemMeta} />}
           {/* caret pointing down at the prop */}
           <div className="absolute left-1/2 top-full h-0 w-0 -translate-x-1/2 border-x-[6px] border-t-[6px] border-x-transparent border-t-card" />
         </div>
@@ -1571,7 +1588,7 @@ export default function Cooking({ data }: { data: any }) {
       </div>
 
       {/* hover tooltip for a bar card (tray item / ingredient) */}
-      {barTip && !dragging && <BarTooltip tip={barTip} actions={tipActions} onPin={onBarTipPin} />}
+      {barTip && !dragging && <BarTooltip tip={barTip} actions={tipActions} onPin={onBarTipPin} meta={itemMeta} />}
 
       {/* floating ghost while dragging a topping (cheese) onto a patty */}
       {ghost && (
@@ -1950,7 +1967,11 @@ export default function Cooking({ data }: { data: any }) {
                       {_L("cook.item_badge")}
                     </span>
                   )}
-                  {!!e.cheese && <span className="text-sm">🧀</span>}
+                  {e.top && (
+                    metaImage(itemMeta, e.top.item)
+                      ? <ItemThumb src={metaImage(itemMeta, e.top.item)} alt="" className="h-4 w-4 object-contain" />
+                      : <span className="text-sm">🧀</span>
+                  )}
                 </div>
               </div>
               );

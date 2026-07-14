@@ -11,9 +11,11 @@ INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('b
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('burnt_fries', 'Burnt Fries', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('burnt_nuggets', 'Burnt Nuggets', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('burnt_pizza', 'Burnt Pizza', 5, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
+INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('cheese', 'Cheese Slice', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('cheeseburger', 'Cheeseburger', 3, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('chicken_sandwich', 'Chicken Sandwich', 3, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('coffee', 'Coffee', 3, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
+INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('cokebaggy', 'Cokebaggy', 2, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('cooked_cake', 'Cake', 4, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('cooked_cookie', 'Cookie', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('cooked_doughnut', 'Doughnut', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
@@ -29,11 +31,16 @@ INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('e
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('frosted_doughnut', 'Frosted Doughnut', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('frosting', 'Frosting', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('grape_soda', 'Grape Zap', 3, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
+INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('ketchup', 'Ketchup', 2, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('lemonade', 'Lemonade Bliss', 3, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('lettuce', 'Lettuce', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
+INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('mayo', 'Mayo', 2, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('meal', 'Meal', 8, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
+INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('mustard', 'Mustard', 2, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('pepperoni', 'Pepperoni', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('pickle', 'Pickle', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
+INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('pickle_weed_bud', 'Pickle Weed Bud', 2, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
+INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('pickle_weed_seed', 'Pickle Weed Seed', 2, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('pizza_cheese', 'Shredded Cheese', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('pizza_dough', 'Pizza Dough', 3, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('pizza_sauce', 'Pizza Sauce', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
@@ -47,6 +54,7 @@ INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('r
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('raw_nuggets', 'Raw Nuggets', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('raw_pizza', 'Uncooked Pizza', 5, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('receipt', 'Receipt', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
+INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('restaurant_bag', 'Restaurant Bag', 8, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('soda', 'Classic Cola', 3, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('sprinkled_doughnut', 'Sprinkled Doughnut', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
 INSERT INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES ('sprinkles', 'Sprinkles', 1, 0, 1) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`);
