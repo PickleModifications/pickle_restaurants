@@ -17,6 +17,20 @@ const PERMISSIONS = [
   "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance", "manage_stock",
 ];
 
+// Raw permission key → locale key for its human-readable label. Keeps the chips
+// in the Default Roles editor localized (and Title Cased) instead of showing the
+// bare snake_case keys.
+const PERM_LABEL: Record<string, string> = {
+  cook: "settings.perm_cook",
+  sell: "settings.perm_sell",
+  manage_menu: "settings.perm_manage_menu",
+  manage_props: "settings.perm_manage_props",
+  manage_employees: "settings.perm_manage_employees",
+  view_finances: "settings.perm_view_finances",
+  manage_balance: "settings.perm_manage_balance",
+  manage_stock: "settings.perm_manage_stock",
+};
+
 type Props = {
   settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void;
   appTheme?: ThemeConfig | null; onAppTheme?: (t: ThemeConfig) => void;
@@ -266,7 +280,7 @@ function Roles({ settings, onSaved }: { settings: any; onSaved: () => void }) {
                     r.permissions[p] ? "border-primary/30 bg-primary/15 text-primary" : "border-border text-muted-foreground hover:bg-accent"
                   )}
                 >
-                  {p.replace(/_/g, " ")}
+                  {_L(PERM_LABEL[p] || "")}
                 </button>
               ))}
             </div>

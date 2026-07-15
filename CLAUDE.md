@@ -138,7 +138,30 @@ Each module is a self-contained feature loaded by the `modules/**` glob. Key one
 - `sales` / `npc_customers` — selling to players and NPC customers.
 - `rendertarget` — runtime **brand-texture replacement** via a DUI (`html/brand.html`);
   `AddReplaceTexture` is global per txd+txn, so only the nearest branded restaurant is
-  active at once.
+  active at once. A target may list `altTxds` (extra models embedding the same texture
+  at the SAME orientation) — `applyReplacement` swaps them all to one runtime texture.
+  When two models share a texture but their UVs run it at DIFFERENT rotations, they
+  can't share one painted surface: give each its OWN target and a shared `configKey` so
+  they read one brand config (the wall `kiosk` + floor `kiosk_ground` targets both read
+  the `"kiosk"` image but paint at their own `rot`). `GetBrandKeyForModel(model)` returns
+  the target key whose primary model is `model`; `GetBrandTargetOrient(key)` its rot/flip;
+  `SuspendBrandTarget`/`ResumeBrandTarget(key)` let another module borrow a target's
+  texture (the kiosk order screen).
+- `kiosk` — the self-service kiosk as an **interactive in-world DUI**, not a fullscreen
+  NUI. Idle, the kiosk shows the restaurant brand (rendertarget). On interact
+  (`OpenKioskScreen`) it resolves the brand target for the exact model
+  (`GetBrandKeyForModel` — wall `kiosk` vs floor `kiosk_ground`, which paint at different
+  rotations), suspends THAT target, borrows its orientation (`GetBrandTargetOrient`, so
+  the order page lands upright exactly like the brand image), takes over
+  `kiosk_large_brand` on that model with a DUI running the built React app in `#kiosk`
+  mode (`web/src/views/KioskDui.tsx`, selected in `main.tsx` by the URL hash), frames a
+  scripted camera on the screen, and **hides the player ped** (`SetEntityVisible`, like
+  entering an interactive entity) for the duration. A VIRTUAL CURSOR (mouse-look deltas →
+  `SendDuiMouseMove` at the surface pixel) drives the page; CEF renders its OWN cursor
+  onto the surface (never a world-drawn sprite — that lives in a different projection and
+  clicks would miss it). The order still becomes a normal ticket (`sales:kioskOrder`).
+  Camera framing / cursor speed / DUI aspect are `KIOSK` tunables (TUNE IN-GAME:
+  `/pickle_kiosk_cam`, `/pickle_kiosk_res`).
 - `itemgen` — `/restaurants_items` admin command exports ready-to-install item
   definitions (ox_inventory / ESX SQL / QBCore) into `generated_items/` from the **live**
   in-game config.

@@ -13,7 +13,7 @@ import { Modal } from "@/components/ui/modal";
 import { Truncate } from "@/components/ui/truncate";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { Plus, Trash2, Pencil, TriangleAlert, EyeOff, Check, Loader2, Tags, ChevronDown, UtensilsCrossed, Wrench, Layers, Download, RotateCcw } from "lucide-react";
+import { Plus, Trash2, Pencil, TriangleAlert, EyeOff, Check, Loader2, Tags, ChevronDown, UtensilsCrossed, Wrench, Layers, Download, RotateCcw, Search, X } from "lucide-react";
 
 // The shipped default menu (DEFAULT_FOODS/TOOLS/INGREDIENTS, sent verbatim in the
 // admin payload) — the source list for the Import Defaults dialog.
@@ -111,6 +111,9 @@ export default function Menu({ foods, tools, ingredients, defaults, settings, it
   const [picking, setPicking] = useState(false);
   // The Import Defaults dialog (restore deleted shipped entries / reset edited ones).
   const [importing, setImporting] = useState(false);
+  // Free-text filter over the grouped list (matched against the entry's display
+  // label, its kind, and its group name).
+  const [search, setSearch] = useState("");
   const close = () => { setEditKey(null); setPicking(false); setImporting(false); };
 
   const addFood = (preset: (typeof PRESETS)[number]) => {
@@ -170,6 +173,8 @@ export default function Menu({ foods, tools, ingredients, defaults, settings, it
     else setIngList((l) => put(l, l.findIndex((g) => !!g.item && g.item === row.def.item)));
   };
 
+  const KIND_LABEL: Record<string, string> = { food: "menu.kind_recipe", tool: "menu.kind_tool", ing: "menu.kind_ingredient" };
+
   // Build the unified, grouped row list.
   const groupsOut = useMemo(() => {
     type Row = { kind: string; key: string; group: string; sortLabel: string; index: number; data: any };
@@ -187,17 +192,24 @@ export default function Menu({ foods, tools, ingredients, defaults, settings, it
       sortLabel: g.label || (g.item ? labelOf(items, g.item) : ""), index: i, data: g,
     }));
 
+    const q = search.trim().toLowerCase();
+    const shown = q
+      ? rows.filter((r) =>
+          r.sortLabel.toLowerCase().includes(q) ||
+          r.group.toLowerCase().includes(q) ||
+          _L(KIND_LABEL[r.kind]).toLowerCase().includes(q))
+      : rows;
+
     const by: Record<string, Row[]> = {};
-    rows.forEach((r) => { (by[r.group] ||= []).push(r); });
+    shown.forEach((r) => { (by[r.group] ||= []).push(r); });
     const order = ["food", "tool", "ing"];
     const names = Object.keys(by).sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b)));
     return names.map((g) => ({
       name: g,
       rows: by[g].sort((a, b) => (order.indexOf(a.kind) - order.indexOf(b.kind)) || a.sortLabel.localeCompare(b.sortLabel)),
     }));
-  }, [foodList, toolList, ingList, items]);
+  }, [foodList, toolList, ingList, items, search]);
 
-  const KIND_LABEL: Record<string, string> = { food: "menu.kind_recipe", tool: "menu.kind_tool", ing: "menu.kind_ingredient" };
   const imgItem = (row: any) =>
     row.kind === "food" ? foodImageItem(row.data)
     : row.kind === "tool" ? row.data.item
@@ -257,8 +269,27 @@ export default function Menu({ foods, tools, ingredients, defaults, settings, it
         </div>
       </div>
 
+      <div className="flex shrink-0 items-center gap-2 rounded-md border border-input bg-muted/50 px-2.5">
+        <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder={_L("menu.search_placeholder")}
+          className="h-9 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+        />
+        {search && (
+          <button className="shrink-0 text-muted-foreground hover:text-foreground" onClick={() => setSearch("")}>
+            <X className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1 pb-4">
-        {groupsOut.length === 0 && <div className="py-6 text-center text-sm text-muted-foreground">{_L("menu.none_yet")}</div>}
+        {groupsOut.length === 0 && (
+          <div className="py-6 text-center text-sm text-muted-foreground">
+            {search.trim() ? _L("menu.no_match", search.trim()) : _L("menu.none_yet")}
+          </div>
+        )}
 
         {groupsOut.map((grp) => (
           <div key={grp.name || "__ungrouped__"} className="space-y-2">

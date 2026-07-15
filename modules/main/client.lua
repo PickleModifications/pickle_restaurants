@@ -185,10 +185,12 @@ local function SpawnProp(prop)
     debugPrint(("Spawned prop #%s '%s' at %.2f %.2f %.2f"):format(prop.id, prop.model, prop.x, prop.y, prop.z))
 
     -- A kiosk is a real world prop but NOT a cooking station: its interaction opens
-    -- the self-service order NUI (modules/sales OpenKiosk) so a customer can place
-    -- an order without a cashier — the order still becomes a kitchen ticket a worker
-    -- fulfils. Re-assert any configured brand now the model exists (its screen is a
-    -- render-target texture; AddReplaceTexture only takes on a streamed model).
+    -- the self-service order screen as an INTERACTIVE in-world DUI (modules/kiosk
+    -- OpenKioskScreen) — the customer orders on the kiosk's own screen, no fullscreen
+    -- NUI, and it shows the restaurant BRAND when idle. The order still becomes a
+    -- kitchen ticket a worker fulfils. Re-assert any configured brand now the model
+    -- exists (its screen is a render-target texture; AddReplaceTexture only takes on a
+    -- streamed model). Pass the spawned entity so the kiosk can frame its camera.
     if prop.prop_type == "kiosk" or prop.prop_type == "kiosk_ground" then
         if ReassertBrandFor then ReassertBrandFor(prop.model) end
         propInteractions[prop.id] = CreateInteraction({
@@ -198,7 +200,7 @@ local function SpawnProp(prop)
             radius         = 1.2,
             interactRadius = 1.8,
         }, function()
-            if OpenKiosk then OpenKiosk(prop.restaurant_id) end
+            if OpenKioskScreen then OpenKioskScreen(prop, ent) end
         end)
         return
     end

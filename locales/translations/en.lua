@@ -87,6 +87,7 @@ Language["en"] = {
     ["main_station_soda"] = "Soda Machine",
     ["main_station_stovetop"] = "Stovetop",
     ["main_use_kiosk"] = "Order Food",
+    ["kiosk_exit_hint"] = "Press ~INPUT_FRONTEND_CANCEL~ to step away",
     ["main_use_station"] = "Use %s",
     ["main_use_virtual"] = "Use %s (Virtual)",
     ["manage_no_access"] = "You can't manage this place.",
