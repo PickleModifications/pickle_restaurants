@@ -50,7 +50,7 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
         </TabsContent>
 
         <TabsContent value="recipes" className="flex min-h-0 flex-1 flex-col">
-          <Menu foods={foods} tools={tools} ingredients={menuIngredients} settings={settings} items={items} groups={groups} onSaved={refresh} />
+          <Menu foods={foods} tools={tools} ingredients={menuIngredients} defaults={data?.defaults} settings={settings} items={items} groups={groups} onSaved={refresh} />
         </TabsContent>
 
         <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">

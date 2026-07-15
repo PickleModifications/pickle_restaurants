@@ -2149,6 +2149,61 @@ end
 
 function GetRestaurant(id) return RestaurantCache[tonumber(id)] end
 
+-- Counters are placeable props (prop_type "counter") — a restaurant can have as
+-- many register anchors as it likes, exactly like stations. The `counter` COLUMN
+-- lives on as the single PRIMARY anchor everything else pins to (map blip, kitchen
+-- shell XY, NPC queue origin, brand render anchor): it's the LOWEST-id counter
+-- prop, recomputed whenever a counter is placed / moved / removed. No counter props
+-- → nil (no register interaction, no blip). Returns true if the anchor changed.
+function RecomputeCounterAnchor(restaurantId)
+    restaurantId = tonumber(restaurantId)
+    local r = RestaurantCache[restaurantId]
+    if not r then return false end
+    local best
+    for _, p in pairs(PropCache) do
+        if p.restaurant_id == restaurantId and p.prop_type == "counter" and (not best or p.id < best.id) then
+            best = p
+        end
+    end
+    local counter = best and { x = best.x + 0.0, y = best.y + 0.0, z = best.z + 0.0, heading = (best.heading or 0.0) + 0.0 } or nil
+    local cur = r.counter
+    local same = (cur == nil and counter == nil) or (cur ~= nil and counter ~= nil
+        and cur.x == counter.x and cur.y == counter.y and cur.z == counter.z and cur.heading == counter.heading)
+    if same then return false end
+    r.counter = counter
+    MySQL.update.await("UPDATE pickle_restaurants SET counter = ? WHERE id = ?",
+        { counter and json.encode(counter) or nil, restaurantId })
+    return true
+end
+
+-- One-time migration: legacy restaurants stored their single counter in the
+-- `counter` column. Counters are props now — mint a counter prop from that column
+-- for any restaurant that has one but no counter prop yet, so existing registers
+-- keep working (and become editable / removable / multipliable like everything
+-- else placed). The column stays as the derived primary anchor above.
+local function MigrateCounterProps()
+    if GetSetting("counter_props_seeded", false) then return end
+    for id, r in pairs(RestaurantCache) do
+        local c = r.counter
+        local has = false
+        if c and c.x then
+            for _, p in pairs(PropCache) do
+                if p.restaurant_id == id and p.prop_type == "counter" then has = true break end
+            end
+        end
+        if c and c.x and not has then
+            local propId = MySQL.insert.await(
+                "INSERT INTO pickle_restaurant_props (restaurant_id, prop_type, model, x, y, z, heading) VALUES (?, 'counter', '', ?, ?, ?, ?)",
+                { id, c.x + 0.0, c.y + 0.0, c.z + 0.0, (c.heading or 0.0) + 0.0 })
+            if propId then
+                PropCache[propId] = { id = propId, restaurant_id = id, prop_type = "counter", model = "",
+                    x = c.x + 0.0, y = c.y + 0.0, z = c.z + 0.0, heading = (c.heading or 0.0) + 0.0, metadata = {} }
+            end
+        end
+    end
+    SetSetting("counter_props_seeded", true)
+end
+
 -- The station type a prop row behaves as. A virtual point (an invisible anchor
 -- that opens a station inside the restaurant's kitchen shell) cooks as its
 -- metadata.target; everything else cooks as its own prop_type. Every cooking
@@ -3298,6 +3353,7 @@ CreateThread(function()
         RebuildDerived()
         LoadRestaurants()
         LoadProps()
+        MigrateCounterProps() -- legacy `counter` column → a counter prop (once)
         LoadEmployees()
         LoadStock()
         LoadOrders()

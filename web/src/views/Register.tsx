@@ -79,7 +79,7 @@ function Tickets({ id, tickets }: { id: number; tickets: Ticket[] }) {
   if (tickets.length === 0) return <div className="py-8 text-center text-sm text-muted-foreground">{_L("register.no_tickets")}</div>;
   return (
     <div className="relative h-full">
-      <div className="h-full space-y-2 overflow-y-auto pr-1">
+      <div className="h-full space-y-2 overflow-y-auto pr-1 pb-4">
         {tickets.map((t) => (
           <TicketCard key={t.orderId} id={id} t={t}
             onOpenPicker={(meals) => setPicker({ orderId: t.orderId, meals })} />

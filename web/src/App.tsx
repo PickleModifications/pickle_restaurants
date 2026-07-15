@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, Component, type ReactNode } from "react";
-import { useNuiEvent, fetchNui } from "@/lib/nui";
+import { useNuiEvent, fetchNui, setPeek } from "@/lib/nui";
 import { isSaving, onSavingChange } from "@/lib/autosave";
 import { applyTheme } from "@/lib/theme";
 import InteractText from "@/views/InteractText";
@@ -35,6 +35,10 @@ export default function App() {
     // Restaurant-scoped payloads carry the franchise theme seed; closing (or a
     // payload without one) resets the UI to the default kit.
     applyTheme(v === "none" ? null : d.data?.theme);
+    // Any panel that (re)opens must start at full opacity — clear a leftover
+    // prop-hover "peek" fade (e.g. a placement/edit hand-off closed the panel
+    // mid-hover), so a reopened panel is never rendered washed out.
+    setPeek(false);
   });
 
   const doClose = useCallback(() => {
@@ -69,7 +73,7 @@ export default function App() {
   }, [view, close]);
 
   return (
-    <div className="h-full w-full">
+    <div className="peek-fade h-full w-full">
       {view === "none" && <InteractText />}
 
       {/* Persistent read-only ticket board — self-gates on its own `ticketWidget`

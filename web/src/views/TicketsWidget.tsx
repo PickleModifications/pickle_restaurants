@@ -120,7 +120,7 @@ function TicketDetail({ t }: { t: Ticket }) {
           <StatusPill ok={okReady} missing={missing} />
         </div>
       </div>
-      <div className="max-h-[50vh] space-y-2 overflow-y-auto pr-0.5">
+      <div className="max-h-[50vh] space-y-2 overflow-y-auto pr-0.5 pb-2">
         {arr<Line>(t.lines).map((l, i) => {
           const mods = orderMods(arr<LineMod>(l.mods));
           return (

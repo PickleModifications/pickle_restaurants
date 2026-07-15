@@ -10,12 +10,17 @@ import {
   type Food, type Step, type Tool, type IngredientDef,
 } from "@/components/editors";
 import { Modal } from "@/components/ui/modal";
+import { Truncate } from "@/components/ui/truncate";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { Plus, Trash2, Pencil, TriangleAlert, EyeOff, Check, Loader2, Tags, ChevronDown, UtensilsCrossed, Wrench, Layers } from "lucide-react";
+import { Plus, Trash2, Pencil, TriangleAlert, EyeOff, Check, Loader2, Tags, ChevronDown, UtensilsCrossed, Wrench, Layers, Download, RotateCcw } from "lucide-react";
+
+// The shipped default menu (DEFAULT_FOODS/TOOLS/INGREDIENTS, sent verbatim in the
+// admin payload) — the source list for the Import Defaults dialog.
+type DefaultMenu = { foods?: Food[]; tools?: Tool[]; ingredients?: IngredientDef[] };
 
 type Props = {
-  foods: Food[]; tools: Tool[]; ingredients: IngredientDef[];
+  foods: Food[]; tools: Tool[]; ingredients: IngredientDef[]; defaults?: DefaultMenu | null;
   settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void;
 };
 
@@ -73,7 +78,7 @@ const PRESETS: { key: string; label: string; desc: string; make: () => Partial<F
   },
 ];
 
-export default function Menu({ foods, tools, ingredients, settings, items, groups, onSaved }: Props) {
+export default function Menu({ foods, tools, ingredients, defaults, settings, items, groups, onSaved }: Props) {
   // The whole menu lives in the settings blob as three arrays, each saved whole
   // via the batched settings autosave (the server sanitizes + rebuilds + syncs).
   const [foodList, setFoodList] = useState<Food[]>(() => (Array.isArray(foods) ? foods : []));
@@ -104,7 +109,9 @@ export default function Menu({ foods, tools, ingredients, settings, items, group
   const [newOpen, setNewOpen] = useState(false);
   // "New Recipe" first asks WHAT it is (kind + preset) before showing any fields.
   const [picking, setPicking] = useState(false);
-  const close = () => { setEditKey(null); setPicking(false); };
+  // The Import Defaults dialog (restore deleted shipped entries / reset edited ones).
+  const [importing, setImporting] = useState(false);
+  const close = () => { setEditKey(null); setPicking(false); setImporting(false); };
 
   const addFood = (preset: (typeof PRESETS)[number]) => {
     setPicking(false);
@@ -129,6 +136,38 @@ export default function Menu({ foods, tools, ingredients, settings, items, group
       setEditKey(`ing:${next.length - 1}`);
       return next;
     });
+  };
+
+  // ── Import Defaults ──────────────────────────────────────────────────────────
+  // Every shipped default, flagged present/missing against the CURRENT lists
+  // (foods/tools by id, ingredients by item — same identity SeedUnifiedMenu uses).
+  // Restoring appends a copy; resetting replaces the entry in place. Both go out
+  // through the normal list autosave, so the server sanitizes + rebuilds as usual.
+  type DefaultRow = { kind: "food" | "tool" | "ing"; key: string; label: string; img: string; present: boolean; def: any };
+  const defaultRows = useMemo<DefaultRow[]>(() => {
+    const rows: DefaultRow[] = [];
+    (defaults?.foods ?? []).forEach((d) => rows.push({
+      kind: "food", key: `food:${d.id}`, label: d.label || prettyName(d.id || ""), img: foodImageItem(d),
+      present: foodList.some((f) => !!f.id && f.id === d.id), def: d,
+    }));
+    (defaults?.tools ?? []).forEach((d) => rows.push({
+      kind: "tool", key: `tool:${d.id}`, label: d.item ? labelOf(items, d.item) : prettyName(d.id || ""), img: d.item || "",
+      present: toolList.some((t) => !!t.id && t.id === d.id), def: d,
+    }));
+    (defaults?.ingredients ?? []).forEach((d) => rows.push({
+      kind: "ing", key: `ing:${d.item}`, label: labelOf(items, d.item || ""), img: d.item || "",
+      present: ingList.some((g) => !!g.item && g.item === d.item), def: d,
+    }));
+    return rows;
+  }, [defaults, foodList, toolList, ingList, items]);
+  const missingDefaults = defaultRows.filter((r) => !r.present);
+
+  const restoreDefault = (row: DefaultRow) => {
+    const def = JSON.parse(JSON.stringify(row.def)); // never share the payload's object
+    const put = <T,>(list: T[], at: number): T[] => (at >= 0 ? list.map((e, i) => (i === at ? def : e)) : [...list, def]);
+    if (row.kind === "food") setFoodList((l) => put(l, l.findIndex((f) => !!f.id && f.id === row.def.id)));
+    else if (row.kind === "tool") setToolList((l) => put(l, l.findIndex((t) => !!t.id && t.id === row.def.id)));
+    else setIngList((l) => put(l, l.findIndex((g) => !!g.item && g.item === row.def.item)));
   };
 
   // Build the unified, grouped row list.
@@ -203,13 +242,22 @@ export default function Menu({ foods, tools, ingredients, settings, items, group
                 <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={() => { setNewOpen(false); setPicking(true); setEditKey(null); }}>{_L("menu.new_recipe")}</button>
                 <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addTool}>{_L("menu.new_tool")}</button>
                 <button className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={addIngredient}>{_L("menu.new_ingredient")}</button>
+                {defaultRows.length > 0 && (
+                  <>
+                    <div className="my-1 border-t border-border" />
+                    <button className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-sm hover:bg-accent"
+                      onClick={() => { setNewOpen(false); setEditKey(null); setPicking(false); setImporting(true); }}>
+                      <Download className="h-3.5 w-3.5 text-muted-foreground" /> {_L("menu.import_defaults")}
+                    </button>
+                  </>
+                )}
               </div>
             )}
           </div>
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1 pb-4">
         {groupsOut.length === 0 && <div className="py-6 text-center text-sm text-muted-foreground">{_L("menu.none_yet")}</div>}
 
         {groupsOut.map((grp) => (
@@ -229,7 +277,7 @@ export default function Menu({ foods, tools, ingredients, settings, items, group
                       <ItemImage items={items} name={imgItem(row)} className="h-10 w-10 shrink-0" />
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="truncate font-medium">{row.sortLabel || "—"}</span>
+                          <Truncate className="font-medium">{row.sortLabel || "—"}</Truncate>
                           <Badge variant="secondary">{_L(KIND_LABEL[row.kind])}</Badge>
                           {row.kind === "food" && <Badge variant="outline">{foodSubBadge(d)}</Badge>}
                           {row.kind === "food" && d.drink_item_installed === false && (
@@ -302,6 +350,58 @@ export default function Menu({ foods, tools, ingredients, settings, items, group
         </div>
       </Modal>
 
+      {/* Import Defaults: the shipped menu, restorable entry-by-entry. A missing
+          default (deleted, or pre-dating an update) gets Restore; a present one
+          gets Reset — replacing the current entry with the shipped version. */}
+      <Modal
+        open={importing}
+        onClose={close}
+        title={_L("menu.import_defaults")}
+        subtitle={_L("menu.import_defaults_sub")}
+        icon={<Download className="h-4 w-4" />}
+        size="lg"
+        footer={
+          missingDefaults.length > 0 ? (
+            <Button size="sm" onClick={() => missingDefaults.forEach(restoreDefault)}>
+              <Download className="h-4 w-4" /> {_L("menu.import_all", missingDefaults.length)}
+            </Button>
+          ) : (
+            <Button size="sm" variant="outline" onClick={close}>{_L("recipes.done")}</Button>
+          )
+        }
+      >
+        <div className="space-y-1.5">
+          {missingDefaults.length === 0 && (
+            <p className="pb-1 text-center text-xs text-muted-foreground">{_L("menu.import_all_present")}</p>
+          )}
+          {defaultRows.map((row) => (
+            <div key={row.key} className="flex items-center justify-between gap-2 rounded-lg border border-border p-2">
+              <div className="flex min-w-0 items-center gap-2.5">
+                <ItemImage items={items} name={row.img} className="h-8 w-8 shrink-0" />
+                <Truncate className="text-sm font-medium">{row.label}</Truncate>
+                <Badge variant="secondary" className="shrink-0">{_L(KIND_LABEL[row.kind])}</Badge>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {row.present ? (
+                  <>
+                    <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                      <Check className="h-3 w-3 text-primary" /> {_L("menu.import_on_menu")}
+                    </span>
+                    <Button size="sm" variant="outline" onClick={() => restoreDefault(row)}>
+                      <RotateCcw className="h-3.5 w-3.5" /> {_L("menu.import_reset")}
+                    </Button>
+                  </>
+                ) : (
+                  <Button size="sm" onClick={() => restoreDefault(row)}>
+                    <Download className="h-3.5 w-3.5" /> {_L("menu.import_restore")}
+                  </Button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Modal>
+
       {/* Create / edit an entry in a dialog (replaces the old inline editor). */}
       <Modal
         open={!!editing}
@@ -319,6 +419,7 @@ export default function Menu({ foods, tools, ingredients, settings, items, group
           <ToolForm
             tool={editing.data}
             cost={Number(costs[editing.data.item || ""] ?? 0)}
+            allTools={toolList}
             onChange={(p) => updateTool(editing.index, p)}
             onChangeCost={(v) => setCost(editing.data.item, v)}
             items={items}

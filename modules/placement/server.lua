@@ -123,15 +123,47 @@ lib.callback.register("pickle_restaurants:placement:saveShell", function(src, d)
     return { ok = true }
 end)
 
+-- A counter is an INVISIBLE register anchor (prop_type "counter"), stored like a
+-- seat: no world model, just a point + heading. Each one spawns a register /
+-- management interaction (modules/main). A restaurant may have several; the LOWEST-
+-- id counter is the restaurant's primary anchor (blip / shell XY / NPC queue), kept
+-- in the `counter` column by RecomputeCounterAnchor. Placing one is additive.
 lib.callback.register("pickle_restaurants:placement:saveCounter", function(src, d)
     local id = tonumber(d.restaurant_id)
     if not GetRestaurant(id) then return { ok = false, error = _L("placement_no_restaurant") } end
     if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
 
-    local counter = { x = d.x + 0.0, y = d.y + 0.0, z = d.z + 0.0, heading = (d.heading or 0.0) + 0.0 }
-    MySQL.update.await("UPDATE pickle_restaurants SET counter = ? WHERE id = ?", { json.encode(counter), id })
-    RestaurantCache[id].counter = counter
-    SyncToClient(-1) -- rebuild counter interaction + blip everywhere
+    local propId = MySQL.insert.await(
+        "INSERT INTO pickle_restaurant_props (restaurant_id, prop_type, model, x, y, z, heading) VALUES (?, 'counter', '', ?, ?, ?, ?)",
+        { id, d.x + 0.0, d.y + 0.0, d.z + 0.0, (d.heading or 0.0) + 0.0 })
+    if not propId then return { ok = false } end
+
+    PropCache[propId] = {
+        id = propId, restaurant_id = id, prop_type = "counter", model = "",
+        x = d.x + 0.0, y = d.y + 0.0, z = d.z + 0.0, heading = (d.heading or 0.0) + 0.0, metadata = {},
+    }
+    RecomputeCounterAnchor(id) -- may become the new primary anchor (blip/shell/NPC)
+    SyncToClient(-1) -- rebuild counter interactions + blip everywhere
+    return { ok = true, id = propId }
+end)
+
+-- Reposition an already-placed prop (station / counter / seat / virtual point /
+-- kiosk / screen): the admin re-runs the gizmo seeded at the prop's current
+-- transform and saves the new one. A full re-sync respawns it at the new spot; a
+-- counter move may shift the primary anchor, so recompute it first.
+lib.callback.register("pickle_restaurants:placement:updateProp", function(src, d)
+    local propId = tonumber(d.id)
+    local prop = PropCache[propId]
+    if not prop then return { ok = false } end
+    if not HasPerm(prop.restaurant_id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    local x, y, z = tonumber(d.x), tonumber(d.y), tonumber(d.z)
+    if not (x and y and z) then return { ok = false } end
+
+    prop.x, prop.y, prop.z, prop.heading = x + 0.0, y + 0.0, z + 0.0, (tonumber(d.heading) or 0.0) + 0.0
+    MySQL.update.await("UPDATE pickle_restaurant_props SET x = ?, y = ?, z = ?, heading = ? WHERE id = ?",
+        { prop.x, prop.y, prop.z, prop.heading, propId })
+    if prop.prop_type == "counter" then RecomputeCounterAnchor(prop.restaurant_id) end
+    SyncToClient(-1) -- respawn the prop at its new transform for everyone
     return { ok = true }
 end)
 
@@ -165,6 +197,11 @@ lib.callback.register("pickle_restaurants:placement:removeProp", function(src, d
     -- server-side notice so other modules can release state tied to this prop
     -- (cooking drops any items cooking on it; seating frees its occupancy)
     TriggerEvent("pickle_restaurants:propDeleted", propId)
+    -- Removing a counter may drop or shift the restaurant's primary anchor
+    -- (blip / shell XY / NPC queue) — recompute it and re-sync the world.
+    if prop.prop_type == "counter" and RecomputeCounterAnchor(prop.restaurant_id) then
+        SyncToClient(-1)
+    end
     return { ok = true }
 end)
 

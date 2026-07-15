@@ -123,7 +123,23 @@ RegisterNUICallback("admin:setCounter", function(d, cb)
     CloseNUI()
     cb({})
     StartCounterPlacement(d.id)
-    ReopenAdmin(d.id, "stations")
+    ReopenAdmin(d.id, "counters")
+end)
+
+-- Reposition an existing placed prop (station / counter / seat / virtual point):
+-- hand off to the gizmo seeded at its current spot, then reopen to its section.
+RegisterNUICallback("admin:editProp", function(d, cb)
+    CloseNUI()
+    cb({})
+    StartPropReposition(d.propId)
+    ReopenAdmin(d.restaurantId, d.section)
+end)
+
+-- Purely visual: while a prop's card is hovered in the panel, beam its world point
+-- so the admin can tell which placed thing the card refers to. No server round-trip.
+RegisterNUICallback("admin:highlightProp", function(d, cb)
+    if SetPropHighlight then SetPropHighlight(d.propId, d.on) end
+    cb({})
 end)
 
 RegisterNUICallback("admin:placeSeat", function(d, cb)

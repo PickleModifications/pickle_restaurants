@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { fetchNui } from "@/lib/nui";
+import { fetchNui, setPeek } from "@/lib/nui";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -10,7 +10,7 @@ import { applyTheme, type ThemeConfig } from "@/lib/theme";
 import { money } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Plus, Trash2, MapPin, ChevronRight, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X, Building2, Sparkles, Monitor, Users,
+  Plus, Trash2, Pencil, MapPin, ChevronRight, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X, Building2, Sparkles, Monitor, Users,
 } from "lucide-react";
 
 const STATIONS = [
@@ -26,6 +26,42 @@ const STATIONS = [
   { key: "menu_screen", label: _L("admin.station_menu_screen"), icon: Monitor, physicalOnly: true },
   { key: "orders_screen", label: _L("admin.station_orders_screen"), icon: Monitor, physicalOnly: true },
 ];
+
+// Human name for a placed prop, so a chip reads "Fryer #12" instead of just "#12".
+// Virtual points resolve through their target station; counters/seats are named
+// directly. Falls back to the raw type for anything unmapped.
+function propLabel(p: any): string {
+  if (p.prop_type === "counter") return _L("admin.counter");
+  if (p.prop_type === "seat") return _L("admin.seat_one");
+  const key = p.prop_type === "virtual_point" ? p.target : p.prop_type;
+  return STATIONS.find((s) => s.key === key)?.label || key || _L("admin.prop_one");
+}
+
+// One placed prop: a named chip with Edit (reposition) + Remove. Hovering beams
+// the prop's point in the world (the panel is centred, so the world shows around
+// it) — highlight is force-cleared on unmount so a closed panel leaves no beam.
+function PropChip({ p, act, restaurantId, section, virtual }:
+  { p: any; act: (e: string, d: any) => void; restaurantId: number; section: string; virtual?: boolean }) {
+  const hi = (on: boolean) => { fetchNui("admin:highlightProp", { propId: p.id, on }); setPeek(on); };
+  useEffect(() => () => { fetchNui("admin:highlightProp", { propId: p.id, on: false }); setPeek(false); }, [p.id]);
+  return (
+    <Badge
+      variant="outline"
+      className="gap-1.5"
+      onMouseEnter={() => hi(true)}
+      onMouseLeave={() => hi(false)}
+    >
+      {virtual && <Sparkles className="h-3 w-3 text-primary" />}
+      <span>{propLabel(p)} <span className="opacity-45 tabular-nums">#{p.id}</span></span>
+      <button title={_L("admin.reposition")} onClick={() => { hi(false); fetchNui("admin:editProp", { propId: p.id, restaurantId, section }); }}>
+        <Pencil className="h-3 w-3" />
+      </button>
+      <button title={_L("admin.remove")} onClick={() => { hi(false); act("admin:removeProp", { propId: p.id }); }}>
+        <Trash2 className="h-3 w-3" />
+      </button>
+    </Badge>
+  );
+}
 
 type Focus = { restaurant?: number; section?: string };
 type Props = { restaurants: any[]; players: any[]; groups: string[]; refresh: () => void; focus?: Focus; appTheme?: ThemeConfig | null; onDetailChange?: (open: boolean) => void };
@@ -71,20 +107,21 @@ export default function Restaurants({ restaurants, players, groups, refresh, foc
   return <List restaurants={restaurants} act={act} onOpen={setSelectedId} />;
 }
 
+// internal key is derived from the display label — admins never type a raw slug
+const restSlug = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+
 function List({ restaurants, act, onOpen }: { restaurants: any[]; act: (e: string, p: any) => void; onOpen: (id: number) => void }) {
-  const [name, setName] = useState("");
   const [label, setLabel] = useState("");
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex shrink-0 items-end gap-2 rounded-lg border border-border p-3">
-        <Field label={_L("admin.internal_name")} className="flex-1"><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="burgershot" /></Field>
         <Field label={_L("admin.display_label")} className="flex-1"><Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Burger Shot" /></Field>
-        <Button onClick={async () => { if (!name) return; await act("admin:create", { name, label: label || name }); setName(""); setLabel(""); }}>
+        <Button onClick={async () => { const name = restSlug(label); if (!name) return; await act("admin:create", { name, label: label.trim() }); setLabel(""); }}>
           <Plus className="h-4 w-4" /> {_L("admin.create")}
         </Button>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 pb-4">
         {restaurants.length === 0 && <div className="py-6 text-center text-sm text-muted-foreground">{_L("admin.no_restaurants")}</div>}
         {restaurants.map((r) => (
           <button
@@ -133,31 +170,27 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
   const setMode = (k: string, m: "physical" | "virtual") => setModes((prev) => ({ ...prev, [k]: m }));
   const stationsRef = useRef<HTMLDivElement>(null);
   const seatingRef = useRef<HTMLDivElement>(null);
+  const countersRef = useRef<HTMLDivElement>(null);
 
   // Scroll the just-used section into view when reopened from a placement flow.
   // Virtual placement lives in the stations card now, so "virtual" lands there.
   useEffect(() => {
     if (!focusSection) return;
-    const el = focusSection === "seating" ? seatingRef.current : stationsRef.current;
+    const el = focusSection === "seating" ? seatingRef.current
+      : focusSection === "counters" ? countersRef.current
+      : stationsRef.current;
     const t = setTimeout(() => el?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
     return () => clearTimeout(t);
   }, [focusSection]);
 
-  // Preview this restaurant's franchise theme while its detail is open; back to
-  // the panel's OWN theme on the way out (the theme editor also applies live). A
-  // ref keeps the cleanup reading the CURRENT app theme, not the one at mount.
-  const appThemeRef = useRef(appTheme);
-  appThemeRef.current = appTheme;
-  // Re-assert the franchise theme on mount AND after EVERY data refresh — not just
-  // when the restaurant id changes. Any in-detail action (remove a prop/seat, set
-  // owner, set access groups) routes through `act` -> `refresh`, which re-dispatches
-  // the admin `setView`; App's handler then re-applies the panel's OWN app theme,
-  // snapping this open detail back to the management look. `r` is a fresh object on
-  // every refresh (never on the detail's local state), so this fires exactly then and
-  // wins the last write. useLayoutEffect stamps it before paint, so there's no flash.
-  useLayoutEffect(() => { applyTheme(r.theme); }, [r]);
-  // Restore the panel's own theme when the detail closes.
-  useEffect(() => () => applyTheme(appThemeRef.current), []);
+  // The admin panel keeps its OWN app theme throughout — opening a restaurant does
+  // NOT reskin /restaurants to that franchise's colors (a restaurant's theme only
+  // skins ITS OWN in-game panels). App already stamps the app theme on every admin
+  // `setView`; we re-assert it here on mount and after every in-detail refresh so
+  // nothing (e.g. a stale layout effect) can snap it to a restaurant seed. The
+  // restaurant's ThemeEditor runs `scoped` so its edits preview in a contained chip
+  // rather than hijacking this panel. useLayoutEffect stamps before paint (no flash).
+  useLayoutEffect(() => { applyTheme(appTheme); }, [r, appTheme]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
@@ -195,8 +228,8 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
           <TabsTrigger value="settings">{_L("admin.tab_settings")}</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="overview" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
-        {/* ownership + counter */}
+        <TabsContent value="overview" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 pb-4">
+        {/* ownership + NPC customer spawn point */}
         <div className="grid grid-cols-2 gap-3">
           <div className="rounded-lg border border-border p-3">
             <div className="mb-2 flex items-center gap-2 text-sm font-semibold"><UserCog className="h-4 w-4 text-primary" /> {_L("admin.ownership")}</div>
@@ -218,15 +251,6 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
               {players.map((p: any) => <option key={p.id} value={p.id}>{p.name} [{p.id}]</option>)}
             </select>
           </div>
-          <div className="rounded-lg border border-border p-3">
-            <div className="mb-2 flex items-center gap-2 text-sm font-semibold"><Receipt className="h-4 w-4 text-primary" /> {_L("admin.counter")}</div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-muted-foreground">{r.hasCounter ? _L("admin.counter_placed") : _L("admin.no_counter_placed")}</span>
-              <Button size="sm" variant="outline" onClick={() => fetchNui("admin:setCounter", { id: r.id })}>
-                <MapPin className="h-3.5 w-3.5" /> {r.hasCounter ? _L("admin.reposition") : _L("admin.place")}
-              </Button>
-            </div>
-          </div>
           {/* NPC customer spawn point — where AI customers appear before walking up to
               queue. Without it they spawn a fixed distance back and can get stuck. */}
           <div className="rounded-lg border border-border p-3">
@@ -238,6 +262,30 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
               </Button>
             </div>
           </div>
+        </div>
+
+        {/* counters — invisible register anchors, placed like stations (multiple).
+            Each one opens the register / management panel; the first also anchors
+            the map blip, kitchen shell, and NPC queue. */}
+        <div ref={countersRef} className="rounded-lg border border-border p-3">
+          <div className="mb-1.5 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <Receipt className="h-4 w-4 text-primary" /> {_L("admin.counters")}
+              <Badge variant="secondary">{byType("counter").length}</Badge>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => fetchNui("admin:setCounter", { id: r.id })}>
+              <Plus className="h-3.5 w-3.5" /> {_L("admin.place")}
+            </Button>
+          </div>
+          {byType("counter").length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {byType("counter").map((p) => (
+                <PropChip key={p.id} p={p} act={act} restaurantId={r.id} section="counters" />
+              ))}
+            </div>
+          ) : (
+            <p className="text-[11px] text-muted-foreground">{_L("admin.counters_hint")}</p>
+          )}
         </div>
 
         {/* stations — each type places EITHER a physical world prop or a virtual
@@ -300,16 +348,10 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
                   {(physical.length > 0 || virtual.length > 0) && (
                     <div className="flex flex-wrap gap-1.5">
                       {physical.map((p) => (
-                        <Badge key={p.id} variant="outline" className="gap-1.5">
-                          #{p.id}
-                          <button onClick={() => act("admin:removeProp", { propId: p.id })}><Trash2 className="h-3 w-3" /></button>
-                        </Badge>
+                        <PropChip key={p.id} p={p} act={act} restaurantId={r.id} section="stations" />
                       ))}
                       {virtual.map((p) => (
-                        <Badge key={p.id} variant="outline" className="gap-1.5" title={_L("admin.mode_virtual")}>
-                          <Sparkles className="h-3 w-3 text-primary" /> #{p.id}
-                          <button onClick={() => act("admin:removeProp", { propId: p.id })}><Trash2 className="h-3 w-3" /></button>
-                        </Badge>
+                        <PropChip key={p.id} p={p} act={act} restaurantId={r.id} section="stations" virtual />
                       ))}
                     </div>
                   )}
@@ -336,10 +378,7 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
           {byType("seat").length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
               {byType("seat").map((p) => (
-                <Badge key={p.id} variant="outline" className="gap-1.5">
-                  #{p.id}
-                  <button onClick={() => act("admin:removeProp", { propId: p.id })}><Trash2 className="h-3 w-3" /></button>
-                </Badge>
+                <PropChip key={p.id} p={p} act={act} restaurantId={r.id} section="seating" />
               ))}
             </div>
           ) : (
@@ -354,8 +393,8 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
         {/* per-restaurant settings — branding (per-texture packaging photos, same
             editor as the boss panel). Server-wide settings live in the top-level
             Settings tab; this is scoped to THIS restaurant. */}
-        <TabsContent value="settings" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
-          <ThemeEditor id={r.id} theme={r.theme} event="admin:setTheme" onChange={onThemeChange} />
+        <TabsContent value="settings" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 pb-4">
+          <ThemeEditor id={r.id} theme={r.theme} event="admin:setTheme" onChange={onThemeChange} scoped />
 
           {/* recipe access groups — what this restaurant may cook & sell */}
           <div className="rounded-lg border border-border p-3">

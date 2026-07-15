@@ -370,7 +370,7 @@ export function OrderBuilder({
             <FilterChip key={k} active={kind === k} onClick={() => setKind(k)}>{_L(KIND_LABEL[k] || "register.kind_recipe")}</FilterChip>
           ))}
         </div>
-        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
+        <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 pb-4">
           {catalog.length === 0 && comboList.length === 0 && <div className="py-8 text-center text-sm text-muted-foreground">{_L("register.no_catalog")}</div>}
           {showCombos && (
             <div className="grid grid-cols-2 gap-2">

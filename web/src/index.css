@@ -73,6 +73,12 @@ html, body, #root {
   user-select: none;
 }
 
+/* "peek" — while a prop card is hovered, the highlighted world entity is outlined
+   behind the panel; fade the whole NUI so it can be seen through. Driven by the
+   `data-peek` attr on <html> (see setPeek in lib/nui). */
+.peek-fade { transition: opacity 140ms ease; }
+:root[data-peek] .peek-fade { opacity: 0.75; }
+
 ::selection { background: rgb(var(--brand) / 0.35); }
 
 :focus-visible {

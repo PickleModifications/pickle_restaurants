@@ -2,6 +2,7 @@ import { useEffect, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Truncate } from "@/components/ui/truncate";
 import { usePanelContent } from "@/components/ui/panel-content";
 
 // A centered dialog over a faded scrim. Inside a Panel it portals into the
@@ -52,8 +53,8 @@ export function Modal({
           <div className="flex min-w-0 items-center gap-2.5">
             {icon && <div className="shrink-0 text-muted-foreground">{icon}</div>}
             <div className="min-w-0">
-              <div className="truncate text-sm font-semibold">{title}</div>
-              {subtitle && <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{subtitle}</div>}
+              <Truncate className="text-sm font-semibold">{title}</Truncate>
+              {subtitle && <Truncate className="mt-0.5 text-[11px] text-muted-foreground">{subtitle}</Truncate>}
             </div>
           </div>
           <button

@@ -39,7 +39,7 @@ export default function Settings({ settings, items, groups, onSaved, appTheme, o
   return (
     <div className="flex min-h-0 flex-1 gap-4">
       {/* group nav */}
-      <div className="w-44 shrink-0 space-y-1 overflow-y-auto pr-1">
+      <div className="w-44 shrink-0 space-y-1 overflow-y-auto pr-1 pb-4">
         {GROUPS.map((g) => {
           const Icon = g.icon;
           return (
@@ -59,7 +59,7 @@ export default function Settings({ settings, items, groups, onSaved, appTheme, o
       </div>
 
       {/* group form */}
-      <div className="min-w-0 flex-1 overflow-y-auto pr-1">
+      <div className="min-w-0 flex-1 overflow-y-auto pr-1 pb-4">
         {group === "general" && <General settings={settings} onSaved={onSaved} />}
         {group === "appearance" && <Appearance appTheme={appTheme} onAppTheme={onAppTheme} />}
         {group === "economy" && <Economy settings={settings} onSaved={onSaved} />}

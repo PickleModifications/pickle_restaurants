@@ -1484,7 +1484,7 @@ export default function Cooking({ data }: { data: any }) {
   const gridMode = (expanded || !!q) && !dragging;
   const rowCls = cn(
     "min-h-[132px] gap-2 pb-1",
-    gridMode ? "flex max-h-[40vh] flex-wrap content-start overflow-y-auto pr-1" : "flex items-center overflow-x-auto"
+    gridMode ? "flex max-h-[40vh] flex-wrap content-start overflow-y-auto pr-1 pb-4" : "flex items-center overflow-x-auto"
   );
   const onRowWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     if (gridMode) return;

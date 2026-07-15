@@ -37,10 +37,9 @@ local STATION_ICONS = {
 }
 
 local spawnedProps       = {} -- [propId]        = entity
-local propInteractions   = {} -- [propId]        = interaction index
+local propInteractions   = {} -- [propId]        = interaction index (stations, seats, counters, virtual points)
 local restaurantBlips    = {} -- [restaurantId]  = blip
-local counterInteractions = {} -- [restaurantId] = interaction index
-local propsById          = {} -- [propId]        = synced prop row (stations, seats, virtual points)
+local propsById          = {} -- [propId]        = synced prop row (stations, seats, counters, virtual points)
 
 -- A virtual session (modules/virtual) spawns its station as a LOCAL prop inside
 -- the kitchen shell and registers it here so everything that anchors to "the
@@ -64,6 +63,7 @@ local function SafeDeleteEntity(ent)
 end
 
 local function ClearWorld()
+    if ClearPropHighlight then ClearPropHighlight() end -- drop any hover outline/temp body
     for id, ent in pairs(spawnedProps) do
         if DespawnOvenDoors then DespawnOvenDoors(id) end
         if DespawnFryerBaskets then DespawnFryerBaskets(id) end
@@ -72,9 +72,6 @@ local function ClearWorld()
     end
     for id, idx in pairs(propInteractions) do
         DeleteInteraction(idx); propInteractions[id] = nil
-    end
-    for id, idx in pairs(counterInteractions) do
-        DeleteInteraction(idx); counterInteractions[id] = nil
     end
     for id, blip in pairs(restaurantBlips) do
         if DoesBlipExist(blip) then RemoveBlip(blip) end
@@ -105,6 +102,35 @@ local function SpawnProp(prop)
             distance       = 2.5,
         }, function()
             if SitOnSeat then SitOnSeat(prop) end
+        end)
+        return
+    end
+
+    -- A counter is an INVISIBLE register anchor: no world model spawns — just a
+    -- "Register / Management" interaction at the point (players use the restaurant's
+    -- own counter geometry here). A restaurant may have several; each is its own
+    -- interaction. The primary (lowest-id) counter also anchors the blip/shell/NPC
+    -- queue, but that's read off restaurant.counter, not this interaction.
+    if prop.prop_type == "counter" then
+        local rest = Restaurants[prop.restaurant_id]
+        local label = (rest and rest.label) or _L("main_station_generic")
+        propInteractions[prop.id] = CreateInteraction({
+            coords         = vector3(prop.x, prop.y, prop.z),
+            label          = label,
+            icon           = "fa-solid fa-cash-register",
+            radius         = 1.5,
+            interactRadius = 2.0,
+            title          = label,
+            options        = {
+                { label = _L("main_staff_register"), icon = "fa-solid fa-cash-register" },
+                { label = _L("main_management"),     icon = "fa-solid fa-users-gear" },
+            },
+        }, function(selection)
+            if selection == 1 then
+                OpenRegister(prop.restaurant_id)
+            elseif selection == 2 then
+                OpenManagement(prop.restaurant_id)
+            end
         end)
         return
     end
@@ -205,29 +231,6 @@ local function SpawnProp(prop)
     end)
 end
 
-local function SetupCounter(restaurant)
-    local c = restaurant.counter
-    if not c then return end
-    counterInteractions[restaurant.id] = CreateInteraction({
-        coords         = vector3(c.x, c.y, c.z),
-        label          = restaurant.label,
-        icon           = "fa-solid fa-cash-register",
-        radius         = 1.5,
-        interactRadius = 2.0,
-        title          = restaurant.label,
-        options        = {
-            { label = _L("main_staff_register"), icon = "fa-solid fa-cash-register" },
-            { label = _L("main_management"),     icon = "fa-solid fa-users-gear" },
-        },
-    }, function(selection)
-        if selection == 1 then
-            OpenRegister(restaurant.id)
-        elseif selection == 2 then
-            OpenManagement(restaurant.id)
-        end
-    end)
-end
-
 local function SetupBlip(restaurant)
     local b = restaurant.blip or { sprite = 93, color = 1, scale = 0.8, enabled = true }
     if b.enabled == false then return end
@@ -310,7 +313,6 @@ local function ApplySync(payload)
     end
     for _, r in pairs(Restaurants) do
         SetupBlip(r)
-        SetupCounter(r)
     end
     -- Re-assert brand render-target bindings now that brand_images may have changed,
     -- so a brand edit takes effect after re-streaming the item (no resource restart).
@@ -378,3 +380,85 @@ AddEventHandler("onResourceStop", function(res)
 end)
 
 function GetRestaurantById(id) return Restaurants[id] end
+
+-- ─── admin prop highlight ────────────────────────────────────────────────────
+-- Hovering a prop's card in the admin / boss panel flags exactly which placed thing
+-- it is, using the SAME entity outline the interaction / cooking hover uses (amber
+-- SetEntityDrawOutline). A physical prop's own world entity is outlined directly;
+-- an INVISIBLE anchor (counter / seat / virtual point) has no entity, so a temporary
+-- body — the same one its placement previews — is spawned at the point and outlined,
+-- so the highlight reads identically everywhere. SetPropHighlight is global so the
+-- admin / management NUI relays can toggle it. (Panel is centred, so the world — and
+-- the outline — shows around it.)
+local HL_OUTLINE = { 255, 180, 40, 255 } -- amber, matching the cooking/stovetop hover
+local ANCHOR_HL = {
+    counter       = { model = "prop_till_01" },      -- the counter gizmo preview
+    virtual_point = { model = "prop_tennis_ball" },  -- the virtual-point gizmo preview
+    seat          = { model = "a_m_y_business_01", ped = true }, -- the seat ghost ped
+}
+local hlReal = nil -- a real world entity whose outline we turned on
+local hlTemp = nil -- a temp body we spawned for an invisible anchor
+local hlGen  = 0   -- bumped each toggle so a late async spawn can bail
+
+function ClearPropHighlight()
+    hlGen = hlGen + 1
+    if hlReal and DoesEntityExist(hlReal) then SetEntityDrawOutline(hlReal, false) end
+    hlReal = nil
+    if hlTemp and DoesEntityExist(hlTemp) then
+        SetEntityAsMissionEntity(hlTemp, true, true)
+        DeleteEntity(hlTemp)
+    end
+    hlTemp = nil
+end
+
+function SetPropHighlight(propId, on)
+    ClearPropHighlight()
+    if not on then return end
+    propId = tonumber(propId)
+    local prop = propId and propsById[propId]
+    if not prop then return end
+
+    -- Physical prop (station / kiosk / screen): outline its actual world entity.
+    local ent = GetStationEntity and GetStationEntity(propId)
+    if ent and DoesEntityExist(ent) then
+        SetEntityDrawOutline(ent, true)
+        SetEntityDrawOutlineColor(HL_OUTLINE[1], HL_OUTLINE[2], HL_OUTLINE[3], HL_OUTLINE[4])
+        hlReal = ent
+        return
+    end
+
+    -- Invisible anchor: spawn its placement-preview body at the point and outline it.
+    local spec = ANCHOR_HL[prop.prop_type]
+    if not spec then return end
+    local gen, x, y, z, h = hlGen, prop.x + 0.0, prop.y + 0.0, prop.z + 0.0, (prop.heading or 0.0) + 0.0
+    CreateThread(function()
+        local hash = GetHashKey(spec.model)
+        RequestModel(hash)
+        local t = GetGameTimer()
+        while not HasModelLoaded(hash) and GetGameTimer() - t < 1000 do Wait(0) end
+        if not HasModelLoaded(hash) or gen ~= hlGen then SetModelAsNoLongerNeeded(hash); return end
+        local e
+        if spec.ped then
+            e = CreatePed(4, hash, x, y, z - 1.0, h, false, false)
+            if e and DoesEntityExist(e) then
+                SetEntityInvincible(e, true)
+                SetBlockingOfNonTemporaryEvents(e, true)
+            end
+        else
+            e = CreateObject(hash, x, y, z, false, false, false)
+            if e and DoesEntityExist(e) then
+                SetEntityHeading(e, h)
+                SetEntityCollision(e, false, false)
+            end
+        end
+        SetModelAsNoLongerNeeded(hash)
+        if not e or not DoesEntityExist(e) or gen ~= hlGen then
+            if e and DoesEntityExist(e) then SetEntityAsMissionEntity(e, true, true); DeleteEntity(e) end
+            return
+        end
+        FreezeEntityPosition(e, true)
+        SetEntityDrawOutline(e, true)
+        SetEntityDrawOutlineColor(HL_OUTLINE[1], HL_OUTLINE[2], HL_OUTLINE[3], HL_OUTLINE[4])
+        hlTemp = e
+    end)
+end

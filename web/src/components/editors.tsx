@@ -296,38 +296,39 @@ function CookStepCard({
   const stationLabel = step.station === "fryer" ? _L("recipes.station_fryer") : _L("recipes.station_stovetop");
   return (
     <StepShell title={_L("steps.cook_title", stationLabel)} onRemove={onRemove}>
-      <div className="grid grid-cols-3 gap-3">
+      {/* 6-col grid so short rows can stretch: no field ever leaves dead space
+          at the end of its row (outputs split 3/3, times fill when fryer). */}
+      <div className="grid grid-cols-6 gap-3">
         {fedByPrevious && !step.input ? (
-          <Field label={_L("recipes.input_item")}>
+          <Field label={_L("recipes.input_item")} className="col-span-2">
             <div className="flex h-9 items-center gap-1.5 rounded-md border border-dashed border-border bg-muted/40 px-3 text-xs text-muted-foreground">
               <Link2 className="h-3.5 w-3.5 shrink-0" /> {_L("steps.fed_by_previous")}
             </div>
           </Field>
         ) : (
-          <ItemField label={_L("recipes.input_item")} items={items} value={step.input || ""} allowFree
+          <ItemField label={_L("recipes.input_item")} className="col-span-2" items={items} value={step.input || ""} allowFree
             onChange={(v) => onChange({ input: v })} />
         )}
-        <Select label={_L("recipes.station")} value={step.station}
+        <Select label={_L("recipes.station")} className="col-span-2" value={step.station}
           onChange={(v) => onChange({ station: v, method: (METHODS[v] || [])[0]?.value || "grill" })}
           options={[{ value: "fryer", label: _L("recipes.station_fryer") }, { value: "stovetop", label: _L("recipes.station_stovetop") }]} />
-        <Select label={_L("recipes.method")} value={step.method || (METHODS[step.station] || [])[0]?.value || "grill"}
+        <Select label={_L("recipes.method")} className="col-span-2" value={step.method || (METHODS[step.station] || [])[0]?.value || "grill"}
           onChange={(v) => onChange({ method: v })} options={METHODS[step.station] || METHODS.stovetop} />
-        <ModelField label={_L("recipes.raw_model")} value={step.raw_model || ""} onChange={(v) => onChange({ raw_model: v })} badModels={badModels} />
-        <ModelField label={_L("recipes.cooked_model")} value={step.cooked_model || ""} onChange={(v) => onChange({ cooked_model: v })} badModels={badModels} />
-        <ModelField label={_L("recipes.burnt_model")} value={step.burnt_model || ""} onChange={(v) => onChange({ burnt_model: v })} badModels={badModels} />
-        <ItemField label={_L("recipes.cooked_output")} items={items} value={step.output || ""} allowFree
+        <ModelField label={_L("recipes.raw_model")} className="col-span-2" value={step.raw_model || ""} onChange={(v) => onChange({ raw_model: v })} badModels={badModels} />
+        <ModelField label={_L("recipes.cooked_model")} className="col-span-2" value={step.cooked_model || ""} onChange={(v) => onChange({ cooked_model: v })} badModels={badModels} />
+        <ModelField label={_L("recipes.burnt_model")} className="col-span-2" value={step.burnt_model || ""} onChange={(v) => onChange({ burnt_model: v })} badModels={badModels} />
+        <ItemField label={_L("recipes.cooked_output")} className="col-span-3" items={items} value={step.output || ""} allowFree
           onChange={(v) => onChange({ output: v })} />
-        <ItemField label={_L("recipes.burnt_output")} items={items} value={step.output_burnt || ""} allowFree
+        <ItemField label={_L("recipes.burnt_output")} className="col-span-3" items={items} value={step.output_burnt || ""} allowFree
           placeholder={step.output ? `burnt_${step.output}` : undefined} onChange={(v) => onChange({ output_burnt: v })} />
-        <div />
-        <NumberField label={_L("recipes.cook_time")} value={step.cook_ms ?? 15000} min={0} step={1000} onChange={(v) => onChange({ cook_ms: v })} />
-        <NumberField label={_L("recipes.burn_time")} value={step.burn_ms ?? 15000} min={0} step={1000} onChange={(v) => onChange({ burn_ms: v })} />
-        {step.station === "stovetop" ? (
-          <div className="flex items-end pb-1.5">
+        <NumberField label={_L("recipes.cook_time")} className={step.station === "stovetop" ? "col-span-2" : "col-span-3"}
+          value={step.cook_ms ?? 15000} min={0} step={1000} onChange={(v) => onChange({ cook_ms: v })} />
+        <NumberField label={_L("recipes.burn_time")} className={step.station === "stovetop" ? "col-span-2" : "col-span-3"}
+          value={step.burn_ms ?? 15000} min={0} step={1000} onChange={(v) => onChange({ burn_ms: v })} />
+        {step.station === "stovetop" && (
+          <div className="col-span-2 flex items-end pb-1.5">
             <Toggle checked={!!step.dual_sided} onChange={(v) => onChange({ dual_sided: v })} label={_L("recipes.dual_sided_short")} />
           </div>
-        ) : (
-          <div />
         )}
       </div>
 
@@ -337,15 +338,15 @@ function CookStepCard({
         {advanced ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />} {_L("steps.advanced")}
       </button>
       {advanced && (
-        <div className="mt-2 grid grid-cols-3 gap-3">
-          <NumberField label={_L("recipes.output_count")} value={step.output_count ?? 1} min={1} step={1} onChange={(v) => onChange({ output_count: v })} />
-          <ModelField label={_L("recipes.container_model")} value={step.container_model || ""} onChange={(v) => onChange({ container_model: v })} badModels={badModels} />
-          <TextField label={_L("recipes.expiry")} hint={_L("recipes.expiry_hint")}
+        <div className="mt-2 grid grid-cols-6 gap-3">
+          <NumberField label={_L("recipes.output_count")} className="col-span-2" value={step.output_count ?? 1} min={1} step={1} onChange={(v) => onChange({ output_count: v })} />
+          <ModelField label={_L("recipes.container_model")} className="col-span-2" value={step.container_model || ""} onChange={(v) => onChange({ container_model: v })} badModels={badModels} />
+          <TextField label={_L("recipes.expiry")} hint={_L("recipes.expiry_hint")} className="col-span-2"
             value={step.expire_seconds == null ? "" : String(step.expire_seconds)}
             onChange={(v) => onChange({ expire_seconds: v === "" ? null : Number(v) })} />
-          <ModelField label={_L("steps.serving_model")} hint={_L("steps.serving_model_hint")}
+          <ModelField label={_L("steps.serving_model")} hint={_L("steps.serving_model_hint")} className="col-span-3"
             value={step.serving_model || ""} onChange={(v) => onChange({ serving_model: v })} badModels={badModels} />
-          <ModelField label={_L("steps.serving_burnt_model")} hint={_L("steps.serving_burnt_model_hint")}
+          <ModelField label={_L("steps.serving_burnt_model")} hint={_L("steps.serving_burnt_model_hint")} className="col-span-3"
             value={step.serving_burnt_model || ""} onChange={(v) => onChange({ serving_burnt_model: v })} badModels={badModels} />
         </div>
       )}
@@ -354,18 +355,18 @@ function CookStepCard({
 }
 
 function PourStepCard({
-  step, foodLabel, items, badModels, onChange, onRemove,
+  step, items, badModels, onChange, onRemove,
 }: {
-  step: Extract<Step, { type: "pour" }>; foodLabel: string;
+  step: Extract<Step, { type: "pour" }>;
   items: Item[]; badModels: Set<string>; onChange: (patch: any) => void; onRemove: () => void;
 }) {
+  // The poured flavor's internal key is derived from the food's label upstream
+  // (in FoodForm) — there is no manual flavor-key field here.
   const hex = rgbToHex(step.color);
   return (
     <StepShell title={_L("steps.pour_title")} onRemove={onRemove}>
       <div className="grid grid-cols-2 gap-3">
         <ItemField label={_L("steps.pour_cup")} items={items} value={step.input || ""} onChange={(v) => onChange({ input: v })} />
-        <TextField label={_L("steps.pour_flavor")} hint={_L("steps.pour_flavor_hint")}
-          value={step.flavor || ""} placeholder={modSlug(foodLabel)} onChange={(v) => onChange({ flavor: modSlug(v) })} />
         <ModelField label={_L("settings.prop_model")} value={step.model || ""} onChange={(v) => onChange({ model: v })} badModels={badModels} />
         <NumberField label={_L("settings.fill_time")} value={Number(step.fill_ms ?? 3000)} min={0} step={500} onChange={(v) => onChange({ fill_ms: v })} />
         <Field label={_L("settings.drink_color")} hint={_L("settings.drink_color_hint")}>
@@ -392,7 +393,13 @@ export function FoodForm({ food, onChange, items, groups }: { food: Food; onChan
   return (
     <>
       <div className="grid grid-cols-3 items-start gap-3">
-        <TextField label={_L("settings.label")} value={food.label || ""} onChange={(v) => onChange({ label: v })} />
+        {/* the label is the single source of truth: a drink's poured-flavor key is
+            auto-derived from it here, so there's no separate internal-key field */}
+        <TextField label={_L("settings.label")} value={food.label || ""} onChange={(v) => {
+          const patch: any = { label: v };
+          if (hasPour) patch.steps = steps.map((s) => (s.type === "pour" ? { ...s, flavor: modSlug(v) } : s));
+          onChange(patch);
+        }} />
         <GroupField label={_L("settings.group_field")} hint={_L("settings.group_field_hint")}
           value={food.group || ""} groups={groups} onChange={(v) => onChange({ group: v })} />
         {/* the kind is decided at creation (preset) and fixed after — shown, not edited */}
@@ -405,7 +412,7 @@ export function FoodForm({ food, onChange, items, groups }: { food: Food; onChan
 
       {food.kind === "bag" ? (
         <>
-          <div className="mt-3 grid grid-cols-2 gap-3">
+          <div className="mt-3">
             <ItemField label={_L("steps.bag_display_item")} hint={_L("steps.bag_display_hint")}
               items={items} value={food.display_item || ""} onChange={(v) => onChange({ display_item: v })} />
           </div>
@@ -423,7 +430,7 @@ export function FoodForm({ food, onChange, items, groups }: { food: Food; onChan
               <CookStepCard key={i} step={s} fedByPrevious={i > 0}
                 items={items} badModels={badModels} onChange={(p) => patchStep(i, p)} onRemove={() => removeStep(i)} />
             ) : (
-              <PourStepCard key={i} step={s} foodLabel={food.label || ""}
+              <PourStepCard key={i} step={s}
                 items={items} badModels={badModels} onChange={(p) => patchStep(i, p)} onRemove={() => removeStep(i)} />
             )
           )}
@@ -456,9 +463,9 @@ function FlavorRow({ fl, onChange, onRemove }: { fl: any; onChange: (patch: any)
   const hex = /^#?[0-9a-fA-F]{6}$/.test(fl.color || "") ? (fl.color[0] === "#" ? fl.color : "#" + fl.color) : "#cccccc";
   return (
     <div className="flex items-end gap-2 rounded-md border border-border/60 p-2">
-      <TextField label={_L("settings.flavor_label")} className="w-28" value={fl.label || ""}
-        onChange={(v) => onChange({ label: v, id: fl.id || modSlug(v) })} />
-      <TextField label={_L("settings.flavor_id")} className="w-24" value={fl.id || ""} onChange={(v) => onChange({ id: modSlug(v) })} />
+      {/* internal id is auto-derived from the label (no manual key entry) */}
+      <TextField label={_L("settings.flavor_label")} className="w-40" value={fl.label || ""}
+        onChange={(v) => onChange({ label: v, id: modSlug(v) })} />
       <div className="flex-1"><TextField label={_L("settings.flavor_model")} value={fl.model || ""} onChange={(v) => onChange({ model: v })} /></div>
       <label className="flex shrink-0 flex-col gap-1">
         <span className="text-xs text-muted-foreground">{_L("settings.flavor_color")}</span>
@@ -472,10 +479,18 @@ function FlavorRow({ fl, onChange, onRemove }: { fl: any; onChange: (patch: any)
 
 // One target card: which cooked item this tool decorates, what it produces, the
 // apply mode, an optional pre-requisite finish, and the flavor list.
-function TargetCard({ target, items, onChange, onRemove }:
-  { target: any; items: Item[]; onChange: (patch: any) => void; onRemove: () => void }) {
+// `finishOptions` are the other finishes this one can require first — picked from a
+// dropdown, never typed as a raw key.
+function TargetCard({ target, items, finishOptions, onChange, onRemove }:
+  { target: any; items: Item[]; finishOptions: { value: string; label: string }[]; onChange: (patch: any) => void; onRemove: () => void }) {
   const flavors: any[] = target.flavors ?? [];
   const updateFlavor = (fi: number, patch: any) => onChange({ flavors: flavors.map((f, i) => (i === fi ? { ...f, ...patch } : f)) });
+  // A configured requirement whose finish no longer exists still needs to show as a
+  // choice so it isn't silently dropped when the admin opens the card.
+  const requireOpts = [{ value: "", label: _L("settings.finish_requires_none") }, ...finishOptions];
+  if (target.requires_finish && !finishOptions.some((o) => o.value === target.requires_finish)) {
+    requireOpts.push({ value: target.requires_finish, label: labelOf(items, target.requires_finish) });
+  }
   return (
     <div className="rounded-lg border border-border/70 p-2.5">
       <div className="mb-2 flex items-start justify-between gap-2">
@@ -484,8 +499,9 @@ function TargetCard({ target, items, onChange, onRemove }:
           <Field label={_L("settings.finish_target_output")}><ItemPicker items={items} value={target.output || ""} onChange={(v) => onChange({ output: v })} /></Field>
           <Select label={_L("settings.finish_mode")} value={target.mode || "overlay"} onChange={(v) => onChange({ mode: v })}
             options={[{ value: "overlay", label: _L("settings.finish_mode_overlay") }, { value: "replace", label: _L("settings.finish_mode_replace") }]} />
-          <TextField label={_L("settings.finish_requires")} hint={_L("settings.finish_requires_hint")}
-            value={target.requires_finish || ""} onChange={(v) => onChange({ requires_finish: v || undefined })} />
+          <Select label={_L("settings.finish_requires")} hint={_L("settings.finish_requires_hint")}
+            value={target.requires_finish || ""} onChange={(v) => onChange({ requires_finish: v || undefined })}
+            options={requireOpts} />
         </div>
         <Button size="icon" variant="ghost" onClick={onRemove}><Trash2 className="h-4 w-4" /></Button>
       </div>
@@ -512,10 +528,9 @@ function TrayRow({ tray, items, badModels, onChange, onRemove }:
     <div className="rounded-lg border border-border/70 p-2.5">
       <div className="flex items-start justify-between gap-2">
         <div className="grid flex-1 grid-cols-2 gap-2">
+          {/* internal kind is auto-derived from the label (no manual key entry) */}
           <TextField label={_L("settings.label")} value={tray.label || ""}
-            onChange={(v) => onChange({ label: v, kind: tray.kind || modSlug(v) })} />
-          <TextField label={_L("tool.tray_kind")} hint={_L("tool.tray_kind_hint")}
-            value={tray.kind || ""} onChange={(v) => onChange({ kind: modSlug(v) })} />
+            onChange={(v) => onChange({ label: v, kind: modSlug(v) })} />
           <ModelField label={_L("tool.tray_model")} value={tray.tray_model || ""} onChange={(v) => onChange({ tray_model: v })} badModels={badModels} />
           <ModelField label={_L("tool.tray_raw_model")} hint={_L("tool.tray_raw_model_hint")}
             value={tray.raw_model || ""} onChange={(v) => onChange({ raw_model: v })} badModels={badModels} />
@@ -534,10 +549,15 @@ function TrayRow({ tray, items, badModels, onChange, onRemove }:
   );
 }
 
-export function ToolForm({ tool, cost, onChange, onChangeCost, items, groups }:
-  { tool: Tool; cost: number; onChange: (patch: any) => void; onChangeCost: (v: number) => void; items: Item[]; groups: string[] }) {
+export function ToolForm({ tool, cost, allTools, onChange, onChangeCost, items, groups }:
+  { tool: Tool; cost: number; allTools: Tool[]; onChange: (patch: any) => void; onChangeCost: (v: number) => void; items: Item[]; groups: string[] }) {
   const badModels = new Set(tool.invalid_models || []);
   const targets: any[] = tool.targets ?? [];
+  // Other decorate finishes this one can require first (a finish can't require
+  // itself) — offered as a dropdown so the admin never types a raw finish key.
+  const finishOptions = (allTools || [])
+    .filter((t) => t.mode === "decorate" && t.item && t.item !== tool.item)
+    .map((t) => ({ value: t.item as string, label: labelOf(items, t.item as string) }));
   const trays: any[] = tool.trays ?? [];
   const updateTarget = (ti: number, patch: any) => onChange({ targets: targets.map((t, i) => (i === ti ? { ...t, ...patch } : t)) });
   const updateTray = (ti: number, patch: any) => onChange({ trays: trays.map((t, i) => (i === ti ? { ...t, ...patch } : t)) });
@@ -570,7 +590,7 @@ export function ToolForm({ tool, cost, onChange, onChangeCost, items, groups }:
         <Field label={_L("settings.finish_targets")} hint={_L("settings.finish_targets_hint")} className="mt-3">
           <div className="space-y-2">
             {targets.map((t, ti) => (
-              <TargetCard key={ti} target={t} items={items} onChange={(p) => updateTarget(ti, p)}
+              <TargetCard key={ti} target={t} items={items} finishOptions={finishOptions} onChange={(p) => updateTarget(ti, p)}
                 onRemove={() => onChange({ targets: targets.filter((_, i) => i !== ti) })} />
             ))}
             <Button size="sm" variant="outline" onClick={() => onChange({ targets: [...targets, { item: "", output: "", mode: "overlay", flavors: [] }] })}>
@@ -602,15 +622,15 @@ export function ToolForm({ tool, cost, onChange, onChangeCost, items, groups }:
 // A property toggle that reveals its detail fields: short name + one-line
 // plain-language explanation, so the behaviors are self-describing.
 function PropertyBlock({
-  checked, onToggle, label, blurb, children,
+  checked, onToggle, label, blurb, children, cols = 3,
 }: {
-  checked: boolean; onToggle: (v: boolean) => void; label: string; blurb: string; children?: React.ReactNode;
+  checked: boolean; onToggle: (v: boolean) => void; label: string; blurb: string; children?: React.ReactNode; cols?: 2 | 3;
 }) {
   return (
     <div className={cn("rounded-lg border p-2.5", checked ? "border-primary/40 bg-primary/5" : "border-border/70")}>
       <Toggle checked={checked} onChange={onToggle} label={label} />
       <p className="ml-11 mt-0.5 text-[11px] text-muted-foreground">{blurb}</p>
-      {checked && children && <div className="mt-2.5 grid grid-cols-3 gap-3">{children}</div>}
+      {checked && children && <div className={cn("mt-2.5 grid gap-3", cols === 2 ? "grid-cols-2" : "grid-cols-3")}>{children}</div>}
     </div>
   );
 }
@@ -632,7 +652,7 @@ export function IngredientForm({ ing, cost, onChange, onChangeCost, items, group
       </div>
 
       <div className="mt-3 space-y-2">
-        <PropertyBlock checked={!!halves} label={_L("ing.prop_halves")} blurb={_L("ing.prop_halves_blurb")}
+        <PropertyBlock checked={!!halves} label={_L("ing.prop_halves")} blurb={_L("ing.prop_halves_blurb")} cols={2}
           onToggle={(v) => onChange({ halves: v ? { top_model: "", bottom_model: "" } : undefined })}>
           <ModelField label={_L("ing.halves_top")} value={halves?.top_model || ""}
             onChange={(v) => onChange({ halves: { ...halves, top_model: v } })} badModels={badModels} />

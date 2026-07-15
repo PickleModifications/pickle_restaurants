@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchNui } from "@/lib/nui";
+import { fetchNui, setPeek } from "@/lib/nui";
 import Panel from "@/components/Panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,7 +12,47 @@ import Branding, { ThemeEditor } from "@/components/Branding";
 import Combos from "@/components/ComboEditor";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { UserPlus, Trash2, Plus, Minus, MapPin, Banknote, Armchair, ImageOff, PackagePlus, ArrowDownToLine, ArrowUpFromLine, Sparkles, Users } from "lucide-react";
+import { UserPlus, Trash2, Pencil, Plus, Minus, MapPin, Banknote, Armchair, Receipt, ImageOff, PackagePlus, ArrowDownToLine, ArrowUpFromLine, Sparkles, Users } from "lucide-react";
+
+// The station types placeable from the boss/admin panels, with display labels.
+const MGMT_STATIONS = [
+  { key: "soda_machine", label: _L("admin.station_soda_machine") },
+  { key: "fryer", label: _L("admin.station_fryer") },
+  { key: "stovetop", label: _L("admin.station_stovetop") },
+  { key: "kitchen_prep", label: _L("admin.station_kitchen_prep") },
+  { key: "kiosk", label: _L("admin.station_kiosk"), physicalOnly: true },
+  { key: "kiosk_ground", label: _L("admin.station_kiosk_ground"), physicalOnly: true },
+  { key: "menu_screen", label: _L("admin.station_menu_screen"), physicalOnly: true },
+  { key: "orders_screen", label: _L("admin.station_orders_screen"), physicalOnly: true },
+];
+
+// Human name for a placed prop (so a chip reads "Fryer #12", not "#12").
+function mgmtPropLabel(p: any): string {
+  if (p.prop_type === "counter") return _L("admin.counter");
+  if (p.prop_type === "seat") return _L("admin.seat_one");
+  const key = p.prop_type === "virtual_point" ? p.target : p.prop_type;
+  return MGMT_STATIONS.find((s) => s.key === key)?.label || key || _L("admin.prop_one");
+}
+
+// One placed prop in the boss panel: named chip with Edit (reposition) + Remove.
+// Hover beams the prop's world point (the panel is centred; the world shows around
+// it). Highlight is force-cleared on unmount so a closed panel leaves no beam.
+function MgmtPropChip({ id, p, section, virtual }: { id: number; p: any; section: string; virtual?: boolean }) {
+  const hi = (on: boolean) => { fetchNui("management:highlightProp", { propId: p.id, on }); setPeek(on); };
+  useEffect(() => () => { fetchNui("management:highlightProp", { propId: p.id, on: false }); setPeek(false); }, [p.id]);
+  return (
+    <Badge variant="outline" className="gap-1.5" onMouseEnter={() => hi(true)} onMouseLeave={() => hi(false)}>
+      {virtual && <Sparkles className="h-3 w-3 text-primary" />}
+      <span>{mgmtPropLabel(p)} <span className="opacity-45 tabular-nums">#{p.id}</span></span>
+      <button title={_L("admin.reposition")} onClick={() => { hi(false); fetchNui("management:editProp", { id, propId: p.id, section }); }}>
+        <Pencil className="h-3 w-3" />
+      </button>
+      <button title={_L("admin.remove")} onClick={() => { hi(false); fetchNui("management:removeProp", { id, propId: p.id }); }}>
+        <Trash2 className="h-3 w-3" />
+      </button>
+    </Badge>
+  );
+}
 
 // Inventory thumbnail from a direct nui:// url the server resolved.
 function Thumb({ src, className }: { src?: string; className?: string }) {
@@ -50,17 +90,17 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         </TabsList>
 
         {perms.manage_employees && (
-          <TabsContent value="employees" className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <TabsContent value="employees" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
             <Employees id={id} roles={roles} employees={data?.employees || []} nearby={data?.nearby || []} />
           </TabsContent>
         )}
         {perms.manage_menu && (
-          <TabsContent value="menu" className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <TabsContent value="menu" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
             <Menu id={id} priceList={data?.priceList || []} stale={data?.stale || []} />
           </TabsContent>
         )}
         {perms.manage_menu && (
-          <TabsContent value="combos" className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <TabsContent value="combos" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
             {/* Option picker is over sellable KEYS: map the price list to the ItemPicker
                 shape (name = catalog key, so drink flavors are pickable too). */}
             <Combos
@@ -72,22 +112,22 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
           </TabsContent>
         )}
         {perms.manage_stock && (
-          <TabsContent value="supplies" className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <TabsContent value="supplies" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
             <Supplies id={id} supplies={data?.supplies || []} />
           </TabsContent>
         )}
         {perms.view_finances && (
-          <TabsContent value="finances" className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <TabsContent value="finances" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
             <Finances id={id} balance={data?.restaurant?.balance} ledger={data?.ledger || []} canManage={!!perms.manage_balance} />
           </TabsContent>
         )}
         {perms.manage_props && (
-          <TabsContent value="stations" className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <TabsContent value="stations" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
             <Stations id={id} props={data?.props || []} hasShell={data?.restaurant?.hasShell} hasNpcSpawn={data?.restaurant?.hasNpcSpawn} focusSection={focus?.section} />
           </TabsContent>
         )}
         {perms.manage_props && (
-          <TabsContent value="branding" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
+          <TabsContent value="branding" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 pb-4">
             <ThemeEditor id={id} theme={data?.restaurant?.theme} event="management:setTheme" />
             <Branding id={id} brand={data?.restaurant?.brand_image || ""} brandImages={data?.restaurant?.brand_images || {}} event="management:setBrandImage" />
           </TabsContent>
@@ -352,32 +392,22 @@ function Finances({ id, balance, ledger, canManage }: any) {
 }
 
 function Stations({ id, props, hasShell, hasNpcSpawn, focusSection }: any) {
-  const STATIONS = [
-    { key: "soda_machine", label: _L("admin.station_soda_machine") },
-    { key: "fryer", label: _L("admin.station_fryer") },
-    { key: "stovetop", label: _L("admin.station_stovetop") },
-    { key: "kitchen_prep", label: _L("admin.station_kitchen_prep") },
-    // The self-service kiosk is a customer ORDER terminal, not a cooking station,
-    // so it's placed as a physical world prop only (no virtual-kitchen variant).
-    { key: "kiosk", label: _L("admin.station_kiosk"), physicalOnly: true },
-    // Free-standing floor kiosk (the _02 body) — same order terminal, ground-placed.
-    { key: "kiosk_ground", label: _L("admin.station_kiosk_ground"), physicalOnly: true },
-    // Customer info SCREENS — non-interactable wall boards driven by a render target
-    // (menu slideshow / live orders). Physical world props only.
-    { key: "menu_screen", label: _L("admin.station_menu_screen"), physicalOnly: true },
-    { key: "orders_screen", label: _L("admin.station_orders_screen"), physicalOnly: true },
-  ];
+  const STATIONS = MGMT_STATIONS;
   const seats = (props as any[]).filter((p) => p.prop_type === "seat");
+  const counters = (props as any[]).filter((p) => p.prop_type === "counter");
   const [modes, setModes] = useState<Record<string, "physical" | "virtual">>({});
   const setMode = (k: string, m: "physical" | "virtual") => setModes((prev) => ({ ...prev, [k]: m }));
   const stationsRef = useRef<HTMLDivElement>(null);
   const seatingRef = useRef<HTMLDivElement>(null);
+  const countersRef = useRef<HTMLDivElement>(null);
 
   // Scroll the just-used section into view when reopened from a placement flow.
   // Virtual placement lives in the stations card now, so "virtual" lands there.
   useEffect(() => {
     if (!focusSection) return;
-    const el = focusSection === "seating" ? seatingRef.current : stationsRef.current;
+    const el = focusSection === "seating" ? seatingRef.current
+      : focusSection === "counters" ? countersRef.current
+      : stationsRef.current;
     const t = setTimeout(() => el?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
     return () => clearTimeout(t);
   }, [focusSection]);
@@ -394,9 +424,6 @@ function Stations({ id, props, hasShell, hasNpcSpawn, focusSection }: any) {
             <div className="flex items-center gap-1.5">
               <Button variant="outline" size="sm" onClick={() => fetchNui("management:placeNpcSpawn", { id })}>
                 <Users className="h-3.5 w-3.5" /> {hasNpcSpawn ? `${_L("mgmt.set_npc_spawn")} ✓` : _L("mgmt.set_npc_spawn")}
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => fetchNui("management:setCounter", { id })}>
-                <MapPin className="h-3.5 w-3.5" /> {_L("mgmt.set_counter")}
               </Button>
             </div>
           </div>
@@ -443,16 +470,10 @@ function Stations({ id, props, hasShell, hasNpcSpawn, focusSection }: any) {
                   {(physical.length > 0 || virtual.length > 0) && (
                     <div className="flex flex-wrap gap-1.5">
                       {physical.map((p: any) => (
-                        <Badge key={p.id} variant="outline" className="gap-1.5">
-                          #{p.id}
-                          <button onClick={() => fetchNui("management:removeProp", { id, propId: p.id })}><Trash2 className="h-3 w-3" /></button>
-                        </Badge>
+                        <MgmtPropChip key={p.id} id={id} p={p} section="stations" />
                       ))}
                       {virtual.map((p: any) => (
-                        <Badge key={p.id} variant="outline" className="gap-1.5" title={_L("mgmt.mode_virtual")}>
-                          <Sparkles className="h-3 w-3 text-primary" /> #{p.id}
-                          <button onClick={() => fetchNui("management:removeProp", { id, propId: p.id })}><Trash2 className="h-3 w-3" /></button>
-                        </Badge>
+                        <MgmtPropChip key={p.id} id={id} p={p} section="stations" virtual />
                       ))}
                     </div>
                   )}
@@ -461,6 +482,29 @@ function Stations({ id, props, hasShell, hasNpcSpawn, focusSection }: any) {
             })}
           </div>
           <p className="mt-3 text-[11px] text-muted-foreground">{_L("mgmt.virtual_hint")}</p>
+        </CardContent>
+      </Card>
+
+      {/* counters — invisible register anchors, placed like stations (multiple).
+          Each opens the register / management panel; the first also anchors the
+          map blip, kitchen shell, and NPC queue. */}
+      <Card ref={countersRef}>
+        <CardContent className="pt-4">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="flex items-center gap-2 text-sm font-semibold"><Receipt className="h-4 w-4" /> {_L("admin.counters")}</h3>
+            <Button variant="outline" size="sm" onClick={() => fetchNui("management:setCounter", { id })}>
+              <Plus className="h-3.5 w-3.5" /> {_L("admin.place")}
+            </Button>
+          </div>
+          {counters.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {counters.map((p: any) => (
+                <MgmtPropChip key={p.id} id={id} p={p} section="counters" />
+              ))}
+            </div>
+          ) : (
+            <div className="text-xs text-muted-foreground">{_L("admin.counters_hint")}</div>
+          )}
         </CardContent>
       </Card>
 
@@ -475,10 +519,7 @@ function Stations({ id, props, hasShell, hasNpcSpawn, focusSection }: any) {
           {seats.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
               {seats.map((p: any) => (
-                <Badge key={p.id} variant="outline" className="gap-1.5">
-                  {_L("mgmt.seat_num", p.id)}
-                  <button onClick={() => fetchNui("management:removeProp", { id, propId: p.id })}><Trash2 className="h-3 w-3" /></button>
-                </Badge>
+                <MgmtPropChip key={p.id} id={id} p={p} section="seating" />
               ))}
             </div>
           ) : (

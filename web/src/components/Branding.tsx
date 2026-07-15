@@ -40,7 +40,7 @@ function Segmented<T extends string>({
 }
 
 export function ThemeEditor({
-  id, theme, event, onChange, heading, blurb,
+  id, theme, event, onChange, heading, blurb, scoped,
 }: {
   id: number; theme?: ThemeConfig | null; event: string;
   // Fired on every edit with the new seed — lets the parent keep its cached copy
@@ -48,6 +48,12 @@ export function ThemeEditor({
   // the stale open-payload one.
   onChange?: (t: Required<ThemeConfig>) => void;
   heading?: string; blurb?: string;
+  // `scoped` = this editor tunes a theme that is NOT the panel it lives in (the
+  // admin panel editing a restaurant's franchise seed). It must NOT hijack the
+  // surrounding panel with a live preview — the admin keeps its OWN app theme. A
+  // contained swatch below shows the seed instead. Boss panel leaves it off, where
+  // "the open panel IS the preview" is correct.
+  scoped?: boolean;
 }) {
   const [cfg, setCfg] = useState(() => normalizeTheme(theme));
   const [hexDraft, setHexDraft] = useState(cfg.primary);
@@ -55,7 +61,7 @@ export function ThemeEditor({
   const set = (patch: Partial<ThemeConfig>) => {
     setCfg((c) => {
       const next = normalizeTheme({ ...c, ...patch });
-      applyTheme(next); // live preview — the open panel IS the preview
+      if (!scoped) applyTheme(next); // live preview — the open panel IS the preview
       onChange?.(next); // keep the parent's cached theme in sync
       return next;
     });
@@ -149,6 +155,34 @@ export function ThemeEditor({
             <RotateCcw className="h-3 w-3" /> {_L("theme.reset")}
           </button>
         </div>
+
+        {/* Scoped preview: the admin panel keeps its OWN theme, so this seed can't
+            preview on the surrounding panel — a self-contained WYSIWYG chip (inline
+            styles straight off the seed, not the token system) shows it instead. */}
+        {scoped && (
+          <div
+            className="mt-3 flex items-center gap-3 border p-3"
+            style={{
+              borderRadius: cfg.radius === "sharp" ? 2 : cfg.radius === "round" ? 16 : 8,
+              backgroundColor: cfg.mode === "paper" ? "#f5f1e8" : "#14140f",
+              color: cfg.mode === "paper" ? "#14140f" : "#f5f1e8",
+              borderColor: cfg.mode === "paper" ? "#00000022" : "#ffffff1f",
+            }}
+          >
+            <span
+              className="grid h-8 w-8 shrink-0 place-items-center font-display text-sm font-bold text-white"
+              style={{ backgroundColor: cfg.primary, borderRadius: cfg.radius === "sharp" ? 2 : cfg.radius === "round" ? 999 : 6 }}
+            >Aa</span>
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-semibold">{_L("theme.preview_title")}</div>
+              <div className="text-[11px] opacity-70">{_L("theme.preview_blurb")}</div>
+            </div>
+            <span
+              className="shrink-0 px-2.5 py-1 text-[11px] font-semibold text-white"
+              style={{ backgroundColor: cfg.primary, borderRadius: cfg.radius === "sharp" ? 2 : cfg.radius === "round" ? 999 : 6 }}
+            >{_L("theme.preview_action")}</span>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

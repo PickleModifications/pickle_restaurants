@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
+import { Truncate } from "@/components/ui/truncate";
 import { Check, ChevronsUpDown, Search, TriangleAlert } from "lucide-react";
 
 export type Item = { name: string; label: string; image?: string };
@@ -72,9 +73,9 @@ export default function ItemPicker({
         <span className="flex min-w-0 items-center gap-1.5 truncate">
           {missing && <TriangleAlert className="h-3.5 w-3.5 shrink-0" />}
           {selected ? (
-            <span className="truncate">{selected.label}</span>
+            <Truncate>{selected.label}</Truncate>
           ) : value ? (
-            <span className="truncate font-mono text-xs">{value}</span>
+            <Truncate className="font-mono text-xs">{value}</Truncate>
           ) : (
             <span className="text-muted-foreground">{placeholder}</span>
           )}
@@ -147,8 +148,8 @@ function Option({ label, sub, active, onClick }: { label: string; sub: string; a
       )}
     >
       <span className="flex min-w-0 flex-col">
-        <span className="truncate">{label}</span>
-        {sub && <span className="truncate font-mono text-[10px] text-muted-foreground">{sub}</span>}
+        <Truncate>{label}</Truncate>
+        {sub && <Truncate className="font-mono text-[10px] text-muted-foreground">{sub}</Truncate>}
       </span>
       {active && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
     </button>

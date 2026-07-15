@@ -138,6 +138,7 @@ Language["en"] = {
     ["place_counter_fail"] = "Failed to set counter.",
     ["place_counter_set"] = "Counter set.",
     ["place_npc_spawn_fail"] = "Failed to set the NPC spawn point.",
+    ["place_prop_moved"] = "Moved.",
     ["place_npc_spawn_set"] = "NPC customer spawn point set.",
     ["place_seat_fail"] = "Failed to place seat.",
     ["place_seat_placed"] = "Seat placed.",

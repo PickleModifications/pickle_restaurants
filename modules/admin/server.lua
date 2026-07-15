@@ -15,6 +15,9 @@ local function buildAdminData()
         foods       = AnnotateFoods(),
         tools       = AnnotateTools(),
         ingredients = AnnotateIngredients(),
+        -- The shipped default menu, verbatim — feeds the NUI's "Import Defaults"
+        -- dialog (restore a deleted default / reset an edited one, no restart).
+        defaults    = { foods = DEFAULT_FOODS, tools = DEFAULT_TOOLS, ingredients = DEFAULT_INGREDIENTS },
         items       = BuildItemList(),     -- catalogue for item-pickers
         groups      = CollectGroups(),     -- every group name in use (UI suggestions)
         players     = {},

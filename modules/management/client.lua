@@ -99,7 +99,23 @@ RegisterNUICallback("management:setCounter", function(d, cb)
     CloseNUI()
     cb({})
     StartCounterPlacement(d.id)
-    OpenManagement(d.id, "stations")
+    OpenManagement(d.id, "counters")
+end)
+
+-- Reposition an existing placed prop (station / counter / seat / virtual point),
+-- then reopen to its section.
+RegisterNUICallback("management:editProp", function(d, cb)
+    CloseNUI()
+    cb({})
+    StartPropReposition(d.propId)
+    OpenManagement(d.id, d.section)
+end)
+
+-- Purely visual: beam a prop's world point while its card is hovered so the boss
+-- can tell which placed thing the card is. No server round-trip.
+RegisterNUICallback("management:highlightProp", function(d, cb)
+    if SetPropHighlight then SetPropHighlight(d.propId, d.on) end
+    cb({})
 end)
 
 RegisterNUICallback("management:placeSeat", function(d, cb)

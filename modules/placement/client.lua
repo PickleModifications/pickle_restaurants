@@ -261,6 +261,10 @@ function StartShellPlacement(restaurantId)
     end
 end
 
+-- A counter is an invisible register anchor (no runtime prop) — the till is only
+-- the gizmo PREVIEW so the admin can aim it at the map's own counter. Placing is
+-- additive: a restaurant can have several registers (modules/main gives each one
+-- its interaction; the lowest-id counter is the primary blip/shell/NPC anchor).
 function StartCounterPlacement(restaurantId)
     Wait(250)
     local result = StartGizmoEditor({ model = "prop_till_01", enableCancel = true, deleteEntity = true })
@@ -274,5 +278,64 @@ function StartCounterPlacement(restaurantId)
         ShowNotification(_L("place_counter_set"))
     else
         ShowNotification((res and res.error) or _L("place_counter_fail"))
+    end
+end
+
+-- Reposition an already-placed prop. Re-runs the gizmo SEEDED at the prop's current
+-- transform (starts exactly where it sits) with the same preview its original
+-- placement used — physical station, counter till, seated ghost ped, or virtual
+-- point ball — then persists the new transform via updateProp.
+function StartPropReposition(propId)
+    local prop = GetClientProp and GetClientProp(tonumber(propId))
+    if not prop then return ShowNotification(_L("place_unknown_station")) end
+    Wait(250)
+
+    -- Hide the prop's CURRENT world entity so it doesn't sit as a ghost duplicate
+    -- next to the gizmo preview while you drag. On save, the re-sync deletes + respawns
+    -- it at the new spot; on cancel / failure we restore its visibility below.
+    local liveEnt = GetStationEntity and GetStationEntity(tonumber(propId))
+    if liveEnt and DoesEntityExist(liveEnt) then SetEntityVisible(liveEnt, false, false) end
+    local function restoreLive()
+        if liveEnt and DoesEntityExist(liveEnt) then SetEntityVisible(liveEnt, true, false) end
+    end
+
+    local seed = {
+        coords       = vector3(prop.x + 0.0, prop.y + 0.0, prop.z + 0.0),
+        rotation     = vector3(0.0, 0.0, (prop.heading or 0.0) + 0.0),
+        enableCancel = true,
+        deleteEntity = true,
+    }
+    local ptype = prop.prop_type
+    if ptype == "seat" then
+        local sitDict, sitAnim = SeatPreviewAnim()
+        seed.isPed        = true
+        seed.model        = SEAT_PREVIEW_PED
+        seed.anim         = { dict = sitDict, name = sitAnim }
+        seed.coordsOffset = vector3(0.0, 0.0, -SeatSitOffsetZ())
+        seed.coords       = vector3(prop.x + 0.0, prop.y + 0.0, prop.z - SeatSitOffsetZ())
+    elseif ptype == "counter" then
+        seed.model = "prop_till_01"
+    elseif ptype == "virtual_point" then
+        seed.model = GetHashKey(VIRTUAL_PLACE_MODEL)
+    else
+        local model = PLACEABLE_MODELS[ptype]
+        if not model then restoreLive(); return ShowNotification(_L("place_unknown_station")) end
+        seed.model = GetHashKey(model)
+        if WALL_MOUNTED[ptype] then seed.wallOffset = WallMountDepth(model) end
+    end
+
+    local result = StartGizmoEditor(seed)
+    if not result or not result.position then restoreLive(); return end -- cancelled: put it back
+    local res = lib.callback.await("pickle_restaurants:placement:updateProp", false, {
+        id = propId,
+        x = result.position.x, y = result.position.y, z = result.position.z,
+        heading = (result.rotation and result.rotation.z) or 0.0,
+    })
+    if res and res.ok then
+        ShowNotification(_L("place_prop_moved"))
+        -- leave the old (hidden) entity — the re-sync deletes + respawns it at the new spot
+    else
+        restoreLive() -- save failed: unhide the original so it isn't lost
+        ShowNotification((res and res.error) or _L("place_station_fail"))
     end
 end
