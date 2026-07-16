@@ -8,11 +8,14 @@ import {
   Plus, Minus, Trash2, User, Receipt, Check, X, Loader2, ImageOff, SlidersHorizontal, Ban, UtensilsCrossed, ShoppingBag,
 } from "lucide-react";
 
-// Shared point-of-sale building blocks used by BOTH the staff register
-// (views/Register.tsx) and the customer self-service kiosk (views/Order.tsx), so
-// the catalog grid, modifier picker, cart and pricing can never drift between the
-// two. The only differences the kiosk makes are: no "who pays" customer picker
-// (the customer always pays for their own order) and a different submit event.
+// Shared point-of-sale building blocks used by the staff register — both the
+// full-screen NUI panel (views/Register.tsx) and the in-world register DUI
+// (views/RegisterDui.tsx) — and the customer self-service kiosk DUI
+// (views/KioskDui.tsx), so the catalog grid, modifier picker, cart and pricing can
+// never drift between them. The kiosk's only behavioural differences: no "who pays"
+// customer picker (the customer always pays for their own order) and a different
+// submit event. The `big` prop selects the large in-world layout independently of
+// those behaviours (see the OrderBuilder doc-comment).
 
 export type Mod = { id: string; label: string; item?: string; price?: number; default?: boolean; image?: string; group?: string; color?: string };
 export type Cat = { key: string; item: string; variant: string; label: string; kind: string; price: number; image?: string; modifiers?: Mod[] };
@@ -217,18 +220,38 @@ function FilterChip({ active, onClick, big, children }: { active: boolean; onCli
   );
 }
 
+// The who-pays selector on the in-world register DUI's review sheet: a click target
+// (not a native <select>, which the virtual cursor can't open) for "Myself" + each
+// nearby player the cashier can charge.
+function CustomerChip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button onClick={onClick}
+      className={cn("rounded-full border px-4 py-2 text-base font-medium transition-colors",
+        active ? "border-primary bg-primary/15 text-primary ring-1 ring-primary" : "border-border text-muted-foreground hover:bg-accent hover:text-foreground")}>
+      {children}
+    </button>
+  );
+}
+
 // The catalog + modifier picker + cart. In "register" mode the cashier can charge
 // a nearby player (the customer picker); in "kiosk" mode the customer always pays
 // for their own order (no picker) and the submit reads "Place Order". `onOrdered`
 // fires with the new ticket number after a successful submit.
+//
+// `big` forces the large, in-world layout (big cards + a checkout review sheet)
+// used on an interactive DUI screen, whose virtual cursor needs generous aim
+// targets. The kiosk mode always implies it; the staff register DUI passes it
+// explicitly while keeping register SEMANTICS (the customer picker + "Charge" +
+// createOrder). The full-screen register NUI leaves it off for the dense POS layout.
 export function OrderBuilder({
-  id, catalog, combos, nearby, mode, onOrdered,
+  id, catalog, combos, nearby, mode, big: bigProp, onOrdered,
 }: {
   id: number;
   catalog: Cat[];
   combos?: Combo[];
   nearby?: Near[];
   mode: "register" | "kiosk";
+  big?: boolean;
   onOrdered?: (ticket?: number) => void;
 }) {
   const [cart, setCart] = useState<Record<string, CartEntry>>({});
@@ -341,13 +364,17 @@ export function OrderBuilder({
   const total = blocks.reduce((s, b) => s + b.price * b.qty, 0);
   const count = blocks.reduce((s, b) => s + b.qty, 0);
 
+  // The wire form of the cart: keys + counts + modifier ids, never labels or prices —
+  // the server re-derives those from its own priced catalog.
+  const cartWire = () => Object.values(cart).map((e) =>
+    e.type === "combo"
+      ? { combo: e.comboId, qty: e.qty, slots: e.picks.map((p) => ({ key: p.key, mods: p.sel })) }
+      : { key: e.catKey, qty: e.qty, mods: e.sel });
+
   const submit = async () => {
     if (blocks.length === 0 || busy) return;
     setBusy(true);
-    const cartArr = Object.values(cart).map((e) =>
-      e.type === "combo"
-        ? { combo: e.comboId, qty: e.qty, slots: e.picks.map((p) => ({ key: p.key, mods: p.sel })) }
-        : { key: e.catKey, qty: e.qty, mods: e.sel });
+    const cartArr = cartWire();
     const event = mode === "kiosk" ? "sales:kioskOrder" : "sales:createOrder";
     const payload = mode === "kiosk" ? { id, cart: cartArr } : { id, customer, cart: cartArr };
     const res: any = await fetchNui(event, payload);
@@ -365,7 +392,11 @@ export function OrderBuilder({
         return s + resolveMods(opt as unknown as Cat, comboPicks[i]?.sel || []).extra;
       }, 0)
     : 0;
-  const isKiosk = mode === "kiosk";
+  // Large in-world layout: the kiosk always, and the staff register DUI on request.
+  // Drives every SIZE/LAYOUT decision below; `mode` still drives BEHAVIOUR (who-pays
+  // picker, submit event + button copy), so the register DUI reads big but still
+  // charges a customer.
+  const big = mode === "kiosk" || !!bigProp;
 
   // Quantity stepper + remove for a cart row. `big` scales it up for the kiosk
   // review sheet (the in-world screen needs larger touch/aim targets).
@@ -428,18 +459,18 @@ export function OrderBuilder({
     <>
       {/* modifier dialog */}
       {modFor && (
-        <div className={cn(isKiosk ? "fixed" : "absolute", "inset-0 z-40 flex items-center justify-center bg-black/50", isKiosk ? "p-10" : "p-4")} onClick={() => setModFor(null)}>
-          <div className={cn("w-full rounded-2xl border border-border bg-card shadow-xl", isKiosk ? "max-w-xl p-6" : "max-w-sm p-4")} onClick={(e) => e.stopPropagation()}>
-            <div className={cn("flex items-center", isKiosk ? "mb-5 gap-4" : "mb-3 gap-2")}>
-              <Thumb src={modFor.image} className={cn("shrink-0", isKiosk ? "h-16 w-16" : "h-10 w-10")} />
+        <div className={cn(big ? "fixed" : "absolute", "inset-0 z-40 flex items-center justify-center bg-black/50", big ? "p-10" : "p-4")} onClick={() => setModFor(null)}>
+          <div className={cn("w-full rounded-2xl border border-border bg-card shadow-xl", big ? "max-w-xl p-6" : "max-w-sm p-4")} onClick={(e) => e.stopPropagation()}>
+            <div className={cn("flex items-center", big ? "mb-5 gap-4" : "mb-3 gap-2")}>
+              <Thumb src={modFor.image} className={cn("shrink-0", big ? "h-16 w-16" : "h-10 w-10")} />
               <div className="min-w-0 flex-1">
-                <div className={cn("truncate font-semibold", isKiosk && "text-2xl")}>{modFor.label}</div>
-                <div className={cn("text-muted-foreground", isKiosk ? "text-lg" : "text-xs")}>{money(modFor.price)}</div>
+                <div className={cn("truncate font-semibold", big && "text-2xl")}>{modFor.label}</div>
+                <div className={cn("text-muted-foreground", big ? "text-lg" : "text-xs")}>{money(modFor.price)}</div>
               </div>
-              <button onClick={() => setModFor(null)} className="text-muted-foreground hover:text-foreground"><X className={isKiosk ? "h-7 w-7" : "h-4 w-4"} /></button>
+              <button onClick={() => setModFor(null)} className="text-muted-foreground hover:text-foreground"><X className={big ? "h-7 w-7" : "h-4 w-4"} /></button>
             </div>
             {(modFor.modifiers || []).length > 0 && (
-              <div className={cn("overflow-y-auto p-0.5", isKiosk ? "max-h-[46vh] space-y-4" : "max-h-72 space-y-3")}>
+              <div className={cn("overflow-y-auto p-0.5", big ? "max-h-[46vh] space-y-4" : "max-h-72 space-y-3")}>
                 {(() => {
                   const all = modFor.modifiers || [];
                   const ungrouped = all.filter((m) => !m.group);
@@ -448,14 +479,14 @@ export function OrderBuilder({
                     <>
                       {ungrouped.length > 0 && (
                         <div className="grid grid-cols-3 gap-2">
-                          {ungrouped.map((m) => <ModTile key={m.id} m={m} big={isKiosk} on={modSel.includes(m.id)} onClick={() => toggleMod(m)} />)}
+                          {ungrouped.map((m) => <ModTile key={m.id} m={m} big={big} on={modSel.includes(m.id)} onClick={() => toggleMod(m)} />)}
                         </div>
                       )}
                       {groupNames.map((g) => (
                         <div key={g}>
-                          <div className={cn("mb-1 font-semibold uppercase tracking-wide text-muted-foreground", isKiosk ? "text-sm" : "text-xs")}>{g}</div>
+                          <div className={cn("mb-1 font-semibold uppercase tracking-wide text-muted-foreground", big ? "text-sm" : "text-xs")}>{g}</div>
                           <div className="grid grid-cols-3 gap-2">
-                            {all.filter((m) => m.group === g).map((m) => <ModTile key={m.id} m={m} big={isKiosk} on={modSel.includes(m.id)} onClick={() => toggleMod(m)} />)}
+                            {all.filter((m) => m.group === g).map((m) => <ModTile key={m.id} m={m} big={big} on={modSel.includes(m.id)} onClick={() => toggleMod(m)} />)}
                           </div>
                         </div>
                       ))}
@@ -464,16 +495,16 @@ export function OrderBuilder({
                 })()}
               </div>
             )}
-            <div className={cn("flex items-center justify-between gap-3", isKiosk ? "mt-5" : "mt-3")}>
-              <div className={cn("flex items-center", isKiosk ? "gap-3" : "gap-2")}>
+            <div className={cn("flex items-center justify-between gap-3", big ? "mt-5" : "mt-3")}>
+              <div className={cn("flex items-center", big ? "gap-3" : "gap-2")}>
                 <button onClick={() => setModQty((q) => Math.max(1, q - 1))} disabled={modQty <= 1}
-                  className={cn("grid place-items-center rounded-md border border-border transition-colors hover:bg-accent disabled:opacity-40", isKiosk ? "h-12 w-12" : "h-9 w-9")}><Minus className={isKiosk ? "h-6 w-6" : "h-4 w-4"} /></button>
-                <span className={cn("text-center font-mono font-semibold tabular-nums", isKiosk ? "w-10 text-2xl" : "w-8 text-lg")}>{modQty}</span>
+                  className={cn("grid place-items-center rounded-md border border-border transition-colors hover:bg-accent disabled:opacity-40", big ? "h-12 w-12" : "h-9 w-9")}><Minus className={big ? "h-6 w-6" : "h-4 w-4"} /></button>
+                <span className={cn("text-center font-mono font-semibold tabular-nums", big ? "w-10 text-2xl" : "w-8 text-lg")}>{modQty}</span>
                 <button onClick={() => setModQty((q) => Math.min(10, q + 1))} disabled={modQty >= 10}
-                  className={cn("grid place-items-center rounded-md border border-border transition-colors hover:bg-accent disabled:opacity-40", isKiosk ? "h-12 w-12" : "h-9 w-9")}><Plus className={isKiosk ? "h-6 w-6" : "h-4 w-4"} /></button>
+                  className={cn("grid place-items-center rounded-md border border-border transition-colors hover:bg-accent disabled:opacity-40", big ? "h-12 w-12" : "h-9 w-9")}><Plus className={big ? "h-6 w-6" : "h-4 w-4"} /></button>
               </div>
-              <Button size={isKiosk ? "lg" : "sm"} className={cn(isKiosk && "h-14 gap-2.5 px-8 text-xl")} onClick={() => { addItemEntry(modFor.key, modSel, modQty); setModFor(null); }}>
-                <Plus className={isKiosk ? "h-6 w-6" : "h-4 w-4"} /> {_L("register.add_to_order")} · {money((modFor.price + modExtra) * modQty)}
+              <Button size={big ? "lg" : "sm"} className={cn(big && "h-14 gap-2.5 px-8 text-xl")} onClick={() => { addItemEntry(modFor.key, modSel, modQty); setModFor(null); }}>
+                <Plus className={big ? "h-6 w-6" : "h-4 w-4"} /> {_L("register.add_to_order")} · {money((modFor.price + modExtra) * modQty)}
               </Button>
             </div>
           </div>
@@ -482,51 +513,51 @@ export function OrderBuilder({
 
       {/* combo builder dialog — pick each slot's option + its toppings */}
       {comboFor && (
-        <div className={cn(isKiosk ? "fixed" : "absolute", "inset-0 z-40 flex items-center justify-center bg-black/50", isKiosk ? "p-10" : "p-4")} onClick={() => setComboFor(null)}>
-          <div className={cn("flex max-h-full w-full flex-col rounded-2xl border border-border bg-card shadow-xl", isKiosk ? "max-w-2xl" : "max-w-md")} onClick={(e) => e.stopPropagation()}>
-            <div className={cn("flex items-center border-b border-border", isKiosk ? "gap-4 p-5" : "gap-2 p-3")}>
-              <span className={cn("grid shrink-0 place-items-center rounded-md bg-primary font-mono font-bold text-primary-foreground tabular-nums", isKiosk ? "h-12 w-12 text-lg" : "h-8 w-8 text-sm")}>{comboFor.number}</span>
+        <div className={cn(big ? "fixed" : "absolute", "inset-0 z-40 flex items-center justify-center bg-black/50", big ? "p-10" : "p-4")} onClick={() => setComboFor(null)}>
+          <div className={cn("flex max-h-full w-full flex-col rounded-2xl border border-border bg-card shadow-xl", big ? "max-w-2xl" : "max-w-md")} onClick={(e) => e.stopPropagation()}>
+            <div className={cn("flex items-center border-b border-border", big ? "gap-4 p-5" : "gap-2 p-3")}>
+              <span className={cn("grid shrink-0 place-items-center rounded-md bg-primary font-mono font-bold text-primary-foreground tabular-nums", big ? "h-12 w-12 text-lg" : "h-8 w-8 text-sm")}>{comboFor.number}</span>
               <div className="min-w-0 flex-1">
-                <div className={cn("truncate font-semibold", isKiosk && "text-2xl")}>{comboFor.label}</div>
-                <div className={cn("text-muted-foreground", isKiosk ? "text-base" : "text-xs")}>{_L("combo.customize_title")}</div>
+                <div className={cn("truncate font-semibold", big && "text-2xl")}>{comboFor.label}</div>
+                <div className={cn("text-muted-foreground", big ? "text-base" : "text-xs")}>{_L("combo.customize_title")}</div>
               </div>
-              <button onClick={() => setComboFor(null)} className="text-muted-foreground hover:text-foreground"><X className={isKiosk ? "h-7 w-7" : "h-4 w-4"} /></button>
+              <button onClick={() => setComboFor(null)} className="text-muted-foreground hover:text-foreground"><X className={big ? "h-7 w-7" : "h-4 w-4"} /></button>
             </div>
-            <div className={cn("min-h-0 flex-1 overflow-y-auto", isKiosk ? "space-y-4 p-5" : "space-y-3 p-3")}>
+            <div className={cn("min-h-0 flex-1 overflow-y-auto", big ? "space-y-4 p-5" : "space-y-3 p-3")}>
               {comboFor.slots.map((slot, si) => {
                 const pick = comboPicks[si];
                 const opt = slot.options.find((o) => o.key === pick?.key) || slot.options[0];
                 const isChoice = slot.options.length > 1;
                 const mods = opt?.modifiers || [];
                 return (
-                  <div key={si} className={cn("rounded-lg border border-border/70", isKiosk ? "p-4" : "p-2.5")}>
-                    <div className={cn("flex items-center gap-2", isKiosk ? "mb-2.5" : "mb-1.5")}>
-                      <span className={cn("tape text-muted-foreground", isKiosk && "text-sm")}>{slot.label || opt?.label}</span>
+                  <div key={si} className={cn("rounded-lg border border-border/70", big ? "p-4" : "p-2.5")}>
+                    <div className={cn("flex items-center gap-2", big ? "mb-2.5" : "mb-1.5")}>
+                      <span className={cn("tape text-muted-foreground", big && "text-sm")}>{slot.label || opt?.label}</span>
                       {isChoice && <Badge variant="secondary">{_L("combo.choose_one")}</Badge>}
                     </div>
                     {isChoice && (
-                      <div className={cn("grid grid-cols-2", isKiosk ? "mb-3 gap-2" : "mb-2 gap-1.5")}>
+                      <div className={cn("grid grid-cols-2", big ? "mb-3 gap-2" : "mb-2 gap-1.5")}>
                         {slot.options.map((o) => (
                           <button key={o.key} onClick={() => pickComboOption(si, o)}
                             className={cn("flex items-center rounded-md border text-left transition-colors",
-                              isKiosk ? "gap-2.5 p-2.5" : "gap-1.5 p-1.5",
+                              big ? "gap-2.5 p-2.5" : "gap-1.5 p-1.5",
                               o.key === opt?.key ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border hover:border-primary/50 hover:bg-accent/50")}>
-                            <Thumb src={o.image} className={cn("shrink-0", isKiosk ? "h-10 w-10" : "h-7 w-7")} />
-                            <span className={cn("truncate font-medium", isKiosk ? "text-base" : "text-xs")}>{o.label}</span>
+                            <Thumb src={o.image} className={cn("shrink-0", big ? "h-10 w-10" : "h-7 w-7")} />
+                            <span className={cn("truncate font-medium", big ? "text-base" : "text-xs")}>{o.label}</span>
                           </button>
                         ))}
                       </div>
                     )}
                     {!isChoice && (
-                      <div className={cn("flex items-center gap-2", isKiosk ? "mb-3" : "mb-2")}>
-                        <Thumb src={opt?.image} className={cn("shrink-0", isKiosk ? "h-11 w-11" : "h-8 w-8")} />
-                        <span className={cn("truncate font-medium", isKiosk ? "text-lg" : "text-sm")}>{opt?.label}</span>
+                      <div className={cn("flex items-center gap-2", big ? "mb-3" : "mb-2")}>
+                        <Thumb src={opt?.image} className={cn("shrink-0", big ? "h-11 w-11" : "h-8 w-8")} />
+                        <span className={cn("truncate font-medium", big ? "text-lg" : "text-sm")}>{opt?.label}</span>
                       </div>
                     )}
                     {mods.length > 0 && (
                       <div className="grid grid-cols-3 gap-2">
                         {mods.map((m) => (
-                          <ModTile key={m.id} m={m} big={isKiosk} on={(pick?.sel || []).includes(m.id)} onClick={() => toggleComboMod(si, opt, m)} />
+                          <ModTile key={m.id} m={m} big={big} on={(pick?.sel || []).includes(m.id)} onClick={() => toggleComboMod(si, opt, m)} />
                         ))}
                       </div>
                     )}
@@ -534,10 +565,10 @@ export function OrderBuilder({
                 );
               })}
             </div>
-            <div className={cn("flex items-center justify-between border-t border-border", isKiosk ? "p-5" : "p-3")}>
-              <span className={cn("font-semibold", isKiosk ? "text-xl" : "text-sm")}>{money(comboFor.price + comboExtra)}</span>
-              <Button size={isKiosk ? "lg" : "sm"} className={cn(isKiosk && "h-14 gap-2.5 px-8 text-xl")} onClick={() => { addComboEntry(comboFor.comboId, comboPicks); setComboFor(null); }}>
-                <Plus className={isKiosk ? "h-6 w-6" : "h-4 w-4"} /> {_L("combo.add_combo", money(comboFor.price + comboExtra))}
+            <div className={cn("flex items-center justify-between border-t border-border", big ? "p-5" : "p-3")}>
+              <span className={cn("font-semibold", big ? "text-xl" : "text-sm")}>{money(comboFor.price + comboExtra)}</span>
+              <Button size={big ? "lg" : "sm"} className={cn(big && "h-14 gap-2.5 px-8 text-xl")} onClick={() => { addComboEntry(comboFor.comboId, comboPicks); setComboFor(null); }}>
+                <Plus className={big ? "h-6 w-6" : "h-4 w-4"} /> {_L("combo.add_combo", money(comboFor.price + comboExtra))}
               </Button>
             </div>
           </div>
@@ -551,7 +582,7 @@ export function OrderBuilder({
   // cards) and the cart collapses to a fixed footer (bag count + total + a single
   // Checkout button). Checkout opens a review sheet — the only place to edit qty
   // or remove, since the side receipt is gone — where the order is finally placed.
-  if (isKiosk) {
+  if (big) {
     return (
       <div className="relative flex h-full flex-col bg-background">
         <div className="flex shrink-0 flex-wrap gap-2 px-5 pb-3 pt-5">
@@ -638,6 +669,20 @@ export function OrderBuilder({
                 : blocks.map((b) => cartLine(b, true))}
             </div>
             <div className="shrink-0 space-y-3 border-t border-border bg-card px-6 py-4">
+              {/* who pays — register only; a kiosk customer always pays for their own.
+                  A click-based row (not a native <select>, which a virtual cursor on the
+                  in-world screen can't drive). */}
+              {mode === "register" && (
+                <div>
+                  <div className="tape mb-1.5 flex items-center gap-2 text-muted-foreground"><User className="h-4 w-4" /> {_L("register.customer")}</div>
+                  <div className="flex flex-wrap gap-2">
+                    <CustomerChip active={customer === 0} onClick={() => setCustomer(0)}>{_L("register.myself")}</CustomerChip>
+                    {(nearby || []).map((p) => (
+                      <CustomerChip key={p.id} active={customer === p.id} onClick={() => setCustomer(p.id)}>{p.name}</CustomerChip>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="flex items-center justify-between font-mono text-2xl font-bold">
                 <span className="uppercase tracking-widest">{_L("register.total")}</span>
                 <span className="tabular-nums">{money(total)}</span>
@@ -646,8 +691,8 @@ export function OrderBuilder({
                 <Button variant="outline" size="lg" className="h-16 flex-1 text-xl" onClick={() => setReviewing(false)}>{_L("order.add_more")}</Button>
                 <Button size="lg" className="h-16 flex-[2] gap-2.5 text-xl" disabled={blocks.length === 0 || busy} onClick={submit}>
                   {busy
-                    ? <><Loader2 className="h-6 w-6 animate-spin" /> {_L("order.placing")}</>
-                    : <><Receipt className="h-6 w-6" /> {_L("order.place", money(total))}</>}
+                    ? <><Loader2 className="h-6 w-6 animate-spin" /> {mode === "register" ? _L("register.waiting") : _L("order.placing")}</>
+                    : <><Receipt className="h-6 w-6" /> {mode === "register" ? _L("register.charge", money(total)) : _L("order.place", money(total))}</>}
                 </Button>
               </div>
             </div>
@@ -739,7 +784,7 @@ export function OrderBuilder({
             <span className="uppercase tracking-widest">{_L("register.total")}</span>
             <span className="tabular-nums">{money(total)}</span>
           </div>
-          {!isKiosk && (
+          {!big && (
             <label className="flex items-center gap-2 text-xs text-muted-foreground">
               <User className="h-3.5 w-3.5" />
               <select value={customer} onChange={(e) => setCustomer(Number(e.target.value))}
@@ -751,8 +796,8 @@ export function OrderBuilder({
           )}
           <Button className="w-full" disabled={blocks.length === 0 || busy} onClick={submit}>
             {busy
-              ? <><Loader2 className="h-4 w-4 animate-spin" /> {isKiosk ? _L("order.placing") : _L("register.waiting")}</>
-              : <><Receipt className="h-4 w-4" /> {isKiosk ? _L("order.place", money(total)) : _L("register.charge", money(total))}</>}
+              ? <><Loader2 className="h-4 w-4 animate-spin" /> {big ? _L("order.placing") : _L("register.waiting")}</>
+              : <><Receipt className="h-4 w-4" /> {big ? _L("order.place", money(total)) : _L("register.charge", money(total))}</>}
           </Button>
         </div>
         <div className="tear-b shrink-0" />

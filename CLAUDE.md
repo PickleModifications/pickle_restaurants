@@ -136,6 +136,23 @@ Each module is a self-contained feature loaded by the `modules/**` glob. Key one
 - `management` / `admin` — the boss/owner and admin panels (employees, roles, finances,
   settings, recipes).
 - `sales` / `npc_customers` — selling to players and NPC customers.
+**Render-target registry (ONE source of truth).** Every DUI-painted texture — food
+packaging brands, the kiosk brand/order screen, the menu/orders boards, and the register
+POS — is ONE entry in `Config.RenderTargets` (`core/shared.lua`): `{ key, group, txd,
+txn, w, h, rot, flipx, flipy, … }`. **`w`/`h` are the UPRIGHT display aspect** — the
+size/shape as you see it on the prop and crop it in the panel, so the config value always
+matches the UI. The DUI/texture SURFACE aspect is DERIVED (`RenderTargetSurface(t)` —
+w/h swapped for a 90/270 `rot`); the page rotates the content back upright. The modules
+that paint them are filtered VIEWS of the registry
+(`RenderTargetsByGroup("packaging","kiosk")` in `rendertarget`,
+`RenderTargetsByGroup("screen")` in `screens`, `RenderTargetByKey("register")`/`("kiosk")`
+in `register`/`kiosk`), and they size their DUIs with `RenderTargetSurface`. The NUI crop
+UI reads the SAME numbers: `BrandRenderTargets()` (the config w/h directly; `configKey`
+borrowers skipped) is synced into the admin + management payloads as `renderTargets` and
+consumed by `Branding.tsx` — NO more hardcoded `BRAND_TEXTURES`. The `/pickle_*_res|orient`
+debug commands mutate these entries live (orient rebuilds the DUI, since a 90/270 turn
+changes the surface); bake the tuned numbers back into `Config.RenderTargets`.
+
 - `rendertarget` — runtime **brand-texture replacement** via a DUI (`html/brand.html`);
   `AddReplaceTexture` is global per txd+txn, so only the nearest branded restaurant is
   active at once. A target may list `altTxds` (extra models embedding the same texture
@@ -162,6 +179,56 @@ Each module is a self-contained feature loaded by the `modules/**` glob. Key one
   clicks would miss it). The order still becomes a normal ticket (`sales:kioskOrder`).
   Camera framing / cursor speed / DUI aspect are `KIOSK` tunables (TUNE IN-GAME:
   `/pickle_kiosk_cam`, `/pickle_kiosk_res`).
+- `register` — the STAFF POS register painted on the counter's `register_brand`
+  screen. It is an **ALWAYS-ON board** (like the `screens` menu/orders boards): an idle
+  driver picks the nearest counter's restaurant, keeps the `register_brand` texture
+  bound, and paints the register UI (catalog + live ticket queue) persistently — seeded
+  from a PUBLIC callback (`register:getPublic`, the same display-safe data the menu/
+  orders boards show, `idle = true` so the page hides balance/close). On INTERACT
+  (physical counter) `OpenRegisterScreen(prop, ent)` overlays the interactive layer —
+  frames a scripted camera, hides the ped, swaps in the perm-gated `getRegister` payload
+  (nearby customers + balance), and drives the same virtual-cursor loop as the kiosk;
+  stepping away hands the screen back to the idle board (never blanks). The built React
+  app runs in `#register` mode (`web/src/views/RegisterDui.tsx`, SQUARE aspect). It
+  REPLACES the old customer-facing till display (the removed `screens` `register`
+  board). Orders ring up through the unchanged `sales:createOrder`/`completeOrder`/
+  `cancelOrder`; the live open-ticket list is forwarded into the DUI (`SendDuiMessage`,
+  action `registerOrders`) off the `sales:orders` broadcast, for both the idle board and
+  an open session. `ReassertRegister()` (from main's counter spawn) + `RefreshRegister()`
+  (from `ApplySync`) keep it bound/current. Camera/cursor tunables (TUNE IN-GAME:
+  `/pickle_register_cam`, `/pickle_register_sens`); `/pickle_register_res|orient` tune
+  the shared registry copy (see the render-target registry note below).
+  A VIRTUAL register (`prop_type = "virtual_register"`) is an invisible anchor with no
+  screen to paint — placed like a seat (`StartVirtualRegisterPlacement` → ghost-ball
+  gizmo → `saveVirtualRegister`), it keeps the ordinary fullscreen NUI register
+  (`OpenRegister`, `web/src/views/Register.tsx`). Both kinds share the `OrderBuilder`
+  (its `big` prop selects the in-world layout) and the `Tickets` panel
+  (`web/src/components/RegisterTickets.tsx`). Management stays a fullscreen NUI on both.
+- `screens` — the customer-facing DUI boards (`html/screens.html`), same replacement
+  trick as `rendertarget` but the page is DYNAMIC and fed live data each tick. One
+  `SCREENS` entry per board (`txd`/`txn`/`w`/`h`/`rot`/`flip*`, TUNE IN-GAME:
+  `/pickle_screen_res`, `/pickle_screen_orient`, `/pickle_screen_debug`,
+  `/pickle_screen_state`):
+  **menu** (`pickle_screen_menu_01`/`s_m_brand`, the priced menu as a paged slideshow)
+  and **orders** (`pickle_screen_orders_01`/`s_o_brand`, open tickets newest-first, live
+  off the `sales:orders` broadcast). Each is driven from the NEAREST restaurant with that
+  screen's prop placed (`AddReplaceTexture` is global per txd+txn). Both boards seed once
+  via a one-shot callback and then stay live off a broadcast — a seed reply that a
+  broadcast overtook is dropped (`dataEpoch`), since "no data" and "not asked yet" are
+  indistinguishable and a stale write would never be corrected.
+  (The counter's `register_brand` screen used to be a THIRD board here — the till's
+  customer cart display — but it's now the cashier's interactive POS DUI, `modules/register`.)
+  The counter still spawns a real model: `prop_type = "counter"` rows are no longer
+  invisible anchors — `modules/main` spawns `COUNTER_MODEL` (`pickle_register_01`,
+  exported as `CounterModel()` so the placement gizmo previews the real thing) at the
+  point, and the counter's `model` column stays empty (it predates having one).
+
+  A replaced texture is **albedo, never emissive** — it's drawn through the model's lit
+  shader, so a screen is only ever as bright as the room it's in. Do NOT try to
+  compensate by over-exposing the DUI page (a `filter: brightness()` gain, a white lift
+  sheet): that was tried and removed — it washes the design out and still can't make a
+  lit surface glow. A screen that reads as dim wants an **emissive shader on the model's
+  screen material**, which is an asset-side fix.
 - `itemgen` — `/restaurants_items` admin command exports ready-to-install item
   definitions (ox_inventory / ESX SQL / QBCore) into `generated_items/` from the **live**
   in-game config.
@@ -187,6 +254,29 @@ Server-side authority only. `ResolvePerms(restaurantId, source)` returns
 the employee's role (`r.roles` or the `default_roles` setting, keyed by grade) supplies the
 permission set. Gate every mutating callback with `HasPerm(...)` / `IsPlayerAdmin(...)` —
 the NUI is untrusted.
+
+### The register: DUI (physical) vs NUI (virtual)
+
+A PHYSICAL counter's register is an interactive in-world DUI painted on the counter's
+`register_brand` screen (`modules/register`, cloned from `modules/kiosk`); a VIRTUAL
+register (`prop_type = "virtual_register"`) has no screen to paint, so it keeps the
+ordinary fullscreen NUI (`OpenRegister` → `web/src/views/Register.tsx`). Both use the
+same `OrderBuilder` (the `big` prop selects the large in-world layout, with a click
+customer-picker in place of the NUI's native `<select>`, since the virtual cursor can't
+drive a native dropdown) and the same `Tickets` fulfilment panel (extracted to
+`web/src/components/RegisterTickets.tsx`). Management stays a fullscreen NUI on both.
+
+The live open-ticket list reaches the DUI the same way the NUI got it — off the
+`sales:orders` broadcast — but forwarded as a `SendDuiMessage` (`registerOrders`), since
+a DUI never receives `SendNUIMessage`. Order actions (`sales:createOrder` /
+`completeOrder` / `cancelOrder`) `fetchNui` straight through unchanged (a DUI POSTs to
+the resource just like the NUI); the focus re-assert in `modules/sales`'s relay is a
+no-op for a DUI (`NUIView` is `none`), so it can't fight the in-world cursor.
+
+NOTE: the old customer-facing "live cart preview" — the POS streaming its in-progress
+cart to a separate customer till screen (`sales:cartPreview` → `sales:cart` broadcast →
+the removed `screens` `register` board) — was REMOVED with this change. The register
+screen IS the cashier's POS now, so there is no separate customer display to mirror to.
 
 ## Money & the cooked-items tray (subtle bits)
 

@@ -29,6 +29,7 @@ const MGMT_STATIONS = [
 // Human name for a placed prop (so a chip reads "Fryer #12", not "#12").
 function mgmtPropLabel(p: any): string {
   if (p.prop_type === "counter") return _L("admin.counter");
+  if (p.prop_type === "virtual_register") return _L("admin.virtual_register");
   if (p.prop_type === "seat") return _L("admin.seat_one");
   const key = p.prop_type === "virtual_point" ? p.target : p.prop_type;
   return MGMT_STATIONS.find((s) => s.key === key)?.label || key || _L("admin.prop_one");
@@ -129,7 +130,7 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         {perms.manage_props && (
           <TabsContent value="branding" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 pb-4">
             <ThemeEditor id={id} theme={data?.restaurant?.theme} event="management:setTheme" />
-            <Branding id={id} brand={data?.restaurant?.brand_image || ""} brandImages={data?.restaurant?.brand_images || {}} event="management:setBrandImage" />
+            <Branding id={id} brand={data?.restaurant?.brand_image || ""} brandImages={data?.restaurant?.brand_images || {}} event="management:setBrandImage" renderTargets={data?.renderTargets} />
           </TabsContent>
         )}
       </Tabs>
@@ -395,6 +396,7 @@ function Stations({ id, props, hasShell, hasNpcSpawn, focusSection }: any) {
   const STATIONS = MGMT_STATIONS;
   const seats = (props as any[]).filter((p) => p.prop_type === "seat");
   const counters = (props as any[]).filter((p) => p.prop_type === "counter");
+  const virtualRegisters = (props as any[]).filter((p) => p.prop_type === "virtual_register");
   const [modes, setModes] = useState<Record<string, "physical" | "virtual">>({});
   const setMode = (k: string, m: "physical" | "virtual") => setModes((prev) => ({ ...prev, [k]: m }));
   const stationsRef = useRef<HTMLDivElement>(null);
@@ -485,21 +487,30 @@ function Stations({ id, props, hasShell, hasNpcSpawn, focusSection }: any) {
         </CardContent>
       </Card>
 
-      {/* counters — invisible register anchors, placed like stations (multiple).
-          Each opens the register / management panel; the first also anchors the
-          map blip, kitchen shell, and NPC queue. */}
+      {/* registers — a PHYSICAL counter spawns the register model and its screen is
+          the in-world POS DUI; a VIRTUAL register is an invisible anchor that opens
+          the fullscreen NUI register (no screen to paint). The first physical counter
+          also anchors the map blip, kitchen shell, and NPC queue. */}
       <Card ref={countersRef}>
         <CardContent className="pt-4">
-          <div className="mb-2 flex items-center justify-between">
+          <div className="mb-2 flex items-center justify-between gap-2">
             <h3 className="flex items-center gap-2 text-sm font-semibold"><Receipt className="h-4 w-4" /> {_L("admin.counters")}</h3>
-            <Button variant="outline" size="sm" onClick={() => fetchNui("management:setCounter", { id })}>
-              <Plus className="h-3.5 w-3.5" /> {_L("admin.place")}
-            </Button>
+            <div className="flex items-center gap-1.5">
+              <Button variant="outline" size="sm" onClick={() => fetchNui("management:setCounter", { id })}>
+                <Plus className="h-3.5 w-3.5" /> {_L("admin.place_physical")}
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => fetchNui("management:setVirtualRegister", { id })}>
+                <Sparkles className="h-3.5 w-3.5" /> {_L("admin.place_virtual")}
+              </Button>
+            </div>
           </div>
-          {counters.length > 0 ? (
+          {counters.length + virtualRegisters.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
               {counters.map((p: any) => (
                 <MgmtPropChip key={p.id} id={id} p={p} section="counters" />
+              ))}
+              {virtualRegisters.map((p: any) => (
+                <MgmtPropChip key={p.id} id={id} p={p} section="counters" virtual />
               ))}
             </div>
           ) : (

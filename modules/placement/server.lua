@@ -147,6 +147,32 @@ lib.callback.register("pickle_restaurants:placement:saveCounter", function(src, 
     return { ok = true, id = propId }
 end)
 
+-- A virtual register is an INVISIBLE register anchor (prop_type "virtual_register"),
+-- stored like a seat: no world model, just a point + heading. Using it opens the
+-- ordinary fullscreen NUI register (modules/main) — it has no screen to paint a DUI on,
+-- unlike a physical counter. It is NOT a primary anchor (blip/shell/NPC queue stays on
+-- the physical counters), so it never touches RecomputeCounterAnchor. Placing is additive.
+lib.callback.register("pickle_restaurants:placement:saveVirtualRegister", function(src, d)
+    local id = tonumber(d.restaurant_id)
+    if not GetRestaurant(id) then return { ok = false, error = _L("placement_no_restaurant") } end
+    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    local x, y, z = tonumber(d.x), tonumber(d.y), tonumber(d.z)
+    if not (x and y and z) then return { ok = false } end
+
+    local propId = MySQL.insert.await(
+        "INSERT INTO pickle_restaurant_props (restaurant_id, prop_type, model, x, y, z, heading) VALUES (?, 'virtual_register', '', ?, ?, ?, ?)",
+        { id, x + 0.0, y + 0.0, z + 0.0, (tonumber(d.heading) or 0.0) + 0.0 })
+    if not propId then return { ok = false } end
+
+    local prop = {
+        id = propId, restaurant_id = id, prop_type = "virtual_register", model = "",
+        x = x + 0.0, y = y + 0.0, z = z + 0.0, heading = (tonumber(d.heading) or 0.0) + 0.0, metadata = {},
+    }
+    PropCache[propId] = prop
+    TriggerClientEvent("pickle_restaurants:propPlaced", -1, prop)
+    return { ok = true, id = propId }
+end)
+
 -- Reposition an already-placed prop (station / counter / seat / virtual point /
 -- kiosk / screen): the admin re-runs the gizmo seeded at the prop's current
 -- transform and saves the new one. A full re-sync respawns it at the new spot; a

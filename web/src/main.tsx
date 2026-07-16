@@ -2,15 +2,17 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import KioskDui from "./views/KioskDui";
+import RegisterDui from "./views/RegisterDui";
 import "./index.css";
 
-// The SAME built bundle is loaded two ways: as the normal ui_page NUI (<App/>), and
-// as a DUI on the kiosk's in-world screen via `.../nui/index.html#kiosk` — that hash
-// selects the self-service kiosk order page instead (modules/kiosk).
-const isKiosk = window.location.hash.replace(/^#/, "").split("?")[0] === "kiosk";
+// The SAME built bundle is loaded three ways: as the normal ui_page NUI (<App/>), and
+// as a DUI on an in-world screen selected by the URL hash —
+//   #kiosk    → the self-service customer kiosk order page (modules/kiosk)
+//   #register → the staff POS register painted on the counter's screen (modules/register)
+const hash = window.location.hash.replace(/^#/, "").split("?")[0];
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    {isKiosk ? <KioskDui /> : <App />}
+    {hash === "kiosk" ? <KioskDui /> : hash === "register" ? <RegisterDui /> : <App />}
   </React.StrictMode>
 );

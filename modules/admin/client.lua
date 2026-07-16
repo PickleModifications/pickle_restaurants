@@ -126,6 +126,14 @@ RegisterNUICallback("admin:setCounter", function(d, cb)
     ReopenAdmin(d.id, "counters")
 end)
 
+-- A virtual register anchor (invisible; opens the fullscreen NUI register, no DUI).
+RegisterNUICallback("admin:setVirtualRegister", function(d, cb)
+    CloseNUI()
+    cb({})
+    StartVirtualRegisterPlacement(d.id)
+    ReopenAdmin(d.id, "counters")
+end)
+
 -- Reposition an existing placed prop (station / counter / seat / virtual point):
 -- hand off to the gizmo seeded at its current spot, then reopen to its section.
 RegisterNUICallback("admin:editProp", function(d, cb)

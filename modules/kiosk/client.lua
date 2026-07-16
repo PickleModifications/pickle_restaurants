@@ -2,14 +2,13 @@
 --  modules/kiosk | client.lua
 --  The self-service kiosk as an INTERACTIVE in-world DUI screen, not a fullscreen
 --  NUI. Idle, the kiosk shows the restaurant's BRAND (modules/rendertarget paints
---  `kiosk_large_brand`). On interact we:
---    1. SUSPEND the brand render target for the kiosk (SuspendBrandTarget), so it
---       stops driving `kiosk_large_brand`, and
---    2. take over that same texture with OUR order-page DUI (the built React app in
---       "#kiosk" mode — views/KioskDui.tsx), pointed at the model the player is at.
+--  `kiosk_large_brand`, or solid black when no brand is configured). On interact we
+--  take that same texture over with OUR order-page DUI (the built React app in
+--  "#kiosk" mode — views/KioskDui.tsx), pointed at the model the player is at, winning
+--  by last-write-wins over the brand driver's replacement.
 --  A scripted camera frames the screen head-on and the player drives a VIRTUAL
 --  CURSOR (mouse-look deltas → SendDuiMouse*) over the page. Placing an order or
---  stepping away restores the brand (ResumeBrandTarget).
+--  stepping away hands the screen back to the brand driver (ReassertBrandFor).
 --
 --  There is NO fullscreen focus grab: the game stays in control, we just disable
 --  input for the duration and forward the cursor to the DUI. The order still becomes
@@ -20,10 +19,16 @@
 --  best-guess default — TUNE IN-GAME with /pickle_kiosk_cam and /pickle_kiosk_res.
 -- =============================================
 
--- The DUI runs the built React app at this resolution = the kiosk screen's pixel
--- aspect (matches the brand target's kiosk res, portrait). TUNE IN-GAME.
+-- The DUI runs the built React app at the kiosk screen's SURFACE aspect. That comes from
+-- the `kiosk` render target in the ONE registry (core/shared.lua) — its upright config
+-- w/h swapped for a 90/270 turn (RenderTargetSurface) — so the order DUI and the brand
+-- screen can never disagree. /pickle_kiosk_res tunes this copy live; bake the number back
+-- into Config.RenderTargets' `kiosk` entry.
+local KIOSK_RT = RenderTargetByKey("kiosk")
+local KIOSK_SW, KIOSK_SH = 1080, 1920
+if KIOSK_RT then KIOSK_SW, KIOSK_SH = RenderTargetSurface(KIOSK_RT) end
 local KIOSK = {
-    w = 1080, h = 1920,
+    w = KIOSK_SW, h = KIOSK_SH,
     -- Virtual-cursor speed relative to raw mouse-look delta (higher = faster).
     -- TUNE IN-GAME with /pickle_kiosk_sens <n>.
     sensitivity = 0.5,
@@ -209,7 +214,7 @@ end
 
 function CloseKioskScreen()
     if not active then return end
-    local brandKey = active.brandKey or "kiosk"
+    local model = active.model
     active = nil
     if dui then SendDuiMouseUp(dui, "l") end -- release a held button, just in case
     local ped = PlayerPedId()
@@ -217,7 +222,10 @@ function CloseKioskScreen()
     SetEntityVisible(ped, true, false)
     teardownCam()
     removeOrderScreen()
-    if ResumeBrandTarget then ResumeBrandTarget(brandKey) end
+    -- Hand the screen back to the brand driver (idle brand / black default) by
+    -- re-binding its render target now the order screen is gone — otherwise the model
+    -- would revert to its baked-in placeholder texture until the next driver tick.
+    if ReassertBrandFor then ReassertBrandFor(model) end
     if dui then SendDuiMessage(dui, json.encode({ action = "kioskReset" })) end
 end
 
@@ -231,21 +239,10 @@ function OpenKioskScreen(prop, ent)
     end
     local geo = KIOSK.geo[prop.prop_type] or KIOSK.geo["kiosk"]
 
-    -- Which brand target owns THIS kiosk model. The wall (`kiosk`) and floor
-    -- (`kiosk_ground`) paint the shared texture at different rotations, so we must
-    -- borrow the orientation of — and suspend — the one for the model we're at.
-    local brandKey = (GetBrandKeyForModel and GetBrandKeyForModel(prop.model)) or "kiosk"
-
-    -- match that brand target's orientation so the order page lands upright, exactly
-    -- like the brand image does (rot/flip of kiosk_large_brand on this model).
-    if GetBrandTargetOrient then
-        local o = GetBrandTargetOrient(brandKey)
-        if o then orient = { rot = o.rot or 0, flipx = o.flipx or false, flipy = o.flipy or false } end
-    end
-
     ensureDui()
-    -- take the kiosk texture over from the brand driver, on THIS model only
-    if SuspendBrandTarget then SuspendBrandTarget(brandKey) end
+    -- Take the kiosk screen texture over on THIS model only. The brand driver's target
+    -- for this model stays applied; our order screen wins by last-write-wins, and
+    -- CloseKioskScreen hands it back (ReassertBrandFor) when we step away.
     applyOrderScreen(prop.model)
 
     setupCam(prop, ent, geo)
@@ -256,7 +253,7 @@ function OpenKioskScreen(prop, ent)
     local ped = PlayerPedId()
     FreezeEntityPosition(ped, true)
     SetEntityVisible(ped, false, false)
-    active = { model = prop.model, ent = ent, rid = rid, brandKey = brandKey }
+    active = { model = prop.model, ent = ent, rid = rid }
 
     pendingPayload = data
     pushKioskData(data)         -- resends until the page acknowledges

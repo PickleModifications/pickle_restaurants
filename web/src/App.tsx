@@ -41,6 +41,12 @@ export default function App() {
     setPeek(false);
   });
 
+  // Re-skin the NUI to a panel's theme without switching views. Object placement
+  // runs with the panel closed but keeps drawing the InteractText control hints;
+  // it re-asserts the launching panel's theme (admin app theme / boss restaurant
+  // theme) so those hints aren't stranded on the default kit. `null` → default.
+  useNuiEvent("applyTheme", (d) => applyTheme(d?.theme ?? null));
+
   const doClose = useCallback(() => {
     setView("none");
     fetchNui("close");

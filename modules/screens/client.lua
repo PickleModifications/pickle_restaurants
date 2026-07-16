@@ -1,6 +1,6 @@
 -- =============================================
 --  modules/screens | client.lua
---  Two customer-facing INFO SCREENS, rendered onto placed props by the same
+--  The customer-facing SCREENS, rendered onto placed props by the same
 --  render-target trick modules/rendertarget uses for packaging brands — a DUI paints
 --  an HTML page (html/screens.html) into a runtime texture, and AddReplaceTexture
 --  swaps it in for the prop's branded screen texture. Unlike a brand image the page
@@ -14,27 +14,29 @@
 --             open tickets in progress, NEWEST FIRST, with a PREPARING/READY chip.
 --             Kept live off the sales orders broadcast (seeded once on arrival).
 --
+--  (The counter's `register_brand` screen is no longer driven here — the register is
+--  now the cashier's interactive POS DUI, modules/register, which owns that texture.)
+--
 --  AddReplaceTexture is GLOBAL per (txd + txn) — so, exactly like the packaging brand,
 --  only ONE restaurant's board shows on a given screen model at a time. We drive each
 --  screen from the NEAREST restaurant that actually has that screen prop placed, so a
---  player reading a restaurant's board sees that restaurant's data. The two screens use
---  different models AND different textures, so they never collide with each other or
+--  player reading a restaurant's board sees that restaurant's data. Every screen uses a
+--  different model AND a different texture, so they never collide with each other or
 --  with the packaging brands.
 --
 --  Aspect + orientation are TUNED IN-GAME like the brand textures: /pickle_screen_res
---  and /pickle_screen_orient (plus /pickle_screen_debug to spawn both screens on a wall
+--  and /pickle_screen_orient (plus /pickle_screen_debug to spawn every screen on a wall
 --  with live data), then bake the numbers into SCREENS below.
 -- =============================================
 
--- One entry per screen. `txd` is the model's embedded texture dictionary (== the model
--- name for these props) and `txn` the branded screen texture inside it. `w`/`h` is the
--- DUI resolution = the screen's pixel aspect (TUNE IN-GAME — best-guess defaults: a
--- landscape menu board, a portrait orders board). rot/flipx/flipy correct a rotated or
--- mirrored UV, same as the brand targets.
-local SCREENS = {
-    { key = "menu",   kind = "menu",   prop_type = "menu_screen",   txd = "pickle_screen_menu_01",   txn = "s_m_brand", w = 1080, h = 1920, rot = 90, flipx = false, flipy = false, gap = 3.5 },
-    { key = "orders", kind = "orders", prop_type = "orders_screen", txd = "pickle_screen_orders_01", txn = "s_o_brand", w = 1080, h = 1920, rot = 90, flipx = false, flipy = false, gap = 3.5 },
-}
+-- The menu + orders boards are the "screen" render targets — a filtered VIEW of the
+-- ONE registry in core/shared.lua (`Config.RenderTargets`), so their resolution +
+-- orientation live in exactly one place. Each entry carries key/kind/prop_type/txd/txn/
+-- w/h/rot/gap; the /pickle_screen_res|orient commands mutate w/h/rot on them live (bake
+-- the tuned numbers back into Config.RenderTargets).
+-- NOTE: the counter's `register_brand` screen is NO LONGER a screen here — the register
+-- is now the cashier's interactive POS DUI (modules/register), which owns that texture.
+local SCREENS = RenderTargetsByGroup("screen")
 local SCREEN_BY_KEY, SCREEN_BY_MODEL = {}, {}
 for _, t in ipairs(SCREENS) do SCREEN_BY_KEY[t.key] = t; SCREEN_BY_MODEL[t.txd] = t end
 
@@ -49,6 +51,14 @@ local debugForce = nil  -- { rid = <id> } | nil
 local ScreenOrders = {}   -- [rid] = projected orders list (newest first)
 local seededOrders = {}   -- [rid] = true once the one-shot seed has been requested
 
+-- Bumped every time a BROADCAST updates a restaurant's data. A one-shot seed reply that
+-- comes back to find the epoch moved on is STALE and must be dropped: the broadcast that
+-- overtook it is the newer truth, and "nothing there" is a value the seed can't tell
+-- apart from "not asked yet" (an emptied cart / a cleared list would otherwise be
+-- overwritten by the reply and stay wrong until the next change — possibly forever).
+local dataEpoch = {}      -- [rid] = integer
+local function bumpEpoch(rid) dataEpoch[rid] = (dataEpoch[rid] or 0) + 1 end
+
 -- ─── per-screen DUI + runtime texture (mirrors modules/rendertarget) ──────────
 
 local function rtNames(t) return
@@ -62,7 +72,9 @@ end
 local function pushToDui(t)
     if not (t.dui and t.ready and t.cur) then return false end
     local d = t.cur
-    d.w, d.h = t.w, t.h
+    -- screens.html sizes its surface to the w/h it receives and rotates the content, so
+    -- it must get the SURFACE aspect (upright config w/h swapped for a 90/270 turn).
+    d.w, d.h = RenderTargetSurface(t)
     d.rot, d.flipx, d.flipy = t.rot or 0, t.flipx or false, t.flipy or false
     d.key, d.res = t.key, GetCurrentResourceName()
     SendDuiMessage(t.dui, json.encode(d))
@@ -74,7 +86,9 @@ local function ensureDui(t)
     t.gen = (t.gen or 0) + 1
     t.ready = false
     local url = ("https://cfx-nui-%s/html/screens.html"):format(GetCurrentResourceName())
-    t.dui = CreateDui(url, t.w, t.h)
+    -- Surface = the texture's pixel aspect (upright config w/h swapped for a 90/270 turn).
+    local sw, sh = RenderTargetSurface(t)
+    t.dui = CreateDui(url, sw, sh)
     local txdName, texName = rtNames(t)
     local txd = CreateRuntimeTxd(txdName)
     CreateRuntimeTextureFromDuiHandle(txd, texName, GetDuiHandle(t.dui))
@@ -190,8 +204,10 @@ end
 local function seedOrders(rid)
     if not rid or seededOrders[rid] then return end
     seededOrders[rid] = true
+    local epoch = dataEpoch[rid]
     CreateThread(function()
         local res = lib.callback.await("pickle_restaurants:screens:getOrders", false, { id = rid })
+        if dataEpoch[rid] ~= epoch then return end -- a broadcast overtook us; it's newer
         ScreenOrders[rid] = projectOrders(res and res.orders)
     end)
 end
@@ -199,9 +215,18 @@ end
 -- Show restaurant `r`'s data on screen `t` (nil = nothing in range → restore texture).
 local function driveScreen(t, r)
     if not r then
+        -- Nothing is driving this screen: paint a solid BLACK board rather than
+        -- reverting to the model's baked-in placeholder texture. Keep the replacement
+        -- applied so the black frame stays bound.
+        local firstApply = not t.applied
         t.rid = nil
-        removeReplacement(t)
-        t.cur, t.sig = nil, nil
+        ensureDui(t)
+        applyReplacement(t)
+        if t.sig ~= "black" then
+            t.cur = { action = "black" }
+            if pushToDui(t) then t.sig = "black" end
+        end
+        if firstApply then rebindAfterPaint(t) end
         return
     end
     if t.kind == "orders" then seedOrders(r.id) end
@@ -240,9 +265,10 @@ CreateThread(function()
     Wait(700)
     for _, t in ipairs(SCREENS) do
         ensureDui(t)
-        t.cur = { action = t.kind, title = "", accent = "#ff7a00",
-                  items = {}, orders = {} }
-        t.sig = "warm"
+        -- Warm to a solid BLACK board — the unbranded default — so the first texture
+        -- bind catches black, never the DUI's raw white surface.
+        t.cur = { action = "black" }
+        t.sig = "black"
         pushToDui(t)
     end
 end)
@@ -254,6 +280,7 @@ RegisterNetEvent("pickle_restaurants:sales:orders", function(rid, orders)
     if not rid then return end
     ScreenOrders[rid] = projectOrders(orders)
     seededOrders[rid] = true -- a broadcast supersedes any need to seed
+    bumpEpoch(rid)
 end)
 
 -- screens.html POSTs here the instant it has painted a real frame, so we bind the
@@ -385,7 +412,10 @@ RegisterCommand("pickle_screen_state", function()
             for _, p in ipairs(rr.props or {}) do if p.prop_type == t.prop_type then propHere = true end end
         end
         local n = 0
-        if r then n = (t.kind == "menu") and #(r.menu or {}) or #(ScreenOrders[r.id] or {}) end
+        if r then
+            if t.kind == "menu" then n = #(r.menu or {})
+            else n = #(ScreenOrders[r.id] or {}) end
+        end
         print(("  %-7s model=%s txn=%s prop_placed=%s dui=%s ready=%s applied=%s rid=%s data=%d")
             :format(t.key, t.txd, t.txn, tostring(propHere), tostring(t.dui ~= nil),
                     tostring(t.ready == true), tostring(t.applied == true), tostring(r and r.id or "-"), n))
@@ -422,8 +452,9 @@ RegisterCommand("pickle_screen_orient", function(_, args)
     t.rot   = (math.floor(rot / 90 + 0.5) * 90) % 360
     t.flipx = (args[3] == "1" or args[3] == "true")
     t.flipy = (args[4] == "1" or args[4] == "true")
-    t.sig = nil -- force a re-push with the new orientation
-    pushToDui(t)
+    -- A 90/270 turn changes the SURFACE aspect (upright w/h swap), so rebuild the DUI at
+    -- the new surface rather than just repainting.
+    recreateDui(t)
     print(("[screens] %s orient rot=%d flipx=%s flipy=%s"):format(t.key, t.rot, tostring(t.flipx), tostring(t.flipy)))
 end, false)
 

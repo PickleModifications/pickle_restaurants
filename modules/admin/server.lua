@@ -21,6 +21,9 @@ local function buildAdminData()
         items       = BuildItemList(),     -- catalogue for item-pickers
         groups      = CollectGroups(),     -- every group name in use (UI suggestions)
         players     = {},
+        -- Brand-texture aspects for the crop UI, from the ONE render-target registry
+        -- (core/shared.lua) so the panel never hardcodes a resolution that drifts.
+        renderTargets = BrandRenderTargets(),
     }
     for _, r in pairs(RestaurantCache) do
         local props = {}

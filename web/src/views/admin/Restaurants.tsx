@@ -32,6 +32,7 @@ const STATIONS = [
 // directly. Falls back to the raw type for anything unmapped.
 function propLabel(p: any): string {
   if (p.prop_type === "counter") return _L("admin.counter");
+  if (p.prop_type === "virtual_register") return _L("admin.virtual_register");
   if (p.prop_type === "seat") return _L("admin.seat_one");
   const key = p.prop_type === "virtual_point" ? p.target : p.prop_type;
   return STATIONS.find((s) => s.key === key)?.label || key || _L("admin.prop_one");
@@ -64,9 +65,9 @@ function PropChip({ p, act, restaurantId, section, virtual }:
 }
 
 type Focus = { restaurant?: number; section?: string };
-type Props = { restaurants: any[]; players: any[]; groups: string[]; refresh: () => void; focus?: Focus; appTheme?: ThemeConfig | null; onDetailChange?: (open: boolean) => void };
+type Props = { restaurants: any[]; players: any[]; groups: string[]; refresh: () => void; focus?: Focus; appTheme?: ThemeConfig | null; onDetailChange?: (open: boolean) => void; renderTargets?: { key: string; w: number; h: number }[] };
 
-export default function Restaurants({ restaurants, players, groups, refresh, focus, appTheme, onDetailChange }: Props) {
+export default function Restaurants({ restaurants, players, groups, refresh, focus, appTheme, onDetailChange, renderTargets }: Props) {
   // After a placement reopen, `focus.restaurant` drops us straight back into that
   // restaurant (and `focus.section` scrolls to its stations/seating).
   const [selectedId, setSelectedId] = useState<number | null>(focus?.restaurant ?? null);
@@ -101,6 +102,7 @@ export default function Restaurants({ restaurants, players, groups, refresh, foc
         focusSection={selected.id === focus?.restaurant ? focus?.section : undefined}
         appTheme={appTheme}
         onThemeChange={(t) => setThemeEdits((m) => ({ ...m, [selected.id]: t }))}
+        renderTargets={renderTargets}
       />
     );
   }
@@ -160,7 +162,7 @@ function List({ restaurants, act, onOpen }: { restaurants: any[]; act: (e: strin
   );
 }
 
-function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThemeChange }: { r: any; players: any[]; groups: string[]; act: (e: string, p: any) => void; onBack: () => void; focusSection?: string; appTheme?: ThemeConfig | null; onThemeChange?: (t: ThemeConfig) => void }) {
+function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThemeChange, renderTargets }: { r: any; players: any[]; groups: string[]; act: (e: string, p: any) => void; onBack: () => void; focusSection?: string; appTheme?: ThemeConfig | null; onThemeChange?: (t: ThemeConfig) => void; renderTargets?: { key: string; w: number; h: number }[] }) {
   const props: any[] = r.props || [];
   const byType = (t: string) => props.filter((p) => p.prop_type === t);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -264,23 +266,33 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
           </div>
         </div>
 
-        {/* counters — invisible register anchors, placed like stations (multiple).
-            Each one opens the register / management panel; the first also anchors
-            the map blip, kitchen shell, and NPC queue. */}
+        {/* registers — a PHYSICAL counter spawns the register model and its screen
+            becomes the in-world POS DUI; a VIRTUAL register is an invisible anchor
+            that opens the fullscreen NUI register instead (no screen to paint). Both
+            are placed additively; the first physical counter also anchors the map
+            blip, kitchen shell, and NPC queue. */}
         <div ref={countersRef} className="rounded-lg border border-border p-3">
-          <div className="mb-1.5 flex items-center justify-between">
+          <div className="mb-1.5 flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <Receipt className="h-4 w-4 text-primary" /> {_L("admin.counters")}
-              <Badge variant="secondary">{byType("counter").length}</Badge>
+              <Badge variant="secondary">{byType("counter").length + byType("virtual_register").length}</Badge>
             </div>
-            <Button size="sm" variant="outline" onClick={() => fetchNui("admin:setCounter", { id: r.id })}>
-              <Plus className="h-3.5 w-3.5" /> {_L("admin.place")}
-            </Button>
+            <div className="flex items-center gap-1.5">
+              <Button size="sm" variant="outline" onClick={() => fetchNui("admin:setCounter", { id: r.id })}>
+                <Plus className="h-3.5 w-3.5" /> {_L("admin.place_physical")}
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => fetchNui("admin:setVirtualRegister", { id: r.id })}>
+                <Sparkles className="h-3.5 w-3.5" /> {_L("admin.place_virtual")}
+              </Button>
+            </div>
           </div>
-          {byType("counter").length > 0 ? (
+          {byType("counter").length + byType("virtual_register").length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
               {byType("counter").map((p) => (
                 <PropChip key={p.id} p={p} act={act} restaurantId={r.id} section="counters" />
+              ))}
+              {byType("virtual_register").map((p) => (
+                <PropChip key={p.id} p={p} act={act} restaurantId={r.id} section="counters" virtual />
               ))}
             </div>
           ) : (
@@ -414,6 +426,7 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
               brand={r.brand_image || ""}
               brandImages={r.brand_images || {}}
               event="admin:setBrandImage"
+              renderTargets={renderTargets}
             />
           </div>
         </TabsContent>

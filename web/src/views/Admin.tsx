@@ -46,7 +46,7 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
         )}
 
         <TabsContent value="restaurants" className="flex min-h-0 flex-1 flex-col">
-          <Restaurants restaurants={restaurants} players={players} groups={groups} refresh={refresh} focus={focus} appTheme={appTheme} onDetailChange={setRestDetail} />
+          <Restaurants restaurants={restaurants} players={players} groups={groups} refresh={refresh} focus={focus} appTheme={appTheme} onDetailChange={setRestDetail} renderTargets={data?.renderTargets} />
         </TabsContent>
 
         <TabsContent value="recipes" className="flex min-h-0 flex-1 flex-col">

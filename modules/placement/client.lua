@@ -170,6 +170,9 @@ function StartShellPlacement(restaurantId)
     local rest = GetRestaurantById(restaurantId)
     if not rest or not rest.counter then return ShowNotification(_L("place_shell_needs_counter")) end
     Wait(250) -- let the NUI fully release focus before the loop takes input
+    -- Carry the launching panel's theme onto this loop's control-hint overlay
+    -- (the panel closed for placement, resetting the NUI to the default kit).
+    if ReassertNUITheme then ReassertNUITheme() end
 
     local hash = LoadModelTimeout(VirtualShellModel())
     if not hash then return ShowNotification(_L("virtual_shell_missing")) end
@@ -261,13 +264,33 @@ function StartShellPlacement(restaurantId)
     end
 end
 
--- A counter is an invisible register anchor (no runtime prop) — the till is only
--- the gizmo PREVIEW so the admin can aim it at the map's own counter. Placing is
--- additive: a restaurant can have several registers (modules/main gives each one
--- its interaction; the lowest-id counter is the primary blip/shell/NPC anchor).
+-- A VIRTUAL register is an invisible register anchor (prop_type "virtual_register"):
+-- nothing spawns in the world, so — like a virtual point — the gizmo previews a small
+-- ball at the exact anchor, and only the point + heading are saved. Using it opens the
+-- ordinary fullscreen NUI register (modules/main), not the counter's in-world DUI.
+function StartVirtualRegisterPlacement(restaurantId)
+    Wait(250)
+    local result = StartGizmoEditor({ model = GetHashKey(VIRTUAL_PLACE_MODEL), enableCancel = true, deleteEntity = true })
+    if not result or not result.position then return end
+    local res = lib.callback.await("pickle_restaurants:placement:saveVirtualRegister", false, {
+        restaurant_id = restaurantId,
+        x = result.position.x, y = result.position.y, z = result.position.z,
+        heading = (result.rotation and result.rotation.z) or 0.0,
+    })
+    if res and res.ok then
+        ShowNotification(_L("place_virtual_register_placed"))
+    else
+        ShowNotification((res and res.error) or _L("place_virtual_register_fail"))
+    end
+end
+
+-- A counter is the register anchor: what you aim with the gizmo is the register model
+-- itself (modules/main spawns exactly this at the point), so the preview IS the result.
+-- Placing is additive: a restaurant can have several registers (modules/main gives each
+-- one its interaction; the lowest-id counter is the primary blip/shell/NPC anchor).
 function StartCounterPlacement(restaurantId)
     Wait(250)
-    local result = StartGizmoEditor({ model = "prop_till_01", enableCancel = true, deleteEntity = true })
+    local result = StartGizmoEditor({ model = CounterModel(), enableCancel = true, deleteEntity = true })
     if not result or not result.position then return end
     local res = lib.callback.await("pickle_restaurants:placement:saveCounter", false, {
         restaurant_id = restaurantId,
@@ -314,8 +337,8 @@ function StartPropReposition(propId)
         seed.coordsOffset = vector3(0.0, 0.0, -SeatSitOffsetZ())
         seed.coords       = vector3(prop.x + 0.0, prop.y + 0.0, prop.z - SeatSitOffsetZ())
     elseif ptype == "counter" then
-        seed.model = "prop_till_01"
-    elseif ptype == "virtual_point" then
+        seed.model = GetHashKey(CounterModel())
+    elseif ptype == "virtual_point" or ptype == "virtual_register" then
         seed.model = GetHashKey(VIRTUAL_PLACE_MODEL)
     else
         local model = PLACEABLE_MODELS[ptype]

@@ -289,6 +289,9 @@ end
 function StartGizmoEditor(data)
     if inGizmo then return false end
     inGizmo = true
+    -- The launching panel just closed for placement, resetting the NUI to the
+    -- default theme; re-skin the [E]/[G] hint overlay to that panel's theme.
+    if ReassertNUITheme then ReassertNUITheme() end
     local ped = PlayerPedId()
     local coords = data.coords or (GetEntityCoords(ped) + GetEntityForwardVector(ped) * 3)
     local rotation = data.rotation or vector3(0.0, 0.0, GetEntityHeading(ped))

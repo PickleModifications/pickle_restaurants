@@ -9,7 +9,7 @@
        resolution the screen is calibrated to, and stays legible from across the room. */
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body {
-      width: 100%; height: 100%; overflow: hidden; background: #0b0f14;
+      width: 100%; height: 100%; overflow: hidden; background: #000;
       font-family: "Bricolage Grotesque", "Trebuchet MS", system-ui, sans-serif;
       color: #f4f6f8; -webkit-font-smoothing: antialiased;
     }
@@ -19,6 +19,10 @@
        instant the page loads, before any data message sizes it precisely. */
     #root { position: absolute; top: 50%; left: 50%; width: 100vw; height: 100vh;
             transform: translate(-50%, -50%); transform-origin: center center; }
+    /* The BLACK default: no restaurant / no content is driving this screen, so paint a
+       solid black board rather than reverting to the model's baked-in placeholder. */
+    body.blk { background: #000; }
+    body.blk #root { display: none; }
     #stage {
       position: relative; width: 100%; height: 100%;
       display: flex; flex-direction: column;
@@ -375,8 +379,22 @@
       notifyPainted();
     }
 
+    // Solid-black board — the default when nothing is driving this screen. Clear the
+    // content and let the `.blk` background show through, then ACK so Lua binds the
+    // texture against the painted black frame.
+    function renderBlack() {
+      if (flipTimer) { clearInterval(flipTimer); flipTimer = null; }
+      pages = [];
+      body.innerHTML = "";
+      foot.innerHTML = "";
+      notifyPainted();
+    }
+
     function render() {
       if (!state) return;
+      var black = state.action === "black";
+      document.body.classList.toggle("blk", black);
+      if (black) { renderBlack(); return; }
       if (state.action === "orders") renderOrders(state);
       else renderMenu(state);
     }

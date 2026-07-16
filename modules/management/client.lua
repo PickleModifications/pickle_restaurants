@@ -102,6 +102,14 @@ RegisterNUICallback("management:setCounter", function(d, cb)
     OpenManagement(d.id, "counters")
 end)
 
+-- A virtual register anchor (invisible; opens the fullscreen NUI register, no DUI).
+RegisterNUICallback("management:setVirtualRegister", function(d, cb)
+    CloseNUI()
+    cb({})
+    StartVirtualRegisterPlacement(d.id)
+    OpenManagement(d.id, "counters")
+end)
+
 -- Reposition an existing placed prop (station / counter / seat / virtual point),
 -- then reopen to its section.
 RegisterNUICallback("management:editProp", function(d, cb)

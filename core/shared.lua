@@ -40,6 +40,97 @@ Config.FrameworkSettings = {
 Config.AdminGroups   = { "admin", "superadmin", "god" }
 Config.InventoryLimit = false
 
+-- ─── Render targets (the ONE place every DUI-painted texture is defined) ──────
+-- Every runtime texture we paint onto a prop — food-packaging brands, the kiosk
+-- brand/order screen, the customer menu/orders boards, and the staff register POS —
+-- is ONE entry here. This is the single editable source of truth for a target's
+-- resolution + orientation; the modules that paint them (rendertarget, screens,
+-- kiosk, register) all READ this table instead of keeping their own copy, and the
+-- NUI is fed the brand-editable ones (BrandRenderTargets → the crop UI) so the panel
+-- can never drift from the aspect the game actually renders at.
+--
+-- Fields:
+--   key    stable id (config url/crop key + the debug commands)
+--   group  which module paints it: "packaging" | "kiosk" | "screen" | "register"
+--   txd    the model's embedded texture dictionary (== model name for these props)
+--   txn    the branded texture inside it that we replace
+--   w / h  the UPRIGHT DISPLAY aspect — the size/shape as you SEE it on the prop and
+--          as you crop it in the panel (so the config value always matches the UI). The
+--          actual DUI/texture SURFACE aspect is derived from this + `rot`
+--          (RenderTargetSurface): a 90/270 turn swaps w/h for the surface, and the page
+--          rotates the content back upright. Edit these as the upright dimensions.
+--   rot    0|90|180|270 clockwise turn applied so a correct image lands upright
+--   flipx / flipy  mirror to fix a back/upside-down UV (default false)
+-- Group-specific extras:
+--   packaging/kiosk: debugGap (/pickle_brand_debug footprint), blackDefault
+--                    (unbranded → solid black, not the baked placeholder), configKey
+--                    (borrow another target's brand config)
+--   screen/register: kind (menu|orders|register), prop_type (placed prop that drives
+--                    it), gap (/pickle_screen_debug footprint)
+-- w/h are the UPRIGHT display aspect (see the field notes above). A 90/270 `rot` means
+-- the on-prop content is portrait/landscape-swapped from the texture's own pixels; the
+-- surface the DUI actually renders at is RenderTargetSurface(t) (w/h swapped for 90/270).
+Config.RenderTargets = {
+    -- food-packaging brands (modules/rendertarget)
+    { key = "pizza_box", group = "packaging", txd = "pickle_pizza_box_02",      txn = "pizza_brand",             w = 1024, h = 1024, rot = 270 },
+    { key = "cup",       group = "packaging", txd = "pickle_drink_container_01", txn = "cup_brand",               w = 1792, h = 1024, rot = 90 },
+    { key = "tray",      group = "packaging", txd = "pickle_tray_paper_01",      txn = "tray_paper",              w = 1792, h = 1024, rot = 180 },
+    { key = "side",      group = "packaging", txd = "pickle_side_container_01",  txn = "side_container_brand_01", w = 2304, h = 1024, rot = 0 },
+    { key = "bag",       group = "packaging", txd = "pickle_restaurant_bag_01",  txn = "bag_brand",              w = 1024, h = 1024, rot = 0 },
+    -- the self-order kiosk's brand SCREEN (rendered as a brand by rendertarget; the
+    -- kiosk ORDER DUI, modules/kiosk, reuses the same aspect). Both kiosk models embed
+    -- `kiosk_large_brand`; the floor kiosk borrows the wall one's brand config.
+    { key = "kiosk",        group = "kiosk", txd = "pickle_kiosk_large_01", txn = "kiosk_large_brand", w = 1080, h = 1920, rot = 0, debugGap = 3.5, blackDefault = true },
+    { key = "kiosk_ground", group = "kiosk", txd = "pickle_kiosk_large_02", txn = "kiosk_large_brand", w = 1080, h = 1920, rot = 0, debugGap = 3.5, blackDefault = true, configKey = "kiosk" },
+    -- customer-facing info boards (modules/screens)
+    { key = "menu",   group = "screen", kind = "menu",   prop_type = "menu_screen",   txd = "pickle_screen_menu_01",   txn = "s_m_brand", w = 1920, h = 1080, rot = 90, gap = 3.5 },
+    { key = "orders", group = "screen", kind = "orders", prop_type = "orders_screen", txd = "pickle_screen_orders_01", txn = "s_o_brand", w = 1920, h = 1080, rot = 90, gap = 3.5 },
+    -- the staff POS register, painted on the counter's screen (modules/register). SQUARE.
+    { key = "register", group = "register", kind = "register", prop_type = "counter", txd = "pickle_register_01", txn = "register_brand", w = 1024, h = 1024, rot = 0, gap = 2.0 },
+}
+
+-- All render targets in a group, in registry order (the module tables are just a
+-- filtered VIEW of Config.RenderTargets — edit geometry there, once).
+function RenderTargetsByGroup(...)
+    local want = {}
+    for _, g in ipairs({ ... }) do want[g] = true end
+    local out = {}
+    for _, t in ipairs(Config.RenderTargets) do
+        if want[t.group] then out[#out + 1] = t end
+    end
+    return out
+end
+
+function RenderTargetByKey(key)
+    for _, t in ipairs(Config.RenderTargets) do
+        if t.key == key then return t end
+    end
+    return nil
+end
+
+-- The SURFACE aspect the DUI actually renders at (the texture's own pixel dims): a
+-- 90/270 turn swaps the upright w/h back. The painting modules (rendertarget, screens,
+-- kiosk, register) size their DUIs with this; the page then rotates the content upright.
+function RenderTargetSurface(t)
+    local rot = (t.rot or 0) % 360
+    if rot == 90 or rot == 270 then return t.h, t.w end
+    return t.w, t.h
+end
+
+-- The brand-editable targets (packaging + kiosk) with their UPRIGHT display aspect (==
+-- the config w/h, so the crop UI always matches what's in Config.RenderTargets), for the
+-- NUI. A target that borrows another's brand config (`configKey`, e.g. the floor kiosk)
+-- is NOT independently editable, so it's skipped — its primary already appears.
+function BrandRenderTargets()
+    local out = {}
+    for _, t in ipairs(Config.RenderTargets) do
+        if (t.group == "packaging" or t.group == "kiosk") and not t.configKey then
+            out[#out + 1] = { key = t.key, w = t.w, h = t.h }
+        end
+    end
+    return out
+end
+
 -- ─── Generic utilities ───────────────────────────────────────────────────────
 
 Templates = {}

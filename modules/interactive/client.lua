@@ -5,9 +5,15 @@
 -- =============================================
 
 NUIView = "none"
+-- The theme seed of the most recently opened panel (admin app theme / boss
+-- restaurant theme). Kept so an in-world flow that runs WHILE the panel is
+-- closed — object placement — can re-skin its NUI overlay to that panel's
+-- theme instead of the default kit CloseNUI resets to. See ReassertNUITheme.
+LastNUITheme = nil
 
 function OpenNUI(view, data)
     NUIView = view
+    LastNUITheme = data and data.theme or nil
     SetNuiFocus(true, true)
     SetNuiFocusKeepInput(false)
     SendNUIMessage({ action = "setView", view = view, data = data })
@@ -28,6 +34,16 @@ function CloseNUI()
     SetNuiFocus(false, false)
     SendNUIMessage({ action = "setView", view = "none" })
     if HideTicketWidget then HideTicketWidget() end
+end
+
+-- Re-skin the NUI to the last panel's theme WITHOUT reopening a view. The
+-- object-placement gizmo runs with the panel closed but still draws a NUI
+-- overlay (the [E]/[G] control hints via ShowInteractText); closing for
+-- placement reset the theme to the default kit, so the hints rendered off-brand.
+-- Called once as placement begins to carry the launching panel's theme through
+-- it; the theme is restored anyway when the panel reopens afterward.
+function ReassertNUITheme()
+    SendNUIMessage({ action = "applyTheme", theme = LastNUITheme })
 end
 
 RegisterNUICallback("close", function(_, cb)

@@ -188,15 +188,33 @@ export function ThemeEditor({
   );
 }
 
-// Each branded texture + the aspect its DUI renders at. MUST match `TARGETS` in
-// modules/rendertarget/client.lua — these aspects lock the crop frame's shape.
-const BRAND_TEXTURES: { key: string; label: string; w: number; h: number; hint: string }[] = [
-  { key: "pizza_box", label: _L("branding.tex_pizza_box_label"), w: 1024, h: 1024, hint: _L("branding.tex_pizza_box_hint") },
-  { key: "cup", label: _L("branding.tex_cup_label"), w: 1024, h: 1792, hint: _L("branding.tex_cup_hint") },
-  { key: "tray", label: _L("branding.tex_tray_label"), w: 1792, h: 1024, hint: _L("branding.tex_tray_hint") },
-  { key: "side", label: _L("branding.tex_side_label"), w: 2304, h: 1024, hint: _L("branding.tex_side_hint") },
-  { key: "kiosk", label: _L("branding.tex_kiosk_label"), w: 1080, h: 1920, hint: _L("branding.tex_kiosk_hint") },
-];
+// Per-texture UI copy (label + hint). The ASPECT it crops to is NOT hardcoded here —
+// it comes from the render-target registry (core/shared.lua), synced to the panel as
+// `renderTargets` (see `brandTextures()` below), so the crop frame always matches the
+// resolution/orientation the game actually renders at. `w`/`h` here are only a fallback
+// display aspect for when the sync hasn't arrived.
+type BrandTex = { key: string; label: string; w: number; h: number; hint: string };
+const BRAND_TEXTURE_META: Record<string, { label: string; hint: string; w: number; h: number }> = {
+  pizza_box: { label: _L("branding.tex_pizza_box_label"), hint: _L("branding.tex_pizza_box_hint"), w: 1024, h: 1024 },
+  cup: { label: _L("branding.tex_cup_label"), hint: _L("branding.tex_cup_hint"), w: 1024, h: 1792 },
+  tray: { label: _L("branding.tex_tray_label"), hint: _L("branding.tex_tray_hint"), w: 1792, h: 1024 },
+  side: { label: _L("branding.tex_side_label"), hint: _L("branding.tex_side_hint"), w: 2304, h: 1024 },
+  bag: { label: _L("branding.tex_bag_label"), hint: _L("branding.tex_bag_hint"), w: 1024, h: 1024 },
+  kiosk: { label: _L("branding.tex_kiosk_label"), hint: _L("branding.tex_kiosk_hint"), w: 1080, h: 1920 },
+};
+
+// Build the editable brand-texture list. Prefers the synced render-target aspects
+// (display w/h from the server); falls back to the META defaults if the sync is absent.
+// Only keys we have UI copy for are shown (an unknown target has no label/hint).
+function brandTextures(rts?: { key: string; w: number; h: number }[]): BrandTex[] {
+  const src = rts && rts.length ? rts : Object.entries(BRAND_TEXTURE_META).map(([key, m]) => ({ key, w: m.w, h: m.h }));
+  return src
+    .filter((t) => BRAND_TEXTURE_META[t.key])
+    .map((t) => {
+      const m = BRAND_TEXTURE_META[t.key];
+      return { key: t.key, w: t.w, h: t.h, label: m.label, hint: m.hint };
+    });
+}
 
 export type Crop = { x: number; y: number; w: number; h: number };
 type Aspect = { w: number; h: number };
@@ -235,14 +253,18 @@ function drawCrop(
 // crop) and saved only on confirm. `event` is the NUI event to save through —
 // "management:setBrandImage" or "admin:setBrandImage" (both hit SetRestaurantBrand).
 export default function Branding({
-  id, brand, brandImages, event,
+  id, brand, brandImages, event, renderTargets,
 }: {
   id: number; brand: string; brandImages: Record<string, any>; event: string;
+  renderTargets?: { key: string; w: number; h: number }[];
 }) {
   // local optimistic copy so cards update without a full panel refetch
   const [images, setImages] = useState<Record<string, { url: string; crop?: Crop | null }>>(
     () => ({ ...(brandImages || {}) })
   );
+  // The editable textures + their crop aspects, sourced from the synced render-target
+  // registry (falls back to the built-in defaults if the sync hasn't landed).
+  const textures = brandTextures(renderTargets);
 
   const saveTexture = (key: string, entry: { url: string; crop?: Crop | null } | null) => {
     setImages((m) => {
@@ -271,7 +293,7 @@ export default function Branding({
       </Card>
 
       <div className="grid grid-cols-2 gap-3">
-        {BRAND_TEXTURES.map((t) => (
+        {textures.map((t) => (
           <BrandTextureCard
             key={t.key}
             tex={t}
@@ -287,7 +309,7 @@ export default function Branding({
 function BrandTextureCard({
   tex, entry, onSave,
 }: {
-  tex: (typeof BRAND_TEXTURES)[number]; entry?: { url: string; crop?: Crop | null }; onSave: (e: { url: string; crop?: Crop | null } | null) => void;
+  tex: BrandTex; entry?: { url: string; crop?: Crop | null }; onSave: (e: { url: string; crop?: Crop | null } | null) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const has = !!entry?.url;

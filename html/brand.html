@@ -33,7 +33,7 @@
     // surface it would otherwise catch while the (remote) image was still loading. This
     // is what makes a pre-configured brand appear on load without a manual reload.
     function notifyPainted() {
-      if (!last || last.action !== "brand" || !last.res || !last.key) return;
+      if (!last || (last.action !== "brand" && last.action !== "black") || !last.res || !last.key) return;
       try {
         fetch("https://" + last.res + "/rt:painted", {
           method: "POST",
@@ -48,6 +48,16 @@
       h = Math.max(1, Math.round(h || 1024));
       if (canvas.width !== w) canvas.width = w;
       if (canvas.height !== h) canvas.height = h;
+    }
+
+    // Solid-black default: what a screen shows when no brand/content is configured for
+    // it, instead of reverting to the model's baked-in placeholder texture.
+    function paintBlack(d) {
+      sizeCanvas(d.w, d.h);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      notifyPainted(); // let Lua bind against the painted black frame
     }
 
     function fillBlank(d) {
@@ -151,6 +161,7 @@
       if (!d) return;
       last = d;
       if (d.action === "brand") paintBrand(d);
+      else if (d.action === "black") paintBlack(d);
       else if (d.action === "calibrate") drawCalibration(d);
     });
   </script>

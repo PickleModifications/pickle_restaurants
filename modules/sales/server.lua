@@ -633,6 +633,27 @@ lib.callback.register("pickle_restaurants:sales:getRegister", function(src, d)
     return buildRegister(src, id)
 end)
 
+-- PUBLIC idle payload for the always-on register board (modules/register). The counter
+-- screen persistently shows the POS UI even when nobody's ringing anything up, so it
+-- needs a seed anyone can fetch — the SAME display-safe data the public menu + orders
+-- boards already show (label/theme/catalog/combos + the open-ticket queue). It carries
+-- NO balance/commission and NO nearby-players list; those live only in the perm-gated
+-- buildRegister a cashier gets on interact.
+lib.callback.register("pickle_restaurants:register:getPublic", function(_, d)
+    local id = tonumber(d and d.id)
+    local r = id and GetRestaurant(id)
+    if not r then return { ok = false } end
+    return {
+        ok           = true,
+        restaurantId = id,
+        label        = r.label,
+        theme        = r.metadata and r.metadata.theme or nil,
+        catalog      = BuildPricedCatalog(id, true),
+        combos       = BuildComboCatalog(id),
+        tickets      = AnnotateOrders(id, GetOpenOrders(id)),
+    }
+end)
+
 -- Read-only annotated open tickets for the corner "Tickets" widget shown in every
 -- restaurant experience (cooking / management / virtual). Any staff member who
 -- can work the restaurant may VIEW them (a cook without `sell` still sees whether
