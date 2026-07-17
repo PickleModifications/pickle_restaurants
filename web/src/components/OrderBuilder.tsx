@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
+import { flavorModImageUrl, itemImageUrl } from "@/lib/localImages";
 import {
   Plus, Minus, Trash2, User, Receipt, Check, X, Loader2, ImageOff, SlidersHorizontal, Ban, UtensilsCrossed, ShoppingBag,
 } from "lucide-react";
@@ -94,18 +95,38 @@ type CartBlock = ItemBlock | ComboBlock;
 export const arr = <T,>(x: unknown): T[] => (Array.isArray(x) ? (x as T[]) : []);
 
 // Inventory thumbnail from a direct nui:// url the server resolved, with a
-// graceful fallback (different inventories store images differently).
-export function Thumb({ src, className }: { src?: string; className?: string }) {
-  const [broken, setBroken] = useState(false);
-  useEffect(() => setBroken(false), [src]);
-  if (!src || broken) {
+// graceful fallback (different inventories store images differently). `fallbackSrc`
+// is tried if `src` is absent or fails to load — used so a supplied per-flavor
+// drink image (web/public/items/) that isn't present degrades to the generic
+// inventory image we showed before, then to the placeholder.
+export function Thumb({ src, fallbackSrc, className }: { src?: string; fallbackSrc?: string; className?: string }) {
+  const chain = [src, fallbackSrc].filter(Boolean) as string[];
+  const [idx, setIdx] = useState(0);
+  useEffect(() => setIdx(0), [src, fallbackSrc]);
+  const cur = chain[idx];
+  if (!cur) {
     return (
       <div className={cn("flex items-center justify-center rounded bg-muted/60 text-muted-foreground", className)}>
         <ImageOff className="h-1/2 w-1/2" />
       </div>
     );
   }
-  return <img src={src} onError={() => setBroken(true)} className={cn("rounded object-contain", className)} />;
+  return <img src={cur} onError={() => setIdx((i) => i + 1)} className={cn("rounded object-contain", className)} />;
+}
+
+// A drink flavor's picker art. Tries the supplied per-flavor image FIRST (that's
+// the curated art the server dropped in web/public/items/), then any inventory
+// image the flavor's legacy item still has, then the flavor's colour swatch, then
+// a placeholder — so supplied art always wins and an unsupplied flavor degrades to
+// exactly what the tile showed before, never a broken icon.
+function FlavorThumb({ src, fallbackSrc, color, className }: { src?: string; fallbackSrc?: string; color?: string; className?: string }) {
+  const chain = [src, fallbackSrc].filter(Boolean) as string[];
+  const [idx, setIdx] = useState(0);
+  useEffect(() => setIdx(0), [src, fallbackSrc]);
+  const cur = chain[idx];
+  if (cur) return <img src={cur} onError={() => setIdx((i) => i + 1)} className={cn("rounded object-contain", className)} />;
+  if (color) return <span className={cn("rounded-full border border-border", className)} style={{ backgroundColor: color }} />;
+  return <div className={cn("grid place-items-center rounded bg-muted/60 text-muted-foreground", className)}><ImageOff className="h-1/2 w-1/2" /></div>;
 }
 
 // Combo photo (owner-set url + crop). The precise crop is honoured on the menu
@@ -121,6 +142,19 @@ export function ComboThumb({ photo, label, className }: { photo?: { url: string;
     );
   }
   return <img src={photo.url} onError={() => setBroken(true)} className={cn("object-cover", className)} alt={label} />;
+}
+
+// The image a drink card/line/option shows. A drink's own image is the empty
+// generic drink item, so it borrows a real flavor's art instead of a placeholder:
+// the CHOSEN flavor when the selection is known (cart line, combo pick), else the
+// FIRST flavor (catalog grid card, mirroring the dialog header). Returns undefined
+// for non-drinks (callers keep the item's own image); every caller still falls back
+// to items/<item>.png.
+function drinkCardSrc(cat: { kind?: string; modifiers?: { id: string }[] }, chosen?: { id: string }[]): string | undefined {
+  if (cat.kind !== "drink") return undefined;
+  const sel = chosen?.find((m) => m.id.startsWith("flavor:"))?.id;
+  const first = cat.modifiers?.find((m) => m.id.startsWith("flavor:"))?.id;
+  return flavorModImageUrl(sel ?? first);
 }
 
 export const KIND_LABEL: Record<string, string> = {
@@ -185,6 +219,11 @@ export function OptRow({ added, removed }: { added: OptView[]; removed: OptView[
 // A single modifier tile: item image, or a flavor colour swatch, or a fallback.
 // `big` scales it up for the kiosk's larger dialogs.
 function ModTile({ m, on, onClick, big }: { m: Mod; on: boolean; onClick: () => void; big?: boolean }) {
+  // a drink flavor modifier (id "flavor:<output>") prefers its supplied per-flavor
+  // art (web/public/items/<output>.png) over the flavor's legacy inventory image,
+  // then that image, then its colour swatch (all handled by FlavorThumb)
+  const flavorImg = flavorModImageUrl(m.id);
+  const sz = big ? "h-16 w-16" : "h-12 w-12";
   return (
     <button onClick={onClick}
       className={cn("relative flex flex-col items-center rounded-lg border text-center transition-colors",
@@ -195,11 +234,13 @@ function ModTile({ m, on, onClick, big }: { m: Mod; on: boolean; onClick: () => 
           <Check className={big ? "h-3.5 w-3.5" : "h-3 w-3"} />
         </span>
       )}
-      {m.image
-        ? <Thumb src={m.image} className={big ? "h-16 w-16" : "h-12 w-12"} />
+      {flavorImg
+        ? <FlavorThumb src={flavorImg} fallbackSrc={m.image} color={m.color} className={sz} />
+        : m.image
+          ? <Thumb src={m.image} className={sz} />
         : m.color
-          ? <span className={cn("rounded-full border border-border", big ? "h-16 w-16" : "h-12 w-12")} style={{ backgroundColor: m.color }} />
-          : <div className={cn("grid place-items-center rounded bg-muted/60 text-muted-foreground", big ? "h-16 w-16" : "h-12 w-12")}><ImageOff className="h-1/2 w-1/2" /></div>}
+          ? <span className={cn("rounded-full border border-border", sz)} style={{ backgroundColor: m.color }} />
+          : <div className={cn("grid place-items-center rounded bg-muted/60 text-muted-foreground", sz)}><ImageOff className="h-1/2 w-1/2" /></div>}
       <span className={cn("line-clamp-2 font-medium leading-tight", big ? "text-sm" : "text-xs")}>
         {m.label}
         {m.default && <span className={cn("ml-1 text-muted-foreground", big ? "text-[11px]" : "text-[9px]")}>{_L("register.mod_default")}</span>}
@@ -304,18 +345,13 @@ export function OrderBuilder({
     if (c?.kind === "drink" && !base.length && c.modifiers && c.modifiers.length) base.push(c.modifiers[0].id);
     return base;
   };
-  // Click a card: open the item dialog (choose modifiers + quantity, then add). On
-  // the register a plain item with no modifiers still drops straight in — the fast
-  // path a cashier wants; the kiosk always opens the dialog so a customer gets a
-  // confirming "Add to Order" step and a quantity picker.
+  // Click a card: always open the item dialog (choose modifiers + quantity, then
+  // add) — even a plain item with no modifiers gets a confirming "Add to Order"
+  // step and a quantity picker, so the register matches the kiosk exactly.
   const clickCard = (c: Cat) => {
-    if ((c.modifiers && c.modifiers.length) || mode === "kiosk") {
-      setModFor(c);
-      setModSel(seedSel(c));
-      setModQty(1);
-    } else {
-      addItemEntry(c.key, []);
-    }
+    setModFor(c);
+    setModSel(seedSel(c));
+    setModQty(1);
   };
   // Click a combo: open the builder seeded with each slot's first option + that
   // option's default modifiers (and a drink slot's first flavor).
@@ -386,6 +422,12 @@ export function OrderBuilder({
   };
 
   const modExtra = modFor ? resolveMods(modFor, modSel).extra : 0;
+  // The customise dialog's header image. For a drink the generic "Restaurant Drink"
+  // has no art of its own, so the CHOSEN flavor's image leads; otherwise the item's
+  // own image, then a supplied items/<item>.png (e.g. a generic drink.png).
+  const selFlavorId = modFor?.modifiers?.find((m) => modSel.includes(m.id) && m.id.startsWith("flavor:"))?.id;
+  const modHeaderSrc = flavorModImageUrl(selFlavorId) ?? modFor?.image;
+  const modHeaderFallback = itemImageUrl(modFor?.item);
   const comboExtra = comboFor
     ? comboFor.slots.reduce((s, slot, i) => {
         const opt = slot.options.find((o) => o.key === comboPicks[i]?.key) || slot.options[0];
@@ -415,7 +457,7 @@ export function OrderBuilder({
     if (b.type === "item") {
       return (
         <div key={b.ck} className={cn("flex items-center rounded-sm bg-muted/50", big ? "gap-4 p-4" : "gap-2 p-1.5")}>
-          <Thumb src={b.cat.image} className={cn("shrink-0", big ? "h-16 w-16" : "h-8 w-8")} />
+          <Thumb src={drinkCardSrc(b.cat, b.added) ?? b.cat.image} fallbackSrc={itemImageUrl(b.cat.item)} className={cn("shrink-0", big ? "h-16 w-16" : "h-8 w-8")} />
           <div className="min-w-0 flex-1">
             <div className={cn("truncate font-medium", big ? "text-lg" : "text-xs")}>{b.cat.label}</div>
             <OptRow added={b.added} removed={b.removed} />
@@ -438,7 +480,7 @@ export function OrderBuilder({
         <div className={cn("mt-1 space-y-0.5 border-l border-border/60", big ? "pl-3" : "pl-2")}>
           {b.comps.map((comp, i) => (
             <div key={i} className="flex items-center gap-1.5">
-              <Thumb src={comp.opt.image} className={cn("shrink-0", big ? "h-8 w-8" : "h-5 w-5")} />
+              <Thumb src={drinkCardSrc(comp.opt, comp.added) ?? comp.opt.image} fallbackSrc={itemImageUrl(comp.opt.item)} className={cn("shrink-0", big ? "h-8 w-8" : "h-5 w-5")} />
               <span className={cn("truncate", big ? "text-base" : "text-[11px]")}>{comp.opt.label}</span>
               {(comp.added.length > 0 || comp.removed.length > 0) && (
                 <span className="flex items-center gap-0.5">
@@ -462,7 +504,7 @@ export function OrderBuilder({
         <div className={cn(big ? "fixed" : "absolute", "inset-0 z-40 flex items-center justify-center bg-black/50", big ? "p-10" : "p-4")} onClick={() => setModFor(null)}>
           <div className={cn("w-full rounded-2xl border border-border bg-card shadow-xl", big ? "max-w-xl p-6" : "max-w-sm p-4")} onClick={(e) => e.stopPropagation()}>
             <div className={cn("flex items-center", big ? "mb-5 gap-4" : "mb-3 gap-2")}>
-              <Thumb src={modFor.image} className={cn("shrink-0", big ? "h-16 w-16" : "h-10 w-10")} />
+              <Thumb src={modHeaderSrc} fallbackSrc={modHeaderFallback} className={cn("shrink-0", big ? "h-16 w-16" : "h-10 w-10")} />
               <div className="min-w-0 flex-1">
                 <div className={cn("truncate font-semibold", big && "text-2xl")}>{modFor.label}</div>
                 <div className={cn("text-muted-foreground", big ? "text-lg" : "text-xs")}>{money(modFor.price)}</div>
@@ -542,7 +584,7 @@ export function OrderBuilder({
                             className={cn("flex items-center rounded-md border text-left transition-colors",
                               big ? "gap-2.5 p-2.5" : "gap-1.5 p-1.5",
                               o.key === opt?.key ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border hover:border-primary/50 hover:bg-accent/50")}>
-                            <Thumb src={o.image} className={cn("shrink-0", big ? "h-10 w-10" : "h-7 w-7")} />
+                            <Thumb src={drinkCardSrc(o) ?? o.image} fallbackSrc={itemImageUrl(o.item)} className={cn("shrink-0", big ? "h-10 w-10" : "h-7 w-7")} />
                             <span className={cn("truncate font-medium", big ? "text-base" : "text-xs")}>{o.label}</span>
                           </button>
                         ))}
@@ -550,7 +592,7 @@ export function OrderBuilder({
                     )}
                     {!isChoice && (
                       <div className={cn("flex items-center gap-2", big ? "mb-3" : "mb-2")}>
-                        <Thumb src={opt?.image} className={cn("shrink-0", big ? "h-11 w-11" : "h-8 w-8")} />
+                        <Thumb src={(opt && drinkCardSrc(opt)) ?? opt?.image} fallbackSrc={itemImageUrl(opt?.item)} className={cn("shrink-0", big ? "h-11 w-11" : "h-8 w-8")} />
                         <span className={cn("truncate font-medium", big ? "text-lg" : "text-sm")}>{opt?.label}</span>
                       </div>
                     )}
@@ -627,7 +669,7 @@ export function OrderBuilder({
                     {customisable && (
                       <span className="absolute right-3 top-3 text-primary/70" title={_L("register.customisable")}><SlidersHorizontal className="h-6 w-6" /></span>
                     )}
-                    <Thumb src={c.image} className="h-28 w-28" />
+                    <Thumb src={drinkCardSrc(c) ?? c.image} fallbackSrc={itemImageUrl(c.item)} className="h-28 w-28" />
                     <span className="line-clamp-2 text-xl font-semibold leading-snug">{c.label}</span>
                     <span className="font-mono text-lg font-bold tabular-nums text-primary">{money(c.price)}</span>
                   </button>
@@ -749,7 +791,7 @@ export function OrderBuilder({
                     {customisable && (
                       <span className="absolute right-1 top-1 text-primary/70" title={_L("register.customisable")}><SlidersHorizontal className="h-3.5 w-3.5" /></span>
                     )}
-                    <Thumb src={c.image} className="h-12 w-12" />
+                    <Thumb src={drinkCardSrc(c) ?? c.image} fallbackSrc={itemImageUrl(c.item)} className="h-12 w-12" />
                     <span className="line-clamp-2 text-xs font-medium leading-tight">{c.label}</span>
                     <span className="font-mono text-[11px] tabular-nums text-muted-foreground">{money(c.price)}</span>
                   </button>

@@ -1,10 +1,45 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNuiEvent, fetchNui } from "@/lib/nui";
 import { applyTheme } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
 import { _L } from "@/lib/locale";
 import { Check, ShoppingBag } from "lucide-react";
 import { OrderBuilder, arr, type Cat, type Combo } from "@/components/OrderBuilder";
+
+// The restaurant brand the idle kiosk screen shows: a url + optional normalised
+// source-crop rectangle (the same { url, crop } the render-target driver paints —
+// modules/rendertarget). nil → no brand configured (the idle screen is solid black).
+type Brand = { url?: string; crop?: { x: number; y: number; w: number; h: number } } | null;
+
+// Milliseconds the brand cover takes to slide up (reveal) / down (conceal). The Lua
+// (modules/kiosk CloseKioskScreen) waits KIOSK.close_ms — keep it >= this so the
+// cover has finished sliding down before the screen is handed back to the brand driver.
+const SLIDE_MS = 450;
+
+// Paint the brand image so it fills the cover exactly like brand.html does on the idle
+// screen: the owner's crop rectangle mapped to fill the surface (else `cover`-centred),
+// over a white backdrop for transparent logo areas. nil brand → solid black (the idle
+// screen's blackDefault). The kiosk stage already applies the screen orientation, so
+// this paints in upright content space just like the menu it slides away to reveal.
+function coverStyle(brand: Brand): React.CSSProperties {
+  if (!brand || !brand.url) return { background: "#000000" };
+  const base: React.CSSProperties = {
+    backgroundColor: "#ffffff",
+    backgroundImage: `url("${brand.url}")`,
+    backgroundRepeat: "no-repeat",
+  };
+  const c = brand.crop;
+  if (c && c.w > 0 && c.h > 0) {
+    // Show source rect [x,y,w,h] (normalised) filling the box: scale the image so the
+    // crop spans the box, then offset so the crop's top-left lands at the box origin.
+    return {
+      ...base,
+      backgroundSize: `${100 / c.w}% ${100 / c.h}%`,
+      backgroundPosition: `${c.w >= 1 ? 0 : (c.x / (1 - c.w)) * 100}% ${c.h >= 1 ? 0 : (c.y / (1 - c.h)) * 100}%`,
+    };
+  }
+  return { ...base, backgroundSize: "cover", backgroundPosition: "center" };
+}
 
 // The self-service kiosk rendered as a DUI painted onto the kiosk's own in-world
 // screen (modules/kiosk), NOT a fullscreen NUI. The Lua drives a virtual cursor
@@ -29,6 +64,12 @@ export default function KioskDui() {
   const [orient, setOrient] = useState<Orient>({ rot: 0 });
   const [placed, setPlaced] = useState<number | null>(null);
   const [nonce, setNonce] = useState(0); // remount OrderBuilder to clear the cart
+  const [brand, setBrand] = useState<Brand>(null); // idle-screen brand for the reveal
+  // The brand cover slides UP to reveal the menu on open, DOWN to conceal it on exit.
+  // Starts concealed (covering the menu) so the brand the idle screen was showing
+  // appears to persist through the texture swap, then lifts away.
+  const [revealed, setRevealed] = useState(false);
+  const revealTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The virtual cursor, in UPRIGHT content space [0..1] (the Lua streams it as it
   // moves). CEF doesn't paint its own cursor onto the runtime texture here, so we
   // draw it — inside the rotated stage, so it stays upright in-world and sits exactly
@@ -38,9 +79,31 @@ export default function KioskDui() {
   useNuiEvent("kioskData", (d) => {
     setData(d.data ?? null);
     setOrient(d.orient ?? { rot: 0 });
+    setBrand((d.data?.brand as Brand) ?? null);
     applyTheme(d.data?.theme ?? null);
     setPlaced(null);
     setNonce((n) => n + 1);
+    // Open COVERED (brand down over the menu). The Lua binds the texture to the prop
+    // while it's covered, then explicitly asks us to reveal (kioskReveal) once the
+    // screen is bound and framed — so the brand cover is the first frame shown and the
+    // reveal never races the texture swap (no first-open flash). The timer is only a
+    // safety net in case that message is missed.
+    setRevealed(false);
+    if (revealTimer.current) clearTimeout(revealTimer.current);
+    revealTimer.current = setTimeout(() => setRevealed(true), 1500);
+  });
+  // The Lua lifts the brand cover once the screen is bound + the camera is framed.
+  useNuiEvent("kioskReveal", () => {
+    if (revealTimer.current) clearTimeout(revealTimer.current);
+    setRevealed(true);
+  });
+  // The Lua asks the page to slide the brand back down over the menu as the player
+  // steps away (modules/kiosk CloseKioskScreen), then waits for it before handing the
+  // screen back to the idle brand driver — so the conceal is seen and the handoff is
+  // seamless (the cover and the idle brand look the same).
+  useNuiEvent("kioskClosing", () => {
+    if (revealTimer.current) clearTimeout(revealTimer.current);
+    setRevealed(false);
   });
   useNuiEvent("kioskCursor", (d) => setCursor({ x: d.x ?? 0.5, y: d.y ?? 0.5, down: !!d.down }));
   // The Lua forwards a click as the SURFACE pixel it lands on; we hit-test that point
@@ -60,6 +123,9 @@ export default function KioskDui() {
     setPlaced(null);
     setCursor(null);
     setNonce((n) => n + 1);
+    // Stay concealed between customers; the next open re-reveals.
+    if (revealTimer.current) clearTimeout(revealTimer.current);
+    setRevealed(false);
   });
 
   // Tell the Lua the moment we've painted, so it binds the runtime texture to a
@@ -141,6 +207,20 @@ export default function KioskDui() {
     <div className="absolute inset-0 overflow-hidden bg-background">
       <div style={stageStyle}>
         {inner}
+        {/* Brand cover — slides up to reveal the menu on open, down to conceal on exit.
+            Lives in the (already-oriented) stage so it paints upright exactly like the
+            menu beneath it and the idle brand it hands off to. */}
+        {data && (
+          <div
+            className="pointer-events-none absolute inset-0 z-40 ease-in-out"
+            style={{
+              ...coverStyle(brand),
+              transitionProperty: "transform",
+              transitionDuration: `${SLIDE_MS}ms`,
+              transform: revealed ? "translateY(-100%)" : "translateY(0)",
+            }}
+          />
+        )}
         {cursor && (
           <div
             style={{

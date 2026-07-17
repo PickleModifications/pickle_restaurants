@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave, CircleDot, Search, Trash2, ChevronUp, ChevronDown, Timer, Package, ShoppingBag } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
+import { equipImageUrl, drinkImageUrl } from "@/lib/localImages";
 
 // kind "finish" = a finish tool (frosting): flavors is picked on the card, then the
 // tube is rubbed over a cooked target on the prep table until fully coated.
@@ -42,6 +43,9 @@ type TrayEntry = {
   boxed?: boolean;
   // a finished (frosted…) product's recorded flavor, e.g. "Strawberry"
   flavorLabel?: string;
+  // a poured drink's flavor output key (e.g. "soda") — picks its per-flavor card
+  // art (items/<flavor>.png), falling back to the generic drink image
+  flavor?: string;
   // which finish tool last applied to this product (e.g. "frosting") — lets a
   // finish tool gate on a prior finish (sprinkles require frosting) client-side
   finishTool?: string;
@@ -125,11 +129,13 @@ const STATE_STYLE: Record<string, { label: string; cls: string }> = {
 
 const stateMeta = (s?: string) => STATE_STYLE[s || "raw"] || STATE_STYLE.raw;
 
-// Item thumbnail that quietly disappears if the inventory has no image for it.
-function ItemThumb({ src, alt, className }: { src?: string; alt: string; className?: string }) {
+// Item thumbnail that quietly disappears if the inventory has no image for it — or,
+// when a `fallback` node is given (e.g. a vector icon for a non-inventory equipment
+// card), renders that instead of vanishing when the image is absent or fails to load.
+function ItemThumb({ src, alt, className, fallback }: { src?: string; alt: string; className?: string; fallback?: ReactNode }) {
   const [broken, setBroken] = useState(false);
   useEffect(() => setBroken(false), [src]);
-  if (!src || broken) return null;
+  if (!src || broken) return <>{fallback ?? null}</>;
   return <img src={src} alt={alt} draggable={false} onError={() => setBroken(true)} className={className} />;
 }
 
@@ -1794,7 +1800,12 @@ export default function Cooking({ data }: { data: any }) {
                   ) : ing.kind === "bag" ? (
                     <ShoppingBag className="h-10 w-10 text-primary/80" />
                   ) : ing.kind === "lid" ? (
-                    <CircleDot className="h-10 w-10 text-primary/80" />
+                    <ItemThumb
+                      src={equipImageUrl("lid")}
+                      alt={ing.label}
+                      className="h-10 w-10 object-contain"
+                      fallback={<CircleDot className="h-10 w-10 text-primary/80" />}
+                    />
                   ) : (
                     <ItemThumb src={ing.image} alt={ing.label} className={ing.kind === "finish" ? "h-8 w-8 object-contain" : "h-10 w-10 object-contain"} />
                   )}
@@ -1876,15 +1887,24 @@ export default function Cooking({ data }: { data: any }) {
                 onPointerLeave={hideBarTip}
                 className="relative flex h-32 w-28 shrink-0 cursor-grab touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border border-border/80 bg-card text-center text-xs font-medium hover:border-primary/50 hover:bg-accent/60 active:cursor-grabbing"
               >
-                {ing.kind === "tray" ? (
-                  <UtensilsCrossed className="h-10 w-10 text-primary/80" />
-                ) : ing.kind === "baketray" ? (
-                  <CookingPot className="h-10 w-10 text-primary/80" />
-                ) : ing.kind === "bag" ? (
-                  <ShoppingBag className="h-10 w-10 text-primary/80" />
-                ) : (
-                  <Package className="h-10 w-10 text-primary/80" />
-                )}
+                {/* A server-supplied image (web/public/items/, see lib/localImages)
+                    replaces the placeholder icon when present; missing → the icon. */}
+                <ItemThumb
+                  src={equipImageUrl(ing.kind, ing.subkind)}
+                  alt={ing.label}
+                  className="h-10 w-10 object-contain"
+                  fallback={
+                    ing.kind === "tray" ? (
+                      <UtensilsCrossed className="h-10 w-10 text-primary/80" />
+                    ) : ing.kind === "baketray" ? (
+                      <CookingPot className="h-10 w-10 text-primary/80" />
+                    ) : ing.kind === "bag" ? (
+                      <ShoppingBag className="h-10 w-10 text-primary/80" />
+                    ) : (
+                      <Package className="h-10 w-10 text-primary/80" />
+                    )
+                  }
+                />
                 <span className="w-full truncate px-1.5 leading-tight">{ing.label}</span>
                 <span className="text-[10px] text-muted-foreground">
                   {ing.kind === "tray" ? "Build a meal" : ing.kind === "baketray" ? "Rub in the mix" : ing.kind === "bag" ? _L("cook.craft_in_bag") : "Boxes a pizza"}
@@ -1928,7 +1948,15 @@ export default function Cooking({ data }: { data: any }) {
               >
                 {/* content block centered in the space above the action row */}
                 <div className="flex min-h-0 w-full flex-1 flex-col items-center justify-center gap-0.5">
-                  <ItemThumb src={e.image} alt={e.label || e.item} className="h-10 w-10 object-contain" />
+                  {/* a poured drink prefers its supplied per-flavor art, falling back
+                      to the generic drink image (then nothing); everything else uses
+                      its own inventory image as before */}
+                  <ItemThumb
+                    src={e.flavor ? drinkImageUrl(e.flavor) : e.image}
+                    alt={e.label || e.item}
+                    className="h-10 w-10 object-contain"
+                    fallback={e.flavor && e.image ? <ItemThumb src={e.image} alt={e.label || e.item} className="h-10 w-10 object-contain" /> : undefined}
+                  />
                   <span className="w-full truncate px-1.5 leading-tight">{e.label || e.item}</span>
                   {/* flavor line for finished (frosted) products; toppings row for
                       everything else — fixed height so every card lines up */}

@@ -8,6 +8,7 @@ import {
   Thumb, OptRow, arr, groupLines,
   type Ticket, type MealOption, type MealItem, type OptView,
 } from "@/components/OrderBuilder";
+import { drinkLineImageUrl } from "@/lib/localImages";
 import TicketTimer from "@/components/TicketTimer";
 
 // The staff-facing ticket list + fulfillment UI (complete / cancel / meal picker),
@@ -98,7 +99,7 @@ function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?:
               const mods = Array.isArray(l.mods) ? l.mods : [];
               return (
                 <div key={bi} className="flex items-center gap-2 rounded-sm bg-muted/50 p-1.5">
-                  <Thumb src={l.image} className={cn("shrink-0", big ? "h-11 w-11" : "h-9 w-9")} />
+                  <Thumb src={drinkLineImageUrl(l.kind, l.variant)} fallbackSrc={l.image} className={cn("shrink-0", big ? "h-11 w-11" : "h-9 w-9")} />
                   <div className="min-w-0 flex-1">
                     <div className={cn("truncate font-medium", big ? "text-sm" : "text-xs")}>{l.label}</div>
                     <OptRow added={mods.filter((m) => !m.removed)} removed={mods.filter((m) => m.removed)} />
@@ -119,7 +120,7 @@ function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?:
                     const mods = Array.isArray(l.mods) ? l.mods : [];
                     return (
                       <div key={li} className="flex items-center gap-1.5">
-                        <Thumb src={l.image} className="h-6 w-6 shrink-0" />
+                        <Thumb src={drinkLineImageUrl(l.kind, l.variant)} fallbackSrc={l.image} className="h-6 w-6 shrink-0" />
                         <span className="truncate text-[11px]">{l.label}</span>
                         <OptRow added={mods.filter((m) => !m.removed)} removed={mods.filter((m) => m.removed)} />
                       </div>

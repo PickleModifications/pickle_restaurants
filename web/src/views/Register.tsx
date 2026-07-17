@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNuiEvent } from "@/lib/nui";
 import Panel from "@/components/Panel";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { money } from "@/lib/utils";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { ShoppingCart, ClipboardList } from "lucide-react";
 import { OrderBuilder, arr, type Cat, type Combo, type Near, type Ticket } from "@/components/OrderBuilder";
@@ -25,6 +25,8 @@ export default function Register({ data, onClose }: { data: any; onClose: () => 
   useEffect(() => { setTickets(arr<Ticket>(data?.tickets)); }, [data]);
   useNuiEvent("orders", (d) => setTickets(arr<Ticket>(d?.orders)));
 
+  const [tab, setTab] = useState<"new" | "tickets">("new");
+
   return (
     <Panel
       title={_L("register.title")}
@@ -32,21 +34,23 @@ export default function Register({ data, onClose }: { data: any; onClose: () => 
       onClose={onClose}
       width="max-w-4xl"
     >
-      <Tabs defaultValue="new" className="flex min-h-0 flex-1 flex-col">
+      <Tabs value={tab} onValueChange={(v) => setTab(v as "new" | "tickets")} className="flex min-h-0 flex-1 flex-col">
         <TabsList className="shrink-0">
           <TabsTrigger value="new"><ShoppingCart className="h-4 w-4" /> {_L("register.new_order")}</TabsTrigger>
           <TabsTrigger value="tickets"><ClipboardList className="h-4 w-4" /> {_L("register.tickets", tickets.length)}</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="new" className="min-h-0 flex-1">
+        {/* Both panes stay MOUNTED and toggle via CSS (not TabsContent, which unmounts
+            the inactive tab) so the in-progress cart survives a hop to Tickets and back. */}
+        <div className={cn("mt-3 min-h-0 flex-1 animate-fade-in", tab !== "new" && "hidden")}>
           <OrderBuilder id={id} catalog={catalog} combos={combos} nearby={nearby} mode="register" />
-        </TabsContent>
+        </div>
 
         {/* not overflow-scrolled here — Tickets owns its own scroll so the meal
             picker can overlay (and dim) just the ticket area, not the whole panel */}
-        <TabsContent value="tickets" className="min-h-0 flex-1">
+        <div className={cn("mt-3 min-h-0 flex-1 animate-fade-in", tab !== "tickets" && "hidden")}>
           <Tickets id={id} tickets={tickets} />
-        </TabsContent>
+        </div>
       </Tabs>
     </Panel>
   );

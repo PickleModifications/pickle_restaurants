@@ -1880,6 +1880,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                     e.label = dd.label or e.label
                     e.model = dd.model
                     e.stack = drinkRender(dd)
+                    e.flavor = dd.output -- flavor key → per-flavor NUI card art (items/<output>.png)
                 end
             end
             -- the generic restaurant_bag: resolve its craft label from the id its
@@ -1985,6 +1986,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                         entry.label = dd.label or entry.label
                         entry.model = dd.model
                         entry.stack = drinkRender(dd)
+                        entry.flavor = dd.output -- flavor key → per-flavor NUI card art (items/<output>.png)
                     end
                 end
                 -- the generic restaurant_bag: craft label + sealed-vessel render

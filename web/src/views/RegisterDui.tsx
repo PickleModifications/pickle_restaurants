@@ -136,8 +136,11 @@ export default function RegisterDui() {
         </TabBtn>
       </div>
 
+      {/* Both panes stay MOUNTED and toggle via CSS so the in-progress cart survives
+          a hop to Tickets and back (the `nonce` key still remounts — clearing the
+          cart — only on a fresh session: new data or a register reset). */}
       <div className="mt-4 min-h-0 flex-1">
-        {tab === "new" ? (
+        <div className={cn("h-full", tab !== "new" && "hidden")}>
           <OrderBuilder
             key={nonce}
             id={data.restaurantId}
@@ -147,9 +150,10 @@ export default function RegisterDui() {
             mode="register"
             big
           />
-        ) : (
+        </div>
+        <div className={cn("h-full", tab !== "tickets" && "hidden")}>
           <Tickets id={data.restaurantId} tickets={tickets} big />
-        )}
+        </div>
       </div>
     </div>
   );

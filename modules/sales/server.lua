@@ -1006,6 +1006,22 @@ local function PlayerAtKiosk(src, rid)
     return false
 end
 
+-- The image + crop the kiosk screen brands with, resolved exactly like the render
+-- target driver (modules/rendertarget `specForTarget`): the `kiosk` per-texture
+-- override when set, else the restaurant's shared brand image. The kiosk DUI paints
+-- this as a full-screen cover that slides up to reveal the menu on open (so the
+-- brand the idle screen was showing appears to stay, then lift away), and back down
+-- on exit. nil → no brand configured (the DUI covers with solid black, matching the
+-- idle screen's `blackDefault`).
+local function kioskBrandImage(r)
+    local meta = r.metadata or {}
+    local o = meta.brand_images and meta.brand_images["kiosk"]
+    if type(o) == "table" and o.url and o.url ~= "" then return { url = o.url, crop = o.crop } end
+    if type(o) == "string" and o ~= "" then return { url = o } end
+    if meta.brand_image and meta.brand_image ~= "" then return { url = meta.brand_image } end
+    return nil
+end
+
 -- The kiosk's menu payload — the same priced/enabled catalog the register sells,
 -- plus the restaurant theme so the order NUI is skinned like every scoped panel.
 lib.callback.register("pickle_restaurants:sales:getKiosk", function(src, d)
@@ -1018,6 +1034,7 @@ lib.callback.register("pickle_restaurants:sales:getKiosk", function(src, d)
         catalog      = (BuildPricedCatalog(id, true)),
         combos       = BuildComboCatalog(id), -- orderable combo bundles (parallel to catalog)
         theme        = r.metadata and r.metadata.theme or nil,
+        brand        = kioskBrandImage(r),    -- full-screen cover for the open/close slide
     }
 end)
 

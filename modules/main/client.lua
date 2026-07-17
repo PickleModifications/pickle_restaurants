@@ -337,7 +337,7 @@ end
 
 -- ─── sync handler ────────────────────────────────────────────────────────────
 
-local function ApplySync(payload)
+local function DoApplySync(payload)
     ClearWorld()
     Restaurants, RecipesByInput, RecipesByStation, Drinks, Assembly, Finishes, Condiments = {}, {}, {}, {}, {}, {}, {}
 
@@ -408,6 +408,34 @@ local function ApplySync(payload)
     -- And the always-on register board: the counter was just (re)spawned and its
     -- catalog/menu may have changed, so re-seed + re-paint it (modules/register).
     if RefreshRegister then RefreshRegister() end
+end
+
+-- Serialize syncs. SpawnProp yields (CreatePropEntity blocks while its model streams
+-- in), so DoApplySync is asynchronous: a prop's entity isn't recorded in `spawnedProps`
+-- until its model has loaded. On join a client gets TWO overlapping syncs — the server's
+-- `playerJoining` push (modules/main/server.lua) and the client's own `requestSync` — and
+-- config edits fire more (SyncToClient(-1)). If a second pass ran while the first was
+-- still mid-spawn, its ClearWorld couldn't delete the first pass's not-yet-registered
+-- entities, so both passes spawned a full set → props double up until a resource restart.
+-- Guard against re-entry: while one pass runs, a newer sync just parks its payload
+-- (coalesced to the latest), and we re-run once the current pass has fully finished — its
+-- ClearWorld now sees the previous set registered and clears it before respawning.
+local applyingSync = false
+local pendingSync  = nil
+
+local function ApplySync(payload)
+    if applyingSync then
+        pendingSync = payload
+        return
+    end
+    applyingSync = true
+    DoApplySync(payload)
+    while pendingSync do
+        local p = pendingSync
+        pendingSync = nil
+        DoApplySync(p)
+    end
+    applyingSync = false
 end
 
 RegisterNetEvent("pickle_restaurants:sync", ApplySync)

@@ -32,6 +32,10 @@ local KIOSK = {
     -- Virtual-cursor speed relative to raw mouse-look delta (higher = faster).
     -- TUNE IN-GAME with /pickle_kiosk_sens <n>.
     sensitivity = 0.5,
+    -- How long (ms) to hold the framed screen on close while the page slides its brand
+    -- cover back down over the menu, before we swap the texture to the idle brand
+    -- driver. Keep >= KioskDui's SLIDE_MS so the conceal finishes first. TUNE IN-GAME.
+    close_ms = 500,
     -- Per-model framing, in the PROP'S local space (y = the prop's forward):
     --   cam  = where the camera sits (in front of the screen, looking back at it)
     --   look = the screen centre the camera aims at
@@ -67,6 +71,30 @@ local function ensureDui()
     end)
 end
 
+-- Block until the DUI has loaded the React bundle and is painting real frames (or the
+-- timeout lapses). Returns true once ready. Used before framing a kiosk so the FIRST
+-- open shows the order page immediately instead of a blank/half-loaded surface that the
+-- player has to step away and re-enter to fix.
+local function waitDuiReady(timeoutMs)
+    ensureDui()
+    local mine = duiGen
+    local waited = 0
+    while dui and duiGen == mine and not IsDuiAvailable(dui) and waited < (timeoutMs or 5000) do
+        Wait(50)
+        waited = waited + 50
+    end
+    return dui ~= nil and duiGen == mine and IsDuiAvailable(dui)
+end
+
+-- Warm the DUI up shortly after the resource starts so the React bundle is fully loaded
+-- and painting BEFORE the player ever interacts. It isn't bound to any prop texture until
+-- a kiosk is actually opened (applyOrderScreen) — it just renders offscreen — so this
+-- costs one idle DUI in exchange for a glitch-free first open.
+CreateThread(function()
+    Wait(2000)
+    ensureDui()
+end)
+
 -- Which kiosk model our order DUI currently replaces (nil = not applied). The
 -- replacement is per-txd, so we only take over the model the player is actually at.
 local appliedModel = nil
@@ -77,6 +105,7 @@ local pendingPayload = nil
 -- Session state, declared up here so the helper closures below capture the LOCALS
 -- (a later declaration would leave those closures reading a stray global instead).
 local active = nil          -- { model, ent, rid } while a kiosk is open, else nil
+local closing = false       -- true while the brand cover slides down on exit (input still suppressed)
 local vx, vy = 0.5, 0.5     -- virtual cursor, normalised [0..1]
 local lastCurX, lastCurY    -- last cursor pos pushed to the page (skip idle resends)
 local lastDown              -- last button-down state pushed to the page
@@ -153,20 +182,27 @@ RegisterNUICallback("kiosk:painted", function(_, cb)
     cb("ok")
 end)
 
--- Push the order data to the page, resending until it acknowledges (kiosk:painted).
--- On the FIRST open the DUI is still loading the React bundle, so a single send would
--- be lost before the page's message listener exists — hence the retry loop.
-local function pushKioskData(payload)
+-- Send the order data to the page (idempotent — safe to resend; the page just re-renders
+-- the same content). Carries the screen orientation so the page lands upright.
+local function sendKioskData(payload)
+    if dui then SendDuiMessage(dui, json.encode({ action = "kioskData", data = payload, orient = orient })) end
+end
+
+-- Render the order page into the DUI and BLOCK until it has painted a real frame (the
+-- page POSTs kiosk:painted), or the timeout lapses. Because the DUI is pre-warmed the
+-- page's listener already exists, so the first send is received immediately; we resend
+-- each tick only as a safety net. Returns true once painted.
+local function pushKioskDataAndWait(payload, timeoutMs)
     dataAcked = false
+    pendingPayload = payload
     local mine = payload
-    CreateThread(function()
-        local tries = 0
-        while active and pendingPayload == mine and not dataAcked and tries < 60 do
-            if dui then SendDuiMessage(dui, json.encode({ action = "kioskData", data = mine, orient = orient })) end
-            tries = tries + 1
-            Wait(200)
-        end
-    end)
+    local waited = 0
+    while dui and pendingPayload == mine and not dataAcked and waited < (timeoutMs or 2000) do
+        sendKioskData(payload)
+        Wait(100)
+        waited = waited + 100
+    end
+    return dataAcked
 end
 
 -- ─── scripted framing camera ─────────────────────────────────────────────────
@@ -216,30 +252,69 @@ function CloseKioskScreen()
     if not active then return end
     local model = active.model
     active = nil
-    if dui then SendDuiMouseUp(dui, "l") end -- release a held button, just in case
-    local ped = PlayerPedId()
-    FreezeEntityPosition(ped, false)
-    SetEntityVisible(ped, true, false)
-    teardownCam()
-    removeOrderScreen()
-    -- Hand the screen back to the brand driver (idle brand / black default) by
-    -- re-binding its render target now the order screen is gone — otherwise the model
-    -- would revert to its baked-in placeholder texture until the next driver tick.
-    if ReassertBrandFor then ReassertBrandFor(model) end
-    if dui then SendDuiMessage(dui, json.encode({ action = "kioskReset" })) end
+    if dui then
+        SendDuiMouseUp(dui, "l") -- release a held button, just in case
+        -- Slide the brand cover back down over the menu. We hold the framed screen
+        -- (camera + hidden ped) through the slide so the conceal is actually seen, then
+        -- swap to the idle brand — which looks identical to the cover, so it's seamless.
+        SendDuiMessage(dui, json.encode({ action = "kioskClosing" }))
+    end
+    -- Keep input suppressed + HUD hidden while the cover slides (the cursor loop reads
+    -- `closing`). The handoff is DEFERRED to its own thread so this returns immediately
+    -- — CloseKioskScreen is called from inside the cursor loop (the ESC path), and a
+    -- Wait here would block that loop and drop the input suppression mid-slide.
+    closing = true
+    CreateThread(function()
+        Wait(KIOSK.close_ms)
+        if active then return end -- a new open raced us; leave its session intact
+        closing = false
+        local ped = PlayerPedId()
+        FreezeEntityPosition(ped, false)
+        SetEntityVisible(ped, true, false)
+        teardownCam()
+        removeOrderScreen()
+        -- Hand the screen back to the brand driver (idle brand / black default) by
+        -- re-binding its render target now the order screen is gone — otherwise the
+        -- model would revert to its baked-in placeholder texture until the next tick.
+        if ReassertBrandFor then ReassertBrandFor(model) end
+        if dui then SendDuiMessage(dui, json.encode({ action = "kioskReset" })) end
+    end)
 end
 
 -- Opened from main's kiosk interaction (both wall `kiosk` and floor `kiosk_ground`).
+local opening = false
 function OpenKioskScreen(prop, ent)
-    if active then return end
+    if active or opening then return end
+    opening = true
     local rid = prop.restaurant_id
+
+    -- Kick the DUI loading FIRST (usually already warm from the startup pre-warm) so the
+    -- bundle keeps loading WHILE we fetch the kiosk data over the network.
+    ensureDui()
+
     local data = lib.callback.await("pickle_restaurants:sales:getKiosk", false, { id = rid })
     if not data or not data.ok then
+        opening = false
         return ShowNotification((data and data.error) or _L("sales_kiosk_unavailable"))
     end
+
+    -- Don't touch the screen until the DUI is actually loaded and painting — otherwise
+    -- the first open catches a blank/half-rendered surface and the player has to re-enter.
+    -- The data fetch above already gave it a head start; wait out whatever's left.
+    waitDuiReady(5000)
+    if active then opening = false; return end -- a concurrent open won the race
+
     local geo = KIOSK.geo[prop.prop_type] or KIOSK.geo["kiosk"]
 
-    ensureDui()
+    closing = false -- cancel any in-flight close handoff; this open owns the screen now
+
+    -- Render the order page (brand cover DOWN over the menu) into the DUI and wait for it
+    -- to paint BEFORE we bind the texture to the prop. The kiosk's idle screen is the
+    -- brand texture (modules/rendertarget); by making our first bound frame the matching
+    -- brand cover — not the blank bg placeholder the page shows before data arrives — the
+    -- swap is seamless instead of a flash. The cover then lifts (kioskReveal) below.
+    pushKioskDataAndWait(data, 2000)
+
     -- Take the kiosk screen texture over on THIS model only. The brand driver's target
     -- for this model stays applied; our order screen wins by last-write-wins, and
     -- CloseKioskScreen hands it back (ReassertBrandFor) when we step away.
@@ -255,9 +330,12 @@ function OpenKioskScreen(prop, ent)
     SetEntityVisible(ped, false, false)
     active = { model = prop.model, ent = ent, rid = rid }
 
-    pendingPayload = data
-    pushKioskData(data)         -- resends until the page acknowledges
     rebindAfterPaint(prop.model)
+    -- Now that the screen is bound and the camera is framing it, lift the brand cover to
+    -- reveal the menu (the page holds it down until we ask, so the reveal is always seen
+    -- and never races the texture swap).
+    if dui then SendDuiMessage(dui, json.encode({ action = "kioskReveal" })) end
+    opening = false
 end
 
 -- KioskDui's "Done" button asks us to step away.
@@ -338,6 +416,12 @@ CreateThread(function()
                 CloseKioskScreen()
             end
 
+            Wait(0)
+        elseif closing then
+            -- Hold the frame steady while the brand cover slides down: keep input off
+            -- and the HUD hidden, but no cursor/click handling (the session is over).
+            DisableAllControlActions(0)
+            HideHudAndRadarThisFrame()
             Wait(0)
         else
             Wait(250)
