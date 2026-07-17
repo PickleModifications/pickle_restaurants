@@ -1,6 +1,22 @@
 /* Pickle Food — mobile companion app. Layers on top of index.css tokens; no new
    colors, only layout + motion. All color comes from the shared --brand/--bg/…
-   triplets so per-restaurant applyTheme() reskins the whole app for free. */
+   triplets so the ONE global phone theme (applyTheme from the `phone_theme` setting)
+   reskins the whole app for free. NEVER color-mix()/relative-color/backdrop-filter —
+   FiveM's CEF predates them; consume tokens as rgb(var(--x) / alpha). */
+
+:root {
+  /* Soft elevation — tuned for the dark kit (subtle) but reads on paper too. Cards,
+     sheets, and floating bars borrow these instead of hardcoding shadows. */
+  --pf-shadow: 0 1px 2px rgb(0 0 0 / 0.16), 0 8px 22px -12px rgb(0 0 0 / 0.5);
+  --pf-shadow-lg: 0 2px 6px rgb(0 0 0 / 0.2), 0 18px 40px -16px rgb(0 0 0 / 0.6);
+  /* Safe-area insets (lb-phone status bar / notch); 0 in a plain browser. */
+  --pf-top: env(safe-area-inset-top, 0px);
+  --pf-bottom: env(safe-area-inset-bottom, 0px);
+}
+:root[data-mode="paper"] {
+  --pf-shadow: 0 1px 2px rgb(0 0 0 / 0.06), 0 8px 20px -12px rgb(0 0 0 / 0.22);
+  --pf-shadow-lg: 0 2px 6px rgb(0 0 0 / 0.08), 0 16px 36px -14px rgb(0 0 0 / 0.28);
+}
 
 html,
 body,
@@ -11,6 +27,7 @@ body,
   background: rgb(var(--bg));
   color: rgb(var(--ink));
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 /* The app fills the lb-phone iframe. A single scroll region (.pf-scroll) owns all
@@ -21,6 +38,10 @@ body,
   flex-direction: column;
   position: relative;
   overflow: hidden;
+  /* faint brand aura at the very top so the header never meets a hard black edge */
+  background:
+    radial-gradient(120% 42% at 50% -8%, rgb(var(--brand) / 0.1), transparent 70%),
+    rgb(var(--bg));
 }
 
 .pf-scroll {
@@ -29,10 +50,20 @@ body,
   overflow-x: hidden;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
+  padding-top: var(--pf-top);
 }
 .pf-scroll::-webkit-scrollbar {
   width: 0;
   height: 0;
+}
+
+/* Elevated surface — a card/sheet/bar that floats off the background. Opt-in so the
+   existing flat `bg-card` cards can adopt it class-by-class. */
+.pf-elev {
+  box-shadow: var(--pf-shadow);
+}
+.pf-elev-lg {
+  box-shadow: var(--pf-shadow-lg);
 }
 
 /* Hide-scrollbar horizontal rails (order-again, category chips). */
@@ -56,7 +87,7 @@ body,
 @keyframes pf-screen-in {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
@@ -64,7 +95,7 @@ body,
   }
 }
 .pf-screen {
-  animation: pf-screen-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: pf-screen-in 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 /* Bottom sheet (cart / options). */
@@ -87,7 +118,7 @@ body,
 .pf-scrim {
   position: absolute;
   inset: 0;
-  background: rgb(0 0 0 / 0.5);
+  background: rgb(0 0 0 / 0.55);
   animation: pf-scrim-in 0.2s ease both;
   z-index: 40;
 }
@@ -97,21 +128,23 @@ body,
   right: 0;
   bottom: 0;
   background: rgb(var(--card));
-  border-top-left-radius: 1.4rem;
-  border-top-right-radius: 1.4rem;
+  border-top-left-radius: 1.5rem;
+  border-top-right-radius: 1.5rem;
   border-top: 1px solid rgb(var(--line));
-  animation: pf-sheet-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+  box-shadow: var(--pf-shadow-lg);
+  animation: pf-sheet-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
   z-index: 41;
   max-height: 88%;
+  padding-bottom: var(--pf-bottom);
   display: flex;
   flex-direction: column;
 }
 .pf-grab {
   width: 2.4rem;
-  height: 0.28rem;
+  height: 0.3rem;
   border-radius: 999px;
-  background: rgb(var(--ink-mute) / 0.4);
-  margin: 0.55rem auto 0.2rem;
+  background: rgb(var(--ink-mute) / 0.35);
+  margin: 0.6rem auto 0.2rem;
 }
 
 /* The loyalty punch-card: perforated dots that fill as you order. */
@@ -128,6 +161,7 @@ body,
   place-items: center;
   font-size: 0.7rem;
   color: rgb(var(--ink-mute));
+  transition: transform 0.15s ease, background 0.15s ease;
 }
 .pf-hole.on {
   border-style: solid;
@@ -187,25 +221,46 @@ body,
   transform: scale(1.25);
 }
 
-/* Bottom tab bar */
+/* Bottom tab bar — floats over the content with a hairline + soft top shadow. Each
+   tab's icon sits in a pill that lights up (brand wash) when active, Material-3 style. */
 .pf-tabs {
   display: flex;
+  gap: 0.15rem;
   border-top: 1px solid rgb(var(--line));
   background: rgb(var(--card));
-  padding-bottom: env(safe-area-inset-bottom, 0);
+  box-shadow: 0 -1px 0 rgb(var(--line) / 0.6), 0 -10px 24px -16px rgb(0 0 0 / 0.5);
+  padding: 0.35rem 0.4rem calc(0.35rem + var(--pf-bottom));
+  position: relative;
+  z-index: 20;
 }
 .pf-tab {
   flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.15rem;
-  padding: 0.5rem 0 0.55rem;
+  gap: 0.2rem;
+  padding: 0.35rem 0 0.3rem;
   color: rgb(var(--ink-mute));
-  font-size: 0.62rem;
+  font-size: 0.6rem;
   font-weight: 600;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.015em;
+  transition: color 0.18s ease;
+}
+/* the icon capsule — the highlighted indicator when the tab is active */
+.pf-tab-ico {
+  display: grid;
+  place-items: center;
+  width: 3.9rem;
+  height: 1.85rem;
+  border-radius: 999px;
+  transition: background 0.2s ease, transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.pf-tab:active .pf-tab-ico {
+  transform: scale(0.9);
 }
 .pf-tab.on {
   color: rgb(var(--brand));
+}
+.pf-tab.on .pf-tab-ico {
+  background: rgb(var(--brand) / 0.16);
 }

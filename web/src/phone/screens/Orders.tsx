@@ -9,7 +9,6 @@ import {
   ClipboardList,
 } from "lucide-react";
 import { fetchNui, useNuiEvent } from "../../lib/nui";
-import { applyTheme } from "../../lib/theme";
 import { cn } from "../../lib/utils";
 import { usePhone, money } from "../store";
 import { Screen, TopBar, ItemImg, Empty, Stars } from "../ui";
@@ -110,11 +109,6 @@ export function OrderTrack({ params }: { params: any }) {
   const seed = (home?.orders || []).find((o: any) => o.orderId === params.orderId);
   const [order, setOrder] = useState<any>(seed || { orderId: params.orderId, status: "open", type: "pickup", lines: [] });
   const [reviewing, setReviewing] = useState(false);
-
-  useEffect(() => {
-    if (order?.theme) applyTheme(order.theme);
-    return () => applyTheme(null);
-  }, [order?.theme]);
 
   // Live: the server broadcasts open tickets for this restaurant. Update our
   // ready-flag off it; when our ticket drops out of the open list, it's completed.

@@ -16,34 +16,33 @@ function RestaurantCard({ r, onOpen }: { r: any; onOpen: () => void }) {
     <button
       onClick={r.open ? onOpen : undefined}
       className={cn(
-        "block w-full overflow-hidden rounded-2xl border border-border bg-card text-left active:scale-[0.99]",
-        !r.open && "opacity-60"
+        "pf-elev block w-full overflow-hidden rounded-3xl border border-border bg-card text-left transition-transform",
+        r.open ? "active:scale-[0.985]" : "opacity-70"
       )}
     >
-      <div className="relative h-32 w-full bg-muted">
+      <div className="relative h-36 w-full bg-muted">
         <ItemImg src={r.brand} alt={r.label} className="h-full w-full" />
-        <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/60 to-transparent" />
+        <div className="absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/70 via-black/25 to-transparent" />
         {r.promo && (
-          <div className="absolute left-2 top-2">
+          <div className="absolute left-2.5 top-2.5">
             <PromoTag label={`${r.promo.percent}% off`} />
           </div>
         )}
-        {!r.open && (
-          <div className="absolute right-2 top-2 rounded-full bg-black/70 px-2 py-0.5 text-[0.62rem] font-bold text-white">
-            Closed
-          </div>
-        )}
-        <div className="absolute bottom-2 left-3 right-3 flex items-end justify-between text-white">
-          <span className="font-display text-lg font-extrabold drop-shadow">{r.label}</span>
+        <div className="absolute right-2.5 top-2.5 flex items-center gap-1 rounded-full bg-black/65 px-2 py-0.5 text-[0.6rem] font-bold uppercase tracking-wide text-white">
+          <span className={cn("h-1.5 w-1.5 rounded-full", r.open ? "bg-ok" : "bg-white/50")} />
+          {r.open ? "Open" : "Closed"}
+        </div>
+        <div className="absolute bottom-2.5 left-3.5 right-3.5 text-white">
+          <span className="font-display text-xl font-extrabold leading-tight drop-shadow-md">{r.label}</span>
         </div>
       </div>
-      <div className="flex items-center gap-3 px-3 py-2 text-muted-foreground">
+      <div className="flex items-center gap-3 px-3.5 py-2.5 text-muted-foreground">
         <Rating value={r.rating} count={r.reviews} />
-        <span className="inline-flex items-center gap-1 text-[0.72rem]">
+        <span className="inline-flex items-center gap-1 text-[0.72rem] font-medium">
           <Clock className="h-3 w-3" /> {eta(r.dist)}
         </span>
         {r.dist != null && (
-          <span className="inline-flex items-center gap-1 text-[0.72rem]">
+          <span className="ml-auto inline-flex items-center gap-1 text-[0.72rem] font-medium">
             <MapPin className="h-3 w-3" /> {r.dist < 1000 ? `${r.dist}m` : `${(r.dist / 1000).toFixed(1)}km`}
           </span>
         )}
@@ -73,14 +72,14 @@ export default function Home() {
   return (
     <Screen className="pb-24">
       {/* header */}
-      <div className="bg-card px-4 pb-3 pt-4">
-        <div className="text-[0.72rem] uppercase tracking-wide text-muted-foreground">
-          Deliver to · your location
+      <div className="rounded-b-3xl border-b border-border bg-card px-4 pb-3.5 pt-4">
+        <div className="flex items-center gap-1 text-[0.7rem] font-semibold uppercase tracking-wide text-muted-foreground">
+          <MapPin className="h-3.5 w-3.5 text-brand" /> Deliver to · your location
         </div>
-        <h1 className="font-display text-2xl font-extrabold leading-tight">
+        <h1 className="mt-0.5 font-display text-2xl font-extrabold leading-tight">
           Hey {home?.name?.split(" ")[0] || "there"} — hungry?
         </h1>
-        <div className="mt-3 flex items-center gap-2 rounded-full border border-border bg-background px-3 py-2">
+        <div className="mt-3 flex items-center gap-2 rounded-full border border-border bg-background px-3.5 py-2.5">
           <Search className="h-4 w-4 text-muted-foreground" />
           <input
             value={q}
@@ -89,7 +88,7 @@ export default function Home() {
             className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
           />
         </div>
-        <div className="mt-2 flex gap-2">
+        <div className="mt-2.5 flex gap-2">
           <Pill active={onlyOpen} onClick={() => setOnlyOpen((v) => !v)}>
             Open now
           </Pill>
@@ -111,13 +110,13 @@ export default function Home() {
               <button
                 key={f.id}
                 onClick={() => go("restaurant", { rid: f.restaurant_id, reorder: f })}
-                className="w-40 shrink-0 rounded-2xl border border-border bg-card p-3 text-left active:scale-95"
+                className="pf-elev w-40 shrink-0 rounded-2xl border border-border bg-card p-3 text-left transition-transform active:scale-95"
               >
-                <div className="font-semibold leading-tight">{f.label}</div>
+                <div className="truncate font-semibold leading-tight">{f.label}</div>
                 <div className="mt-0.5 truncate text-[0.72rem] text-muted-foreground">
                   {f.restaurant}
                 </div>
-                <div className="mt-2 inline-flex items-center gap-1 text-[0.72rem] font-semibold text-primary">
+                <div className="mt-2 inline-flex items-center gap-1 text-[0.72rem] font-semibold text-brand">
                   Reorder <ChevronRight className="h-3 w-3" />
                 </div>
               </button>

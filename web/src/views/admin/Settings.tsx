@@ -34,6 +34,7 @@ const PERM_LABEL: Record<string, string> = {
 type Props = {
   settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void;
   appTheme?: ThemeConfig | null; onAppTheme?: (t: ThemeConfig) => void;
+  phoneTheme?: ThemeConfig | null; onPhoneTheme?: (t: ThemeConfig) => void;
 };
 
 // Drinks + Assembly editors moved to the Menu tab (foods live together there).
@@ -47,7 +48,7 @@ const GROUPS = [
   { key: "blip", label: _L("settings.group_blip"), icon: MapPin },
 ];
 
-export default function Settings({ settings, items, groups, onSaved, appTheme, onAppTheme }: Props) {
+export default function Settings({ settings, items, groups, onSaved, appTheme, onAppTheme, phoneTheme, onPhoneTheme }: Props) {
   const [group, setGroup] = useState("general");
 
   return (
@@ -75,7 +76,7 @@ export default function Settings({ settings, items, groups, onSaved, appTheme, o
       {/* group form */}
       <div className="min-w-0 flex-1 overflow-y-auto pr-1 pb-4">
         {group === "general" && <General settings={settings} onSaved={onSaved} />}
-        {group === "appearance" && <Appearance appTheme={appTheme} onAppTheme={onAppTheme} />}
+        {group === "appearance" && <Appearance appTheme={appTheme} onAppTheme={onAppTheme} phoneTheme={phoneTheme} onPhoneTheme={onPhoneTheme} />}
         {group === "economy" && <Economy settings={settings} onSaved={onSaved} />}
         {group === "pricing" && <Pricing settings={settings} items={items} onSaved={onSaved} />}
         {group === "roles" && <Roles settings={settings} onSaved={onSaved} />}
@@ -147,16 +148,34 @@ function General({ settings, onSaved }: { settings: any; onSaved: () => void }) 
  * restaurant's theme; saved as the `app_theme` setting. Previews live and keeps
  * the parent's copy in sync so opening a restaurant detail and closing it again
  * returns to the CURRENT panel theme. */
-function Appearance({ appTheme, onAppTheme }: { appTheme?: ThemeConfig | null; onAppTheme?: (t: ThemeConfig) => void }) {
+function Appearance({
+  appTheme, onAppTheme, phoneTheme, onPhoneTheme,
+}: {
+  appTheme?: ThemeConfig | null; onAppTheme?: (t: ThemeConfig) => void;
+  phoneTheme?: ThemeConfig | null; onPhoneTheme?: (t: ThemeConfig) => void;
+}) {
   return (
-    <ThemeEditor
-      id={0}
-      theme={appTheme}
-      event="admin:setAppTheme"
-      onChange={onAppTheme}
-      heading={_L("theme.app_title")}
-      blurb={_L("theme.app_hint")}
-    />
+    <div className="space-y-3">
+      <ThemeEditor
+        id={0}
+        theme={appTheme}
+        event="admin:setAppTheme"
+        onChange={onAppTheme}
+        heading={_L("theme.app_title")}
+        blurb={_L("theme.app_hint")}
+      />
+      {/* The phone app's ONE global skin — `scoped` so it previews on its own swatch
+          instead of hijacking this panel (which keeps its own menu theme). */}
+      <ThemeEditor
+        id={0}
+        theme={phoneTheme}
+        event="admin:setPhoneTheme"
+        onChange={onPhoneTheme}
+        heading={_L("theme.phone_title")}
+        blurb={_L("theme.phone_hint")}
+        scoped
+      />
+    </div>
   );
 }
 

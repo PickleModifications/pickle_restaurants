@@ -21,13 +21,13 @@ export function TopBar({
     <div
       className={cn(
         "sticky top-0 z-20 flex items-center gap-2 px-3 py-2.5",
-        !transparent && "bg-card/95 border-b border-border"
+        !transparent && "pf-elev border-b border-border bg-card/95"
       )}
     >
       {onBack && (
         <button
           onClick={onBack}
-          className="grid h-8 w-8 place-items-center rounded-full bg-muted text-foreground active:scale-95"
+          className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-muted text-foreground transition-transform active:scale-90"
         >
           <ChevronLeft className="h-5 w-5" />
         </button>

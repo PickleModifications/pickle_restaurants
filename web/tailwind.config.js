@@ -17,6 +17,15 @@ export default {
         background: token("var(--bg)"),
         foreground: token("var(--ink)"),
         primary: { DEFAULT: token("var(--brand)"), foreground: token("var(--brand-ink)") },
+        // `brand`/`brand-ink` are aliases of the primary seed for the phone app, which
+        // styles with `bg-brand`/`text-brand-ink`/`border-brand` (nested keys flatten to
+        // `-ink`/`-hover`/`-active`). Same tokens as `primary`, just the phone's vocabulary.
+        brand: {
+          DEFAULT: token("var(--brand)"),
+          ink: token("var(--brand-ink)"),
+          hover: token("var(--brand-hover)"),
+          active: token("var(--brand-active)"),
+        },
         secondary: { DEFAULT: token("var(--card-2)"), foreground: token("var(--ink)") },
         destructive: { DEFAULT: token("var(--danger)"), foreground: "#fff7f5" },
         muted: { DEFAULT: token("var(--sunk)"), foreground: token("var(--ink-mute)") },

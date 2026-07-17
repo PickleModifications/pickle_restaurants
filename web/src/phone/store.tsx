@@ -7,8 +7,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { fetchNui } from "../lib/nui";
-import { applyTheme } from "../lib/theme";
+import { fetchNui, useNuiEvent } from "../lib/nui";
+import { applyTheme, type ThemeConfig } from "../lib/theme";
 
 // ─── types ──────────────────────────────────────────────────────────────────
 export type ScreenName =
@@ -109,14 +109,23 @@ export function PhoneProvider({ children }: { children: any }) {
 
   const currency = home?.currency || "$";
 
-  // NOTE: does NOT touch the theme — themed screens (restaurant / checkout /
-  // tracking) own applyTheme() on mount + reset on unmount, so the periodic
-  // refresh can't stomp the seed while the user is browsing a restaurant.
+  // The phone has ONE global theme (the `phone_theme` setting), applied once here and
+  // held for the whole app — it never reskins per restaurant, so the app reads like a
+  // real delivery service rather than changing color on every storefront.
+  const applyPhoneTheme = useCallback((t?: ThemeConfig | null) => applyTheme(t), []);
+
   const refreshHome = useCallback(async () => {
     const d = await fetchNui("phone:home", {});
-    if (d?.ok) setHome(d);
+    if (d?.ok) {
+      setHome(d);
+      applyPhoneTheme(d.theme); // idempotent — keeps the seed asserted on every refresh
+    }
     return d;
-  }, []);
+  }, [applyPhoneTheme]);
+
+  // Live push: the admin panel changed the global phone theme — reskin immediately
+  // (the next home refresh reasserts the same, now-saved seed).
+  useNuiEvent("theme", (d) => applyPhoneTheme(d?.theme));
 
   // Boot: wait for lb-phone's componentsLoaded handshake, then load. The backend
   // may still be seeding (PhoneReady) right after a server restart, so retry a few
