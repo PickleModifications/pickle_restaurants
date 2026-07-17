@@ -1099,6 +1099,127 @@ lib.callback.register("pickle_restaurants:sales:kioskOrder", function(src, d)
     return { ok = true, ticket = ticketNo }
 end)
 
+-- ─── phone companion: remote order (delivery / pickup / dine-in) ──────────────
+-- Placed from the lb-phone app. The customer pays for their own order from
+-- anywhere; the ticket enters the kitchen queue like a kiosk order (so order-ahead
+-- food queues before arrival). Applies an active promo discount and an optional
+-- loyalty redemption. order_type / scheduled / address persist on the additive
+-- phone columns and ride the GetOpenOrders projection into the KDS + tracking.
+DeliveryTargets = {} -- [orderId] = { x, y, z } customer drop, for the driver blip
+
+lib.callback.register("pickle_restaurants:phone:placeOrder", function(src, d)
+    local id = tonumber(d.id)
+    local r = GetRestaurant(id); if not r then return { ok = false, error = _L("order_failed") } end
+
+    local lines, total, lerr = resolveOrderLines(id, d.cart)
+    if not lines then return { ok = false, error = lerr } end
+
+    local orderType = d.orderType
+    if orderType ~= "delivery" and orderType ~= "dine_in" then orderType = "pickup" end
+    local scheduled = d.scheduled and tostring(d.scheduled):sub(1, 20) or nil
+    local address   = d.address and tostring(d.address):sub(1, 160) or nil
+
+    -- Promo discount (percent off the whole cart). Globals from modules/phone.
+    local promo = ActivePromo and ActivePromo(id) or nil
+    local discountPct = promo and promo.percent or 0
+
+    -- Optional loyalty redemption: a free item = knock the cheapest line's unit
+    -- price off the total. Punches are consumed ATOMICALLY only after the charge
+    -- succeeds, so a failed order can never burn a redemption.
+    local customerId = GetIdentifier(src)
+    local redeemAmount, didRedeem = 0, false
+    if d.redeem and PhoneCanRedeem and PhoneCanRedeem(id, customerId) then
+        local cheapest
+        for _, l in ipairs(lines) do
+            if not cheapest or l.price < cheapest then cheapest = l.price end
+        end
+        redeemAmount, didRedeem = cheapest or 0, true
+    end
+
+    local finalTotal = RoundMoney(math.max(0, (total - redeemAmount) * (100 - discountPct) / 100))
+    if GetMoney(src, "money") < finalTotal then return { ok = false, error = _L("not_enough_cash") } end
+
+    local ticketNo, orderId
+    local ok, err = pcall(function()
+        local order = CreateOrder(id, {
+            customer_identifier = customerId,
+            customer_name       = GetPlayerCharacterName(src),
+            cashier_identifier  = customerId,
+            lines               = lines,
+            total               = finalTotal,
+        })
+        ticketNo, orderId = order.ticket, order.id
+        -- Carry the phone fields on the cache row so GetOpenOrders projects them.
+        order.order_type    = orderType
+        order.scheduled_for = scheduled
+        order.address       = address
+
+        if finalTotal > 0 then RemoveMoney(src, finalTotal, "money") end
+        AdjustBalance(id, finalTotal)
+
+        MySQL.update("UPDATE `pickle_restaurant_orders` SET order_type = ?, scheduled_for = ?, address = ?, phone_number = ? WHERE id = ?",
+            { orderType, scheduled, address, d.phone, order.id })
+
+        local summary = orderSummary(lines)
+        local tag = (orderType == "delivery") and "delivery" or (orderType == "dine_in") and "dine-in" or "pickup"
+        AddLedger(id, "sale", finalTotal, ("Ticket #%d — %s (%s)"):format(order.ticket, summary, tag):sub(1, 255), customerId)
+
+        if ItemExists(ReceiptItem()) then
+            Inventory.AddItem(src, ReceiptItem(), 1, {
+                order_id = order.id, restaurant_id = id, ticket = order.ticket,
+                description = ("%s — Ticket #%d: %s (%s)"):format(r.label, order.ticket, summary, GetCurrencyString(finalTotal)),
+            })
+        end
+
+        if didRedeem and PhoneCommitRedeem then PhoneCommitRedeem(id, customerId) end
+        if orderType == "delivery" and type(d.coords) == "table" then
+            DeliveryTargets[order.id] = { x = d.coords.x + 0.0, y = d.coords.y + 0.0, z = d.coords.z + 0.0 }
+        end
+        ShowNotification(src, _L("order_placed", order.ticket))
+    end)
+    if not ok then
+        print(("[pickle_restaurants] phone placeOrder failed: %s"):format(tostring(err)))
+        return { ok = false, error = _L("order_failed") }
+    end
+
+    SyncOrders(id)
+    return { ok = true, ticket = ticketNo, orderId = orderId, total = finalTotal, discount = discountPct, redeemed = didRedeem }
+end)
+
+-- Whether a ticket can be fulfilled from the pool right now (for the tracking UI).
+function OrderReadyForPickup(rid, orderId)
+    local o = OrderCache[rid] and OrderCache[rid][orderId]
+    if not o then return false end
+    local plan = PlanFulfillment(rid, o, nil)
+    return plan and plan.ok or false
+end
+
+-- Staff marks a delivery ticket "out for delivery": the customer's phone gets a
+-- live driver blip fed by the driver client's ping loop (modules/phone/client).
+lib.callback.register("pickle_restaurants:phone:startDelivery", function(src, d)
+    local id = tonumber(d.id)
+    if not HasPerm(id, src, "sell") then return { ok = false, error = _L("no_work_here") } end
+    local o = OrderCache[id] and OrderCache[id][tonumber(d.orderId)]
+    if not o then return { ok = false, error = _L("order_not_open") } end
+    local customerSrc = findPlayerByIdentifier(o.customer_identifier)
+    if customerSrc then
+        TriggerClientEvent("pickle_restaurants:phone:driverAssigned", customerSrc, { orderId = o.id, driver = src })
+        TriggerClientEvent("pickle_restaurants:phone:beginDriving", src, { orderId = o.id, rid = id, target = DeliveryTargets[o.id], customer = customerSrc })
+    end
+    return { ok = true }
+end)
+
+-- Relayed driver position → forward to the waiting customer for their blip.
+RegisterNetEvent("pickle_restaurants:phone:driverPing", function(data)
+    local src = source
+    local o = data and data.orderId and OrderCache[data.rid] and OrderCache[data.rid][tonumber(data.orderId)]
+    if not o then return end
+    local customerSrc = findPlayerByIdentifier(o.customer_identifier)
+    if customerSrc then
+        TriggerClientEvent("pickle_restaurants:phone:driverCoords", customerSrc, { orderId = o.id, x = data.x, y = data.y })
+    end
+end)
+
 -- ─── complete order ──────────────────────────────────────────────────────────
 
 -- The order's receipt on the customer. With slot metadata the exact order's
@@ -1185,6 +1306,9 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
         payCommission(id, src, o.total + tip, o.ticket)
 
         CloseOrder(id, o.id, "completed")
+        -- Phone companion seam: cook stats / achievements / leaderboard / tip pool.
+        -- NPC orders credit the cook (no customer loyalty — the handler skips npc:).
+        TriggerEvent("pickle_restaurants:internal:orderCompleted", id, o, src, tip)
         if NpcDropOrder then NpcDropOrder(id, o.id, true) end
         ShowNotification(src, _L("order_completed", o.ticket))
         SyncOrders(id)
@@ -1246,6 +1370,9 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
     end
 
     CloseOrder(id, o.id, "completed")
+    -- Phone companion seam: customer loyalty punch + cook stats/achievements/tips.
+    TriggerEvent("pickle_restaurants:internal:orderCompleted", id, o, src, 0)
+    if DeliveryTargets then DeliveryTargets[o.id] = nil end
     ShowNotification(src, _L("order_completed", o.ticket))
     if customerSrc ~= src then ShowNotification(customerSrc, _L("order_received", o.ticket)) end
     SyncOrders(id)

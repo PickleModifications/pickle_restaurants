@@ -1,0 +1,211 @@
+/* Pickle Food — mobile companion app. Layers on top of index.css tokens; no new
+   colors, only layout + motion. All color comes from the shared --brand/--bg/…
+   triplets so per-restaurant applyTheme() reskins the whole app for free. */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: rgb(var(--bg));
+  color: rgb(var(--ink));
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The app fills the lb-phone iframe. A single scroll region (.pf-scroll) owns all
+   vertical scroll so the top bar + tab bar stay pinned. */
+.pf-root {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+.pf-scroll {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.pf-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* Hide-scrollbar horizontal rails (order-again, category chips). */
+.pf-rail {
+  display: flex;
+  gap: 0.6rem;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+  scroll-snap-type: x proximity;
+}
+.pf-rail::-webkit-scrollbar {
+  display: none;
+}
+.pf-rail > * {
+  scroll-snap-align: start;
+  flex: 0 0 auto;
+}
+
+/* Screen enter transition — a gentle slide-up + fade, iOS-app feel. */
+@keyframes pf-screen-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.pf-screen {
+  animation: pf-screen-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Bottom sheet (cart / options). */
+@keyframes pf-sheet-in {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+@keyframes pf-scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.pf-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 0.5);
+  animation: pf-scrim-in 0.2s ease both;
+  z-index: 40;
+}
+.pf-sheet {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgb(var(--card));
+  border-top-left-radius: 1.4rem;
+  border-top-right-radius: 1.4rem;
+  border-top: 1px solid rgb(var(--line));
+  animation: pf-sheet-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+  z-index: 41;
+  max-height: 88%;
+  display: flex;
+  flex-direction: column;
+}
+.pf-grab {
+  width: 2.4rem;
+  height: 0.28rem;
+  border-radius: 999px;
+  background: rgb(var(--ink-mute) / 0.4);
+  margin: 0.55rem auto 0.2rem;
+}
+
+/* The loyalty punch-card: perforated dots that fill as you order. */
+.pf-punch {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(1.6rem, 1fr));
+}
+.pf-hole {
+  aspect-ratio: 1;
+  border-radius: 999px;
+  border: 2px dashed rgb(var(--ink-mute) / 0.5);
+  display: grid;
+  place-items: center;
+  font-size: 0.7rem;
+  color: rgb(var(--ink-mute));
+}
+.pf-hole.on {
+  border-style: solid;
+  border-color: rgb(var(--brand));
+  background: rgb(var(--brand));
+  color: rgb(var(--brand-ink));
+  box-shadow: 0 0 0 3px rgb(var(--brand) / 0.15);
+}
+.pf-hole.free {
+  border-color: rgb(var(--warn));
+  color: rgb(var(--warn));
+  animation: pf-pulse 1.6s ease-in-out infinite;
+}
+@keyframes pf-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.08);
+  }
+}
+
+/* Order-status ticket — the tracking hero. A thermal-slip vibe reusing .receipt. */
+.pf-track-dot {
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 999px;
+  background: rgb(var(--line));
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+}
+.pf-track-dot.done {
+  background: rgb(var(--brand));
+}
+.pf-track-dot.active {
+  background: rgb(var(--brand));
+  box-shadow: 0 0 0 4px rgb(var(--brand) / 0.2);
+  animation: pf-pulse 1.4s ease-in-out infinite;
+}
+.pf-track-line {
+  height: 2px;
+  flex: 1;
+  background: rgb(var(--line));
+}
+.pf-track-line.done {
+  background: rgb(var(--brand));
+}
+
+/* Star row */
+.pf-star {
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+.pf-star:active {
+  transform: scale(1.25);
+}
+
+/* Bottom tab bar */
+.pf-tabs {
+  display: flex;
+  border-top: 1px solid rgb(var(--line));
+  background: rgb(var(--card));
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+.pf-tab {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.5rem 0 0.55rem;
+  color: rgb(var(--ink-mute));
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.pf-tab.on {
+  color: rgb(var(--brand));
+}

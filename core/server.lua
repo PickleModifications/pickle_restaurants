@@ -2725,6 +2725,11 @@ function GetOpenOrders(restaurantId)
                 npc       = isNpc,
                 expiresIn = expiresIn, -- seconds left at send time (client ticks down)
                 patience  = patience,  -- full patience window (radial denominator)
+                -- Phone companion (modules/phone): delivery/pickup/dine-in + order-ahead.
+                -- nil on register/kiosk/NPC tickets (they never set them). Additive.
+                orderType = o.order_type,
+                scheduled = o.scheduled_for,
+                address   = o.address,
             }
         end
     end

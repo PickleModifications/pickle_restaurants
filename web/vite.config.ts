@@ -9,6 +9,15 @@ export default defineConfig({
     outDir: "../nui",
     emptyOutDir: true,
     chunkSizeWarningLimit: 2000,
+    rollupOptions: {
+      // TWO html entries emitted in ONE pass (so emptyOutDir stays safe):
+      //   index.html → the in-world NUI / DUIs (App / KioskDui / RegisterDui)
+      //   phone.html → the lb-phone companion app (served as nui/phone.html)
+      input: {
+        main: path.resolve(__dirname, "index.html"),
+        phone: path.resolve(__dirname, "phone.html"),
+      },
+    },
   },
   resolve: {
     alias: { "@": path.resolve(__dirname, "./src") },
