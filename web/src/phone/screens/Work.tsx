@@ -20,11 +20,14 @@ import {
   Minus,
   UserPlus,
   Trash2,
+  Info,
+  MapPin,
+  CalendarClock,
 } from "lucide-react";
 import { fetchNui, useNuiEvent } from "../../lib/nui";
 import { cn } from "../../lib/utils";
 import { usePhone, money } from "../store";
-import { Screen, TopBar, Empty, Spinner } from "../ui";
+import { Screen, TopBar, Empty, Spinner, ItemImg } from "../ui";
 
 const TYPE_ICON: Record<string, any> = { delivery: Truck, pickup: ShoppingBag, dine_in: Utensils };
 
@@ -42,10 +45,132 @@ function fmtDur(seconds: number) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+const TYPE_LABEL: Record<string, string> = { delivery: "Delivery", pickup: "Pickup", dine_in: "Dine-in" };
+
+function modText(mods?: any[]) {
+  if (!mods || mods.length === 0) return "";
+  return mods.map((m: any) => (m.removed ? `no ${m.label}` : `+${m.label}`)).join(", ");
+}
+
+// A full-detail ticket sheet: every line with its photo + mods, the customer /
+// order-type / delivery meta, fulfillment state, and the serve/dispatch/cancel
+// actions. Opened from a ticket's info button in the queue.
+function TicketSheet({
+  t,
+  currency,
+  onClose,
+  onServe,
+  onDispatch,
+  onCancel,
+}: {
+  t: any;
+  currency: string;
+  onClose: () => void;
+  onServe: () => void;
+  onDispatch: () => void;
+  onCancel: () => void;
+}) {
+  const ready = t.fulfill?.ready;
+  const Icon = t.npc ? Bot : TYPE_ICON[t.orderType] || ShoppingBag;
+  const typeLabel = t.npc ? "Walk-in" : TYPE_LABEL[t.orderType] || "Pickup";
+  return (
+    <>
+      <div className="pf-scrim" onClick={onClose} />
+      <div className="pf-sheet">
+        <div className="pf-grab" />
+        {/* header */}
+        <div className="flex items-center gap-3 px-4 pb-3 pt-1">
+          <span className="grid h-11 w-11 place-items-center rounded-xl bg-muted">
+            <Icon className="h-5 w-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="font-display text-lg font-extrabold leading-tight">Ticket #{t.ticket}</div>
+            <div className="text-[0.72rem] text-muted-foreground">
+              {typeLabel} · {t.customer || "Guest"}
+            </div>
+          </div>
+          <span className="font-mono text-base font-bold">{money(currency, t.total)}</span>
+        </div>
+
+        {/* meta (delivery address / scheduled) */}
+        {(t.address || t.scheduled) && (
+          <div className="mx-4 mb-3 space-y-1.5 rounded-xl border border-border bg-card px-3 py-2 text-[0.76rem]">
+            {t.address && (
+              <div className="flex items-start gap-2">
+                <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand" />
+                <span className="text-foreground">{t.address}</span>
+              </div>
+            )}
+            {t.scheduled && (
+              <div className="flex items-center gap-2">
+                <CalendarClock className="h-3.5 w-3.5 shrink-0 text-brand" />
+                <span className="text-foreground">Scheduled · {t.scheduled}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* line items with photos — scrolls if long */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-4">
+          <div className="space-y-2">
+            {(t.lines || []).map((l: any, i: number) => (
+              <div key={i} className="flex items-center gap-3 rounded-xl border border-border bg-card p-2">
+                <ItemImg src={l.image} alt={l.label} className="h-12 w-12 shrink-0 rounded-lg bg-muted" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-semibold">
+                    <span className="font-mono text-muted-foreground">{l.qty}×</span> {l.label}
+                  </div>
+                  {l.mods && l.mods.length > 0 && (
+                    <div className="truncate text-[0.7rem] text-muted-foreground">{modText(l.mods)}</div>
+                  )}
+                </div>
+                <span className="font-mono text-[0.78rem] text-muted-foreground">
+                  {money(currency, (l.price || 0) * (l.qty || 1))}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {!ready && t.fulfill?.missing && (
+            <div className="mt-3 rounded-lg bg-warn/15 px-3 py-2 text-[0.74rem] text-warn">
+              Still cooking: {t.fulfill.missing.join(", ")}
+            </div>
+          )}
+        </div>
+
+        {/* actions */}
+        <div className="flex gap-2 border-t border-border p-4" style={{ paddingBottom: "calc(1rem + var(--pf-bottom))" }}>
+          {t.orderType === "delivery" && ready && (
+            <button
+              onClick={onDispatch}
+              className="flex flex-1 items-center justify-center gap-1 rounded-full bg-muted px-3 py-2.5 text-sm font-bold"
+            >
+              <Truck className="h-4 w-4" /> Dispatch
+            </button>
+          )}
+          <button
+            disabled={!ready}
+            onClick={onServe}
+            className={cn(
+              "flex flex-1 items-center justify-center gap-1 rounded-full px-3 py-2.5 text-sm font-bold",
+              ready ? "bg-ok text-white" : "bg-muted text-muted-foreground"
+            )}
+          >
+            <Check className="h-4 w-4" /> {ready ? "Serve" : "Not ready"}
+          </button>
+          <button onClick={onCancel} className="grid h-11 w-11 place-items-center rounded-full bg-muted">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function RestaurantChips({ employment, rid, setRid }: any) {
   if (employment.length < 2) return null;
   return (
-    <div className="pf-rail px-4 pb-2">
+    <div className="pf-rail px-4 pb-2 pt-3">
       {employment.map((e: any) => (
         <button
           key={e.id}
@@ -68,6 +193,7 @@ export function Kitchen({ params }: { params?: any }) {
   const { employment, rid, setRid, active } = useEmployment(params?.rid);
   const [tickets, setTickets] = useState<any[]>([]);
   const [shift, setShift] = useState<any>(null);
+  const [detailId, setDetailId] = useState<number | null>(null);
   const canManage =
     active && (active.isOwner || ["manage_menu", "view_finances", "manage_employees", "manage_stock"].some((p) => active.perms?.[p]));
 
@@ -98,13 +224,16 @@ export function Kitchen({ params }: { params?: any }) {
     const res = await fetchNui("phone:completeOrder", { id: rid, orderId: t.orderId, mealSig: sig });
     if (res?.ok) {
       toast(`Ticket #${t.ticket} served`);
+      setDetailId(null);
       loadTickets();
     } else toast(res?.error || "Can't complete", "err");
   };
   const cancel = async (t: any) => {
     const res = await fetchNui("phone:cancelOrder", { id: rid, orderId: t.orderId });
-    if (res?.ok) loadTickets();
-    else toast(res?.error || "Can't cancel", "err");
+    if (res?.ok) {
+      setDetailId(null);
+      loadTickets();
+    } else toast(res?.error || "Can't cancel", "err");
   };
   const dispatch = async (t: any) => {
     const res = await fetchNui("phone:startDelivery", { id: rid, orderId: t.orderId });
@@ -128,7 +257,7 @@ export function Kitchen({ params }: { params?: any }) {
       <RestaurantChips employment={employment} rid={rid} setRid={setRid} />
 
       {/* shift + manage */}
-      <div className="flex gap-2 px-4 pb-3">
+      <div className={cn("flex gap-2 px-4 pb-3", employment.length < 2 && "pt-3")}>
         <button
           onClick={clock}
           className={cn(
@@ -179,7 +308,33 @@ export function Kitchen({ params }: { params?: any }) {
                     </div>
                   </div>
                   <span className="font-mono text-sm">{money(currency, t.total)}</span>
+                  <button
+                    onClick={() => setDetailId(t.orderId)}
+                    className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-muted text-muted-foreground active:scale-90"
+                    aria-label="Ticket details"
+                  >
+                    <Info className="h-4 w-4" />
+                  </button>
                 </div>
+
+                {/* photo strip — tap to open full details */}
+                <button
+                  onClick={() => setDetailId(t.orderId)}
+                  className="mt-2 flex w-full items-center gap-2 text-left"
+                >
+                  <div className="flex flex-1 flex-wrap gap-1.5">
+                    {(t.lines || []).map((l: any, i: number) => (
+                      <span key={i} className="relative">
+                        <ItemImg src={l.image} alt={l.label} className="h-9 w-9 rounded-lg bg-muted" />
+                        {l.qty > 1 && (
+                          <span className="absolute -right-1 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-brand px-1 font-mono text-[0.55rem] font-bold text-brand-ink">
+                            {l.qty}
+                          </span>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                </button>
 
                 <div className="mt-2 space-y-0.5 font-mono text-[0.78rem]">
                   {(t.lines || []).map((l: any, i: number) => (
@@ -230,6 +385,21 @@ export function Kitchen({ params }: { params?: any }) {
           })}
         </div>
       )}
+
+      {detailId != null && (() => {
+        const t = tickets.find((x) => x.orderId === detailId);
+        if (!t) return null;
+        return (
+          <TicketSheet
+            t={t}
+            currency={currency}
+            onClose={() => setDetailId(null)}
+            onServe={() => complete(t)}
+            onDispatch={() => dispatch(t)}
+            onCancel={() => cancel(t)}
+          />
+        );
+      })()}
     </Screen>
   );
 }
@@ -365,7 +535,7 @@ export function Manage({ params }: { params: any }) {
 }
 
 function SalesTab({ rid, onChange }: { rid: number; onChange: () => void }) {
-  const { currency, toast } = usePhone();
+  const { currency, toast, ask } = usePhone();
   const [a, setA] = useState<any>(null);
   const load = () => fetchNui("phone:analytics", { id: rid }).then((d) => d?.ok && setA(d));
   useEffect(() => {
@@ -376,7 +546,14 @@ function SalesTab({ rid, onChange }: { rid: number; onChange: () => void }) {
   const maxPeak = Math.max(1, ...a.peak.map((p: any) => p.orders));
 
   const bank = async (dir: "deposit" | "withdraw") => {
-    const raw = prompt(dir === "deposit" ? "Deposit how much?" : "Withdraw how much?");
+    const raw = await ask({
+      title: dir === "deposit" ? "Deposit funds" : "Withdraw funds",
+      label: `Balance: ${money(currency, a.balance)}`,
+      kind: "number",
+      prefix: currency,
+      placeholder: "0",
+      confirm: dir === "deposit" ? "Deposit" : "Withdraw",
+    });
     const amount = Math.floor(Number(raw));
     if (!amount || amount <= 0) return;
     const res = await fetchNui(`phone:${dir}`, { id: rid, amount });
@@ -461,7 +638,7 @@ function Kpi({ label, value }: { label: string; value: string }) {
 }
 
 function MenuTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () => void }) {
-  const { currency, toast } = usePhone();
+  const { currency, toast, ask } = usePhone();
   if (!mgmt) return <Spinner />;
   const items: any[] = mgmt.priceList || [];
 
@@ -471,7 +648,14 @@ function MenuTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () => 
     else toast(res?.error || "Failed", "err");
   };
   const reprice = async (it: any) => {
-    const raw = prompt(`New price for ${it.label}`, String(it.price));
+    const raw = await ask({
+      title: `Price · ${it.label}`,
+      label: "Set the menu price for this item.",
+      kind: "number",
+      prefix: currency,
+      initial: it.price,
+      confirm: "Save price",
+    });
     const price = Math.floor(Number(raw));
     if (!price || price <= 0) return;
     const res = await fetchNui("phone:saveMenuItem", { id: rid, key: it.key, price, enabled: it.enabled });

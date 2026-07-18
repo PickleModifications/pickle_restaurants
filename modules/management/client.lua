@@ -40,6 +40,8 @@ RegisterNUICallback("management:deleteMenuItem", relayThenRefresh("pickle_restau
 RegisterNUICallback("management:deposit",        relayThenRefresh("pickle_restaurants:management:deposit"))
 RegisterNUICallback("management:withdraw",       relayThenRefresh("pickle_restaurants:management:withdraw"))
 RegisterNUICallback("management:buyStock",       relayThenRefresh("pickle_restaurants:management:buyStock"))
+RegisterNUICallback("management:depositStock",   relayThenRefresh("pickle_restaurants:management:depositStock"))
+RegisterNUICallback("management:withdrawStock",  relayThenRefresh("pickle_restaurants:management:withdrawStock"))
 
 -- Branding saves DON'T refresh the panel — that would remount the crop UI mid-setup.
 -- The React side keeps its own optimistic copy; the server sync drives the props.

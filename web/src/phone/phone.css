@@ -9,9 +9,12 @@
      sheets, and floating bars borrow these instead of hardcoding shadows. */
   --pf-shadow: 0 1px 2px rgb(0 0 0 / 0.16), 0 8px 22px -12px rgb(0 0 0 / 0.5);
   --pf-shadow-lg: 0 2px 6px rgb(0 0 0 / 0.2), 0 18px 40px -16px rgb(0 0 0 / 0.6);
-  /* Safe-area insets (lb-phone status bar / notch); 0 in a plain browser. */
-  --pf-top: env(safe-area-inset-top, 0px);
-  --pf-bottom: env(safe-area-inset-bottom, 0px);
+  /* Safe-area insets. lb-phone paints its status bar (notch/camera) and home
+     indicator OVER our iframe, but the CEF iframe reports env(safe-area-inset-*)
+     as 0, so the env() fallback never fires — we max() against a fixed minimum
+     that clears lb-phone's chrome. (max() is fine in CEF; it's not a color fn.) */
+  --pf-top: max(env(safe-area-inset-top, 0px), 58px);
+  --pf-bottom: max(env(safe-area-inset-bottom, 0px), 22px);
 }
 :root[data-mode="paper"] {
   --pf-shadow: 0 1px 2px rgb(0 0 0 / 0.06), 0 8px 20px -12px rgb(0 0 0 / 0.22);
@@ -44,13 +47,20 @@ body,
     rgb(var(--bg));
 }
 
+/* Reserved space under lb-phone's status bar / notch. A real element (not
+   pf-scroll padding) so sticky TopBars stick BELOW the notch, not under it.
+   Transparent — the pf-root brand aura shows through it. */
+.pf-statusbar {
+  flex: 0 0 auto;
+  height: var(--pf-top);
+}
+
 .pf-scroll {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
-  padding-top: var(--pf-top);
 }
 .pf-scroll::-webkit-scrollbar {
   width: 0;
@@ -66,7 +76,10 @@ body,
   box-shadow: var(--pf-shadow-lg);
 }
 
-/* Hide-scrollbar horizontal rails (order-again, category chips). */
+/* Hide-scrollbar horizontal rails (order-again, category chips). overflow-x:auto
+   forces overflow-y to compute to auto, which would clip a selected chip's border
+   / an elevated card's shadow at the rail's top+bottom edge — a hair of vertical
+   padding keeps those inside the scrollport so nothing gets shaved off. */
 .pf-rail {
   display: flex;
   gap: 0.6rem;
@@ -74,6 +87,8 @@ body,
   overscroll-behavior-x: contain;
   scrollbar-width: none;
   scroll-snap-type: x proximity;
+  padding-top: 3px;
+  padding-bottom: 3px;
 }
 .pf-rail::-webkit-scrollbar {
   display: none;

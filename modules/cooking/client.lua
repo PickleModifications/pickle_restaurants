@@ -57,7 +57,19 @@ local DUAL = {
     -- The whole patty is raised by this so the bottom (cooking) face rests ON the
     -- grill instead of sinking through it (we drop on the surface point, but the
     -- bottom face has its own height below that). Tune up until it sits flush.
+    -- NOTE: this ONLY affects the patty on the GRILL now — the prep table cancels it
+    -- with a -base_lift sink (patty rests on the bun) and toppings seat off top_seat,
+    -- so tune this purely for how the patty sits on the hotplate.
     base_lift   = 0.0075,
+    -- Height of the patty's TOP SURFACE above the part's seat — i.e. how high the
+    -- cooking face's origin plus the patty's rendered thickness reaches. This is the
+    -- ONE knob for anything that RESTS on the patty: a flat topping (applied/melted
+    -- cheese, pickle slices), or the next stack layer (the top bun). face_gap only
+    -- spaces the two rendered faces (visual thickness); base_lift only lifts the whole
+    -- patty off the surface below. If a topping sinks INTO the patty, raise this; if it
+    -- floats, lower it. Must be > base_lift (the top is above the cooking face).
+    -- TUNE IN-GAME.
+    top_seat    = 0.025,
     tween_ms    = 250,
 }
 
@@ -401,6 +413,11 @@ end
 -- Returns three parallel arrays: models, incremental heights (rise to the next
 -- layer), and per-prop roll in degrees (0 for everything that isn't a patty face).
 -- `state` swaps toppings to their cooked/burnt look, same as before.
+-- /pickle_stackdbg toggles a one-shot dump of the NEXT stack laid out: for each
+-- expanded layer it prints the model, its raw GetModelDimensions mn.z/mx.z, the
+-- height fed to the layout (rise to the next layer) and the running cumulative z.
+-- Purely a measurement aid for tuning tower spacing — leaves behavior untouched.
+StackDebug = false
 local function expandStackLayers(models, state)
     local mdls, heights, rolls = {}, {}, {}
     for _, m0 in ipairs(models or {}) do
@@ -414,10 +431,31 @@ local function expandStackLayers(models, state)
         if s == 0.0 then s = stackSink(m) end
         if s ~= 0.0 and #heights > 0 then heights[#heights] = math.max(heights[#heights] + s, 0.001) end
         if dualModelRecipe(m0) then
-            mdls[#mdls + 1] = m; heights[#heights + 1] = DUAL.face_gap;       rolls[#rolls + 1] = DUAL.bottom_roll
-            mdls[#mdls + 1] = m; heights[#heights + 1] = stackLayerHeight(m);  rolls[#rolls + 1] = DUAL.top_roll
+            -- A dual (two-faced patty) is a stovetop COOK prop, not a centre-bottom
+            -- stack prop, so its measured modelHeight is bogus — using it as the rise
+            -- floats the whole tower above the patty (the cheese/bun gap). Mirror the
+            -- prep path (part.height for a dual, ~line 1761): the cook face sits at the
+            -- base, the visible face a face_gap above it, and the NEXT layer rests where
+            -- patty rests where a topping/next layer seats — the patty TOP SURFACE. Here
+            -- there's no base_lift (the cook face sits at the running height directly), so
+            -- the two faces' rises sum to top_seat - base_lift (the patty thickness above
+            -- the cook face): face_gap between the faces, the remainder up to the top.
+            local topRise = math.max(DUAL.top_seat - DUAL.base_lift - DUAL.face_gap, 0.001)
+            mdls[#mdls + 1] = m; heights[#heights + 1] = DUAL.face_gap;   rolls[#rolls + 1] = DUAL.bottom_roll
+            mdls[#mdls + 1] = m; heights[#heights + 1] = topRise;         rolls[#rolls + 1] = DUAL.top_roll
         else
             mdls[#mdls + 1] = m; heights[#heights + 1] = stackLayerHeight(m);  rolls[#rolls + 1] = 0.0
+        end
+    end
+    if StackDebug then
+        StackDebug = false -- one-shot
+        local cz = 0.0
+        print(("[stackdbg] %d layers (state=%s)"):format(#mdls, tostring(state)))
+        for i = 1, #mdls do
+            local mn, mx = GetModelDimensions(EnsureModel(mdls[i]))
+            print(("[stackdbg]  %d  %-32s  mn.z=%.4f  mx.z=%.4f  modelH=%.4f  rise=%.4f  roll=%.1f  seatZ=%.4f"):format(
+                i, mdls[i], mn and mn.z or 0.0, mx and mx.z or 0.0, modelHeight(mdls[i]), heights[i], rolls[i], cz))
+            cz = cz + (heights[i] or 0.0)
         end
     end
     return mdls, heights, rolls
@@ -1226,7 +1264,9 @@ end
 -- base (x,y,z). Pure + shared by the stovetop and the prep table; no-op without one.
 local function placeMeltAt(ent, x, y, z, yaw)
     if not ent or not DoesEntityExist(ent) then return end
-    SetEntityCoordsNoOffset(ent, x, y, z + DUAL.base_lift + DUAL.face_gap + MELT_SEAT.z, false, false, false)
+    -- Rest the topping's bottom on the patty's top surface (DUAL.top_seat) — the same
+    -- height the next stack layer uses, so cheese/pickle and the top bun agree.
+    SetEntityCoordsNoOffset(ent, x, y, z + DUAL.top_seat, false, false, false)
     SetEntityRotation(ent, 0.0, DUAL.top_roll + MELT_SEAT.roll, yaw or 0.0, 2, true)
 end
 
@@ -1741,13 +1781,23 @@ local function makePart(spec)
         part.dual   = true
         part.faces  = { e1, e2 }
         part.ents   = { e1, e2 }
-        -- The next part rests where a topping sits on the visible face — the EXACT
-        -- spot placeMeltAt seats a melt slice (base_lift + face_gap above the base,
-        -- plus the topping float) — so a topping stacked on the item matches an
-        -- item-borne one. We do NOT use modelHeight(the dual model): the two-faced
-        -- item is a stovetop cook prop, not a centre-bottom stack prop, so its
-        -- measured height is bogus.
-        part.height = DUAL.base_lift + DUAL.face_gap + MELT_SEAT.z
+        -- Seat correction. A dual patty carries DUAL.base_lift as GRILL clearance
+        -- (orientPair seats its cook face base_lift above the anchor, keeping it off
+        -- the hotplate). In a prep pile the patty rests on a bun, where that clearance
+        -- reads as a fixed ~7.5mm gap UNDER the patty. Neutralise it by default so the
+        -- patty seats flush on whatever's below; a configured STACK_TWEAKS.sink stacks
+        -- on top for further tuning. (layoutParts shifts this part — and everything
+        -- above it — by part.sink when it isn't the base of its pile. The dual branch
+        -- used to skip stackSink entirely, so a patty-keyed sink did nothing.)
+        local ds = -DUAL.base_lift + stackSink(spec.model)
+        if ds ~= 0.0 then part.sink = ds end
+        -- Where the NEXT part rests: the patty's TOP SURFACE (DUAL.top_seat above the
+        -- seat) — the SAME height placeMeltAt seats a flat topping (cheese/pickle), so a
+        -- bare top bun and a topping-then-bun agree. We do NOT use modelHeight(the dual
+        -- model): the two-faced item is a stovetop cook prop, not a centre-bottom stack
+        -- prop, so its measured height is bogus. (A melt slice riding the patty bumps
+        -- this up by the slice's own height in the melt branch below.)
+        part.height = DUAL.top_seat
         -- A melt topping riding the visible face: new specs carry `top` ({ item,
         -- state }, model server-resolved on `topModel`); LEGACY decompose specs
         -- (old inventory slot metadata) instead carry the resolved model directly
@@ -1759,8 +1809,8 @@ local function makePart(spec)
                 part.meltEnt   = ce
                 part.meltModel = meltModel
                 part.ents[#part.ents + 1] = ce
-                part.height = math.max(part.height,
-                    DUAL.base_lift + DUAL.face_gap + MELT_SEAT.z + modelHeight(meltModel))
+                -- next layer (top bun) rests on the slice: patty top + the slice height
+                part.height = math.max(part.height, DUAL.top_seat + modelHeight(meltModel))
             end
         end
     else
@@ -2604,11 +2654,17 @@ local function StopCooking()
         DoScreenFadeOut(VirtualFadeMs and VirtualFadeMs() or 400)
         while not IsScreenFadedOut() do Wait(0) end
     end
+    -- ⚠ TEMP — VIDEO DEMO ONLY, REVERT ME. When true, placed kitchen_prep items are
+    -- LEFT standing in the world on exit instead of being auto-made/saved and deleted.
+    -- Set this back to false (or delete this block) to restore normal behavior. This is
+    -- purely client-side and touches no server/DB state.
+    local DEMO_KEEP_PREP = true
+    local keepPrep = wasPrep and DEMO_KEEP_PREP
     -- Deliver completed work on the way out: each stack still on the table is saved as
     -- its closest product (the exact variation preserved). Stacks that form no product
     -- fall through to prepClose below, which drops their reservations — parts stay in
     -- the player's holdings, so nothing is lost either way.
-    if wasPrep then
+    if wasPrep and not keepPrep then
         -- Serving trays first: each arrangement becomes its meal (a failed make
         -- leaves its stacks behind for the per-stack save below; empty trays are
         -- just put away by clearPrepStacks).
@@ -2630,8 +2686,10 @@ local function StopCooking()
     cancelCondiment() -- drop any in-progress condiment-bottle drag
     HoverDual(nil)
     if HoverOvenDoor then HoverOvenDoor(nil, nil) end -- clear any door outline
-    clearPrepStacks()
-    if wasPrep then TriggerServerEvent("pickle_restaurants:cooking:prepClose") end -- drop unfinished build
+    -- keepPrep (video demo) leaves the placed props standing and keeps their server
+    -- reservations, so clearPrepStacks/prepClose are skipped for this exit only.
+    if not keepPrep then clearPrepStacks() end
+    if wasPrep and not keepPrep then TriggerServerEvent("pickle_restaurants:cooking:prepClose") end -- drop unfinished build
     StopStationCamera()
     CloseNUI()
     SendNUIMessage({ action = "cookingItems", items = {} })
@@ -3820,7 +3878,7 @@ local function meltSnapTarget()
         if c and rec and not rec.meltEnt and not rec.topping then
             local dx0, dy0 = c.x - prop.x, c.y - prop.y
             if dx0 * dx0 + dy0 * dy0 <= 6.25 then -- within ~2.5m of the station
-                local sz = c.z + DUAL.base_lift + DUAL.face_gap + MELT_SEAT.z
+                local sz = c.z + DUAL.top_seat
                 local on, sx, sy = GetScreenCoordFromWorldCoord(c.x, c.y, sz)
                 if on then
                     local dx, dy = sx - curx, sy - cury
@@ -4502,3 +4560,56 @@ AddEventHandler("onResourceStop", function(res)
     cancelBakeMix()
     cancelCondiment()
 end)
+
+-- Measurement aid: arm a one-shot dump of the next stack that gets laid out (see
+-- StackDebug in expandStackLayers). Run it, then re-open/re-render the burger tower
+-- and read the console for per-layer mn.z/mx.z/height/seatZ.
+RegisterCommand("pickle_stackdbg", function()
+    StackDebug = true
+    print("[stackdbg] armed — render a stack (open the item/preview) to dump it")
+end, false)
+
+-- Print raw GetModelDimensions for one or more models: /pickle_modeldim pickle_patty_beef_02
+-- Reports mn.z/mx.z (physics box, ~0.04 margin), total height and modelHeight. Use it to
+-- set DUAL.face_gap to the patty's visual thickness and DUAL.top_seat to where toppings sit.
+RegisterCommand("pickle_modeldim", function(_, argsIn)
+    local models = (argsIn and #argsIn > 0) and argsIn
+        or { "pickle_patty_beef_02", "pickle_cheese_applied_01", "pickle_cheese_applied_02" }
+    for _, model in ipairs(models) do
+        local mn, mx = GetModelDimensions(EnsureModel(model))
+        if mn and mx then
+            print(("[modeldim] %-32s mn.z=%.4f mx.z=%.4f  totalZ=%.4f  modelH(mx+mn)=%.4f"):format(
+                model, mn.z, mx.z, mx.z - mn.z, mx.z + mn.z))
+        else
+            print(("[modeldim] %-32s <no dimensions / model failed to load>"):format(model))
+        end
+    end
+end, false)
+
+-- Live dump of the current prep piles: for each part its item/model, dual flag,
+-- height, sink and the z it lands at — the discrete-part path (layoutParts) that a
+-- hand-assembled burger actually uses. Also prints what StackTweaks holds client-side,
+-- so we can see whether a sink even reached the client.
+RegisterCommand("pickle_prepdbg", function()
+    local n = 0
+    for k in pairs(StackTweaks or {}) do n = n + 1 end
+    print(("[prepdbg] StackTweaks has %d entries:"):format(n))
+    for model, t in pairs(StackTweaks or {}) do
+        print(("[prepdbg]   %-32s sink=%s rise=%s"):format(model, tostring(t.sink), tostring(t.rise)))
+    end
+    local piles = 0
+    for sid, stack in pairs(PrepStacks or {}) do
+        piles = piles + 1
+        print(("[prepdbg] pile %s at z0=%.4f, %d parts:"):format(tostring(sid), stack.z0 or 0.0, #(stack.parts or {})))
+        local z, prevSeat = stack.z0 or 0.0, nil
+        for i, part in ipairs(stack.parts or {}) do
+            if i > 1 then z = math.max(z + (part.sink or 0.0), prevSeat + 0.001) end
+            print(("[prepdbg]   %d  item=%-16s dual=%-5s stacked=%-5s height=%.4f sink=%s seatZ=%.4f"):format(
+                i, tostring(part.item), tostring(part.dual or false), tostring(part.stacked or false),
+                part.height or 0.0, tostring(part.sink), z))
+            prevSeat = z
+            z = z + (part.height or 0.0)
+        end
+    end
+    if piles == 0 then print("[prepdbg] no active prep piles (stand at a prep station with items placed)") end
+end, false)

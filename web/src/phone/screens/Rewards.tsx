@@ -125,12 +125,28 @@ export function Reserve() {
   const [party, setParty] = useState(2);
   const [slot, setSlot] = useState(SLOTS[0]);
   const [mine, setMine] = useState<any[]>([]);
+  const [avail, setAvail] = useState<any>(null);
   const [busy, setBusy] = useState(false);
 
   const load = () => fetchNui("phone:myReservations", {}).then((d) => d?.ok && setMine(d.reservations || []));
+  const loadAvail = (r: number | null) => {
+    setAvail(null);
+    if (r != null) fetchNui("phone:reserveAvailability", { id: r }).then((d) => d?.ok && setAvail(d));
+  };
   useEffect(() => {
     load();
   }, []);
+  useEffect(() => {
+    loadAvail(rid);
+  }, [rid]);
+
+  // Seats left in a slot, given capacity − already-booked parties.
+  const capacity: number = avail?.capacity ?? 0;
+  const remaining = (s: string) => capacity - (avail?.usage?.[s] || 0);
+  const slotFull = (s: string) => avail != null && remaining(s) < party;
+  const alreadyBooked = !!avail?.hasReservation;
+  // A restaurant with no seat anchors placed can't take reservations at all.
+  const noSeats = avail != null && capacity <= 0;
 
   const book = async () => {
     if (!rid) return;
@@ -140,6 +156,7 @@ export function Reserve() {
     if (res?.ok) {
       toast("Table reserved");
       load();
+      loadAvail(rid);
     } else toast(res?.error || "Couldn't reserve", "err");
   };
 
@@ -150,6 +167,7 @@ export function Reserve() {
   const cancel = async (r: any) => {
     await fetchNui("phone:cancelReservation", { id: r.id });
     load();
+    loadAvail(rid);
   };
 
   return (
@@ -188,29 +206,66 @@ export function Reserve() {
         </div>
 
         <div>
-          <div className="tape mb-1.5 text-muted-foreground">Time</div>
-          <div className="pf-rail">
-            {SLOTS.map((s) => (
-              <button
-                key={s}
-                onClick={() => setSlot(s)}
-                className={cn(
-                  "rounded-full border px-3 py-1.5 text-sm font-semibold",
-                  slot === s ? "border-brand bg-brand text-brand-ink" : "border-border bg-card"
-                )}
-              >
-                {s}
-              </button>
-            ))}
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="tape text-muted-foreground">Time</span>
+            {avail && !noSeats && (
+              <span className="text-[0.66rem] text-muted-foreground">
+                {capacity} seat{capacity === 1 ? "" : "s"}
+              </span>
+            )}
           </div>
+          {noSeats ? (
+            <p className="rounded-xl border border-border bg-card px-3 py-2 text-[0.74rem] text-muted-foreground">
+              This restaurant hasn't set up any seating to reserve yet.
+            </p>
+          ) : (
+          <div className="pf-rail">
+            {SLOTS.map((s) => {
+              const full = slotFull(s);
+              return (
+                <button
+                  key={s}
+                  disabled={full}
+                  onClick={() => setSlot(s)}
+                  className={cn(
+                    "flex flex-col items-center rounded-2xl border px-3 py-1.5 text-sm font-semibold",
+                    slot === s ? "border-brand bg-brand text-brand-ink" : "border-border bg-card",
+                    full && "opacity-40"
+                  )}
+                >
+                  {s}
+                  {avail && (
+                    <span className={cn("text-[0.6rem] font-medium", slot === s ? "text-brand-ink/80" : "text-muted-foreground")}>
+                      {full ? "Full" : `${remaining(s)} left`}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          )}
         </div>
 
+        {alreadyBooked && (
+          <p className="rounded-xl border border-border bg-card px-3 py-2 text-[0.74rem] text-muted-foreground">
+            You already have a table booked here — cancel it below to book a new time.
+          </p>
+        )}
+
         <button
-          disabled={busy || !rid}
+          disabled={busy || !rid || alreadyBooked || noSeats || slotFull(slot)}
           onClick={book}
           className="w-full rounded-full bg-brand px-4 py-3 font-bold text-brand-ink disabled:opacity-60"
         >
-          {busy ? "Reserving…" : "Reserve table"}
+          {busy
+            ? "Reserving…"
+            : noSeats
+            ? "No seating here"
+            : alreadyBooked
+            ? "Already booked here"
+            : slotFull(slot)
+            ? "That time is full"
+            : "Reserve table"}
         </button>
 
         {mine.length > 0 && (

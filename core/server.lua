@@ -105,6 +105,7 @@ local DEFAULT_SETTINGS = {
         ["pickle_pizza_sauce_01"]  = { sink = -0.004 },
         ["pickle_pizza_cheese_01"] = { sink = -0.004 },
         ["pickle_pizza_cheese_02"] = { sink = -0.004 },
+        ["pickle_patty_beef_02"] = { sink = -1.0 },
     },
     -- Global default freshness window (seconds) for collected cooked items in the
     -- tray before they spoil and are swept. Default 900 = 15 minutes; 0 = never

@@ -1,4 +1,11 @@
 Language["en"] = {
+    -- Display symbol prefixed to money amounts everywhere (NUI + phone). This is the
+    -- localized CURRENCY SYMBOL, NOT the `currency` setting (which is the ESX/QB
+    -- account name: "money" vs "dirty"). Change it here in the ONE locale file.
+    ["currency_symbol"] = "$",
+    ["reserve_duplicate"] = "You already have a table booked here.",
+    ["reserve_slot_full"] = "No tables left at that time — pick another slot.",
+    ["reserve_no_seats"] = "This restaurant hasn't set up any seating to reserve.",
     ["interact_far"] = "You are too far away to do this.",
     ["no_permission"] = "You don't have permission to do that.",
     ["objects_freeze"] = "Freeze object",

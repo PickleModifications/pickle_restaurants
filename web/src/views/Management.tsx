@@ -130,7 +130,7 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         {perms.manage_props && (
           <TabsContent value="branding" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 pb-4">
             <ThemeEditor id={id} theme={data?.restaurant?.theme} event="management:setTheme" />
-            <Branding id={id} brand={data?.restaurant?.brand_image || ""} brandImages={data?.restaurant?.brand_images || {}} event="management:setBrandImage" renderTargets={data?.renderTargets} />
+            <Branding id={id} brand={data?.restaurant?.brand_image || ""} brandImages={data?.restaurant?.brand_images || {}} phoneImage={data?.restaurant?.phone_image || ""} event="management:setBrandImage" renderTargets={data?.renderTargets} />
           </TabsContent>
         )}
       </Tabs>

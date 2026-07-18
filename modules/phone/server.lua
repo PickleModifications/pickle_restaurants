@@ -281,7 +281,7 @@ function RestaurantCard(r, playerCoords)
         id      = r.id,
         label   = r.label or r.name,
         theme   = r.metadata and r.metadata.theme or nil,
-        brand   = r.metadata and r.metadata.brand_image or nil,
+        brand   = r.metadata and (r.metadata.phone_image or r.metadata.brand_image) or nil,
         coords  = counter and { x = counter.x, y = counter.y } or nil,
         rating  = rev and rev.avg or 0,
         reviews = rev and rev.count or 0,
@@ -353,7 +353,7 @@ lib.callback.register("pickle_restaurants:phone:home", function(src, d)
     return {
         ok         = true,
         name       = GetPlayerCharacterName(src),
-        currency   = GetSetting("currency", "$"),
+        currency   = _L("currency_symbol"),
         -- ONE global phone skin (the `phone_theme` setting) — NOT per-restaurant. The
         -- app applies this once on boot and keeps it for every storefront it browses.
         theme      = GetSetting("phone_theme", nil),
@@ -437,7 +437,7 @@ lib.callback.register("pickle_restaurants:phone:menu", function(src, d)
         id        = id,
         label     = r.label or r.name,
         theme     = r.metadata and r.metadata.theme or nil,
-        brand     = r.metadata and r.metadata.brand_image or nil,
+        brand     = r.metadata and (r.metadata.phone_image or r.metadata.brand_image) or nil,
         catalog   = catalog,
         combos    = combos,
         promo     = ActivePromo(id),
@@ -445,7 +445,7 @@ lib.callback.register("pickle_restaurants:phone:menu", function(src, d)
         reviewCount = rev and rev.count or 0,
         reviews   = reviews,
         loyalty   = { punches = l and l.punches or 0, goal = LoyaltyGoal(), on = LoyaltyOn() },
-        currency  = GetSetting("currency", "$"),
+        currency  = _L("currency_symbol"),
     }
 end)
 
@@ -536,12 +536,63 @@ end
 -- RESERVATIONS — book a private booth; the client teleports into an instanced
 -- routing bucket on enter (see modules/phone/client.lua).
 -- ─────────────────────────────────────────────────────────────────────────────
+-- Seat capacity for reservations = number of placed seat anchors at the restaurant
+-- (modules/seating props). A restaurant with no seats placed can't be reserved —
+-- there's nowhere to seat the party — so capacity is 0 and booking is refused (we
+-- never guess a default). A slot is "full" when the parties already booked into it
+-- would meet or exceed this.
+local function SeatCapacity(rid)
+    local n = 0
+    for _, p in pairs(PropCache or {}) do
+        if p.restaurant_id == rid and p.prop_type == "seat" then n = n + 1 end
+    end
+    return n
+end
+
+-- Total party size already booked into one slot (normalize a nil slot to "Now").
+local function SlotUsage(rid, slot)
+    local key, used = slot or "Now", 0
+    for _, res in pairs(ReservationCache[rid] or {}) do
+        if (res.slot or "Now") == key then used = used + (tonumber(res.party) or 1) end
+    end
+    return used
+end
+
+local function HasBooking(rid, identifier)
+    for _, res in pairs(ReservationCache[rid] or {}) do
+        if res.identifier == identifier then return true end
+    end
+    return false
+end
+
+-- Per-slot availability for a restaurant, so the phone can grey out full slots and
+-- hide the booking form when the player already holds a table here.
+lib.callback.register("pickle_restaurants:phone:reserveAvailability", function(src, d)
+    local id = GetIdentifier(src)
+    local rid = tonumber(d and d.id)
+    if not GetRestaurant(rid) then return { ok = false } end
+    local usage = {}
+    for _, res in pairs(ReservationCache[rid] or {}) do
+        local s = res.slot or "Now"
+        usage[s] = (usage[s] or 0) + (tonumber(res.party) or 1)
+    end
+    return { ok = true, capacity = SeatCapacity(rid), usage = usage, hasReservation = HasBooking(rid, id) }
+end)
+
 lib.callback.register("pickle_restaurants:phone:reserve", function(src, d)
     local id = GetIdentifier(src)
     local rid = tonumber(d and d.id)
     if not GetRestaurant(rid) then return { ok = false } end
     local party = math.max(1, math.min(12, math.floor(tonumber(d.party) or 2)))
     local slot = d.slot and tostring(d.slot):sub(1, 20) or nil
+    -- One active booking per restaurant per player — no spamming reservations.
+    if HasBooking(rid, id) then return { ok = false, error = _L("reserve_duplicate") } end
+    -- Enforce seat capacity for the chosen time (0 seats = nothing to reserve).
+    local capacity = SeatCapacity(rid)
+    if capacity <= 0 then return { ok = false, error = _L("reserve_no_seats") } end
+    if SlotUsage(rid, slot) + party > capacity then
+        return { ok = false, error = _L("reserve_slot_full") }
+    end
     local resId = MySQL.insert.await(
         "INSERT INTO pickle_restaurant_reservations (restaurant_id, identifier, name, party, slot) VALUES (?, ?, ?, ?, ?)",
         { rid, id, GetPlayerCharacterName(src), party, slot })
@@ -714,7 +765,7 @@ lib.callback.register("pickle_restaurants:phone:analytics", function(src, d)
         tickets = ticketCount,
         avgTicket = ticketCount > 0 and math.floor(revenue / ticketCount) or 0,
         days = days, bestSellers = best, peak = peak,
-        currency = GetSetting("currency", "$"),
+        currency = _L("currency_symbol"),
     }
 end)
 

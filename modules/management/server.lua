@@ -174,6 +174,7 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
                        hasNpcSpawn  = (r.metadata and r.metadata.npc_spawn) ~= nil,
                        brand_image  = r.metadata and r.metadata.brand_image or nil,
                        brand_images = r.metadata and r.metadata.brand_images or nil,
+                       phone_image  = r.metadata and r.metadata.phone_image or nil,
                        theme        = r.metadata and r.metadata.theme or nil },
         theme     = r.metadata and r.metadata.theme or nil, -- App-level: skins the open panel
         perms     = effective,
@@ -411,7 +412,11 @@ function SetRestaurantBrand(id, key, url, crop)
     local r = GetRestaurant(id); if not r then return { ok = false, error = _L("mgmt_no_restaurant") } end
     url = tostring(url or ""):gsub("^%s+", ""):gsub("%s+$", "")
     r.metadata = r.metadata or {}
-    if key ~= nil and key ~= "" then
+    if key == "phone" then
+        -- The storefront image the lb-phone app shows for this restaurant (feed card +
+        -- menu header). Separate from the packaging default so the phone can differ.
+        r.metadata.phone_image = (url ~= "") and url or nil
+    elseif key ~= nil and key ~= "" then
         if not BRAND_KEYS[key] then return { ok = false, error = _L("mgmt_unknown_texture") } end
         r.metadata.brand_images = r.metadata.brand_images or {}
         r.metadata.brand_images[key] = (url ~= "") and { url = url, crop = sanitizeCrop(crop) } or nil

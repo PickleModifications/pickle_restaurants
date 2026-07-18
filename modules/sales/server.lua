@@ -13,6 +13,45 @@ local function ReceiptItem() return GetSetting("receipt_item", "receipt") end
 local function DrinkItemName() return GetSetting("drink_item", "drink") end
 local function MealItemName() return GetSetting("meal_item", "meal") end
 
+-- The display image for a drink FLAVOR (its `drinks[].output` key). Every poured
+-- drink collapses into the ONE generic drink item, so a flavor has no inventory
+-- image of its own — the same problem the NUI's localImages helpers solve, resolved
+-- ONCE here so EVERY surface (the plain-JS DUI boards, the phone, the tickets widget,
+-- register meal layers) gets a correct `image` without re-implementing the lookup.
+-- Preference order, mirroring web/src/lib/localImages.ts:
+--   1. supplied local art (web/public/items/<output>.png → nui/items/<output>.png),
+--      verified present on disk so we never override a good generic with a 404;
+--   2. the legacy flavor item's inventory image, if that item is still installed;
+--   3. nil → the caller falls back to the generic drink item image.
+-- The on-disk check is static per resource load, so cache it (false = no file).
+local DRINK_ART_FILE = {}
+function DrinkFlavorImage(output)
+    if type(output) ~= "string" or output == "" then return nil end
+    local f = DRINK_ART_FILE[output]
+    if f == nil then
+        local res = GetCurrentResourceName()
+        if LoadResourceFile(res, "nui/items/" .. output .. ".png") then
+            f = ("nui://%s/nui/items/%s.png"):format(res, output)
+        else
+            f = false
+        end
+        DRINK_ART_FILE[output] = f
+    end
+    if f then return f end
+    if ItemExists(output) then return GetItemImage(output) end
+    return nil
+end
+
+-- The image an order LINE shows: a drink pins its chosen flavor's art (`variant`),
+-- everything else keeps the sellable's own image (fallback to the item image).
+local function LineImage(kind, variant, fallback, item)
+    if kind == "drink" then
+        local img = DrinkFlavorImage(variant)
+        if img then return img end
+    end
+    return fallback or GetItemImage(item)
+end
+
 -- A drink's `color` is stored as an { r, g, b } triplet (soda-machine tint); the NUI
 -- swatch needs a CSS string. Passes a hex string through unchanged.
 local function drinkColorCss(c)
@@ -36,7 +75,7 @@ function BuildSellableCatalog(rid)
     local out, seen = {}, {}
     -- `cost` is the raw ingredient cost of this sellable; the computed default
     -- menu price is that cost marked up by the global profit margin.
-    local function add(item, variant, label, kind, cost, modifiers, group)
+    local function add(item, variant, label, kind, cost, modifiers, group, imageOverride)
         variant = variant or ""
         local key = item .. (variant ~= "" and ("::" .. variant) or "")
         if seen[key] then return end
@@ -46,7 +85,9 @@ function BuildSellableCatalog(rid)
                           -- the sellable's ACCESS GROUP (Bakery/Pizza…) so a combo slot can
                           -- reference "any <group>" and resolve to its live members
                           group = (type(group) == "string" and group ~= "") and group or nil,
-                          image = GetItemImage(item), defaultPrice = MarkupPrice(cost or 0),
+                          -- a drink's card borrows its first flavor's art (it has no image of
+                          -- its own — see DrinkFlavorImage) so the generic card is never blank
+                          image = imageOverride or GetItemImage(item), defaultPrice = MarkupPrice(cost or 0),
                           -- POS customisations the customer can pick (add cheese, no lettuce…)
                           modifiers = (type(modifiers) == "table" and #modifiers > 0) and modifiers or nil }
     end
@@ -166,7 +207,7 @@ function BuildSellableCatalog(rid)
                 flavors[#flavors + 1] = { id = "flavor:" .. d.output, variant = d.output,
                                           label = d.label or GetItemLabel(d.output),
                                           group = _L("order_drink_flavor_group"),
-                                          image = ItemExists(d.output) and GetItemImage(d.output) or nil,
+                                          image = DrinkFlavorImage(d.output),
                                           color = drinkColorCss(d.color), price = 0 }
                 local c = ResolveItemCost(d.input)
                 if not cost or c < cost then cost = c end
@@ -177,8 +218,10 @@ function BuildSellableCatalog(rid)
             end
         end
         if #flavors > 0 then
+            -- the generic drink card borrows its first flavor's art (mirrors the POS)
+            local cardImg = DrinkFlavorImage(flavors[1].variant) or GetItemImage(drinkItem)
             add(drinkItem, "", GetItemLabel(drinkItem), "drink", cost or 0, flavors,
-                (not mixed and grp ~= "") and grp or nil)
+                (not mixed and grp ~= "") and grp or nil, cardImg)
         end
     end
 
@@ -474,6 +517,7 @@ local function mealItemsDetail(meta)
             if l.item == DrinkItemName() then
                 local key = type(l.stack) == "table" and l.stack[1] and l.stack[1].item or nil
                 entry.label = drinkFlavorView(key).label
+                entry.image = DrinkFlavorImage(key) or entry.image
             else
                 local top = type(l.stack) == "table" and l.stack[1] or nil
                 entry.label = GetItemLabel(l.item)
@@ -843,9 +887,10 @@ local function resolveComboEntry(c, combo, inst)
         if not chosen then return nil, _L("order_combo_bad_option") end
         local mods, extra, variant = resolveLineModifiers(chosen, pick and pick.mods or nil)
         local base = (i == 1) and combo.price or 0
+        local lvar = DrinkLineVariant(chosen, variant)
         out[#out + 1] = {
-            item = chosen.item, variant = DrinkLineVariant(chosen, variant), label = chosen.label,
-            image = chosen.image or GetItemImage(chosen.item),
+            item = chosen.item, variant = lvar, label = chosen.label,
+            image = LineImage(chosen.kind, lvar, chosen.image, chosen.item),
             price = base + extra, qty = qty, kind = chosen.kind,
             mods = (#mods > 0) and mods or nil,
             combo = { id = combo.comboId, number = combo.number, label = combo.label,
@@ -884,8 +929,9 @@ local function resolveOrderLines(id, cart)
             local qty = math.max(1, math.min(10, math.floor(tonumber(c.qty) or 1)))
             local mods, extra, variant = resolveLineModifiers(e, c.mods)
             local unit = e.price + extra
-            lines[#lines + 1] = { item = e.item, variant = DrinkLineVariant(e, variant), label = e.label,
-                                  image = e.image or GetItemImage(e.item),
+            local lvar = DrinkLineVariant(e, variant)
+            lines[#lines + 1] = { item = e.item, variant = lvar, label = e.label,
+                                  image = LineImage(e.kind, lvar, e.image, e.item),
                                   price = unit, qty = qty, kind = e.kind,
                                   mods = (#mods > 0) and mods or nil }
             total = total + unit * qty

@@ -45,6 +45,7 @@ local function buildAdminData()
             propCount    = #props,
             brand_image  = r.metadata and r.metadata.brand_image or nil,
             brand_images = r.metadata and r.metadata.brand_images or nil,
+            phone_image  = r.metadata and r.metadata.phone_image or nil,
             theme        = r.metadata and r.metadata.theme or nil,
         }
     end

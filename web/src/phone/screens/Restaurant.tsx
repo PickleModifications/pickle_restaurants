@@ -63,6 +63,11 @@ function ItemSheet({
   const [qty, setQty] = useState(1);
   const groups = useMemo(() => groupMods(item.modifiers), [item]);
   const unit = priceOf(item, st);
+  // A drink has no image of its own (all flavors are the one generic drink item), so
+  // the sheet header shows the CHOSEN flavor's art, falling back to the item image.
+  const chosenFlavorImg = (item.modifiers || []).find(
+    (m) => st[m.id] && m.id.startsWith("flavor:")
+  )?.image;
 
   const pickRadio = (list: Mod[], id: string) =>
     setSt((s) => {
@@ -78,7 +83,7 @@ function ItemSheet({
         <div className="pf-grab" />
         <div className="max-h-[70vh] overflow-y-auto px-4 pb-2">
           <div className="flex gap-3 pt-1">
-            <ItemImg src={item.image} className="h-16 w-16 rounded-xl" />
+            <ItemImg src={chosenFlavorImg || item.image} className="h-16 w-16 rounded-xl" />
             <div className="min-w-0 flex-1">
               <div className="font-display text-lg font-extrabold leading-tight">{item.label}</div>
               <div className="font-mono text-sm text-muted-foreground">
@@ -119,6 +124,16 @@ function ItemSheet({
                         >
                           {on && <Star className="h-3 w-3" fill="currentColor" />}
                         </span>
+                        {(m.image || m.color) && (
+                          m.image ? (
+                            <ItemImg src={m.image} className="h-8 w-8 shrink-0 rounded-lg" />
+                          ) : (
+                            <span
+                              className="h-8 w-8 shrink-0 rounded-lg border border-border"
+                              style={{ backgroundColor: m.color }}
+                            />
+                          )
+                        )}
                         <span className="flex-1 text-sm font-medium">{m.label}</span>
                         {m.price ? (
                           <span className="font-mono text-xs text-muted-foreground">
@@ -248,12 +263,16 @@ export function Restaurant({ params }: { params: any }) {
   }, [data]);
 
   const addLine = (item: CatalogItem, qty: number, st: ModState) => {
-    const mods = (item.modifiers || []).filter((m) => st[m.id]).map((m) => m.id);
-    const modLabels = (item.modifiers || []).filter((m) => st[m.id]).map((m) => m.label);
+    const selected = (item.modifiers || []).filter((m) => st[m.id]);
+    const mods = selected.map((m) => m.id);
+    const modLabels = selected.map((m) => m.label);
+    // a drink line shows its CHOSEN flavor's art (the item's own image is the generic
+    // drink); everything else keeps the item image
+    const flavorImg = selected.find((m) => m.id.startsWith("flavor:"))?.image;
     addToCart(rid, data.label, {
       key: item.key,
       label: item.label,
-      image: item.image,
+      image: flavorImg || item.image,
       price: priceOf(item, st),
       qty,
       mods,

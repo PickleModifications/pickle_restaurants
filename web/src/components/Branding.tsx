@@ -253,9 +253,9 @@ function drawCrop(
 // crop) and saved only on confirm. `event` is the NUI event to save through —
 // "management:setBrandImage" or "admin:setBrandImage" (both hit SetRestaurantBrand).
 export default function Branding({
-  id, brand, brandImages, event, renderTargets,
+  id, brand, brandImages, phoneImage, event, renderTargets,
 }: {
-  id: number; brand: string; brandImages: Record<string, any>; event: string;
+  id: number; brand: string; brandImages: Record<string, any>; phoneImage?: string; event: string;
   renderTargets?: { key: string; w: number; h: number }[];
 }) {
   // local optimistic copy so cards update without a full panel refetch
@@ -288,6 +288,21 @@ export default function Branding({
           />
           <p className="mt-1.5 text-[11px] text-muted-foreground">
             {_L("branding.default_image_hint")}
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="pt-4">
+          <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold"><ImageIcon className="h-4 w-4" /> {_L("branding.phone_image")}</h3>
+          <Input
+            defaultValue={phoneImage || ""}
+            placeholder={_L("branding.phone_image_placeholder")}
+            className="h-9"
+            onBlur={(e) => fetchNui(event, { id, key: "phone", url: e.target.value.trim() })}
+          />
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            {_L("branding.phone_image_hint")}
           </p>
         </CardContent>
       </Card>

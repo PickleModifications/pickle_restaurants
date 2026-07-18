@@ -425,6 +425,7 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
               id={r.id}
               brand={r.brand_image || ""}
               brandImages={r.brand_images || {}}
+              phoneImage={r.phone_image || ""}
               event="admin:setBrandImage"
               renderTargets={renderTargets}
             />

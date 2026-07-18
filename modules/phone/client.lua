@@ -75,6 +75,7 @@ RegisterNUICallback("phone:saveFavorite",     relay("pickle_restaurants:phone:sa
 RegisterNUICallback("phone:deleteFavorite",   relay("pickle_restaurants:phone:deleteFavorite"))
 RegisterNUICallback("phone:submitReview",     relay("pickle_restaurants:phone:submitReview"))
 RegisterNUICallback("phone:reserve",          relay("pickle_restaurants:phone:reserve"))
+RegisterNUICallback("phone:reserveAvailability", relay("pickle_restaurants:phone:reserveAvailability"))
 RegisterNUICallback("phone:cancelReservation",relay("pickle_restaurants:phone:cancelReservation"))
 RegisterNUICallback("phone:myReservations",   relay("pickle_restaurants:phone:myReservations"))
 RegisterNUICallback("phone:leaderboard",      relay("pickle_restaurants:phone:leaderboard"))

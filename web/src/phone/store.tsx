@@ -68,6 +68,18 @@ export type CartLine = {
 };
 export type Cart = { rid: number; label: string; lines: CartLine[] } | null;
 
+// A CEF-safe replacement for window.prompt() (which FiveM's CEF suppresses, so it
+// silently returns null). `ask()` resolves to the entered string, or null on cancel.
+export type AskOpts = {
+  title: string;
+  label?: string;
+  kind?: "number" | "text";
+  initial?: string | number;
+  placeholder?: string;
+  confirm?: string;
+  prefix?: string; // shown inside the field (e.g. the currency symbol) for money inputs
+};
+
 // ─── context ─────────────────────────────────────────────────────────────────
 type Ctx = {
   ready: boolean;
@@ -90,6 +102,10 @@ type Ctx = {
   // toast
   toast: (msg: string, tone?: "ok" | "err") => void;
   toastMsg: { msg: string; tone: "ok" | "err" } | null;
+  // modal input (CEF-safe prompt)
+  ask: (opts: AskOpts) => Promise<string | null>;
+  askState: AskOpts | null;
+  closeAsk: (value: string | null) => void;
 };
 
 const PhoneCtx = createContext<Ctx>(null as any);
@@ -104,6 +120,8 @@ export function PhoneProvider({ children }: { children: any }) {
   const [stack, setStack] = useState<Screen[]>([{ name: "home" }]);
   const [cart, setCart] = useState<Cart>(null);
   const [toastMsg, setToastMsg] = useState<{ msg: string; tone: "ok" | "err" } | null>(null);
+  const [askState, setAskState] = useState<AskOpts | null>(null);
+  const askResolve = useRef<((v: string | null) => void) | null>(null);
   const uidRef = useRef(1);
   const toastTimer = useRef<any>(null);
 
@@ -217,6 +235,21 @@ export function PhoneProvider({ children }: { children: any }) {
     toastTimer.current = setTimeout(() => setToastMsg(null), 2600);
   }, []);
 
+  // ── ask (modal prompt) ──
+  const ask = useCallback(
+    (opts: AskOpts) =>
+      new Promise<string | null>((resolve) => {
+        askResolve.current = resolve;
+        setAskState(opts);
+      }),
+    []
+  );
+  const closeAsk = useCallback((value: string | null) => {
+    askResolve.current?.(value);
+    askResolve.current = null;
+    setAskState(null);
+  }, []);
+
   const value: Ctx = {
     ready,
     home,
@@ -235,6 +268,9 @@ export function PhoneProvider({ children }: { children: any }) {
     cartSubtotal,
     toast,
     toastMsg,
+    ask,
+    askState,
+    closeAsk,
   };
   return <PhoneCtx.Provider value={value}>{children}</PhoneCtx.Provider>;
 }

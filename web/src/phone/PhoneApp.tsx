@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { Home as HomeIcon, ClipboardList, Award, ChefHat, User, ShoppingBag } from "lucide-react";
 import { cn } from "../lib/utils";
 import { PhoneProvider, usePhone, money, Tab } from "./store";
-import { Spinner, Toast } from "./ui";
+import { Spinner, Toast, AskModal } from "./ui";
 import { fetchNui, useNuiEvent } from "../lib/nui";
 
 import Home from "./screens/Home";
@@ -120,11 +120,13 @@ function Shell() {
         <Spinner label="Loading Pickle Food…" />
       ) : (
         <>
+          <div className="pf-statusbar" />
           <div className="pf-scroll">
             <Router />
           </div>
           <CartBar />
           <TabBar />
+          <AskModal />
         </>
       )}
     </div>

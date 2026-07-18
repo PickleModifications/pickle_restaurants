@@ -44,7 +44,7 @@ export function Orders() {
   return (
     <Screen className="pb-20">
       <TopBar title="Your orders" />
-      <div className="flex gap-2 px-4 pb-2">
+      <div className="flex gap-2 px-4 pb-2 pt-3">
         {(["active", "past"] as const).map((t) => (
           <button
             key={t}
@@ -76,9 +76,13 @@ export function Orders() {
                 onClick={() => go("order", { orderId: o.orderId, rid: o.restaurantId })}
                 className="flex w-full items-center gap-3 rounded-2xl border border-border bg-card p-3 text-left active:scale-[0.99]"
               >
-                <span className="grid h-11 w-11 place-items-center rounded-xl bg-muted text-foreground">
-                  <Icon className="h-5 w-5" />
-                </span>
+                {o.lines?.[0]?.image ? (
+                  <ItemImg src={o.lines[0].image} alt={o.lines[0].label} className="h-11 w-11 shrink-0 rounded-xl bg-muted" />
+                ) : (
+                  <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-muted text-foreground">
+                    <Icon className="h-5 w-5" />
+                  </span>
+                )}
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-semibold">{o.restaurant}</div>
                   <div className="text-[0.72rem] text-muted-foreground">
