@@ -8,6 +8,7 @@ local function buildAdminData()
     local data = {
         restaurants = {},
         theme       = GetSetting("app_theme", nil), -- App-level: skins /restaurants itself
+        phoneTheme  = GetSetting("phone_theme", nil), -- ONE global skin for the lb-phone app
         settings    = SettingsCache,
         -- The three authored creation kinds, each flagged valid/missing + per-entry
         -- annotations (defaultPrice, tap, duplicate_input, *_installed). The NUI
@@ -186,6 +187,18 @@ end)
 lib.callback.register("pickle_restaurants:admin:setAppTheme", function(src, d)
     if not IsPlayerAdmin(src) then return { ok = false } end
     SetSetting("app_theme", SanitizeTheme(d.theme))
+    ShowNotification(src, _L("theme_saved"))
+    return { ok = true }
+end)
+
+-- Phone-app theme: ONE global skin for the lb-phone companion app, stored as the
+-- `phone_theme` setting (not per-restaurant — the phone keeps a single consistent
+-- look). Pushed live to every open phone so the change previews without reopening.
+lib.callback.register("pickle_restaurants:admin:setPhoneTheme", function(src, d)
+    if not IsPlayerAdmin(src) then return { ok = false } end
+    local theme = SanitizeTheme(d.theme)
+    SetSetting("phone_theme", theme)
+    TriggerClientEvent("pickle_restaurants:phone:pushTheme", -1, theme)
     ShowNotification(src, _L("theme_saved"))
     return { ok = true }
 end)

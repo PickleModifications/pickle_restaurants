@@ -22,7 +22,6 @@ import {
   Trash2,
 } from "lucide-react";
 import { fetchNui, useNuiEvent } from "../../lib/nui";
-import { applyTheme } from "../../lib/theme";
 import { cn } from "../../lib/utils";
 import { usePhone, money } from "../store";
 import { Screen, TopBar, Empty, Spinner } from "../ui";

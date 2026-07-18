@@ -18,6 +18,8 @@
   "theme.preview_action": "Order",
   "theme.app_title": "Menu Theme",
   "theme.app_hint": "Skins the /restaurants panel itself — the color, surface, and corners of these admin screens. Each restaurant still has its own franchise theme, set on its page.",
+  "theme.phone_title": "Phone App Theme",
+  "theme.phone_hint": "One global look for the Pickle Food phone app — the same color, surface, and corners on every player's phone. Not per-restaurant: the app keeps one consistent skin across all storefronts.",
   "payconfirm.stamp": "Customer receipt",
   "mgmt.balance_label": "Balance",
   "admin.balance": "Balance %s",

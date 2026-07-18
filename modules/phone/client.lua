@@ -147,6 +147,13 @@ RegisterNetEvent("pickle_restaurants:sales:orders", function(rid, orders)
     end
 end)
 
+-- ─── theme push ──────────────────────────────────────────────────────────────
+-- The admin panel changed the ONE global phone theme — forward the new seed to the
+-- app so an open phone reskins live (otherwise it lands on the next home refresh).
+RegisterNetEvent("pickle_restaurants:phone:pushTheme", function(theme)
+    ToApp("theme", { theme = theme })
+end)
+
 -- ─── promotions push ─────────────────────────────────────────────────────────
 RegisterNetEvent("pickle_restaurants:phone:pushPromo", function(p)
     ToApp("promo", p)

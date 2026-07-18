@@ -98,6 +98,7 @@ RegisterNUICallback("admin:setOwner",     relay("pickle_restaurants:admin:setOwn
 RegisterNUICallback("admin:setBrandImage", relay("pickle_restaurants:admin:setBrandImage"))
 RegisterNUICallback("admin:setTheme",     relay("pickle_restaurants:admin:setTheme"))
 RegisterNUICallback("admin:setAppTheme",  relay("pickle_restaurants:admin:setAppTheme"))
+RegisterNUICallback("admin:setPhoneTheme", relay("pickle_restaurants:admin:setPhoneTheme"))
 RegisterNUICallback("admin:saveSetting",  relay("pickle_restaurants:admin:saveSetting"))
 RegisterNUICallback("admin:saveSettings", relay("pickle_restaurants:admin:saveSettings"))
 RegisterNUICallback("admin:resetRecipes", relay("pickle_restaurants:admin:resetRecipes"))

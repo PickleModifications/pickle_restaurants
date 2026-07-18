@@ -24,6 +24,11 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
   // Settings editor previews live AND a restaurant detail can restore it on close.
   const [appTheme, setAppTheme] = useState<ThemeConfig | null>(data?.theme ?? null);
 
+  // The lb-phone companion app's ONE global theme (`phone_theme` setting). Unlike the
+  // menu theme it doesn't skin THIS panel — it just previews on a contained swatch in
+  // Settings → Appearance and saves through admin:setPhoneTheme.
+  const [phoneTheme, setPhoneTheme] = useState<ThemeConfig | null>(data?.phoneTheme ?? null);
+
   // Whether a single restaurant's detail is open in the Restaurants tab. While it is,
   // hide the top-level admin tab strip — the detail is its own focused view (with a
   // back button), and stacking the admin tabs above it is what got confusing.
@@ -54,7 +59,7 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
         </TabsContent>
 
         <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">
-          <Settings settings={settings} items={items} groups={groups} onSaved={refresh} appTheme={appTheme} onAppTheme={setAppTheme} />
+          <Settings settings={settings} items={items} groups={groups} onSaved={refresh} appTheme={appTheme} onAppTheme={setAppTheme} phoneTheme={phoneTheme} onPhoneTheme={setPhoneTheme} />
         </TabsContent>
       </Tabs>
     </Panel>

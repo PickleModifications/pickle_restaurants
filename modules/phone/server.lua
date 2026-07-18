@@ -354,6 +354,9 @@ lib.callback.register("pickle_restaurants:phone:home", function(src, d)
         ok         = true,
         name       = GetPlayerCharacterName(src),
         currency   = GetSetting("currency", "$"),
+        -- ONE global phone skin (the `phone_theme` setting) — NOT per-restaurant. The
+        -- app applies this once on boot and keeps it for every storefront it browses.
+        theme      = GetSetting("phone_theme", nil),
         restaurants= cards,
         favorites  = favorites,
         orders     = orders,

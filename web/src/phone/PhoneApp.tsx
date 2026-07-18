@@ -53,15 +53,15 @@ function CartBar() {
     <div className="pointer-events-none absolute inset-x-0 bottom-0 z-30 p-3">
       <button
         onClick={() => go("checkout", { rid: cart.rid })}
-        className="pointer-events-auto flex w-full items-center justify-between gap-2 rounded-2xl bg-brand px-4 py-3 text-brand-ink shadow-xl active:scale-[0.99]"
+        className="pf-elev-lg pointer-events-auto flex w-full items-center justify-between gap-2 rounded-2xl bg-brand px-4 py-3.5 text-brand-ink transition-transform active:scale-[0.98]"
       >
-        <span className="flex items-center gap-2 font-bold">
-          <span className="grid h-6 w-6 place-items-center rounded-full bg-brand-ink/15 text-sm">
+        <span className="flex items-center gap-2.5 font-bold">
+          <span className="grid h-6 min-w-6 place-items-center rounded-full bg-brand-ink/20 px-1.5 font-mono text-sm tabular-nums">
             {cartCount}
           </span>
           View cart
         </span>
-        <span className="font-mono font-bold">{money(currency, cartSubtotal)}</span>
+        <span className="font-mono font-bold tabular-nums">{money(currency, cartSubtotal)}</span>
       </button>
     </div>
   );
@@ -81,9 +81,12 @@ function TabBar() {
     <div className="pf-tabs">
       {tabs.map((t) => {
         const Icon = t.icon;
+        const on = tab === t.id;
         return (
-          <button key={t.id} className={cn("pf-tab", tab === t.id && "on")} onClick={() => setTab(t.id)}>
-            <Icon className="h-[1.15rem] w-[1.15rem]" strokeWidth={tab === t.id ? 2.6 : 2} />
+          <button key={t.id} className={cn("pf-tab", on && "on")} onClick={() => setTab(t.id)}>
+            <span className="pf-tab-ico">
+              <Icon className="h-[1.2rem] w-[1.2rem]" strokeWidth={on ? 2.6 : 2} />
+            </span>
             {t.label}
           </button>
         );

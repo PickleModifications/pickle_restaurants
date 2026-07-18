@@ -12,7 +12,6 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { fetchNui } from "../../lib/nui";
-import { applyTheme } from "../../lib/theme";
 import { cn } from "../../lib/utils";
 import { usePhone, money, CatalogItem, Mod } from "../store";
 import { Screen, TopBar, Spinner, ItemImg, Rating, PromoTag, PunchCard, Empty } from "../ui";
@@ -224,14 +223,10 @@ export function Restaurant({ params }: { params: any }) {
     let live = true;
     fetchNui("phone:menu", { id: rid }).then((d) => {
       if (!live) return;
-      if (d?.ok) {
-        setData(d);
-        applyTheme(d.theme);
-      }
+      if (d?.ok) setData(d);
     });
     return () => {
       live = false;
-      applyTheme(null);
     };
   }, [rid]);
 
@@ -422,12 +417,8 @@ export function Checkout({ params }: { params: any }) {
   useEffect(() => {
     if (cart)
       fetchNui("phone:menu", { id: cart.rid }).then((d) => {
-        if (d?.ok) {
-          setMenu(d);
-          applyTheme(d.theme);
-        }
+        if (d?.ok) setMenu(d);
       });
-    return () => applyTheme(null);
   }, [cart?.rid]);
 
   const subtotal = cart ? cart.lines.reduce((n, l) => n + l.price * l.qty, 0) : 0;
