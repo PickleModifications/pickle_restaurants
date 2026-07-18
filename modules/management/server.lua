@@ -169,7 +169,7 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
 
     return {
         ok        = true,
-        restaurant = { id = r.id, label = r.label, balance = r.balance, owner = r.owner_identifier,
+        restaurant = { id = r.id, label = r.label, name = r.name, balance = r.balance, owner = r.owner_identifier,
                        hasShell     = (r.metadata and r.metadata.shell) ~= nil,
                        hasNpcSpawn  = (r.metadata and r.metadata.npc_spawn) ~= nil,
                        brand_image  = r.metadata and r.metadata.brand_image or nil,
@@ -178,6 +178,9 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
                        theme        = r.metadata and r.metadata.theme or nil },
         theme     = r.metadata and r.metadata.theme or nil, -- App-level: skins the open panel
         perms     = effective,
+        -- Owner-or-admin. Gates the rename card in the Brand tab, which is NOT a
+        -- staff permission (see management:setName).
+        isOwner   = isOwner or false,
         roles     = rolesArray(roles),
         employees = buildEmployees(id, roles),
         ledger    = ledger,
@@ -537,5 +540,51 @@ lib.callback.register("pickle_restaurants:management:setTheme", function(src, d)
     if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
     local res = SetRestaurantTheme(id, d.theme)
     if res and res.ok then ShowNotification(src, _L("theme_saved")) end
+    return res
+end)
+
+-- ─── identity (rename) ───────────────────────────────────────────────────────
+
+-- Caps mirror the `pickle_restaurants` columns (label VARCHAR(100), name
+-- VARCHAR(60)) so a long name is trimmed here rather than truncated by MySQL.
+local MAX_LABEL_LEN = 100
+local MAX_NAME_LEN  = 60
+
+-- The internal codename is DERIVED from the display label — exactly what the
+-- admin panel's create form does (admins never type a raw slug), but slugged
+-- SERVER-side so a rename can't plant a codename the untrusted NUI made up.
+local function restSlug(s)
+    return (tostring(s or ""):lower():gsub("[^a-z0-9]+", "_"):gsub("^_+", ""):gsub("_+$", ""))
+end
+
+-- Rename a restaurant. Shared by the boss (management) and admin panels — each
+-- gates its own permission before calling. Write-through to BOTH the cache and
+-- MySQL (the mutator pattern), then re-sync so the blip, station labels, menu/
+-- orders boards and the phone all pick the new name up without a restart.
+function SetRestaurantName(id, label)
+    id = tonumber(id)
+    local r = GetRestaurant(id); if not r then return { ok = false, error = _L("mgmt_no_restaurant") } end
+    label = tostring(label or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    label = label:sub(1, MAX_LABEL_LEN)
+    if label == "" then return { ok = false, error = _L("mgmt_name_required") } end
+    local name = restSlug(label):sub(1, MAX_NAME_LEN)
+    if name == "" then name = r.name end -- a label of pure symbols keeps the old key
+    MySQL.update.await("UPDATE pickle_restaurants SET name = ?, label = ? WHERE id = ?", { name, label, id })
+    r.name, r.label = name, label
+    SyncToClient(-1)
+    return { ok = true, name = name, label = label }
+end
+
+lib.callback.register("pickle_restaurants:management:setName", function(src, d)
+    local id = tonumber(d.id)
+    -- Renaming the business is an OWNER-level act, not a staff one: there is no
+    -- per-employee permission for it in PERMISSIONS, and the name lands on every
+    -- customer-facing surface (blip, screens, phone, receipts). ResolvePerms'
+    -- second return is exactly "owner or server admin", so gate on that rather
+    -- than inventing a perm or borrowing manage_props (which a shift lead may hold).
+    local perms, isOwner = ResolvePerms(id, src)
+    if not perms or not isOwner then return { ok = false, error = _L("no_permission") } end
+    local res = SetRestaurantName(id, d.label)
+    if res and res.ok then ShowNotification(src, _L("mgmt_name_saved", res.label)) end
     return res
 end)

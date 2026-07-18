@@ -58,6 +58,14 @@ RegisterNUICallback("management:setTheme", function(d, cb)
     cb(res or {})
 end)
 
+-- Rename also skips the refresh: it auto-saves as you type, and re-fetching getData
+-- would remount the Brand tab and yank the cursor out of the field mid-edit.
+RegisterNUICallback("management:setName", function(d, cb)
+    local res = lib.callback.await("pickle_restaurants:management:setName", false, d)
+    if res and res.error then ShowNotification(res.error) end
+    cb(res or {})
+end)
+
 -- Combos autosave (and delete) from their own optimistic React state — a panel
 -- refresh would remount the editor mid-edit (losing the open card / cursor), so
 -- these relay to the server WITHOUT re-fetching getData, like the theme/brand saves.

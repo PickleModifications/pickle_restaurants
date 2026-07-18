@@ -7,7 +7,7 @@ if GetResourceState('qb-core') == 'started' then return end
 
 debugPrint("Loading standalone bridge (no ESX/QB detected).")
 
-local Accounts = {} -- identifier -> { cash = number }
+local Accounts = {} -- identifier -> { cash = number, bank = number }
 
 local function IdentifierOf(source)
     return GetPlayerIdentifierByType(source, 'license') or ("src:" .. tostring(source))
@@ -21,16 +21,27 @@ MySQL.ready(function()
             PRIMARY KEY (`identifier`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
+    -- Additive migration: bank account (card payments, e.g. phone orders).
+    local cols = MySQL.query.await("SHOW COLUMNS FROM `pickle_restaurant_accounts` LIKE 'bank'")
+    if not cols or #cols == 0 then
+        MySQL.query.await("ALTER TABLE `pickle_restaurant_accounts` ADD COLUMN `bank` BIGINT NOT NULL DEFAULT 5000")
+    end
 end)
+
+-- Which account column a currency maps to. Anything unknown (incl. nil and the
+-- legacy "money") falls back to cash, so existing callers are unchanged.
+local function AccountKey(currency)
+    return (currency == "bank") and "bank" or "cash"
+end
 
 local function LoadAccount(identifier)
     if Accounts[identifier] then return Accounts[identifier] end
-    local row = MySQL.single.await("SELECT cash FROM pickle_restaurant_accounts WHERE identifier = ?", { identifier })
+    local row = MySQL.single.await("SELECT cash, bank FROM pickle_restaurant_accounts WHERE identifier = ?", { identifier })
     if not row then
-        MySQL.insert.await("INSERT INTO pickle_restaurant_accounts (identifier, cash) VALUES (?, ?)", { identifier, 5000 })
-        Accounts[identifier] = { cash = 5000 }
+        MySQL.insert.await("INSERT INTO pickle_restaurant_accounts (identifier, cash, bank) VALUES (?, ?, ?)", { identifier, 5000, 5000 })
+        Accounts[identifier] = { cash = 5000, bank = 5000 }
     else
-        Accounts[identifier] = { cash = row.cash }
+        Accounts[identifier] = { cash = row.cash, bank = row.bank or 0 }
     end
     return Accounts[identifier]
 end
@@ -79,25 +90,27 @@ end
 function GetMoney(source, currency)
     local id = GetIdentifier(source); if not id then return 0 end
     local acc = LoadAccount(id)
-    return acc.cash or 0
+    return acc[AccountKey(currency)] or 0
 end
 
-function AddMoney(source, count, _)
+function AddMoney(source, count, currency)
     local id = GetIdentifier(source); if not id then return end
     local acc = LoadAccount(id)
-    acc.cash = (acc.cash or 0) + RoundMoney(count)
-    MySQL.update("UPDATE pickle_restaurant_accounts SET cash = ? WHERE identifier = ?", { acc.cash, id })
-    TriggerClientEvent("pickle_restaurants:updateMoney", source, acc.cash)
+    local key = AccountKey(currency) -- only ever "cash" or "bank"
+    acc[key] = (acc[key] or 0) + RoundMoney(count)
+    MySQL.update(("UPDATE pickle_restaurant_accounts SET %s = ? WHERE identifier = ?"):format(key), { acc[key], id })
+    TriggerClientEvent("pickle_restaurants:updateMoney", source, acc[key])
 end
 
-function RemoveMoney(source, count, _)
+function RemoveMoney(source, count, currency)
     local id = GetIdentifier(source); if not id then return false end
     local acc = LoadAccount(id)
+    local key = AccountKey(currency) -- only ever "cash" or "bank"
     count = RoundMoney(count)
-    if (acc.cash or 0) < count then return false end
-    acc.cash = acc.cash - count
-    MySQL.update("UPDATE pickle_restaurant_accounts SET cash = ? WHERE identifier = ?", { acc.cash, id })
-    TriggerClientEvent("pickle_restaurants:updateMoney", source, acc.cash)
+    if (acc[key] or 0) < count then return false end
+    acc[key] = acc[key] - count
+    MySQL.update(("UPDATE pickle_restaurant_accounts SET %s = ? WHERE identifier = ?"):format(key), { acc[key], id })
+    TriggerClientEvent("pickle_restaurants:updateMoney", source, acc[key])
     return true
 end
 

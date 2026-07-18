@@ -8,6 +8,11 @@ export default defineConfig({
   build: {
     outDir: "../nui",
     emptyOutDir: true,
+    // PINNED: FiveM ships CEF 103 (Chromium 103). Vite 5's default target
+    // ("modules" → chrome87) happens to be safe, but newer Vite defaults to
+    // baseline-widely-available (chrome111) — a major bump would silently emit
+    // syntax CEF can't parse and break the WHOLE NUI, not just one view.
+    target: "chrome103",
     chunkSizeWarningLimit: 2000,
     rollupOptions: {
       // TWO html entries emitted in ONE pass (so emptyOutDir stays safe):

@@ -8,7 +8,7 @@ import {
   useState,
 } from "react";
 import { fetchNui, useNuiEvent } from "../lib/nui";
-import { applyTheme, type ThemeConfig } from "../lib/theme";
+import { applyTheme, normalizeTheme, type ThemeConfig } from "../lib/theme";
 
 // ─── types ──────────────────────────────────────────────────────────────────
 export type ScreenName =
@@ -108,6 +108,38 @@ type Ctx = {
   closeAsk: (value: string | null) => void;
 };
 
+// ─── theme boot ──────────────────────────────────────────────────────────────
+// The phone's ONE global seed (`phone_theme`) only arrives with the first
+// phone:home reply, which can take a second or more (lb-phone's componentsLoaded
+// handshake + a possible PhoneReady retry loop). Without this the SPLASH/loading
+// screen painted with index.css's static defaults and then snapped to the real
+// theme once data landed. So: cache the last seed we were given and re-apply it
+// synchronously at module load — before React's first render — so the loader is
+// already themed. First-ever launch still falls back to the default seed.
+const THEME_KEY = "pf.theme";
+
+function cachedTheme(): ThemeConfig | null {
+  try {
+    const raw = localStorage.getItem(THEME_KEY);
+    return raw ? (JSON.parse(raw) as ThemeConfig) : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberTheme(t?: ThemeConfig | null) {
+  try {
+    // Always store the NORMALIZED seed, so clearing the setting back to the
+    // default is remembered too (rather than leaving a stale seed cached).
+    localStorage.setItem(THEME_KEY, JSON.stringify(normalizeTheme(t)));
+  } catch {
+    /* storage unavailable in this CEF context — the theme still applies live */
+  }
+}
+
+// Runs at import time (before the first paint), not in an effect.
+applyTheme(cachedTheme());
+
 const PhoneCtx = createContext<Ctx>(null as any);
 export const usePhone = () => useContext(PhoneCtx);
 export const money = (cur: string, n: number) =>
@@ -130,7 +162,12 @@ export function PhoneProvider({ children }: { children: any }) {
   // The phone has ONE global theme (the `phone_theme` setting), applied once here and
   // held for the whole app — it never reskins per restaurant, so the app reads like a
   // real delivery service rather than changing color on every storefront.
-  const applyPhoneTheme = useCallback((t?: ThemeConfig | null) => applyTheme(t), []);
+  // (Seeded from the cached seed at module load above so the loading screen is
+  // already themed; every applied seed is cached for the NEXT cold start.)
+  const applyPhoneTheme = useCallback((t?: ThemeConfig | null) => {
+    applyTheme(t);
+    rememberTheme(t);
+  }, []);
 
   const refreshHome = useCallback(async () => {
     const d = await fetchNui("phone:home", {});

@@ -62,6 +62,8 @@ function AddMoney(source, count, currency)
     local currency = currency or "money"
     if (currency == "money") then
         xPlayer.Functions.AddMoney('cash', count)
+    elseif (currency == "bank") then
+        xPlayer.Functions.AddMoney('bank', count)
     elseif (currency == "dirty") then
         local setting = Config.FrameworkSettings.dirtyMoney
         Inventory.AddItem(source, setting == "DEFAULT" and 'dirty_money' or setting, count)
@@ -74,6 +76,8 @@ function RemoveMoney(source, count, currency)
     local currency = currency or "money"
     if (currency == "money") then
         xPlayer.Functions.RemoveMoney('cash', count)
+    elseif (currency == "bank") then
+        xPlayer.Functions.RemoveMoney('bank', count)
     elseif (currency == "dirty") then
         local setting = Config.FrameworkSettings.dirtyMoney
         Inventory.RemoveItem(source, setting == "DEFAULT" and 'dirty_money' or setting, count)
@@ -87,6 +91,8 @@ function GetMoney(source, currency)
     local money = 0
     if (currency == "money") then
         money = xPlayer.PlayerData.money.cash
+    elseif (currency == "bank") then
+        money = xPlayer.PlayerData.money.bank or 0
     elseif (currency == "dirty") then
         local setting = Config.FrameworkSettings.dirtyMoney
         money = Inventory.GetItemCount(source, setting == "DEFAULT" and 'dirty_money' or setting)

@@ -109,17 +109,61 @@ body,
     transform: translateY(0);
   }
 }
+/* fill-mode is BACKWARDS, never `both`: with `both` the final keyframe's
+   `transform: translateY(0)` sticks around forever, and a transformed element is a
+   containing block for absolutely-positioned descendants — which pinned bottom
+   sheets to the bottom of the tall scrolled PAGE instead of the viewport. Sheets
+   also portal out of the screen now (ui.tsx `Sheet`); this keeps position:sticky
+   and any future overlay honest too. */
 .pf-screen {
-  animation: pf-screen-in 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: pf-screen-in 0.26s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
-/* Bottom sheet (cart / options). */
+/* Overlay host — a child of .pf-root (never of a screen), so everything portalled
+   into it is positioned against the VISIBLE phone, not the scrolled document.
+   Transparent + click-through when empty; the scrim/sheet re-enable pointer events. */
+.pf-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+}
+
+/* "View cart" — the LAST child of the scroll region, not a footer overlay. Sticky
+   bottom pins it to the bottom of the CONTENT area while there's more list below;
+   once the user reaches the end of the list it settles into its natural place as
+   the final row, so the last menu item is never covered and stays tappable. The
+   fade keeps content from showing through the bar's rounded corners while it floats. */
+.pf-cartbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 30;
+  padding: 0.75rem;
+  background: linear-gradient(to top, rgb(var(--bg)) 58%, rgb(var(--bg) / 0));
+}
+
+/* Bottom sheet (cart / options). Enter AND exit both live here — the exit plays on a
+   DOM snapshot the `Sheet` component re-parents into #pf-overlay on unmount (ui.tsx),
+   since React removes the real nodes the instant a call site stops rendering them.
+   `.pf-out` is what that ghost wears. */
 @keyframes pf-sheet-in {
   from {
+    opacity: 0;
     transform: translateY(100%);
   }
   to {
+    opacity: 1;
     transform: translateY(0);
+  }
+}
+@keyframes pf-sheet-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(100%);
   }
 }
 @keyframes pf-scrim-in {
@@ -130,12 +174,33 @@ body,
     opacity: 1;
   }
 }
+@keyframes pf-scrim-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
 .pf-scrim {
   position: absolute;
   inset: 0;
   background: rgb(0 0 0 / 0.55);
   animation: pf-scrim-in 0.2s ease both;
   z-index: 40;
+  pointer-events: auto;
+}
+.pf-scrim.pf-out {
+  animation: pf-scrim-out 0.24s ease both;
+}
+/* The exiting ghost is inert and must never intercept a tap meant for whatever is
+   underneath (or for a sheet that opened while this one was still leaving). */
+.pf-sheet.pf-out,
+.pf-scrim.pf-out {
+  pointer-events: none;
+}
+.pf-sheet.pf-out {
+  animation: pf-sheet-out 0.26s cubic-bezier(0.4, 0, 0.75, 0.3) both;
 }
 .pf-sheet {
   position: absolute;
@@ -153,6 +218,7 @@ body,
   padding-bottom: var(--pf-bottom);
   display: flex;
   flex-direction: column;
+  pointer-events: auto;
 }
 .pf-grab {
   width: 2.4rem;

@@ -11,7 +11,8 @@ import {
 import { fetchNui, useNuiEvent } from "../../lib/nui";
 import { cn } from "../../lib/utils";
 import { usePhone, money } from "../store";
-import { Screen, TopBar, ItemImg, Empty, Stars } from "../ui";
+import { Screen, TopBar, ItemImg, Empty, Spinner, Stars } from "../ui";
+import { OrderMap } from "../map/OrderMap";
 
 const TYPE_ICON: Record<string, any> = { delivery: Truck, pickup: ShoppingBag, dine_in: Utensils };
 const TYPE_LABEL: Record<string, string> = { delivery: "Delivery", pickup: "Pickup", dine_in: "Dine-in" };
@@ -113,6 +114,28 @@ export function OrderTrack({ params }: { params: any }) {
   const seed = (home?.orders || []).find((o: any) => o.orderId === params.orderId);
   const [order, setOrder] = useState<any>(seed || { orderId: params.orderId, status: "open", type: "pickup", lines: [] });
   const [reviewing, setReviewing] = useState(false);
+  // Whether this ticket's DETAIL actually exists. Opening a ticket the home payload
+  // hasn't got yet (a fresh order, or a reconnect) left the page rendering an empty
+  // shell that looked broken. Re-ask for home once, then say which it is.
+  const [probe, setProbe] = useState<"ok" | "loading" | "missing">(seed ? "ok" : "loading");
+
+  useEffect(() => {
+    if (probe !== "loading") return;
+    let cancelled = false;
+    (async () => {
+      const d = await refreshHome();
+      if (cancelled) return;
+      const found = (d?.orders || []).find((o: any) => o.orderId === params.orderId);
+      if (found) {
+        setOrder((o: any) => ({ ...found, ...o, ...found }));
+        setProbe("ok");
+      } else setProbe("missing");
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Live: the server broadcasts open tickets for this restaurant. Update our
   // ready-flag off it; when our ticket drops out of the open list, it's completed.
@@ -120,7 +143,19 @@ export function OrderTrack({ params }: { params: any }) {
     if (d.rid !== rid) return;
     const mine = (d.orders || []).find((t: any) => t.orderId === params.orderId);
     if (mine) {
-      setOrder((o: any) => ({ ...o, status: "open", ready: !!mine.fulfill?.ready, lines: mine.lines || o.lines, total: mine.total ?? o.total }));
+      // Back-fill the fields the broadcast carries but a cold-opened ticket lacks —
+      // without these the page renders only the order-type chip and nothing else.
+      setOrder((o: any) => ({
+        ...o,
+        status: "open",
+        ready: !!mine.fulfill?.ready,
+        lines: mine.lines || o.lines,
+        total: mine.total ?? o.total,
+        ticket: o.ticket ?? mine.ticket,
+        type: o.type || mine.orderType || mine.type,
+        map: o.map || mine.map,
+      }));
+      if (probe === "loading") setProbe("ok");
     } else {
       setOrder((o: any) => (o.status === "open" ? { ...o, status: "completed", ready: true } : o));
       fetchNui("phone:endDeliveryBlip", {});
@@ -133,11 +168,19 @@ export function OrderTrack({ params }: { params: any }) {
 
   return (
     <Screen className="pb-6">
-      <TopBar title={`Ticket #${order.ticket ?? ""}`} subtitle={order.restaurant} onBack={back} />
+      <TopBar
+        title={order.ticket != null ? `Ticket #${order.ticket}` : "Your order"}
+        subtitle={order.restaurant}
+        onBack={back}
+      />
+      {probe === "loading" && <Spinner label="Loading your ticket…" />}
+      {probe === "missing" && (
+        <Empty title="Ticket details unavailable" hint="This order may have already been closed." />
+      )}
 
       {/* status ticket */}
-      <div className="px-4">
-        <div className="receipt tear-b relative mx-auto mt-2 max-w-sm px-5 pb-6 pt-5">
+      <div className="mx-auto mt-2 max-w-sm px-4">
+        <div className="receipt relative px-5 pb-6 pt-5">
           <div className="flex items-center justify-between">
             <span className="tape text-paper-muted">{TYPE_LABEL[order.type] || "Pickup"}</span>
             <Icon className="h-5 w-5 text-paper-ink/70" />
@@ -171,6 +214,20 @@ export function OrderTrack({ params }: { params: any }) {
             </div>
           )}
 
+          {/* Live map — restaurant, drop-off and the driver, under the stepper. */}
+          {order.map?.restaurant && order.status !== "cancelled" && (
+            <div className="mt-4">
+              <OrderMap
+                orderId={order.orderId}
+                data={{
+                  restaurant: order.map.restaurant,
+                  dest: order.map.dest,
+                  type: order.map.type || (order.type === "delivery" ? "delivery" : "pickup"),
+                }}
+              />
+            </div>
+          )}
+
           {order.type === "delivery" && pi >= 2 && order.status === "open" && (
             <div className="mt-3 flex items-center gap-2 rounded-lg bg-paper-muted/15 px-3 py-2 text-[0.78rem] text-paper-ink">
               <Truck className="h-4 w-4" /> Driver's on the way — follow the blip on your map.
@@ -193,6 +250,8 @@ export function OrderTrack({ params }: { params: any }) {
             </div>
           </div>
         </div>
+        {/* the perforated tear-off edge — a SIBLING strip, never a class on the card */}
+        <div className="tear-b" />
       </div>
 
       {/* completed → review prompt */}

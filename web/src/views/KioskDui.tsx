@@ -234,11 +234,11 @@ export default function KioskDui() {
             {/* Classic pointer arrow, tip at (0,0) so it sits on the cursor point.
                 White fill + dark outline + drop shadow reads on any brand colour. */}
             <svg width="26" height="32" viewBox="0 0 16 20" style={{ display: "block", filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.55))" }}>
-              {/* fill turns red while Lua reports the button held — a live check that
+              {/* fill dims to grey while Lua reports the button held — a live check that
                   the click is being detected and forwarded. */}
               <path
                 d="M0.6 0.6 L0.6 15.2 L4.5 11.6 L7.1 17.6 L9.6 16.5 L7.0 10.8 L13.2 10.8 Z"
-                fill={cursor.down ? "#ef4444" : "#ffffff"}
+                fill={cursor.down ? "#9ca3af" : "#ffffff"}
                 stroke="#111111"
                 strokeWidth="1.1"
                 strokeLinejoin="round"

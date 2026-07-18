@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Field } from "@/components/form";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import Branding, { ThemeEditor } from "@/components/Branding";
+import Branding, { ThemeEditor, NameEditor } from "@/components/Branding";
 import { applyTheme, type ThemeConfig } from "@/lib/theme";
 import { money } from "@/lib/utils";
 import { _L } from "@/lib/locale";
@@ -76,8 +76,21 @@ export default function Restaurants({ restaurants, players, groups, refresh, foc
   // here so leaving and reopening a detail re-applies the CURRENT theme (not the
   // one the panel opened with). Survives detail unmount — this component stays up.
   const [themeEdits, setThemeEdits] = useState<Record<number, ThemeConfig>>({});
-  const base = restaurants.find((r) => r.id === selectedId) || null;
-  const selected = base && themeEdits[base.id] ? { ...base, theme: themeEdits[base.id] } : base;
+  // Same optimistic mirror for renames — the rename auto-saves without refreshing
+  // the panel (a refresh would remount the field mid-typing), so the detail header
+  // and the list row read the live label from here.
+  const [nameEdits, setNameEdits] = useState<Record<number, string>>({});
+  const withEdits = (r: any) => (r && (themeEdits[r.id] || nameEdits[r.id])
+    ? {
+        ...r,
+        theme: themeEdits[r.id] || r.theme,
+        label: nameEdits[r.id] || r.label,
+        // The internal key is re-derived from the label server-side; mirror the
+        // same slug so the header's codename doesn't read stale until a refetch.
+        name: nameEdits[r.id] ? (restSlug(nameEdits[r.id]) || r.name) : r.name,
+      }
+    : r);
+  const selected = withEdits(restaurants.find((r) => r.id === selectedId) || null);
 
   // Tell the shell whether a single restaurant's detail is open, so it can drop the
   // top-level admin tab strip (Restaurants / Recipes / Settings) while you're inside
@@ -102,11 +115,12 @@ export default function Restaurants({ restaurants, players, groups, refresh, foc
         focusSection={selected.id === focus?.restaurant ? focus?.section : undefined}
         appTheme={appTheme}
         onThemeChange={(t) => setThemeEdits((m) => ({ ...m, [selected.id]: t }))}
+        onNameChange={(l) => setNameEdits((m) => ({ ...m, [selected.id]: l }))}
         renderTargets={renderTargets}
       />
     );
   }
-  return <List restaurants={restaurants} act={act} onOpen={setSelectedId} />;
+  return <List restaurants={restaurants.map(withEdits)} act={act} onOpen={setSelectedId} />;
 }
 
 // internal key is derived from the display label — admins never type a raw slug
@@ -162,7 +176,7 @@ function List({ restaurants, act, onOpen }: { restaurants: any[]; act: (e: strin
   );
 }
 
-function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThemeChange, renderTargets }: { r: any; players: any[]; groups: string[]; act: (e: string, p: any) => void; onBack: () => void; focusSection?: string; appTheme?: ThemeConfig | null; onThemeChange?: (t: ThemeConfig) => void; renderTargets?: { key: string; w: number; h: number }[] }) {
+function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThemeChange, onNameChange, renderTargets }: { r: any; players: any[]; groups: string[]; act: (e: string, p: any) => void; onBack: () => void; focusSection?: string; appTheme?: ThemeConfig | null; onThemeChange?: (t: ThemeConfig) => void; onNameChange?: (label: string) => void; renderTargets?: { key: string; w: number; h: number }[] }) {
   const props: any[] = r.props || [];
   const byType = (t: string) => props.filter((p) => p.prop_type === t);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -406,6 +420,11 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
             editor as the boss panel). Server-wide settings live in the top-level
             Settings tab; this is scoped to THIS restaurant. */}
         <TabsContent value="settings" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 pb-4">
+          {/* Rename — admin-gated server-side; the owner renames their own place
+              from the boss panel's Brand tab. Saves WITHOUT `act` on purpose: act
+              refreshes the whole panel, which would remount this field mid-typing. */}
+          <NameEditor id={r.id} label={r.label || ""} event="admin:setName" onChange={onNameChange} />
+
           <ThemeEditor id={r.id} theme={r.theme} event="admin:setTheme" onChange={onThemeChange} scoped />
 
           {/* recipe access groups — what this restaurant may cook & sell */}

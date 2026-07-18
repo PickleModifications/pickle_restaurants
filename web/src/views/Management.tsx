@@ -8,7 +8,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Field, TextField, NumberField, Toggle } from "@/components/form";
 import { type Item } from "@/components/ItemPicker";
-import Branding, { ThemeEditor } from "@/components/Branding";
+import Branding, { ThemeEditor, NameEditor } from "@/components/Branding";
 import Combos from "@/components/ComboEditor";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
@@ -77,8 +77,14 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
   // A placement reopen lands on the Stations tab (if allowed) instead of the default.
   const initialTab = (focus?.section && perms.manage_props) ? "stations" : firstTab(perms);
 
+  // The panel header follows a live rename (the rename save deliberately does NOT
+  // refresh the panel — that would remount the field mid-typing), so keep the
+  // label in local state seeded from the payload.
+  const [label, setLabel] = useState<string>(data?.restaurant?.label || "");
+  useEffect(() => { setLabel(data?.restaurant?.label || ""); }, [data?.restaurant?.label]);
+
   return (
-    <Panel title={data?.restaurant?.label || _L("mgmt.title")} subtitle={_L("mgmt.balance", money(data?.restaurant?.balance))} onClose={onClose} width="max-w-4xl">
+    <Panel title={label || _L("mgmt.title")} subtitle={_L("mgmt.balance", money(data?.restaurant?.balance))} onClose={onClose} width="max-w-4xl">
       <Tabs defaultValue={initialTab} className="flex min-h-0 flex-1 flex-col">
         <TabsList className="shrink-0">
           {perms.manage_employees && <TabsTrigger value="employees">{_L("mgmt.tab_employees")}</TabsTrigger>}
@@ -129,6 +135,12 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         )}
         {perms.manage_props && (
           <TabsContent value="branding" className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 pb-4">
+            {/* Renaming the business is OWNER-only (server gates on ResolvePerms'
+                isOwner) — a shift lead with manage_props can restyle the place but
+                not rename it, so the card is hidden for staff. */}
+            {data?.isOwner && (
+              <NameEditor id={id} label={data?.restaurant?.label || ""} event="management:setName" onChange={setLabel} />
+            )}
             <ThemeEditor id={id} theme={data?.restaurant?.theme} event="management:setTheme" />
             <Branding id={id} brand={data?.restaurant?.brand_image || ""} brandImages={data?.restaurant?.brand_images || {}} phoneImage={data?.restaurant?.phone_image || ""} event="management:setBrandImage" renderTargets={data?.renderTargets} />
           </TabsContent>

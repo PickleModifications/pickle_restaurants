@@ -6,7 +6,79 @@ import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
-import { Image as ImageIcon, RotateCcw, X, Pencil, Plus, Trash2, Palette, Check, Loader2 } from "lucide-react";
+import { Image as ImageIcon, RotateCcw, X, Pencil, Plus, Trash2, Palette, Check, Loader2, Store, TriangleAlert } from "lucide-react";
+
+// ─── identity (rename) ────────────────────────────────────────────────────────
+// The restaurant's display name — what every customer-facing surface shows (map
+// blip, station prompts, menu/orders boards, receipts, the phone app). The
+// internal codename is DERIVED from it server-side (same slug the create form
+// uses), so there is one field here, not two. Auto-saves debounced like every
+// other setting — this app has no save buttons.
+// `event` = "management:setName" | "admin:setName" (both hit SetRestaurantName).
+
+const MAX_LABEL_LEN = 100; // mirrors `pickle_restaurants`.label
+
+// Mirror of the server's slug, for previewing the derived internal key. Display
+// only — the server always re-derives it from the label it accepted.
+const previewSlug = (s: string) =>
+  s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+
+export function NameEditor({
+  id, label, event, onChange,
+}: {
+  id: number; label: string; event: string;
+  // Fired after each accepted save with the new label, so the parent's cached
+  // copy (panel header, admin list row) stays live without a refetch — the same
+  // contract ThemeEditor's `onChange` has. Neither panel refreshes on this save:
+  // remounting mid-edit would yank the cursor out of the field.
+  onChange?: (label: string) => void;
+}) {
+  const [draft, setDraft] = useState(label || "");
+  const saved = useRef(label || "");
+
+  const trimmed = draft.trim().slice(0, MAX_LABEL_LEN);
+  const valid = trimmed.length > 0;
+
+  const status = useAutoSave(async () => {
+    if (!valid || trimmed === saved.current) return;
+    const res = (await fetchNui(event, { id, label: trimmed })) as { ok?: boolean; label?: string } | undefined;
+    if (res?.ok === false) return; // server refused (permission / gone) — keep the draft
+    saved.current = res?.label || trimmed;
+    onChange?.(saved.current);
+  }, [trimmed]);
+
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <Store className="h-4 w-4 text-primary" /> {_L("identity.title")}
+          </h3>
+          <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+            {!valid ? (
+              <><TriangleAlert className="h-3 w-3 text-destructive" /> {_L("identity.required")}</>
+            ) : status === "saving" ? (
+              <><Loader2 className="h-3 w-3 animate-spin" /> {_L("theme.saving")}</>
+            ) : status === "saved" ? (
+              <><Check className="h-3 w-3 text-primary" /> {_L("theme.saved")}</>
+            ) : _L("theme.live_hint")}
+          </span>
+        </div>
+        <p className="mb-3 text-[11px] text-muted-foreground">{_L("identity.hint")}</p>
+        <Input
+          value={draft}
+          maxLength={MAX_LABEL_LEN}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder={_L("identity.placeholder")}
+          className="font-display text-base font-bold"
+        />
+        <p className="mt-1.5 text-[11px] text-muted-foreground">
+          {_L("identity.key")} <span className="font-mono">{previewSlug(trimmed) || "—"}</span>
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
 
 // ─── theme editor ─────────────────────────────────────────────────────────────
 // The restaurant's franchise look: one brand color seed + surface mode + corner
@@ -277,35 +349,28 @@ export default function Branding({
 
   return (
     <div className="space-y-3">
-      <Card>
-        <CardContent className="pt-4">
-          <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold"><ImageIcon className="h-4 w-4" /> {_L("branding.default_image")}</h3>
-          <Input
-            defaultValue={brand}
-            placeholder={_L("branding.default_image_placeholder")}
-            className="h-9"
-            onBlur={(e) => fetchNui(event, { id, url: e.target.value.trim() })}
-          />
-          <p className="mt-1.5 text-[11px] text-muted-foreground">
-            {_L("branding.default_image_hint")}
-          </p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent className="pt-4">
-          <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold"><ImageIcon className="h-4 w-4" /> {_L("branding.phone_image")}</h3>
-          <Input
-            defaultValue={phoneImage || ""}
-            placeholder={_L("branding.phone_image_placeholder")}
-            className="h-9"
-            onBlur={(e) => fetchNui(event, { id, key: "phone", url: e.target.value.trim() })}
-          />
-          <p className="mt-1.5 text-[11px] text-muted-foreground">
-            {_L("branding.phone_image_hint")}
-          </p>
-        </CardContent>
-      </Card>
+      {/* The two plain-URL images sit side by side, the same two-column row the
+          packaging texture cards use below. */}
+      <div className="grid grid-cols-2 gap-3">
+        <UrlImageField
+          title={_L("branding.default_image")}
+          value={brand}
+          placeholder={_L("branding.default_image_placeholder")}
+          hint={_L("branding.default_image_hint")}
+          empty={_L("branding.no_image")}
+          aspect={DEFAULT_IMAGE_ASPECT}
+          onCommit={(url) => fetchNui(event, { id, url })}
+        />
+        <UrlImageField
+          title={_L("branding.phone_image")}
+          value={phoneImage || ""}
+          placeholder={_L("branding.phone_image_placeholder")}
+          hint={_L("branding.phone_image_hint")}
+          empty={_L("branding.uses_default_image")}
+          aspect={PHONE_IMAGE_ASPECT}
+          onCommit={(url) => fetchNui(event, { id, key: "phone", url })}
+        />
+      </div>
 
       <div className="grid grid-cols-2 gap-3">
         {textures.map((t) => (
@@ -318,6 +383,66 @@ export default function Branding({
         ))}
       </div>
     </div>
+  );
+}
+
+// The two plain-URL brand images (the shared default packaging art + the phone
+// storefront hero). No crop is stored for either — the game and the phone app both
+// auto-crop them centred — so their preview is the SAME `CropThumb` the packaging
+// cards use, with `crop = null` (a centred cover crop), which is exactly what the
+// consumer renders. Aspects below are only the preview frame's shape.
+const DEFAULT_IMAGE_ASPECT: Aspect = { w: 1024, h: 1024 }; // re-cropped per packaging shape
+const PHONE_IMAGE_ASPECT: Aspect = { w: 1600, h: 800 };    // landscape hero (feed card / menu header)
+
+// Shared "nothing set yet" thumb — same box the packaging cards show before a photo.
+function EmptyThumb({ label }: { label: string }) {
+  return (
+    <div className="flex h-28 items-center justify-center rounded-md border border-dashed border-border bg-muted/30 px-2 text-center text-[11px] text-muted-foreground">
+      {label}
+    </div>
+  );
+}
+
+// One URL-only image field: label, URL input, live preview, hint. Saving is unchanged
+// (commit on blur through the caller's `onCommit` → the same brand NUI event); the
+// preview is debounced off the typed value so a half-typed URL never flashes "Bad URL".
+function UrlImageField({
+  title, value, placeholder, hint, empty, aspect, onCommit,
+}: {
+  title: string; value: string; placeholder: string; hint: string; empty: string;
+  aspect: Aspect; onCommit: (url: string) => void;
+}) {
+  const [url, setUrl] = useState(value || "");
+  const [preview, setPreview] = useState((value || "").trim());
+
+  useEffect(() => {
+    const t = setTimeout(() => setPreview(url.trim()), 400);
+    return () => clearTimeout(t);
+  }, [url]);
+
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold">
+          <ImageIcon className="h-4 w-4 shrink-0" /> <span className="truncate">{title}</span>
+        </h3>
+        <Input
+          value={url}
+          placeholder={placeholder}
+          className="h-9"
+          onChange={(e) => setUrl(e.target.value)}
+          onBlur={(e) => onCommit(e.target.value.trim())}
+        />
+        <div className="mt-2">
+          {preview ? (
+            <CropThumb url={preview} aspect={aspect} crop={null} />
+          ) : (
+            <EmptyThumb label={empty} />
+          )}
+        </div>
+        <p className="mt-1.5 text-[11px] text-muted-foreground">{hint}</p>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -339,9 +464,7 @@ function BrandTextureCard({
         {has ? (
           <CropThumb url={entry!.url} aspect={tex} crop={entry!.crop || null} />
         ) : (
-          <div className="flex h-28 items-center justify-center rounded-md border border-dashed border-border bg-muted/30 text-[11px] text-muted-foreground">
-            {_L("branding.uses_default_image")}
-          </div>
+          <EmptyThumb label={_L("branding.uses_default_image")} />
         )}
 
         <div className="mt-2 flex items-center gap-2">
@@ -393,9 +516,7 @@ export function PhotoField({
       {has ? (
         <CropThumb url={entry!.url} aspect={aspect} crop={entry!.crop || null} />
       ) : (
-        <div className="flex h-28 items-center justify-center rounded-md border border-dashed border-border bg-muted/30 text-[11px] text-muted-foreground">
-          {empty ?? _L("branding.uses_default_image")}
-        </div>
+        <EmptyThumb label={empty ?? _L("branding.uses_default_image")} />
       )}
       <div className="mt-2 flex items-center gap-2">
         <button

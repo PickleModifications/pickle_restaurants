@@ -165,11 +165,11 @@ export default function RegisterDui() {
         {cursor && (
           <div style={{ position: "absolute", left: cursor.x * DW, top: cursor.y * DH, pointerEvents: "none", zIndex: 9999 }}>
             {/* Classic pointer arrow, tip at (0,0). White fill + dark outline reads on
-                any brand colour; turns red while Lua reports the button held. */}
+                any brand colour; dims to grey while Lua reports the button held. */}
             <svg width="26" height="32" viewBox="0 0 16 20" style={{ display: "block", filter: "drop-shadow(0 1px 2px rgba(0,0,0,0.55))" }}>
               <path
                 d="M0.6 0.6 L0.6 15.2 L4.5 11.6 L7.1 17.6 L9.6 16.5 L7.0 10.8 L13.2 10.8 Z"
-                fill={cursor.down ? "#ef4444" : "#ffffff"}
+                fill={cursor.down ? "#9ca3af" : "#ffffff"}
                 stroke="#111111"
                 strokeWidth="1.1"
                 strokeLinejoin="round"

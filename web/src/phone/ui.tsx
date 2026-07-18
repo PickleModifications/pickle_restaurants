@@ -1,7 +1,113 @@
-import { ReactNode, useEffect, useState } from "react";
+import { ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ChevronLeft, Star, ImageOff, Loader2 } from "lucide-react";
 import { cn } from "../lib/utils";
 import { usePhone } from "./store";
+
+// ─── bottom sheet host ───────────────────────────────────────────────────────
+// EVERY sheet must render through this. A sheet is `position: absolute; bottom: 0`,
+// and .pf-screen animates a `transform` — a transformed ancestor becomes the
+// containing block for absolutely-positioned descendants, so a sheet rendered
+// inside a screen pinned itself to the bottom of the (tall, scrollable) PAGE
+// instead of the viewport: opening the item options put "Add to cart" far below
+// the fold, which read as the page jumping to the bottom. Portalling into
+// #pf-overlay (a child of .pf-root, outside any screen) keeps every sheet fixed
+// to the bottom of the visible phone, whatever the scroll offset.
+//
+// ENTER *and* EXIT are owned here, so no call site ever writes animation logic.
+// Enter is pure CSS (.pf-scrim / .pf-sheet keyframes). Exit is the hard half: every
+// call site renders a sheet conditionally (`{sheet && <ItemSheet/>}`), so React rips
+// the nodes out of the DOM the instant the state flips — there is nothing left to
+// animate, which is why sheets used to just blink away. Rather than force each call
+// site to latch its data and keep the sheet mounted, this component snapshots its own
+// scrim + sheet on unmount (a deep clone, with scroll offsets carried over so a
+// scrolled options list doesn't jump to the top mid-exit), re-parents the ghosts into
+// the overlay host, plays the out-animation on them, and drops them. The ghosts are
+// inert (pointer-events: none) and sit BELOW a live sheet's z-index, so opening a new
+// sheet while the old one leaves never covers the new one.
+const SHEET_EXIT_MS = 260;
+
+function copyScroll(from: Element, to: Element) {
+  const a = from.querySelectorAll("*");
+  const b = to.querySelectorAll("*");
+  for (let i = 0; i < a.length && i < b.length; i++) {
+    const src = a[i] as HTMLElement;
+    if (src.scrollTop || src.scrollLeft) {
+      (b[i] as HTMLElement).scrollTop = src.scrollTop;
+      (b[i] as HTMLElement).scrollLeft = src.scrollLeft;
+    }
+  }
+  if (from.scrollTop || from.scrollLeft) {
+    to.scrollTop = from.scrollTop;
+    to.scrollLeft = from.scrollLeft;
+  }
+}
+
+export function Sheet({
+  onClose,
+  children,
+  className,
+}: {
+  onClose?: () => void;
+  children: ReactNode;
+  className?: string;
+}) {
+  const scrimRef = useRef<HTMLDivElement | null>(null);
+  const sheetRef = useRef<HTMLDivElement | null>(null);
+
+  // useLayoutEffect (not useEffect): a passive cleanup can run AFTER React has already
+  // detached the nodes, and a detached node reports scrollTop 0. Nodes are captured
+  // here in the effect body, never read off the refs at cleanup time (React nulls refs
+  // while unmounting the subtree).
+  useLayoutEffect(() => {
+    const scrim = scrimRef.current;
+    const sheet = sheetRef.current;
+    return () => {
+      const host = document.getElementById("pf-overlay");
+      if (!host || !sheet) return;
+      const ghosts: HTMLElement[] = [];
+      if (scrim) {
+        const g = scrim.cloneNode(true) as HTMLElement;
+        g.classList.add("pf-out");
+        g.style.zIndex = "38";
+        ghosts.push(g);
+      }
+      const g = sheet.cloneNode(true) as HTMLElement;
+      g.classList.add("pf-out");
+      g.style.zIndex = "39";
+      ghosts.push(g);
+      copyScroll(sheet, g);
+      for (const el of ghosts) {
+        el.style.pointerEvents = "none";
+        host.appendChild(el);
+      }
+      // Clones are static snapshots — scrollTop must be re-applied after insertion,
+      // since a detached node silently discards the assignment.
+      copyScroll(sheet, g);
+      const drop = () => {
+        for (const el of ghosts) el.remove();
+      };
+      // StrictMode's dev-only remount fires this cleanup without ever removing the
+      // real nodes. One frame later, an original still in the document means this was
+      // a simulated unmount, not a close — pull the ghosts back off.
+      requestAnimationFrame(() => {
+        if (sheet.isConnected) drop();
+      });
+      window.setTimeout(drop, SHEET_EXIT_MS + 60);
+    };
+  }, []);
+
+  const body = (
+    <>
+      <div ref={scrimRef} className="pf-scrim" onClick={onClose} />
+      <div ref={sheetRef} className={cn("pf-sheet", className)}>
+        {children}
+      </div>
+    </>
+  );
+  const host = typeof document !== "undefined" ? document.getElementById("pf-overlay") : null;
+  return host ? createPortal(body, host) : body;
+}
 
 // ─── screen chrome ───────────────────────────────────────────────────────────
 export function TopBar({
@@ -208,9 +314,8 @@ export function AskModal() {
   const numeric = askState.kind !== "text";
   const submit = () => closeAsk(val.trim() === "" ? null : val.trim());
   return (
-    <>
-      <div className="pf-scrim" onClick={() => closeAsk(null)} />
-      <div className="pf-sheet">
+    <Sheet onClose={() => closeAsk(null)}>
+      <>
         <div className="pf-grab" />
         <div className="px-4 pt-2" style={{ paddingBottom: "calc(1rem + var(--pf-bottom))" }}>
           <div className="font-display text-lg font-extrabold leading-tight">{askState.title}</div>
@@ -250,8 +355,8 @@ export function AskModal() {
             </button>
           </div>
         </div>
-      </div>
-    </>
+      </>
+    </Sheet>
   );
 }
 

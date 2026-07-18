@@ -151,8 +151,18 @@ local function CreatePhoneTables()
     EnsureColumn("pickle_restaurant_orders", "order_type",   "`order_type` VARCHAR(12) NOT NULL DEFAULT 'pickup'")
     EnsureColumn("pickle_restaurant_orders", "scheduled_for","`scheduled_for` VARCHAR(20) DEFAULT NULL")
     EnsureColumn("pickle_restaurant_orders", "address",      "`address` VARCHAR(160) DEFAULT NULL")
+    -- Delivery DROP POINT. This used to live ONLY in the in-memory DeliveryTargets
+    -- table in modules/sales, so a restart orphaned every in-flight delivery (no
+    -- waypoint for the driver, no destination for the in-app map). Persisted here so
+    -- RehydrateDeliveryTargets() can restore them on boot, and so the phone's order
+    -- payload can draw the drop pin for a ticket that predates this session.
+    EnsureColumn("pickle_restaurant_orders", "dest_x",       "`dest_x` DOUBLE DEFAULT NULL")
+    EnsureColumn("pickle_restaurant_orders", "dest_y",       "`dest_y` DOUBLE DEFAULT NULL")
     EnsureColumn("pickle_restaurant_orders", "phone_number", "`phone_number` VARCHAR(24) DEFAULT NULL")
     EnsureColumn("pickle_restaurant_orders", "rated",        "`rated` TINYINT UNSIGNED NOT NULL DEFAULT 0")
+    -- Which account paid for the ticket, so a cancel refunds what was charged.
+    -- Phone orders are card payments ('bank'); register/kiosk stay cash (the default).
+    EnsureColumn("pickle_restaurant_orders", "paid_account", "`paid_account` VARCHAR(8) NOT NULL DEFAULT 'cash'")
 
     if GetSetting("loyalty_goal", nil) == nil then SetSetting("loyalty_goal", 8) end
     if GetSetting("loyalty_enabled", nil) == nil then SetSetting("loyalty_enabled", true) end
@@ -227,6 +237,11 @@ end
 CreateThread(function()
     while not RestaurantsReady do Wait(200) end
     CreatePhoneTables()
+    -- Restore in-flight delivery drop points. MUST run here (not in modules/sales,
+    -- which owns DeliveryTargets): this is the first point where the dest_x/dest_y
+    -- columns are guaranteed to exist — CreatePhoneTables adds them, and core's
+    -- LoadOrders runs before any module boot thread.
+    if RehydrateDeliveryTargets then RehydrateDeliveryTargets() end
     LoadReviews(); LoadLoyalty(); LoadPromos(); LoadReservations(); LoadCookStats(); LoadAchievements()
     PhoneReady = true
     print("[pickle_restaurants] phone companion backend ready")
@@ -368,13 +383,38 @@ lib.callback.register("pickle_restaurants:phone:home", function(src, d)
     }
 end)
 
+-- Map payload for one order row → what the in-app Leaflet map needs to draw:
+-- the restaurant pin (the counter anchor, RecomputeCounterAnchor's cached point) and,
+-- for a delivery, the drop pin. Returns nil when NEITHER coordinate is resolvable —
+-- the UI treats an absent `map` key as "this ticket has no map".
+local function OrderMap(o, r)
+    local otype = (o.order_type == "delivery") and "delivery" or "pickup"
+    local counter = r and r.counter
+    local rest = (counter and counter.x) and { x = counter.x + 0.0, y = counter.y + 0.0 } or nil
+
+    local dest
+    if otype == "delivery" then
+        local dx, dy = tonumber(o.dest_x), tonumber(o.dest_y)
+        -- Fall back to the live in-memory target for a ticket placed before the
+        -- dest_x/dest_y migration landed (or by an older running session).
+        if (not dx or not dy) and DeliveryTargets and DeliveryTargets[o.id] then
+            dx, dy = tonumber(DeliveryTargets[o.id].x), tonumber(DeliveryTargets[o.id].y)
+        end
+        if dx and dy then dest = { x = dx + 0.0, y = dy + 0.0 } end
+    end
+
+    if not rest and not dest then return nil end
+    return { restaurant = rest, dest = dest, type = otype }
+end
+
 -- Player's orders (live open + recent closed), newest first. Reads the orders table
 -- directly (cache only holds OPEN rows) and annotates each with a coarse phone
 -- status for the tracking screen.
 function PlayerOrders(identifier, limit)
     local rows = MySQL.query.await([[
         SELECT o.id, o.restaurant_id, o.ticket, o.total, o.status, o.order_type,
-               o.scheduled_for, o.address, o.rated, o.created_at, o.closed_at, o.`lines`
+               o.scheduled_for, o.address, o.dest_x, o.dest_y, o.rated,
+               o.created_at, o.closed_at, o.`lines`
           FROM `pickle_restaurant_orders` o
          WHERE o.customer_identifier = ?
          ORDER BY o.id DESC LIMIT ?
@@ -400,6 +440,7 @@ function PlayerOrders(identifier, limit)
             address    = o.address,
             rated      = (o.rated or 0) == 1,
             ready      = ready,
+            map        = OrderMap(o, r),
             lines      = lines,
             createdAt  = o.created_at,
             closedAt   = o.closed_at,
@@ -529,6 +570,27 @@ function PhoneCommitRedeem(rid, identifier)
     l.redeemed = l.redeemed + 1
     MySQL.query.await("UPDATE pickle_restaurant_loyalty SET punches = ?, redeemed = ? WHERE restaurant_id = ? AND identifier = ?",
         { l.punches, l.redeemed, rid, identifier })
+    return true
+end
+
+-- The inverse of PhoneCommitRedeem: give a burned redemption back when the order it
+-- was spent on is CANCELLED. Called (guarded — this module may not be loaded) from
+-- RefundOrder in core/server.lua for any order row carrying `redeemed = 1`.
+-- A cancelled order refunds the money; the free item it also paid with has to come
+-- back the same way, or a cancel quietly costs the customer a full punch card.
+-- Idempotent by construction at the call site: RefundOrder flags the order refunded
+-- before it gets here, so one order can only ever restore one redemption.
+function PhoneRestoreRedeem(rid, identifier)
+    if not identifier then return false end
+    LoyaltyCache[rid] = LoyaltyCache[rid] or {}
+    local l = LoyaltyCache[rid][identifier] or { punches = 0, redeemed = 0 }
+    l.punches  = l.punches + LoyaltyGoal()
+    l.redeemed = math.max(0, l.redeemed - 1)
+    LoyaltyCache[rid][identifier] = l
+    MySQL.query.await([[
+        INSERT INTO pickle_restaurant_loyalty (restaurant_id, identifier, punches, redeemed) VALUES (?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE punches = VALUES(punches), redeemed = VALUES(redeemed)
+    ]], { rid, identifier, l.punches, l.redeemed })
     return true
 end
 
@@ -927,12 +989,22 @@ AddEventHandler("pickle_restaurants:internal:orderCompleted", function(rid, orde
         if tip and tip > 0 then DistributeTip(rid, tip, GetIdentifier(cookSrc)) end
     end
 
-    -- Nudge the customer's phone that their food is ready / on the way.
+    -- Tell the customer's phone the hand-off HAPPENED. This seam fires on COMPLETION
+    -- — the food physically changed hands (completeOrder requires the customer at the
+    -- counter / the driver at the door) — NOT when the kitchen finished cooking. So the
+    -- copy is delivered / collected, never "ready" or "on the way": out-for-delivery has
+    -- its own push in sales' startDelivery, and readiness is a live flag on the tracking
+    -- screen. Title and body must describe the SAME state.
     local custSrc = SourceForIdentifier and SourceForIdentifier(order.customer_identifier)
     if custSrc then
         local r = GetRestaurant(rid)
-        local verb = (order.order_type == "delivery") and "is on the way" or "is ready for pickup"
-        PhoneNotify(custSrc, "Order ready", ("%s — Ticket #%s %s"):format(r and (r.label or r.name) or "Your order", order.ticket or "?", verb))
+        local name = r and (r.label or r.name) or _L("phone_order_fallback")
+        local ticket = tostring(order.ticket or "?")
+        if order.order_type == "delivery" then
+            PhoneNotify(custSrc, _L("phone_order_delivered_title"), _L("phone_order_delivered_body", name, ticket))
+        else
+            PhoneNotify(custSrc, _L("phone_order_collected_title"), _L("phone_order_collected_body", name, ticket))
+        end
     end
 end)
 

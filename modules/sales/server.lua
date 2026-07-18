@@ -621,6 +621,10 @@ end
 --                   covers the most), shown when the order can't be completed yet.
 -- The pool is restaurant-wide, so this is identical for every cashier — it rides the
 -- SyncOrders broadcast unchanged.
+-- Forward declaration: AnnotateOrders below resolves the claimed driver's server id,
+-- but the definition lives further down with the other order helpers.
+local findPlayerByIdentifier
+
 local function AnnotateOrders(rid, list)
     local mealItem = MealItemName()
     -- Only offer meals the customer can actually be handed: single items come from
@@ -647,6 +651,16 @@ local function AnnotateOrders(rid, list)
         local fulfill = { ok = base.ok, ready = ready, missing = (not ready) and bestMissing or nil }
         if #opts > 0 then fulfill.mealOptions = opts end
         o.fulfill = fulfill
+        -- Who (if anyone) has CLAIMED this delivery. This list is broadcast to every
+        -- client, so `server` — not the identifier — is what the phone compares against
+        -- its own server id to decide whether to offer Cancel Delivery. The claim is
+        -- released on disconnect, so a stale id can't linger.
+        if o.driver_identifier then
+            local dsrc = findPlayerByIdentifier(o.driver_identifier)
+            o.driver = { name = DriverName(o), server = dsrc and tonumber(dsrc) or nil }
+        else
+            o.driver = nil
+        end
     end
     return list
 end
@@ -740,7 +754,7 @@ end
 
 -- ─── order helpers ───────────────────────────────────────────────────────────
 
-local function findPlayerByIdentifier(identifier)
+function findPlayerByIdentifier(identifier)   -- forward-declared local, see above
     for _, p in ipairs(GetPlayers()) do
         p = tonumber(p)
         if GetIdentifier(p) == identifier then return p end
@@ -1153,6 +1167,29 @@ end)
 -- phone columns and ride the GetOpenOrders projection into the KDS + tracking.
 DeliveryTargets = {} -- [orderId] = { x, y, z } customer drop, for the driver blip
 
+-- The drop point is ALSO persisted on the order row (dest_x / dest_y, added by
+-- modules/phone's EnsureColumn migration). This table is the hot read path; the
+-- columns are what survives a restart. Called once at boot from modules/phone's
+-- ready thread — the first place the columns are guaranteed to exist.
+-- z is not persisted: nothing consumes it (SetNewWaypoint is 2D and the driver's
+-- "you've arrived" check is a vector2 distance), so a rehydrated target carries 0.0.
+function RehydrateDeliveryTargets()
+    local rows = MySQL.query.await([[
+        SELECT id, dest_x, dest_y FROM `pickle_restaurant_orders`
+         WHERE status = 'open' AND order_type = 'delivery'
+           AND dest_x IS NOT NULL AND dest_y IS NOT NULL
+    ]]) or {}
+    local n = 0
+    for _, row in ipairs(rows) do
+        DeliveryTargets[row.id] = { x = row.dest_x + 0.0, y = row.dest_y + 0.0, z = 0.0 }
+        n = n + 1
+    end
+    if n > 0 then
+        print(("[pickle_restaurants] restored %d in-flight delivery destination(s)"):format(n))
+    end
+    return n
+end
+
 lib.callback.register("pickle_restaurants:phone:placeOrder", function(src, d)
     local id = tonumber(d.id)
     local r = GetRestaurant(id); if not r then return { ok = false, error = _L("order_failed") } end
@@ -1164,6 +1201,17 @@ lib.callback.register("pickle_restaurants:phone:placeOrder", function(src, d)
     if orderType ~= "delivery" and orderType ~= "dine_in" then orderType = "pickup" end
     local scheduled = d.scheduled and tostring(d.scheduled):sub(1, 20) or nil
     local address   = d.address and tostring(d.address):sub(1, 160) or nil
+
+    -- Delivery drop point, from the client-injected ped coords. Sanity-bounded to the
+    -- map: the NUI is untrusted, and a junk coordinate would persist as a permanent
+    -- bad pin / waypoint. Nil for a non-delivery ticket.
+    local destX, destY, destZ
+    if orderType == "delivery" and type(d.coords) == "table" then
+        local cx, cy, cz = tonumber(d.coords.x), tonumber(d.coords.y), tonumber(d.coords.z)
+        if cx and cy and math.abs(cx) <= 10000 and math.abs(cy) <= 10000 then
+            destX, destY, destZ = cx + 0.0, cy + 0.0, (cz or 0) + 0.0
+        end
+    end
 
     -- Promo discount (percent off the whole cart). Globals from modules/phone.
     local promo = ActivePromo and ActivePromo(id) or nil
@@ -1183,7 +1231,9 @@ lib.callback.register("pickle_restaurants:phone:placeOrder", function(src, d)
     end
 
     local finalTotal = RoundMoney(math.max(0, (total - redeemAmount) * (100 - discountPct) / 100))
-    if GetMoney(src, "money") < finalTotal then return { ok = false, error = _L("not_enough_cash") } end
+    -- A phone order is an ONLINE/card payment: it charges BANK, not cash.
+    -- (The in-person register + kiosk paths stay cash.)
+    if GetMoney(src, "bank") < finalTotal then return { ok = false, error = _L("not_enough_bank") } end
 
     local ticketNo, orderId
     local ok, err = pcall(function()
@@ -1199,12 +1249,21 @@ lib.callback.register("pickle_restaurants:phone:placeOrder", function(src, d)
         order.order_type    = orderType
         order.scheduled_for = scheduled
         order.address       = address
+        order.paid_account  = "bank"
+        -- Recorded so a cancellation can hand the burned punch-card redemption back
+        -- (RefundOrder → PhoneRestoreRedeem). Without this the order row has no idea
+        -- a free item was spent on it and the customer eats the loss on a cancel.
+        order.redeemed      = didRedeem and 1 or 0
+        order.dest_x        = destX
+        order.dest_y        = destY
 
-        if finalTotal > 0 then RemoveMoney(src, finalTotal, "money") end
+        if finalTotal > 0 then RemoveMoney(src, finalTotal, "bank") end
         AdjustBalance(id, finalTotal)
 
-        MySQL.update("UPDATE `pickle_restaurant_orders` SET order_type = ?, scheduled_for = ?, address = ?, phone_number = ? WHERE id = ?",
-            { orderType, scheduled, address, d.phone, order.id })
+        -- Awaited: a phone:home landing before this commits would read order_type NULL
+        -- and render a delivery as a pickup until the next refresh.
+        MySQL.update.await("UPDATE `pickle_restaurant_orders` SET order_type = ?, scheduled_for = ?, address = ?, phone_number = ?, paid_account = 'bank', redeemed = ?, dest_x = ?, dest_y = ? WHERE id = ?",
+            { orderType, scheduled, address, d.phone, order.redeemed, destX, destY, order.id })
 
         local summary = orderSummary(lines)
         local tag = (orderType == "delivery") and "delivery" or (orderType == "dine_in") and "dine-in" or "pickup"
@@ -1218,8 +1277,8 @@ lib.callback.register("pickle_restaurants:phone:placeOrder", function(src, d)
         end
 
         if didRedeem and PhoneCommitRedeem then PhoneCommitRedeem(id, customerId) end
-        if orderType == "delivery" and type(d.coords) == "table" then
-            DeliveryTargets[order.id] = { x = d.coords.x + 0.0, y = d.coords.y + 0.0, z = d.coords.z + 0.0 }
+        if destX then
+            DeliveryTargets[order.id] = { x = destX, y = destY, z = destZ }
         end
         ShowNotification(src, _L("order_placed", order.ticket))
     end)
@@ -1229,7 +1288,7 @@ lib.callback.register("pickle_restaurants:phone:placeOrder", function(src, d)
     end
 
     SyncOrders(id)
-    return { ok = true, ticket = ticketNo, orderId = orderId, total = finalTotal, discount = discountPct, redeemed = didRedeem }
+    return { ok = true, ticket = ticketNo, orderId = orderId, total = finalTotal, discount = discountPct, redeemed = didRedeem, orderType = orderType }
 end)
 
 -- Whether a ticket can be fulfilled from the pool right now (for the tracking UI).
@@ -1240,6 +1299,14 @@ function OrderReadyForPickup(rid, orderId)
     return plan and plan.ok or false
 end
 
+-- The claimed driver's display name, for the "taken by X" copy on other staff phones.
+function DriverName(o)
+    if not o or not o.driver_identifier then return nil end
+    if o.driver_name then return o.driver_name end
+    local src = findPlayerByIdentifier(o.driver_identifier)
+    return src and GetPlayerCharacterName and GetPlayerCharacterName(src) or nil
+end
+
 -- Staff marks a delivery ticket "out for delivery": the customer's phone gets a
 -- live driver blip fed by the driver client's ping loop (modules/phone/client).
 lib.callback.register("pickle_restaurants:phone:startDelivery", function(src, d)
@@ -1247,23 +1314,244 @@ lib.callback.register("pickle_restaurants:phone:startDelivery", function(src, d)
     if not HasPerm(id, src, "sell") then return { ok = false, error = _L("no_work_here") } end
     local o = OrderCache[id] and OrderCache[id][tonumber(d.orderId)]
     if not o then return { ok = false, error = _L("order_not_open") } end
+    -- ONE driver per delivery. The run is CLAIMED by whoever accepts it first, and
+    -- stays claimed until they cancel, complete it, or leave the server — so a second
+    -- staff member opening the same ticket can't take it out from under them.
+    local me = GetIdentifier(src)
+    if o.driver_identifier and o.driver_identifier ~= me then
+        return { ok = false, error = _L("delivery_taken", DriverName(o) or "?") }
+    end
     local customerSrc = findPlayerByIdentifier(o.customer_identifier)
+    -- Record WHO is driving this ticket. Nothing used to, so the driverPing net event
+    -- had nothing to validate against and any client could puppet any customer's blip.
+    -- Stored by identifier (survives a reconnect) on the in-memory cache row only —
+    -- the assignment is transient, like o.busy, and dies with the ticket.
+    o.driver_identifier = me
+    o.driver_name = GetPlayerCharacterName and GetPlayerCharacterName(src) or nil
+    -- ALWAYS start the DRIVER's ping/route loop. This used to live inside the
+    -- `customerSrc` guard below, which meant a customer who happened to be offline /
+    -- loading / reconnecting at this exact instant permanently killed the driver's
+    -- telemetry for the life of the ticket (the loop is only ever started here).
+    -- The loop pings the SERVER, which relays only if the customer is around — so
+    -- running it while they're away costs nothing and recovers the moment they're back.
+    TriggerClientEvent("pickle_restaurants:phone:beginDriving", src,
+        { orderId = o.id, rid = id, target = DeliveryTargets[o.id], customer = customerSrc })
+    if DeliveryDebug then
+        print(("[delivery] startDelivery ticket #%s (order %s) driver=%s target=%s customerOnline=%s")
+            :format(tostring(o.ticket), tostring(o.id), tostring(src),
+                DeliveryTargets[o.id] and "yes" or "NIL", customerSrc and "yes" or "no"))
+    end
     if customerSrc then
         TriggerClientEvent("pickle_restaurants:phone:driverAssigned", customerSrc, { orderId = o.id, driver = src })
-        TriggerClientEvent("pickle_restaurants:phone:beginDriving", src, { orderId = o.id, rid = id, target = DeliveryTargets[o.id], customer = customerSrc })
+        -- This is the ONLY "on the way" state — completion pushes delivered/collected.
+        if PhoneNotify then
+            local r = GetRestaurant(id)
+            PhoneNotify(customerSrc, _L("phone_order_delivering_title"),
+                _L("phone_order_delivering_body", r and (r.label or r.name) or _L("phone_order_fallback"), tostring(o.ticket or "?")))
+        end
     end
+    -- Re-broadcast, or NOTHING tells the phones the ticket is now claimed: the Work
+    -- screen's list is fed by this broadcast, so without it the button never leaves
+    -- "Accept Delivery" — for the driver who just took it AND for everyone else, who
+    -- can then all try to accept a run that is already gone.
+    SyncOrders(id)
     return { ok = true }
 end)
 
--- Relayed driver position → forward to the waiting customer for their blip.
+-- ─── driver telemetry relays (position + route) ───────────────────────────────
+-- Both are INBOUND net events from an untrusted client, so both go through the same
+-- gate: the sender must be the ASSIGNED driver of a still-open delivery ticket, the
+-- coordinates must be real numbers inside the map, and a sender can only push so
+-- often. Anything that fails is dropped silently (a griefer gets no feedback).
+--
+-- Floor between accepted pushes from ONE source, per event. The driver client pings
+-- position every DRIVER_PING_MS (3s) and re-sends its route far more slowly, so
+-- these only ever bite on a spammer. TUNE IN-GAME.
+local DRIVER_PING_MIN_MS = 1500
+
+local DriverRate = {}   -- [src] = { ping = lastMs }
+
+-- LAST-KNOWN driver telemetry per order. Transient (like o.busy / DeliveryTargets),
+-- module-global so modules/phone can read it. The relays below are fire-and-forget
+-- broadcasts, so a customer who opens (or RE-opens) a ticket between two pushes had
+-- nothing to draw — and the route in particular only re-sends every ROUTE.refresh
+-- (12s) or on deviation, so a driver holding a steady course left the polyline blank
+-- indefinitely. This is what phone:trackOrder seeds the in-app map from.
+-- [orderId] = { x, y, points, at }
+DriverTelemetry = {}
+
+-- Toggled by the `pickle_delivery_debug` server command (admin / console). Also read
+-- by startDelivery above. Production stays silent; the relay gate is otherwise a
+-- black hole (every rejection is a silent drop, by design against griefers).
+DeliveryDebug = false
+
+RegisterCommand("pickle_delivery_debug", function(src)
+    if src ~= 0 and not IsPlayerAdmin(src) then return end
+    DeliveryDebug = not DeliveryDebug
+    print(("[delivery] server debug %s"):format(DeliveryDebug and "ON" or "OFF"))
+    if src ~= 0 then ShowNotification(src, _L("delivery_debug", DeliveryDebug and "ON" or "OFF")) end
+end, false)
+
+local function ddbg(fmt, ...)
+    if not DeliveryDebug then return end
+    print(("[delivery] " .. fmt):format(...))
+end
+
+local function driverThrottled(src, key, minMs)
+    local now = GetGameTimer()
+    local seen = DriverRate[src]
+    if not seen then seen = {}; DriverRate[src] = seen end
+    if seen[key] and now - seen[key] < minMs then return true end
+    seen[key] = now
+    return false
+end
+
+AddEventHandler("playerDropped", function() DriverRate[source] = nil end)
+
+local function sane(v)
+    v = tonumber(v)
+    if not v or v ~= v then return nil end            -- nil / NaN
+    if math.abs(v) > 10000 then return nil end        -- off-map
+    return v + 0.0
+end
+
+-- The open delivery ticket `src` is the assigned driver of, or nil + WHY. The reason
+-- is diagnostic only (printed under DeliveryDebug) — it is never sent to the client.
+local function driverOrderFor(src, data)
+    if type(data) ~= "table" then return nil, "payload not a table" end
+    local rid, oid = tonumber(data.rid), tonumber(data.orderId)
+    if not rid or not oid then return nil, "missing rid/orderId" end
+    local o = OrderCache[rid] and OrderCache[rid][oid]
+    if not o then return nil, ("no cached order %s/%s (closed, or wrong restaurant id)"):format(rid, oid) end
+    if o.status ~= "open" then return nil, ("order %s not open (status %s)"):format(oid, tostring(o.status)) end
+    -- No driver assigned = startDelivery was never called for this ticket, so there
+    -- is nothing legitimate to relay.
+    if not o.driver_identifier then return nil, ("order %s has no driver assigned (startDelivery never ran)"):format(oid) end
+    if o.driver_identifier ~= GetIdentifier(src) then return nil, ("order %s driver identifier mismatch"):format(oid) end
+    return o
+end
+
+-- Driver position → the waiting customer (native blip + the in-app map marker).
 RegisterNetEvent("pickle_restaurants:phone:driverPing", function(data)
     local src = source
-    local o = data and data.orderId and OrderCache[data.rid] and OrderCache[data.rid][tonumber(data.orderId)]
-    if not o then return end
+    local o, why = driverOrderFor(src, data)
+    if not o then ddbg("ping REJECTED from %s: %s", tostring(src), why); return end
+    local x, y = sane(data.x), sane(data.y)
+    if not x or not y then ddbg("ping REJECTED from %s: bad coords", tostring(src)); return end
+    if driverThrottled(src, "ping", DRIVER_PING_MIN_MS) then
+        ddbg("ping REJECTED from %s: throttled (< %dms)", tostring(src), DRIVER_PING_MIN_MS)
+        return
+    end
+    -- Cached BEFORE the customer-online check: the whole point of the seed cache is
+    -- to have something to hand a customer who wasn't listening when this arrived.
+    local t = DriverTelemetry[o.id]
+    if not t then t = {}; DriverTelemetry[o.id] = t end
+    t.x, t.y, t.at = x, y, os.time()
     local customerSrc = findPlayerByIdentifier(o.customer_identifier)
     if customerSrc then
-        TriggerClientEvent("pickle_restaurants:phone:driverCoords", customerSrc, { orderId = o.id, x = data.x, y = data.y })
+        TriggerClientEvent("pickle_restaurants:phone:driverCoords", customerSrc, { orderId = o.id, x = x, y = y })
     end
+    ddbg("ping order %s (%.1f, %.1f) → customer %s", tostring(o.id), x, y,
+        customerSrc and tostring(customerSrc) or "OFFLINE (cached only)")
+end)
+
+-- Release a claim: the run goes back on the board for anyone to accept. Used by the
+-- driver's own cancel and by the disconnect sweep — never by another employee.
+function ReleaseDelivery(rid, o, reason)
+    o.driver_identifier, o.driver_name = nil, nil
+    DriverTelemetry[o.id] = nil
+    local customerSrc = findPlayerByIdentifier(o.customer_identifier)
+    if customerSrc then
+        -- Drop the world blip + the in-app marker; the ticket falls back to
+        -- "preparing", since nobody is carrying it any more.
+        TriggerClientEvent("pickle_restaurants:phone:driverReleased", customerSrc, { orderId = o.id })
+        if PhoneNotify then
+            local r = GetRestaurant(rid)
+            PhoneNotify(customerSrc, _L("phone_order_delayed_title"),
+                _L("phone_order_delayed_body", r and (r.label or r.name) or _L("phone_order_fallback"),
+                   tostring(o.ticket or "?")))
+        end
+    end
+    ddbg("order %s: delivery released (%s)", tostring(o.id), reason or "?")
+    SyncOrders(rid)
+end
+
+-- Give a delivery back. ONLY the driver holding the claim may do this — not the boss,
+-- not another employee, not an admin. A run stuck on an AFK driver is released by the
+-- disconnect sweep below instead, which is the only other way a claim ends early.
+lib.callback.register("pickle_restaurants:phone:cancelDelivery", function(src, d)
+    local id = tonumber(d and d.id)
+    local o = id and OrderCache[id] and OrderCache[id][tonumber(d.orderId)]
+    if not o then return { ok = false, error = _L("order_not_open") } end
+    if not o.driver_identifier then return { ok = false, error = _L("delivery_not_started") } end
+    if o.driver_identifier ~= GetIdentifier(src) then
+        return { ok = false, error = _L("delivery_not_yours", DriverName(o) or "?") }
+    end
+    ReleaseDelivery(id, o, "driver cancelled")
+    TriggerClientEvent("pickle_restaurants:phone:endDriving", src, { orderId = o.id })
+    return { ok = true }
+end)
+
+-- Re-set the GPS waypoint to the drop-off. `startDelivery` already sets it on accept,
+-- but a waypoint is a single global slot the player (or any other script) can clear or
+-- overwrite at any time — so the driver needs a way to get it BACK without giving the
+-- run up and re-accepting it. Gated to the claim holder, and it returns the
+-- coordinates rather than setting anything: only the driver's own client can do that.
+lib.callback.register("pickle_restaurants:phone:deliveryTarget", function(src, d)
+    local id = tonumber(d and d.id)
+    local o = id and OrderCache[id] and OrderCache[id][tonumber(d.orderId)]
+    if not o or o.status ~= "open" then return { ok = false, error = _L("order_not_open") } end
+    if o.driver_identifier ~= GetIdentifier(src) then
+        return { ok = false, error = _L("delivery_not_yours", DriverName(o) or "?") }
+    end
+    local t = DeliveryTargets[o.id]
+    if not t or not t.x then return { ok = false, error = _L("delivery_no_target") } end
+    return { ok = true, x = t.x, y = t.y, z = t.z, ticket = o.ticket }
+end)
+
+-- A driver who leaves the server can't finish the run, and the ticket would otherwise
+-- sit claimed forever with nobody able to take it (only the holder may cancel). Sweep
+-- every open delivery they were carrying and put it back on the board.
+AddEventHandler("playerDropped", function()
+    local gone = GetIdentifier(source)
+    if not gone then return end
+    for rid, orders in pairs(OrderCache) do
+        for _, o in pairs(orders) do
+            if o.status == "open" and o.driver_identifier == gone then
+                ReleaseDelivery(rid, o, "driver disconnected")
+            end
+        end
+    end
+end)
+
+-- ─── in-app map SEED ─────────────────────────────────────────────────────────
+-- The map used to be live-events-only, so a customer who opened a ticket between
+-- two pushes (or reconnected, or navigated away and back) saw an empty map for up
+-- to a full route-refresh cycle — or forever, if the driver never deviated.
+-- OrderMap calls this once on mount and renders the reply exactly as if the events
+-- had fired; live events keep updating it afterwards.
+--
+-- PERMISSION: only the ORDER'S OWN CUSTOMER may read it. Anything else — another
+-- player, an unknown order, a closed ticket — gets an empty table, so this can't be
+-- polled to track an arbitrary driver around the map.
+lib.callback.register("pickle_restaurants:phone:trackOrder", function(src, d)
+    local oid = tonumber(type(d) == "table" and d.orderId or nil)
+    if not oid then return {} end
+    local o
+    for _, orders in pairs(OrderCache) do
+        if orders[oid] then o = orders[oid]; break end
+    end
+    if not o or o.status ~= "open" then return {} end
+    local me = GetIdentifier(src)
+    if not me or not o.customer_identifier or o.customer_identifier ~= me then
+        ddbg("trackOrder DENIED: %s is not the customer of order %s", tostring(src), tostring(oid))
+        return {}
+    end
+    local t = DriverTelemetry[oid]
+    if not t then ddbg("trackOrder order %s: nothing cached yet", tostring(oid)); return {} end
+    local driver = (t.x and t.y) and { x = t.x, y = t.y } or nil
+    ddbg("trackOrder order %s → driver %s", tostring(oid), driver and "yes" or "no")
+    return { driver = driver }
 end)
 
 -- ─── complete order ──────────────────────────────────────────────────────────
@@ -1420,7 +1708,12 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
     TriggerEvent("pickle_restaurants:internal:orderCompleted", id, o, src, 0)
     if DeliveryTargets then DeliveryTargets[o.id] = nil end
     ShowNotification(src, _L("order_completed", o.ticket))
-    if customerSrc ~= src then ShowNotification(customerSrc, _L("order_received", o.ticket)) end
+    -- The customer HAS the food at this point (it just moved into their inventory) —
+    -- so this is a hand-off confirmation, not a "ready" nudge.
+    if customerSrc ~= src then
+        ShowNotification(customerSrc, (o.order_type == "delivery")
+            and _L("order_delivered", o.ticket) or _L("order_received", o.ticket))
+    end
     SyncOrders(id)
     -- Reply ok ONLY — the ticket list refreshes via the SyncOrders broadcast above
     -- (which the acting cashier receives too). The reply never carries the list, so
@@ -1445,7 +1738,8 @@ lib.callback.register("pickle_restaurants:sales:cancelOrder", function(src, d)
     end
 
     -- NPC customer: it never pre-paid (NPCs pay on serve), so there's nothing to
-    -- refund — just close the ticket and send the ped off.
+    -- refund — just close the ticket and send the ped off. (RefundOrder would also
+    -- no-op on an NPC ticket; this branch additionally sends the ped away.)
     if IsNpcOrder and IsNpcOrder(o) then
         CloseOrder(id, o.id, "cancelled")
         if NpcDropOrder then NpcDropOrder(id, o.id, false) end
@@ -1454,36 +1748,58 @@ lib.callback.register("pickle_restaurants:sales:cancelOrder", function(src, d)
         return { ok = true }
     end
 
-    -- Refunding needs a live player to hand the money back to.
+    -- Refund through the ONE shared, idempotent path (core/server.lua). It reverses
+    -- the restaurant balance + ledger, returns the charged total to the account that
+    -- was actually charged, restores a burned loyalty redemption, and — critically —
+    -- does NOT need the customer to be online: an unreachable customer's payout is
+    -- persisted and settled on their next login. The old code refused to cancel at
+    -- all when the customer had disconnected, which wedged the ticket open forever.
     local customerSrc = findPlayerByIdentifier(o.customer_identifier)
-    if not customerSrc then return fail(_L("order_customer_offline")) end
-
-    AdjustBalance(id, -o.total)
-    AddMoney(customerSrc, o.total, "money")
-    AddLedger(id, "refund", -o.total, ("Ticket #%d cancelled"):format(o.ticket), o.customer_identifier)
+    -- Guarded: a throw in here must not strand the ticket with o.busy latched (the
+    -- wedged-ticket failure mode). RefundOrder claims `refunded` before it can throw,
+    -- so retrying after a mid-refund error can never double-pay — it just no-ops. A
+    -- failed refund is LOUD, never silent: money is involved.
+    local okr, rerr, refunded, deferred = pcall(RefundOrder, id, o, "cancelled")
+    if not okr then
+        print(("[pickle_restaurants] REFUND FAILED for ticket #%s (order %s, restaurant %s): %s")
+            :format(tostring(o.ticket), tostring(o.id), tostring(id), tostring(rerr)))
+        return fail(_L("order_refund_failed"))
+    end
+    refunded, deferred = refunded or 0, deferred or false
 
     -- Void the receipt if it's still on them — truly best-effort: its OWN guard so
-    -- an inventory hiccup here can never abort (and thus wedge) the cancel.
-    pcall(function()
-        local item = ReceiptItem()
-        if ItemExists(item) then
-            if Inventory.GetItemSlots then
-                for _, s in ipairs(Inventory.GetItemSlots(customerSrc, item) or {}) do
-                    local m = type(s.metadata) == "table" and s.metadata or {}
-                    if tonumber(m.order_id) == o.id then
-                        Inventory.RemoveItemSlot(customerSrc, item, 1, s.slot)
-                        break
+    -- an inventory hiccup here can never abort (and thus wedge) the cancel. Only
+    -- possible while they're online; a stale receipt on an offline customer is
+    -- harmless (completeOrder re-checks the ticket, which is closed by then).
+    if customerSrc then
+        pcall(function()
+            local item = ReceiptItem()
+            if ItemExists(item) then
+                if Inventory.GetItemSlots then
+                    for _, s in ipairs(Inventory.GetItemSlots(customerSrc, item) or {}) do
+                        local m = type(s.metadata) == "table" and s.metadata or {}
+                        if tonumber(m.order_id) == o.id then
+                            Inventory.RemoveItemSlot(customerSrc, item, 1, s.slot)
+                            break
+                        end
                     end
+                elseif (Inventory.GetItemCount(customerSrc, item) or 0) >= 1 then
+                    Inventory.RemoveItem(customerSrc, item, 1)
                 end
-            elseif (Inventory.GetItemCount(customerSrc, item) or 0) >= 1 then
-                Inventory.RemoveItem(customerSrc, item, 1)
             end
-        end
-    end)
+        end)
+    end
 
+    if DeliveryTargets then DeliveryTargets[o.id] = nil end
     CloseOrder(id, o.id, "cancelled")
-    ShowNotification(src, _L("order_cancelled", o.ticket))
-    if customerSrc ~= src then ShowNotification(customerSrc, _L("order_refunded", o.ticket, GetCurrencyString(o.total))) end
+    ShowNotification(src, deferred
+        and _L("order_cancelled_refund_pending", o.ticket)
+        or _L("order_cancelled", o.ticket))
+    -- RefundOrder already notified the customer when it paid them directly; only
+    -- tell them here if the cashier isn't the customer and nothing was paid out.
+    if customerSrc and customerSrc ~= src and refunded <= 0 then
+        ShowNotification(customerSrc, _L("order_cancelled", o.ticket))
+    end
     SyncOrders(id)
     -- Reply ok ONLY — the ticket list refreshes via the SyncOrders broadcast above
     -- (which the acting cashier receives too). The reply never carries the list, so

@@ -118,7 +118,7 @@ export function Rewards() {
 // ─── reservations ─────────────────────────────────────────────────────────────
 const SLOTS = ["Now", "6:00 PM", "7:00 PM", "8:00 PM", "9:00 PM"];
 
-export function Reserve() {
+export function Reserve(_props: { params?: any }) {
   const { home, back, toast } = usePhone();
   const restaurants: any[] = home?.restaurants || [];
   const [rid, setRid] = useState<number | null>(restaurants[0]?.id ?? null);

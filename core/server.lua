@@ -20,6 +20,7 @@ OrderCache      = {}    -- [restaurantId][orderId] = open POS ticket row (lines 
 NextTicket      = {}    -- [restaurantId]  = next kitchen ticket number
 ComboCache      = {}    -- [restaurantId][comboId] = combo-meal row (slots/photo_crop decoded)
 OrdersDirty     = {}    -- [restaurantId]  = true when the pool changed → register needs a live SyncOrders (coalesced flusher in modules/sales)
+PendingRefunds  = {}    -- [rowId]         = unpaid refund owed to an OFFLINE customer (see RefundOrder / the settle thread)
 
 PERMISSIONS = { "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance", "manage_stock" }
 ALL_PERMS   = {}
@@ -695,6 +696,59 @@ local function CreateTables()
             `closed_at`           TIMESTAMP    NULL DEFAULT NULL,
             PRIMARY KEY (`id`),
             KEY `idx_rest_status` (`restaurant_id`, `status`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
+
+    -- ── refund bookkeeping on an order (additive) ────────────────────────────
+    -- These MUST live here in core, not in a module: LoadOrders() below does a
+    -- `SELECT *` into OrderCache and runs BEFORE any module boot thread, so a
+    -- column added later is simply absent from every cached open ticket for the
+    -- rest of the session. `paid_account` was originally added by modules/phone
+    -- for exactly this reason and got it wrong — a bank-paid ticket that was open
+    -- across the restart that first introduced the column would have refunded to
+    -- CASH. Guarding it here as well is idempotent (phone's EnsureColumn then
+    -- no-ops) and closes that window.
+    --   refunded      — the IDEMPOTENCE flag. RefundOrder sets it (cache + DB)
+    --                   before paying out, so no second cancel, admin delete, or
+    --                   racing path can ever pay the same ticket twice.
+    --   paid_account  — which wallet was charged ('bank' for phone/card orders,
+    --                   'cash' for register + kiosk), so a refund returns money
+    --                   to the account it actually came out of.
+    --   redeemed      — a loyalty punch-card redemption was burned on this order,
+    --                   so cancelling can hand it back.
+    local ordCols = {
+        { "refunded",     "`refunded` TINYINT UNSIGNED NOT NULL DEFAULT 0" },
+        { "paid_account", "`paid_account` VARCHAR(8) NOT NULL DEFAULT 'cash'" },
+        { "redeemed",     "`redeemed` TINYINT UNSIGNED NOT NULL DEFAULT 0" },
+    }
+    for _, c in ipairs(ordCols) do
+        local have = MySQL.query.await(("SHOW COLUMNS FROM `pickle_restaurant_orders` LIKE '%s'"):format(c[1]))
+        if not have or #have == 0 then
+            MySQL.query.await(("ALTER TABLE `pickle_restaurant_orders` ADD COLUMN %s"):format(c[2]))
+        end
+    end
+
+    -- OFFLINE REFUNDS. A cancellation must never be blocked by (or silently
+    -- swallow money because of) the customer being disconnected. When there's no
+    -- live source to hand the money to, RefundOrder parks the payout here and the
+    -- settle thread pays it the moment that identifier is online again. The UNIQUE
+    -- key on order_id is a second, database-level guarantee that one ticket can
+    -- never queue two payouts.
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `pickle_restaurant_pending_refunds` (
+            `id`            INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `order_id`      INT          NOT NULL,
+            `restaurant_id` INT UNSIGNED NOT NULL,
+            `identifier`    VARCHAR(80)  NOT NULL,
+            `ticket`        INT UNSIGNED NOT NULL DEFAULT 0,
+            `amount`        INT          NOT NULL DEFAULT 0,
+            `account`       VARCHAR(8)   NOT NULL DEFAULT 'money',
+            `reason`        VARCHAR(64)  DEFAULT NULL,
+            `created_at`    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            `paid_at`       TIMESTAMP    NULL DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uniq_order` (`order_id`),
+            KEY `idx_ident_paid` (`identifier`, `paid_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
 
@@ -2637,10 +2691,28 @@ end
 function CloseOrder(restaurantId, orderId, status)
     local o = OrderCache[restaurantId] and OrderCache[restaurantId][orderId]
     if not o then return false end
+    -- SAFETY NET: closing a ticket as "cancelled" means the customer never got the
+    -- food, so the money must have gone back. Callers are expected to have already
+    -- gone through RefundOrder (and normally have) — but this makes it structurally
+    -- impossible for a NEW cancel path to be added that forgets. RefundOrder is
+    -- idempotent, so the normal path's call here is a no-op; only a path that
+    -- skipped it actually pays out. NPC tickets no-op inside RefundOrder (they
+    -- never pre-paid).
+    if status == "cancelled" and o.refunded ~= 1 and o.refunded ~= true then
+        local ok, err = pcall(RefundOrder, restaurantId, o, "cancelled")
+        if not ok then
+            print(("[pickle_restaurants] REFUND FAILED closing ticket #%s (order %s, restaurant %s): %s")
+                :format(tostring(o.ticket), tostring(orderId), tostring(restaurantId), tostring(err)))
+        end
+    end
     o.status = status
     MySQL.update("UPDATE pickle_restaurant_orders SET status = ?, closed_at = NOW() WHERE id = ?",
         { status, orderId })
     OrderCache[restaurantId][orderId] = nil
+    -- The last-known driver position/route seed (modules/sales) dies with the ticket.
+    -- Cleared HERE rather than in each caller so completed, cancelled and any future
+    -- close path all drop it — the cache is keyed by order id and would otherwise leak.
+    if DriverTelemetry then DriverTelemetry[orderId] = nil end
     return true
 end
 
@@ -2649,6 +2721,230 @@ function ClearOrders(restaurantId)
     OrderCache[restaurantId] = nil
     NextTicket[restaurantId] = nil
 end
+
+-- ─── refunds (the ONE path money ever goes back to a customer) ───────────────
+-- Every cancellation — cashier cancel at the POS, phone/KDS cancel, an admin
+-- deleting a whole restaurant out from under its in-flight tickets, or anything
+-- added later — MUST come through RefundOrder. Duplicating "give the money back"
+-- per call site is exactly how a path ends up refunding the wrong account, the
+-- pre-discount total, or nothing at all.
+--
+-- IDEMPOTENCE: an order is refundable EXACTLY ONCE. `refunded` is flipped on the
+-- cache row (and written through to the DB) BEFORE any payout, with no yield
+-- between the check and the set — so a second call, a cancel racing a completion,
+-- or a cancel racing an admin delete finds the flag already up and returns false
+-- without paying. The flag is PERSISTED, so a restart can't resurrect the ability
+-- to refund a ticket that was already paid back.
+--
+-- OFFLINE: a disconnected customer has no source to AddMoney to. That is NOT a
+-- reason to refuse the cancel (which would wedge the ticket open forever) and it
+-- is emphatically not a reason to drop the money on the floor: the payout is
+-- persisted to pickle_restaurant_pending_refunds and settled on their next login
+-- by SettlePendingRefunds.
+--
+-- Returns ok, amount, deferred.
+
+-- Which wallet a ticket was charged to: phone/card orders take BANK, register and
+-- kiosk take cash. "money" is the bridge's cash currency name.
+function OrderRefundAccount(order)
+    return (order and order.paid_account == "bank") and "bank" or "money"
+end
+
+-- Resolve a live source for an identifier. The bridge's GetSourceFromIdentifier is
+-- the fast path, but it goes through the framework's own player index, which some
+-- setups populate late (multichar) — so fall back to scanning connected players
+-- the way modules/sales does. Getting this wrong means a REACHABLE customer gets
+-- their refund deferred, so it's worth the second look.
+function ResolveSourceForIdentifier(identifier)
+    if not identifier then return nil end
+    if GetSourceFromIdentifier then
+        local src = GetSourceFromIdentifier(identifier)
+        if src then return tonumber(src) end
+    end
+    for _, p in ipairs(GetPlayers()) do
+        p = tonumber(p)
+        if GetIdentifier(p) == identifier then return p end
+    end
+    return nil
+end
+
+-- Park a payout for an offline customer. Cache + DB write-through; the UNIQUE key
+-- on order_id makes a duplicate row impossible even if this were reached twice.
+local function QueueRefund(restaurantId, order, amount, account, reason)
+    local row = {
+        order_id      = order.id,
+        restaurant_id = restaurantId,
+        identifier    = order.customer_identifier,
+        ticket        = order.ticket or 0,
+        amount        = amount,
+        account       = account,
+        reason        = reason,
+    }
+    local id = MySQL.insert.await([[
+        INSERT INTO `pickle_restaurant_pending_refunds`
+            (`order_id`, `restaurant_id`, `identifier`, `ticket`, `amount`, `account`, `reason`)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE `order_id` = `order_id`
+    ]], { row.order_id, row.restaurant_id, row.identifier, row.ticket, row.amount, row.account, row.reason })
+    -- A FALSY-OR-ZERO id means the ON DUPLICATE branch fired (MySQL leaves
+    -- LAST_INSERT_ID at 0 for a no-op update) — a payout is already queued for this
+    -- ticket, so there's nothing to add. Note `id > 0`, not just `if id`: 0 is TRUTHY
+    -- in Lua, and caching a row under key 0 would give it a payout the settle thread
+    -- can never mark paid (the UPDATE would match no row), so it would pay out again
+    -- on every restart. That is the double-refund bug this whole flag exists to stop.
+    id = tonumber(id) or 0
+    if id <= 0 then
+        -- Either the duplicate branch fired or the insert failed outright. Read the
+        -- row back to tell those apart: "already queued" is fine, "no row at all" is
+        -- money that has left the restaurant's balance with nothing owing it back —
+        -- the one case that must never pass silently.
+        local existing = MySQL.query.await(
+            "SELECT * FROM `pickle_restaurant_pending_refunds` WHERE `order_id` = ?", { row.order_id })
+        local found = existing and existing[1]
+        if not found then
+            print(("[pickle_restaurants] MONEY LOST — could not queue a refund for ticket #%s (order %s, restaurant %s): %s owed to %s (%s). Pay this back manually.")
+                :format(tostring(row.ticket), tostring(row.order_id), tostring(restaurantId),
+                        GetCurrencyString(amount), tostring(row.identifier), account))
+            return false
+        end
+        if found.paid_at == nil then PendingRefunds[found.id] = found end
+        return true
+    end
+    row.id = id
+    PendingRefunds[id] = row
+    print(("[pickle_restaurants] REFUND DEFERRED: ticket #%s (order %s, restaurant %s) owes %s to %s (%s) — customer offline, will pay on next login")
+        :format(tostring(row.ticket), tostring(row.order_id), tostring(restaurantId),
+                GetCurrencyString(amount), tostring(row.identifier), account))
+    return true
+end
+
+function RefundOrder(restaurantId, order, reason)
+    if not order then return false, 0, false end
+    -- Already paid back (or being paid back right now, further down this same
+    -- non-yielding block). Never pay twice.
+    if order.refunded == 1 or order.refunded == true then return false, 0, false end
+
+    -- NPC customers pay on serve, so an unserved NPC ticket never took money.
+    -- Flag it refunded anyway so the accounting is uniform and no later path
+    -- mistakes it for an unrefunded charge.
+    local isNpc = (IsNpcOrder and IsNpcOrder(order)) or false
+
+    -- CLAIM FIRST. Everything below can yield; nothing below may run twice.
+    order.refunded = 1
+    if order.id then
+        MySQL.update("UPDATE `pickle_restaurant_orders` SET `refunded` = 1 WHERE `id` = ?", { order.id })
+    end
+    if isNpc then return false, 0, false end
+
+    -- The amount actually CHARGED is what the row stores: resolveOrderLines
+    -- rounds it, and the phone path stores the post-discount, post-redemption
+    -- finalTotal. Round again defensively — money crossing a boundary is always
+    -- whole dollars (house rule), and a legacy row could hold anything.
+    local amount  = RoundMoney(order.total or 0)
+    local account = OrderRefundAccount(order)
+
+    -- Reverse the restaurant's side of the sale regardless of whether the
+    -- customer is reachable — the house never keeps money for an unserved order.
+    AdjustBalance(restaurantId, -amount)
+    AddLedger(restaurantId, "refund", -amount,
+        ("Ticket #%s %s"):format(tostring(order.ticket), reason or "cancelled"), order.customer_identifier)
+
+    -- Hand back a loyalty redemption burned on this order (the free-item punches
+    -- were consumed at placeOrder; PhoneRestoreRedeem is a global from
+    -- modules/phone, absent if that module isn't loaded).
+    if (order.redeemed == 1 or order.redeemed == true) and PhoneRestoreRedeem then
+        pcall(PhoneRestoreRedeem, restaurantId, order.customer_identifier)
+    end
+
+    if amount <= 0 then return true, 0, false end
+
+    local src = ResolveSourceForIdentifier(order.customer_identifier)
+    if not src then
+        QueueRefund(restaurantId, order, amount, account, reason)
+        return true, amount, true
+    end
+
+    AddMoney(src, amount, account)
+    ShowNotification(src, _L("order_refunded", order.ticket or 0, GetCurrencyString(amount)))
+    return true, amount, false
+end
+
+-- Pay out everything owed to one identifier that is now online. Safe to call
+-- repeatedly: a row leaves the cache the moment it's paid, and paid_at is set in
+-- the DB in the same step, so a restart mid-settle can't pay it a second time.
+function SettlePendingRefunds(src)
+    if not src then return 0 end
+    local identifier = GetIdentifier(src)
+    if not identifier then return 0 end
+    -- Snapshot first. The loop below removes (and on failure re-adds) cache keys,
+    -- and re-adding a key mid-`pairs` is undefined behaviour in Lua — so iterate a
+    -- plain array of the rows we intend to settle, never the live table.
+    local due = {}
+    for id, row in pairs(PendingRefunds) do
+        if row.identifier == identifier then due[#due + 1] = { id = id, row = row } end
+    end
+    local paid = 0
+    for _, e in ipairs(due) do
+        local id, row = e.id, e.row
+        if PendingRefunds[id] then -- still unclaimed (another sweep may have taken it)
+            -- Claim before paying, same rule as RefundOrder.
+            PendingRefunds[id] = nil
+            MySQL.update("UPDATE `pickle_restaurant_pending_refunds` SET `paid_at` = NOW() WHERE `id` = ?", { id })
+            local amount = RoundMoney(row.amount or 0)
+            if amount > 0 then
+                -- Claiming before paying is the right trade (a double payout is worse
+                -- than a retried one), but a throw mid-payout would otherwise burn the
+                -- row. Put it back and clear paid_at so the next sweep tries again.
+                local okp = pcall(AddMoney, src, amount, row.account == "bank" and "bank" or "money")
+                if okp then
+                    ShowNotification(src, _L("order_refunded", row.ticket or 0, GetCurrencyString(amount)))
+                    paid = paid + amount
+                else
+                    PendingRefunds[id] = row
+                    MySQL.update("UPDATE `pickle_restaurant_pending_refunds` SET `paid_at` = NULL WHERE `id` = ?", { id })
+                    print(("[pickle_restaurants] refund payout failed for pending row %s (%s to %s) — requeued")
+                        :format(tostring(id), GetCurrencyString(amount), tostring(identifier)))
+                end
+            end
+        end
+    end
+    return paid
+end
+
+local function LoadPendingRefunds()
+    PendingRefunds = {}
+    local rows = MySQL.query.await(
+        "SELECT * FROM `pickle_restaurant_pending_refunds` WHERE `paid_at` IS NULL") or {}
+    local n = 0
+    for _, row in ipairs(rows) do
+        PendingRefunds[row.id] = row
+        n = n + 1
+    end
+    if n > 0 then
+        print(("[pickle_restaurants] %d unpaid refund(s) queued for offline customers"):format(n))
+    end
+end
+
+-- Settle queue. Deliberately a poll rather than a framework "player loaded" hook:
+-- every bridge (esx / qb / custom) already exposes GetSourceFromIdentifier, none
+-- of them expose a common load event, and money owed must not depend on which
+-- framework is running. Idle cost is one table scan when nothing is owed.
+CreateThread(function()
+    while true do
+        Wait(20000)
+        if next(PendingRefunds) then
+            local seen = {}
+            for _, row in pairs(PendingRefunds) do
+                local ident = row.identifier
+                if ident and not seen[ident] then
+                    seen[ident] = true
+                    local src = ResolveSourceForIdentifier(ident)
+                    if src then SettlePendingRefunds(src) end
+                end
+            end
+        end
+    end
+end)
 
 -- A combo slot option whose key is `group:<Name>` references a whole ACCESS GROUP
 -- (any sellable the restaurant can currently make in that group) rather than one
@@ -2736,6 +3032,12 @@ function GetOpenOrders(restaurantId)
                 orderType = o.order_type,
                 scheduled = o.scheduled_for,
                 address   = o.address,
+                -- The transient delivery claim (modules/sales' startDelivery). This is a
+                -- PROJECTION, not the cache row, so anything AnnotateOrders needs has to
+                -- be carried across explicitly — without these the driver lookup always
+                -- saw nil and the phone's "Accept Delivery" never flipped to "Cancel".
+                driver_identifier = o.driver_identifier,
+                driver_name       = o.driver_name,
             }
         end
     end
@@ -3368,6 +3670,7 @@ CreateThread(function()
         LoadEmployees()
         LoadStock()
         LoadOrders()
+        LoadPendingRefunds() -- refunds owed to customers who were offline at cancel time
         LoadCookedItems()
         MigrateTrayCheese()
         LoadCombos()

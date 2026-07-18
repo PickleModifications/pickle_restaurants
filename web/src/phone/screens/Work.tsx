@@ -27,7 +27,7 @@ import {
 import { fetchNui, useNuiEvent } from "../../lib/nui";
 import { cn } from "../../lib/utils";
 import { usePhone, money } from "../store";
-import { Screen, TopBar, Empty, Spinner, ItemImg } from "../ui";
+import { Screen, TopBar, Empty, Spinner, ItemImg, Sheet } from "../ui";
 
 const TYPE_ICON: Record<string, any> = { delivery: Truck, pickup: ShoppingBag, dine_in: Utensils };
 
@@ -52,31 +52,112 @@ function modText(mods?: any[]) {
   return mods.map((m: any) => (m.removed ? `no ${m.label}` : `+${m.label}`)).join(", ");
 }
 
+// The delivery claim button, shared by the queue card and the detail sheet.
+// A delivery has exactly ONE driver: the first employee to accept it holds it until
+// they cancel, serve it, or leave the server. So this is a three-state control —
+// free (accept), held by ME (cancel), held by SOMEONE ELSE (inert, just says who).
+// The server enforces all of it by identifier; this only decides what to show.
+function DeliveryAction({
+  t,
+  me,
+  ready,
+  compact,
+  onAccept,
+  onCancelDelivery,
+  onWaypoint,
+}: {
+  t: any;
+  me?: number;
+  ready?: boolean;
+  compact?: boolean;
+  onAccept: () => void;
+  onCancelDelivery: () => void;
+  onWaypoint: () => void;
+}) {
+  if (t.orderType !== "delivery") return null;
+  const pad = compact ? "py-2" : "py-2.5";
+  const mine = t.driver && me != null && t.driver.server === me;
+
+  if (t.driver && !mine) {
+    return (
+      <div
+        className={cn(
+          "flex flex-1 items-center justify-center gap-1 rounded-full bg-muted px-3 text-sm font-bold text-muted-foreground",
+          pad
+        )}
+      >
+        <Truck className="h-4 w-4" /> With {t.driver.name || "a driver"}
+      </div>
+    );
+  }
+  if (mine) {
+    // A waypoint is a single global slot anything can clear, so the driver needs it
+    // re-settable for the whole run — not just at the moment they accepted.
+    return (
+      <>
+        <button
+          onClick={onWaypoint}
+          className={cn(
+            "flex flex-1 items-center justify-center gap-1 rounded-full bg-brand px-3 text-sm font-bold text-brand-ink",
+            pad
+          )}
+        >
+          <MapPin className="h-4 w-4" /> Set Waypoint
+        </button>
+        <button
+          onClick={onCancelDelivery}
+          aria-label="Cancel delivery"
+          className={cn(
+            "grid shrink-0 place-items-center rounded-full bg-destructive/15 px-3 text-destructive",
+            compact ? "h-9 w-9" : "h-11 w-11"
+          )}
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </>
+    );
+  }
+  if (!ready) return null;
+  return (
+    <button
+      onClick={onAccept}
+      className={cn("flex flex-1 items-center justify-center gap-1 rounded-full bg-muted px-3 text-sm font-bold", pad)}
+    >
+      <Truck className="h-4 w-4" /> Accept Delivery
+    </button>
+  );
+}
+
 // A full-detail ticket sheet: every line with its photo + mods, the customer /
-// order-type / delivery meta, fulfillment state, and the serve/dispatch/cancel
+// order-type / delivery meta, fulfillment state, and the serve/delivery/cancel
 // actions. Opened from a ticket's info button in the queue.
 function TicketSheet({
   t,
   currency,
   onClose,
   onServe,
-  onDispatch,
+  onAccept,
+  onCancelDelivery,
+  onWaypoint,
   onCancel,
+  me,
 }: {
   t: any;
   currency: string;
   onClose: () => void;
   onServe: () => void;
-  onDispatch: () => void;
+  onAccept: () => void;
+  onCancelDelivery: () => void;
+  onWaypoint: () => void;
   onCancel: () => void;
+  me?: number;
 }) {
   const ready = t.fulfill?.ready;
   const Icon = t.npc ? Bot : TYPE_ICON[t.orderType] || ShoppingBag;
   const typeLabel = t.npc ? "Walk-in" : TYPE_LABEL[t.orderType] || "Pickup";
   return (
-    <>
-      <div className="pf-scrim" onClick={onClose} />
-      <div className="pf-sheet">
+    <Sheet onClose={onClose}>
+      <>
         <div className="pf-grab" />
         {/* header */}
         <div className="flex items-center gap-3 px-4 pb-3 pt-1">
@@ -140,14 +221,14 @@ function TicketSheet({
 
         {/* actions */}
         <div className="flex gap-2 border-t border-border p-4" style={{ paddingBottom: "calc(1rem + var(--pf-bottom))" }}>
-          {t.orderType === "delivery" && ready && (
-            <button
-              onClick={onDispatch}
-              className="flex flex-1 items-center justify-center gap-1 rounded-full bg-muted px-3 py-2.5 text-sm font-bold"
-            >
-              <Truck className="h-4 w-4" /> Dispatch
-            </button>
-          )}
+          <DeliveryAction
+            t={t}
+            me={me}
+            ready={ready}
+            onAccept={onAccept}
+            onCancelDelivery={onCancelDelivery}
+            onWaypoint={onWaypoint}
+          />
           <button
             disabled={!ready}
             onClick={onServe}
@@ -162,8 +243,8 @@ function TicketSheet({
             <X className="h-4 w-4" />
           </button>
         </div>
-      </div>
-    </>
+      </>
+    </Sheet>
   );
 }
 
@@ -194,10 +275,19 @@ export function Kitchen({ params }: { params?: any }) {
   const [tickets, setTickets] = useState<any[]>([]);
   const [shift, setShift] = useState<any>(null);
   const [detailId, setDetailId] = useState<number | null>(null);
+  // Our own server id, carried by BOTH the ticket seed and the live broadcast — it's how
+  // a claimed delivery is recognised as OURS (see DeliveryAction).
+  const [me, setMe] = useState<number | undefined>(undefined);
   const canManage =
     active && (active.isOwner || ["manage_menu", "view_finances", "manage_employees", "manage_stock"].some((p) => active.perms?.[p]));
 
-  const loadTickets = () => rid && fetchNui("phone:tickets", { id: rid }).then((d) => d?.ok && setTickets(d.tickets || []));
+  const loadTickets = () =>
+    rid &&
+    fetchNui("phone:tickets", { id: rid }).then((d) => {
+      if (!d?.ok) return;
+      setTickets(d.tickets || []);
+      if (typeof d.me === "number") setMe(d.me);
+    });
   const loadShift = () => rid && fetchNui("phone:shiftStatus", { id: rid }).then((d) => d?.ok && setShift(d));
   useEffect(() => {
     setTickets([]);
@@ -207,7 +297,9 @@ export function Kitchen({ params }: { params?: any }) {
   }, [rid]);
 
   useNuiEvent("orders", (d) => {
-    if (d.rid === rid) setTickets(d.orders || []);
+    if (d.rid !== rid) return;
+    setTickets(d.orders || []);
+    if (typeof d.me === "number") setMe(d.me);
   });
 
   const clock = async () => {
@@ -235,9 +327,18 @@ export function Kitchen({ params }: { params?: any }) {
       loadTickets();
     } else toast(res?.error || "Can't cancel", "err");
   };
-  const dispatch = async (t: any) => {
+  const acceptDelivery = async (t: any) => {
     const res = await fetchNui("phone:startDelivery", { id: rid, orderId: t.orderId });
-    if (res?.ok) toast("Driver dispatched");
+    if (res?.ok) toast("Delivery accepted — route set");
+    else toast(res?.error || "Failed", "err");
+  };
+  const setWaypoint = async (t: any) => {
+    const res = await fetchNui("phone:setWaypoint", { id: rid, orderId: t.orderId });
+    if (!res?.ok) toast(res?.error || "No delivery location saved", "err");
+  };
+  const cancelDelivery = async (t: any) => {
+    const res = await fetchNui("phone:cancelDelivery", { id: rid, orderId: t.orderId });
+    if (res?.ok) toast("Delivery cancelled");
     else toast(res?.error || "Failed", "err");
   };
 
@@ -358,14 +459,15 @@ export function Kitchen({ params }: { params?: any }) {
                 )}
 
                 <div className="mt-2 flex gap-2">
-                  {t.orderType === "delivery" && ready && (
-                    <button
-                      onClick={() => dispatch(t)}
-                      className="flex flex-1 items-center justify-center gap-1 rounded-full bg-muted px-3 py-2 text-sm font-bold"
-                    >
-                      <Truck className="h-4 w-4" /> Dispatch
-                    </button>
-                  )}
+                  <DeliveryAction
+                    t={t}
+                    me={me}
+                    ready={ready}
+                    compact
+                    onAccept={() => acceptDelivery(t)}
+                    onCancelDelivery={() => cancelDelivery(t)}
+                    onWaypoint={() => setWaypoint(t)}
+                  />
                   <button
                     disabled={!ready}
                     onClick={() => complete(t)}
@@ -395,8 +497,11 @@ export function Kitchen({ params }: { params?: any }) {
             currency={currency}
             onClose={() => setDetailId(null)}
             onServe={() => complete(t)}
-            onDispatch={() => dispatch(t)}
+            onAccept={() => acceptDelivery(t)}
+            onCancelDelivery={() => cancelDelivery(t)}
+            onWaypoint={() => setWaypoint(t)}
             onCancel={() => cancel(t)}
+            me={me}
           />
         );
       })()}
@@ -436,7 +541,7 @@ export function Staff({ params }: { params?: any }) {
       <TopBar title="My shift" onBack={back} />
       <div className="space-y-4 p-4">
         <div className="rounded-2xl border border-border bg-card p-4 text-center">
-          <div className="tape text-muted-foreground">{shift?.clockedIn ? "On the clock" : "Off duty"}</div>
+          <div className="text-[0.66rem] font-bold uppercase tracking-wider text-muted-foreground">{shift?.clockedIn ? "On the clock" : "Off duty"}</div>
           <div className="my-1 font-mono text-3xl font-extrabold tabular-nums">
             {shift?.clockedIn ? fmtDur(elapsed) : "—"}
           </div>
@@ -567,7 +672,7 @@ function SalesTab({ rid, onChange }: { rid: number; onChange: () => void }) {
   return (
     <div className="space-y-4">
       <div className="rounded-2xl border border-border bg-card p-4">
-        <div className="tape text-muted-foreground">Balance</div>
+        <div className="text-[0.66rem] font-bold uppercase tracking-wider text-muted-foreground">Balance</div>
         <div className="font-mono text-3xl font-extrabold">{money(currency, a.balance)}</div>
         <div className="mt-2 flex gap-2">
           <button onClick={() => bank("deposit")} className="flex-1 rounded-full bg-muted py-2 text-sm font-bold">
@@ -858,7 +963,7 @@ function PromosTab({ rid }: { rid: number }) {
   return (
     <div className="space-y-4">
       <div className="rounded-2xl border border-border bg-card p-3">
-        <div className="tape mb-2 text-muted-foreground">New promotion</div>
+        <div className="mb-2 text-[0.66rem] font-bold uppercase tracking-wider text-muted-foreground">New promotion</div>
         <input
           value={label}
           onChange={(e) => setLabel(e.target.value)}

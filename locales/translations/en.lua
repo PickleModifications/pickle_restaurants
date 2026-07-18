@@ -111,6 +111,8 @@ Language["en"] = {
     ["mgmt_combo_label_required"] = "Combo name required.",
     ["mgmt_combo_needs_slot"] = "A combo needs at least one item slot.",
     ["mgmt_no_restaurant"] = "No restaurant.",
+    ["mgmt_name_required"] = "Restaurant name required.",
+    ["mgmt_name_saved"] = "Renamed to %s.",
     ["mgmt_player_not_found"] = "Player not found.",
     ["mgmt_player_owns"] = "That player owns this place.",
     ["mgmt_role_saved"] = "Employee role saved.",
@@ -123,6 +125,7 @@ Language["en"] = {
     ["mgmt_unknown_texture"] = "Unknown texture.",
     ["no_work_here"] = "You don't work here.",
     ["not_enough_cash"] = "Not enough cash.",
+    ["not_enough_bank"] = "Not enough money in your bank account.",
     -- POS orders (kitchen tickets)
     ["order_placed"] = "Order placed — Ticket #%d.",
     ["order_charged"] = "Ticket #%d — charged %s.",
@@ -141,9 +144,33 @@ Language["en"] = {
     ["order_meal_gone"] = "that meal",
     ["order_cant_carry"] = "The customer can't carry the %s.",
     ["order_completed"] = "Ticket #%d completed.",
-    ["order_received"] = "Your order (Ticket #%d) is ready!",
+    -- Hand-off copy (fires when the food physically changes hands, NOT when the
+    -- kitchen finishes cooking) — pickup/dine-in vs delivery.
+    ["order_received"] = "You've got your order (Ticket #%d). Enjoy!",
+    ["order_delivered"] = "Your delivery arrived (Ticket #%d). Enjoy!",
     ["order_cancelled"] = "Ticket #%d cancelled.",
     ["order_refunded"] = "Ticket #%d refunded — %s.",
+    -- Shown to the CASHIER when the customer was offline at cancel time: the money
+    -- is owed and persisted, and pays out automatically when they next log in.
+    ["order_cancelled_refund_pending"] = "Ticket #%d cancelled — the customer is offline, so their refund will be paid on their next login.",
+    ["order_refund_failed"] = "Couldn't refund that ticket. Nothing was charged twice — try again.",
+    -- Admin diagnostic: the /pickle_delivery_debug toggle's confirmation.
+    ["delivery_debug"] = "Delivery debug tracing is now %s. Traces print to the server console.",
+    -- Phone push notifications (lb-phone) — one title/body pair per order state.
+    -- NEVER put ~x~ GTA colour tokens in these; the phone can't render them.
+    ["phone_order_fallback"] = "Your order",
+    ["phone_order_delivering_title"] = "Out for delivery",
+    ["phone_order_delivering_body"] = "%s — Ticket #%s is on the way. Track your driver on the map.",
+    ["phone_order_delayed_title"] = "Delivery delayed",
+    ["phone_order_delayed_body"] = "%s — Ticket #%s is back with the kitchen while another driver is found.",
+    ["delivery_taken"] = "%s is already delivering that order.",
+    ["delivery_not_started"] = "That order isn't out for delivery.",
+    ["delivery_not_yours"] = "Only %s can cancel that delivery.",
+    ["delivery_no_target"] = "That order has no delivery location saved.",
+    ["phone_order_delivered_title"] = "Order delivered",
+    ["phone_order_delivered_body"] = "%s — Ticket #%s was delivered. Enjoy!",
+    ["phone_order_collected_title"] = "Order collected",
+    ["phone_order_collected_body"] = "%s — Ticket #%s was handed over. Enjoy!",
     ["place_counter_fail"] = "Failed to set counter.",
     ["place_counter_set"] = "Counter set.",
     ["place_npc_spawn_fail"] = "Failed to set the NPC spawn point.",

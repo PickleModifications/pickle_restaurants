@@ -62,6 +62,8 @@ function AddMoney(source, count, currency)
     local currency = currency or "money"
     if (currency == "money") then
         xPlayer.addMoney(count)
+    elseif (currency == "bank") then
+        xPlayer.addAccountMoney("bank", count)
     elseif (currency == "dirty") then
         xPlayer.addAccountMoney("black_money", count)
     end
@@ -73,6 +75,8 @@ function RemoveMoney(source, count, currency)
     local currency = currency or "money"
     if (currency == "money") then
         xPlayer.removeMoney(count)
+    elseif (currency == "bank") then
+        xPlayer.removeAccountMoney("bank", count)
     elseif (currency == "dirty") then
         xPlayer.removeAccountMoney("black_money", count)
     end
@@ -85,9 +89,12 @@ function GetMoney(source, currency)
     local money = 0
     if (currency == "money") then
         money = xPlayer.getMoney()
+    elseif (currency == "bank") then
+        local acc = xPlayer.getAccount("bank")
+        money = acc and acc.money or 0
     elseif (currency == "dirty") then
         money = xPlayer.getAccount("black_money").money
-    end    
+    end
     TriggerClientEvent("pickle_restaurants:updateMoney", source, money)
     return money
 end

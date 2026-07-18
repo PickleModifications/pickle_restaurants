@@ -109,6 +109,31 @@ lib.callback.register("pickle_restaurants:admin:delete", function(src, d)
     -- collect props so clients can despawn them
     local propIds = {}
     for pid, p in pairs(PropCache) do if p.restaurant_id == id then propIds[#propIds + 1] = pid end end
+
+    -- REFUND EVERY IN-FLIGHT TICKET FIRST. Deleting a restaurant used to drop its
+    -- open orders straight out of the DB, so anyone who had pre-paid at a kiosk,
+    -- register or from the phone simply lost their money with no ticket left to
+    -- cancel. Go through the ONE shared refund path (core/server.lua): it's
+    -- idempotent (the `refunded` flag means a ticket a cashier is cancelling at the
+    -- same moment can't be paid twice), refunds the account that was charged, and
+    -- queues the payout for anyone offline. This MUST run before the DELETEs below
+    -- — the balance/ledger reversal it does needs the rows to still exist, and the
+    -- pending-refund rows it queues live in their own table, which survives.
+    local refundedCount = 0
+    for _, o in pairs(OrderCache[id] or {}) do
+        if o.status == "open" then
+            local ok = pcall(RefundOrder, id, o, "restaurant closed")
+            if ok then refundedCount = refundedCount + 1
+            else
+                print(("[pickle_restaurants] REFUND FAILED deleting restaurant %s, ticket #%s (order %s)")
+                    :format(tostring(id), tostring(o.ticket), tostring(o.id)))
+            end
+        end
+    end
+    if refundedCount > 0 then
+        print(("[pickle_restaurants] refunded %d open ticket(s) while deleting restaurant %d"):format(refundedCount, id))
+    end
+
     MySQL.update.await("DELETE FROM pickle_restaurants WHERE id = ?", { id })
     MySQL.update.await("DELETE FROM pickle_restaurant_props WHERE restaurant_id = ?", { id })
     MySQL.update.await("DELETE FROM pickle_restaurant_employees WHERE restaurant_id = ?", { id })
@@ -180,6 +205,17 @@ lib.callback.register("pickle_restaurants:admin:setTheme", function(src, d)
     if not IsPlayerAdmin(src) then return { ok = false } end
     local res = SetRestaurantTheme(tonumber(d.id), d.theme)
     if res and res.ok then ShowNotification(src, _L("theme_saved")) end
+    return res
+end)
+
+-- Rename: same identity write as the boss panel, admin-gated so a server admin can
+-- rename any restaurant (the owner renames their own via management:setName).
+-- Shares SetRestaurantName (management), which re-derives the internal codename
+-- from the label exactly like admin:create does.
+lib.callback.register("pickle_restaurants:admin:setName", function(src, d)
+    if not IsPlayerAdmin(src) then return { ok = false } end
+    local res = SetRestaurantName(tonumber(d.id), d.label)
+    if res and res.ok then ShowNotification(src, _L("mgmt_name_saved", res.label)) end
     return res
 end)
 

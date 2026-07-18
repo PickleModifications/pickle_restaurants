@@ -50,10 +50,10 @@ function CartBar() {
   // Only show the floating cart on the storefront/menu screen.
   if (!cart || cartCount === 0 || (top !== "restaurant" && top !== "home")) return null;
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-30 p-3">
+    <div className="pf-cartbar">
       <button
         onClick={() => go("checkout", { rid: cart.rid })}
-        className="pf-elev-lg pointer-events-auto flex w-full items-center justify-between gap-2 rounded-2xl bg-brand px-4 py-3.5 text-brand-ink transition-transform active:scale-[0.98]"
+        className="pf-elev-lg flex w-full items-center justify-between gap-2 rounded-2xl bg-brand px-4 py-3.5 text-brand-ink transition-transform active:scale-[0.98]"
       >
         <span className="flex items-center gap-2.5 font-bold">
           <span className="grid h-6 min-w-6 place-items-center rounded-full bg-brand-ink/20 px-1.5 font-mono text-sm tabular-nums">
@@ -117,15 +117,37 @@ function Shell() {
       <Toast />
       <LiveBridge />
       {!ready ? (
-        <Spinner label="Loading Pickle Food…" />
+        // Splash. The theme seed is already planted at module load (store.tsx
+        // caches the last one), so this paints in the phone's colors instead of
+        // flashing the static index.css defaults until phone:home lands.
+        <>
+          <div className="pf-statusbar" />
+          <div className="grid flex-1 place-items-center">
+            <div className="flex flex-col items-center gap-3">
+              <span className="pf-elev-lg grid h-16 w-16 place-items-center rounded-2xl bg-brand text-brand-ink">
+                <ShoppingBag className="h-8 w-8" strokeWidth={2.4} />
+              </span>
+              <div className="font-display text-lg font-extrabold">Pickle Food</div>
+              <Spinner label="Loading…" />
+            </div>
+          </div>
+        </>
       ) : (
         <>
           <div className="pf-statusbar" />
+          {/* ONE scroll region owns the content AND the cart bar: the bar is the
+              scroller's last child (sticky bottom), so it hovers over the list
+              while scrolling and becomes the final row at the end of the list
+              instead of covering it — see .pf-cartbar. */}
           <div className="pf-scroll">
             <Router />
+            <CartBar />
           </div>
-          <CartBar />
           <TabBar />
+          {/* Portal host for every bottom sheet — see `Sheet` in ui.tsx. Lives here,
+              a direct child of .pf-root, so sheets are positioned against the phone
+              viewport and never against a scrolled screen's transformed box. */}
+          <div id="pf-overlay" className="pf-overlay" />
           <AskModal />
         </>
       )}

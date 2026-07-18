@@ -97,6 +97,10 @@ RegisterNUICallback("admin:delete",       relay("pickle_restaurants:admin:delete
 RegisterNUICallback("admin:setOwner",     relay("pickle_restaurants:admin:setOwner"))
 RegisterNUICallback("admin:setBrandImage", relay("pickle_restaurants:admin:setBrandImage"))
 RegisterNUICallback("admin:setTheme",     relay("pickle_restaurants:admin:setTheme"))
+-- Rename auto-saves as you type: relay only, NO panel refresh — re-fetching getData
+-- would remount the detail and yank the cursor out of the field mid-edit. The React
+-- side mirrors the new label optimistically (like the theme edits).
+RegisterNUICallback("admin:setName",      relay("pickle_restaurants:admin:setName"))
 RegisterNUICallback("admin:setAppTheme",  relay("pickle_restaurants:admin:setAppTheme"))
 RegisterNUICallback("admin:setPhoneTheme", relay("pickle_restaurants:admin:setPhoneTheme"))
 RegisterNUICallback("admin:saveSetting",  relay("pickle_restaurants:admin:saveSetting"))

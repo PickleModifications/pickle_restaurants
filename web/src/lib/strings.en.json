@@ -1,4 +1,9 @@
 {
+  "identity.title": "Restaurant Name",
+  "identity.hint": "The name customers see — the map blip, station prompts, the menu and order boards, receipts, and the phone app. Renaming applies everywhere immediately.",
+  "identity.placeholder": "Burger Shot",
+  "identity.required": "Name required",
+  "identity.key": "Internal key:",
   "theme.title": "Theme",
   "theme.hint": "One brand color drives the whole kit — panels, register, and kitchen screens all take this restaurant's colors.",
   "theme.brand_color": "Brand color",
@@ -94,6 +99,7 @@
   "admin.title": "Restaurant Administration",
   "branding.apply_photo": "Apply photo",
   "branding.bad_url": "Bad URL",
+  "branding.no_image": "No image set",
   "branding.cancel": "Cancel",
   "branding.cropper_hint": "Drag the frame · pull a corner to resize.",
   "branding.default_image": "Default image",
