@@ -9,6 +9,7 @@ version '1.0.0'
 shared_scripts {
     '@ox_lib/init.lua',
     'core/shared.lua',
+    'bridge/**/shared.lua',
     'locales/locale.lua',
     'locales/translations/*.lua',
 }

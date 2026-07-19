@@ -36,6 +36,18 @@ local CFG_DEFAULTS = {
     counter_offset   = 1.0,
     queue_spacing    = 0.85,
     spawn_distance   = 6.0,
+    -- NPC PHONE DELIVERIES. A separate stream from the counter queue: no ped, no
+    -- counter, just a delivery ticket that appears in the app's kitchen queue for a
+    -- driver to claim and run. Gated on someone being CLOCKED IN (not nearby) —
+    -- delivery demand should arrive because the restaurant is staffed, not because
+    -- somebody happens to be standing at the till.
+    delivery_enabled   = true,
+    delivery_interval  = 180,   -- seconds between generated deliveries, per restaurant
+    max_deliveries     = 2,     -- concurrent unserved NPC deliveries per restaurant
+    delivery_min_dist  = 120.0, -- how far the drop point sits from the counter
+    delivery_max_dist  = 600.0,
+    delivery_patience  = 1200,  -- an NPC delivery waits far longer than a counter queue
+    delivery_radius    = 8.0,   -- how close the driver must get to hand it over
     models = { "a_m_y_business_01", "a_f_y_business_02", "a_m_m_business_01",
                "a_f_y_hipster_02", "a_m_y_hipster_01", "a_f_m_business_02" },
 }
@@ -61,6 +73,9 @@ function NpcConfig()
     local minI = num(raw.min_items, CFG_DEFAULTS.min_items, 1, 5)
     local maxI = num(raw.max_items, CFG_DEFAULTS.max_items, 1, 5)
     if maxI < minI then maxI = minI end
+    local minD = num(raw.delivery_min_dist, CFG_DEFAULTS.delivery_min_dist, 20.0, 3000.0)
+    local maxD = num(raw.delivery_max_dist, CFG_DEFAULTS.delivery_max_dist, 20.0, 3000.0)
+    if maxD < minD then maxD = minD end
     return {
         enabled          = (raw.enabled ~= false),
         require_staff    = (raw.require_staff ~= false),
@@ -76,8 +91,18 @@ function NpcConfig()
         queue_spacing    = num(raw.queue_spacing, CFG_DEFAULTS.queue_spacing, 0.3, 3.0),
         spawn_distance   = num(raw.spawn_distance, CFG_DEFAULTS.spawn_distance, 1.0, 30.0),
         models           = models,
+        delivery_enabled  = (raw.delivery_enabled ~= false),
+        delivery_interval = num(raw.delivery_interval, CFG_DEFAULTS.delivery_interval, 15, 7200),
+        max_deliveries    = math.floor(num(raw.max_deliveries, CFG_DEFAULTS.max_deliveries, 1, 10)),
+        delivery_min_dist = minD,
+        delivery_max_dist = maxD,
+        delivery_patience = num(raw.delivery_patience, CFG_DEFAULTS.delivery_patience, 60, 7200),
+        delivery_radius   = num(raw.delivery_radius, CFG_DEFAULTS.delivery_radius, 2.0, 50.0),
     }
 end
+
+-- How close a driver must be to the drop point to hand an NPC delivery over.
+function NpcDeliveryRadius() return NpcConfig().delivery_radius end
 
 -- Just the client-facing geometry knobs, folded into every broadcast so the client
 -- lays the queue out exactly as configured without its own copy of the settings.
@@ -130,7 +155,12 @@ local function scanCounter(rid, coords, radius)
         if ped and ped ~= 0 then
             if #(GetEntityCoords(ped) - coords) <= radius then
                 anyoneNear = true
-                if HasPerm(rid, p, "sell") or HasPerm(rid, p, "cook") then
+                -- CLOCKED IN, not merely employed-and-standing-here: an off-shift cook
+                -- passing through shouldn't summon customers nobody agreed to serve.
+                -- Guarded so NPCs still work if modules/phone (which owns shifts) is
+                -- ever absent — then it degrades to the old presence-only rule.
+                local onShift = (IsClockedIn == nil) or IsClockedIn(rid, p)
+                if onShift and (HasPerm(rid, p, "sell") or HasPerm(rid, p, "cook")) then
                     staffNear = true
                     break
                 end
@@ -166,6 +196,14 @@ end
 function NpcDropOrder(rid, orderId, happy)
     local st = NpcState[rid]
     if not st then return end
+    -- A DELIVERY has no ped and no queue slot — it lives in its own list. Handled here
+    -- rather than in a second hook so modules/sales' completion branch stays one call.
+    for i, e in ipairs(st.deliveries or {}) do
+        if e.orderId == orderId then
+            table.remove(st.deliveries, i)
+            return              -- nothing to despawn, nothing to re-slot
+        end
+    end
     local removed = false
     for i, e in ipairs(st.queue) do
         if e.orderId == orderId then table.remove(st.queue, i); removed = true; break end
@@ -262,6 +300,71 @@ local function spawnNpcCustomer(rid, r, cfg)
     })
 end
 
+-- ─── NPC phone deliveries ────────────────────────────────────────────────────
+-- A delivery order from an AI customer somewhere in the city. There is NO ped and no
+-- counter involvement: the ticket simply appears in the app's kitchen queue, a driver
+-- claims it exactly like a player's delivery, drives to the drop point and serves it.
+-- Everything downstream (claim, waypoint, route, blip, the Work UI) is the existing
+-- player-delivery machinery — the only NPC-specific part is completion, which checks
+-- the driver reached the point instead of checking a customer is standing there.
+
+-- A drop point on a random bearing from the counter. Deliberately NOT road-snapped:
+-- that needs a client-side native, and the delivery only ever cares about horizontal
+-- distance (waypoint, blip and the hand-off check are all XY), so a raw offset is both
+-- sufficient and server-resolvable.
+local function deliveryPoint(coords, cfg)
+    local ang = math.random() * math.pi * 2
+    local dist = cfg.delivery_min_dist + math.random() * (cfg.delivery_max_dist - cfg.delivery_min_dist)
+    return coords.x + math.cos(ang) * dist, coords.y + math.sin(ang) * dist, dist
+end
+
+local function spawnNpcDelivery(rid, r, cfg, coords)
+    local catalog = BuildPricedCatalog(rid, true)
+    if not catalog or #catalog == 0 then return end
+
+    local count = math.random(cfg.min_items, cfg.max_items)
+    local lines, total = {}, 0
+    for _ = 1, count do
+        local e = catalog[math.random(#catalog)]
+        lines[#lines + 1] = lineFromEntry(e, 1)
+        total = total + e.price
+    end
+    if #lines == 0 then return end
+    total = RoundMoney(total)
+
+    NpcSeq = NpcSeq + 1
+    local order = CreateOrder(rid, {
+        customer_identifier = "npc:" .. NpcSeq,
+        customer_name       = randomName(),
+        cashier_identifier  = "",
+        lines               = lines,
+        total               = total,
+    })
+    if not order or not order.id then return end
+
+    local dx, dy, dist = deliveryPoint(coords, cfg)
+    -- Carry the phone fields on the cache row so GetOpenOrders projects them (the same
+    -- thing modules/sales' placeOrder does for a player's app order).
+    order.order_type = "delivery"
+    order.address    = _L("npc_delivery_address", math.floor(dist))
+    order.dest_x, order.dest_y = dx, dy
+    DeliveryTargets[order.id] = { x = dx, y = dy, z = 0.0 }
+
+    -- Persisted so a restart mid-run doesn't resurrect the ticket as a pickup with no
+    -- drop point (core reloads orders; RehydrateDeliveryTargets restores the target).
+    MySQL.update("UPDATE `pickle_restaurant_orders` SET order_type = 'delivery', address = ?, dest_x = ?, dest_y = ? WHERE id = ?",
+        { order.address, dx, dy, order.id })
+
+    local st = NpcState[rid]
+    st.deliveries[#st.deliveries + 1] = {
+        orderId   = order.id,
+        expiresAt = os.time() + cfg.delivery_patience,
+        patience  = cfg.delivery_patience,
+    }
+    st.lastDelivery = os.time()
+    if SyncOrders then SyncOrders(rid) end
+end
+
 -- ─── scheduler ───────────────────────────────────────────────────────────────
 -- One thread drives every restaurant: it expires impatient NPCs, then spawns new
 -- ones where the gates allow. Cheap — the heavy BuildPricedCatalog runs only on an
@@ -286,11 +389,21 @@ CreateThread(function()
                 end
             else
                 st = st or { queue = {}, lastSpawn = 0 }
+                st.deliveries = st.deliveries or {}
                 NpcState[rid] = st
 
                 -- Expire the impatient (walk away unserved; ticket cancelled).
                 for i = #st.queue, 1, -1 do
                     local e = st.queue[i]
+                    local o = OrderCache[rid] and OrderCache[rid][e.orderId]
+                    if not o or o.status ~= "open" or now >= e.expiresAt then
+                        abandonNpcOrder(rid, e.orderId)
+                    end
+                end
+                -- Same for deliveries nobody ever ran. A cancelled delivery frees its
+                -- slot, so a restaurant that ignores them doesn't wedge at the cap.
+                for i = #st.deliveries, 1, -1 do
+                    local e = st.deliveries[i]
                     local o = OrderCache[rid] and OrderCache[rid][e.orderId]
                     if not o or o.status ~= "open" or now >= e.expiresAt then
                         abandonNpcOrder(rid, e.orderId)
@@ -302,6 +415,18 @@ CreateThread(function()
                     local anyoneNear, staffNear = scanCounter(rid, coords, cfg.staff_radius)
                     local ok = anyoneNear and (not cfg.require_staff or staffNear)
                     if ok then spawnNpcCustomer(rid, r, cfg) end
+                end
+
+                -- Deliveries gate on SHIFTS, not proximity: an order placed through an
+                -- app doesn't care where the staff are standing, only that the place is
+                -- actually open for business. (AnyoneClockedIn is a modules/phone
+                -- global — guarded so NPCs degrade rather than break without it.)
+                if cfg.delivery_enabled
+                    and #st.deliveries < cfg.max_deliveries
+                    and (now - (st.lastDelivery or 0)) >= cfg.delivery_interval
+                    and AnyoneClockedIn and AnyoneClockedIn(rid)
+                then
+                    spawnNpcDelivery(rid, r, cfg, coords)
                 end
             end
         end
@@ -357,11 +482,16 @@ end
 function NpcOrderTimer(rid, orderId)
     local st = NpcState[rid]
     if not st then return nil end
-    for _, e in ipairs(st.queue) do
-        if e.orderId == orderId then
-            local left = e.expiresAt - os.time()
-            if left < 0 then left = 0 end
-            return left, (e.patience or left)
+    -- Both streams carry a patience window: the counter queue and the delivery list.
+    -- A driver needs the countdown as much as a cashier does — more, since they have to
+    -- drive it — so deliveries are searched too.
+    for _, list in ipairs({ st.queue, st.deliveries or {} }) do
+        for _, e in ipairs(list) do
+            if e.orderId == orderId then
+                local left = e.expiresAt - os.time()
+                if left < 0 then left = 0 end
+                return left, (e.patience or left)
+            end
         end
     end
     return nil

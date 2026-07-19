@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Truck,
   ShoppingBag,
@@ -8,28 +8,50 @@ import {
   Star,
   ClipboardList,
 } from "lucide-react";
-import { fetchNui, useNuiEvent } from "../../lib/nui";
+import { fetchNui, useNuiEvent, usePushFallback } from "../../lib/nui";
 import { cn } from "../../lib/utils";
+import { _L } from "../../lib/locale";
 import { usePhone, money } from "../store";
 import { Screen, TopBar, ItemImg, Empty, Spinner, Stars } from "../ui";
 import { OrderMap } from "../map/OrderMap";
+import { ChatSheet, ChatButton, useChatUnread } from "../DeliveryChat";
 
 const TYPE_ICON: Record<string, any> = { delivery: Truck, pickup: ShoppingBag, dine_in: Utensils };
-const TYPE_LABEL: Record<string, string> = { delivery: "Delivery", pickup: "Pickup", dine_in: "Dine-in" };
 
-// The three phases the customer sees. "Ready" wording flips for delivery.
-function steps(type: string) {
+// Resolved per render, never at module scope — the locale table arrives after import.
+const typeLabel = (t?: string) =>
+  t === "delivery"
+    ? _L("phone.order_type.delivery")
+    : t === "dine_in"
+    ? _L("phone.order_type.dine_in")
+    : _L("phone.order_type.pickup");
+
+// The three phases the customer sees. "Ready" wording flips for delivery, and a
+// delivery that's cooked but unclaimed says so rather than pretending it's moving.
+function steps(o: any) {
+  const delivery = o.type === "delivery";
   return [
-    { key: "placed", label: "Order placed" },
-    { key: "cooking", label: "In the kitchen" },
-    { key: "ready", label: type === "delivery" ? "On the way" : "Ready for pickup" },
-    { key: "done", label: "Completed" },
+    { key: "placed", label: _L("phone.track.placed") },
+    {
+      key: "cooking",
+      label:
+        delivery && o.ready && !o.driving
+          ? _L("phone.track.waiting_driver")
+          : _L("phone.track.cooking"),
+    },
+    { key: "ready", label: delivery ? _L("phone.track.on_the_way") : _L("phone.track.ready_pickup") },
+    { key: "done", label: _L("phone.track.completed") },
   ];
 }
 
 function phaseIndex(o: any) {
   if (o.status === "completed") return 3;
   if (o.status === "cancelled") return -1;
+  // `ready` means the KITCHEN can fulfil the ticket from its pool — nothing more. For a
+  // pickup that genuinely is the last step before collection, but a delivery isn't "on
+  // the way" until a driver has actually claimed the run, so it gates on `driving`.
+  // Reading `ready` as movement is what had orders announcing a driver nobody assigned.
+  if (o.type === "delivery") return o.driving ? 2 : 1;
   return o.ready ? 2 : 1;
 }
 
@@ -44,18 +66,19 @@ export function Orders() {
 
   return (
     <Screen className="pb-20">
-      <TopBar title="Your orders" />
+      <TopBar title={_L("phone.orders.title")} />
       <div className="flex gap-2 px-4 pb-2 pt-3">
         {(["active", "past"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
             className={cn(
-              "rounded-full px-3 py-1.5 text-sm font-semibold capitalize",
+              "rounded-full px-3 py-1.5 text-sm font-semibold",
               tab === t ? "bg-brand text-brand-ink" : "bg-muted text-muted-foreground"
             )}
           >
-            {t} {t === "active" && active.length > 0 && `· ${active.length}`}
+            {t === "active" ? _L("phone.orders.tab_active") : _L("phone.orders.tab_past")}{" "}
+            {t === "active" && active.length > 0 && `· ${active.length}`}
           </button>
         ))}
       </div>
@@ -63,8 +86,12 @@ export function Orders() {
       {list.length === 0 ? (
         <Empty
           icon={<ClipboardList className="h-8 w-8" />}
-          title={tab === "active" ? "No orders in progress" : "No past orders"}
-          hint={tab === "active" ? "Your live orders show up here." : "Completed orders will appear here."}
+          title={tab === "active" ? _L("phone.orders.empty_active") : _L("phone.orders.empty_past")}
+          hint={
+            tab === "active"
+              ? _L("phone.orders.empty_active_hint")
+              : _L("phone.orders.empty_past_hint")
+          }
         />
       ) : (
         <div className="space-y-2 px-4">
@@ -87,13 +114,13 @@ export function Orders() {
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-semibold">{o.restaurant}</div>
                   <div className="text-[0.72rem] text-muted-foreground">
-                    #{o.ticket} · {TYPE_LABEL[o.type] || "Pickup"} ·{" "}
+                    #{o.ticket} · {typeLabel(o.type)} ·{" "}
                     {o.status === "open" ? (
-                      <span className="font-semibold text-primary">{steps(o.type)[pi]?.label}</span>
+                      <span className="font-semibold text-primary">{steps(o)[pi]?.label}</span>
                     ) : o.status === "cancelled" ? (
-                      "Cancelled"
+                      _L("phone.orders.status_cancelled")
                     ) : (
-                      "Completed"
+                      _L("phone.orders.status_completed")
                     )}
                   </div>
                 </div>
@@ -149,6 +176,10 @@ export function OrderTrack({ params }: { params: any }) {
         ...o,
         status: "open",
         ready: !!mine.fulfill?.ready,
+        // The claimed driver rides the same broadcast (AnnotateOrders stamps it), so
+        // the stepper flips to "On the way" the moment someone accepts — and back if
+        // they drop the run.
+        driving: !!mine.driver,
         lines: mine.lines || o.lines,
         total: mine.total ?? o.total,
         ticket: o.ticket ?? mine.ticket,
@@ -162,34 +193,50 @@ export function OrderTrack({ params }: { params: any }) {
     }
   });
 
-  const stepList = steps(order.type);
+  // Order tracking is push-fed too (the `orders` broadcast above drives the phase
+  // stepper). On a pushless phone, re-ask for home and merge THIS ticket's row back
+  // in, so it still advances from cooking → ready → served. Absence isn't treated as
+  // completion here (unlike the broadcast handler, which reads a list of only OPEN
+  // tickets): home carries finished orders too, so a missing row means a hiccup, not
+  // a hand-off. No-op on lb-phone.
+  const pollTicket = useCallback(async () => {
+    const d = await refreshHome();
+    const found = (d?.orders || []).find((o: any) => o.orderId === params.orderId);
+    if (found) setOrder((o: any) => ({ ...o, ...found }));
+  }, [refreshHome, params.orderId]);
+  usePushFallback(pollTicket, 6000);
+
+  const [chatting, setChatting] = useState(false);
+  const unread = useChatUnread(order.status === "open" ? params.orderId : null, chatting);
+
+  const stepList = steps(order);
   const pi = phaseIndex(order);
   const Icon = TYPE_ICON[order.type] || ShoppingBag;
 
   return (
     <Screen className="pb-6">
       <TopBar
-        title={order.ticket != null ? `Ticket #${order.ticket}` : "Your order"}
+        title={order.ticket != null ? _L("phone.track.ticket_no", order.ticket) : _L("phone.track.title")}
         subtitle={order.restaurant}
         onBack={back}
       />
-      {probe === "loading" && <Spinner label="Loading your ticket…" />}
+      {probe === "loading" && <Spinner label={_L("phone.track.loading")} />}
       {probe === "missing" && (
-        <Empty title="Ticket details unavailable" hint="This order may have already been closed." />
+        <Empty title={_L("phone.track.missing")} hint={_L("phone.track.missing_hint")} />
       )}
 
       {/* status ticket */}
       <div className="mx-auto mt-2 max-w-sm px-4">
         <div className="receipt relative px-5 pb-6 pt-5">
           <div className="flex items-center justify-between">
-            <span className="tape text-paper-muted">{TYPE_LABEL[order.type] || "Pickup"}</span>
+            <span className="tape text-paper-muted">{typeLabel(order.type)}</span>
             <Icon className="h-5 w-5 text-paper-ink/70" />
           </div>
           <div className="mt-2 font-display text-2xl font-extrabold text-paper-ink">
             {order.status === "completed"
-              ? "All done — enjoy!"
+              ? _L("phone.track.all_done")
               : order.status === "cancelled"
-              ? "Order cancelled"
+              ? _L("phone.track.cancelled")
               : stepList[pi]?.label}
           </div>
 
@@ -229,9 +276,14 @@ export function OrderTrack({ params }: { params: any }) {
           )}
 
           {order.type === "delivery" && pi >= 2 && order.status === "open" && (
-            <div className="mt-3 flex items-center gap-2 rounded-lg bg-paper-muted/15 px-3 py-2 text-[0.78rem] text-paper-ink">
-              <Truck className="h-4 w-4" /> Driver's on the way — follow the blip on your map.
-            </div>
+            <>
+              <div className="mt-3 flex items-center gap-2 rounded-lg bg-paper-muted/15 px-3 py-2 text-[0.78rem] text-paper-ink">
+                <Truck className="h-4 w-4" /> {_L("phone.track.driver_note")}
+              </div>
+              {/* Only once a driver holds the run: before that there's nobody on the
+                  other end, and the server would reject the send anyway. */}
+              <ChatButton unread={unread} onClick={() => setChatting(true)} className="mt-2 w-full" label={_L("phone.track.message_driver")} />
+            </>
           )}
 
           <div className="receipt-rule my-4" />
@@ -245,7 +297,7 @@ export function OrderTrack({ params }: { params: any }) {
               </div>
             ))}
             <div className="mt-2 flex justify-between border-t border-paper-muted/40 pt-2 font-bold">
-              <span>Total</span>
+              <span>{_L("phone.track.total")}</span>
               <span>{money(currency, order.total || 0)}</span>
             </div>
           </div>
@@ -258,14 +310,23 @@ export function OrderTrack({ params }: { params: any }) {
       {order.status === "completed" && !order.rated && !reviewing && (
         <div className="mx-4 mt-4 flex items-center gap-3 rounded-2xl border border-border bg-card p-3">
           <CheckCircle2 className="h-6 w-6 text-ok" />
-          <div className="flex-1 text-sm">How was it? Leave a review.</div>
+          <div className="flex-1 text-sm">{_L("phone.review.prompt")}</div>
           <button
             onClick={() => setReviewing(true)}
             className="rounded-full bg-brand px-3 py-1.5 text-sm font-bold text-brand-ink"
           >
-            Rate
+            {_L("phone.review.rate")}
           </button>
         </div>
+      )}
+
+      {chatting && (
+        <ChatSheet
+          rid={rid}
+          orderId={params.orderId}
+          title={_L("phone.track.ticket_no", order.ticket ?? "—")}
+          onClose={() => setChatting(false)}
+        />
       )}
 
       {reviewing && (
@@ -276,7 +337,7 @@ export function OrderTrack({ params }: { params: any }) {
           onDone={async () => {
             setReviewing(false);
             setOrder((o: any) => ({ ...o, rated: true }));
-            toast("Thanks for the review!");
+            toast(_L("phone.review.thanks"));
             await refreshHome();
           }}
         />
@@ -308,7 +369,7 @@ export function ReviewSheet({
     if (typeof cam === "function") {
       cam((url: string) => url && setPhoto(url));
     } else {
-      toast("Camera unavailable here", "err");
+      toast(_L("phone.review.no_camera"), "err");
     }
   };
 
@@ -317,7 +378,7 @@ export function ReviewSheet({
     const res = await fetchNui("phone:submitReview", { id: rid, orderId, rating, comment, photo });
     setBusy(false);
     if (res?.ok) onDone();
-    else toast(res?.error || "Couldn't submit", "err");
+    else toast(res?.error || _L("phone.review.submit_failed"), "err");
   };
 
   return (
@@ -326,14 +387,14 @@ export function ReviewSheet({
       <div className="pf-sheet">
         <div className="pf-grab" />
         <div className="p-4">
-          <div className="font-display text-lg font-extrabold">Rate your order</div>
+          <div className="font-display text-lg font-extrabold">{_L("phone.review.title")}</div>
           <div className="mt-3 flex justify-center">
             <Stars value={rating} size={34} onPick={setRating} />
           </div>
           <textarea
             value={comment}
             onChange={(e) => setComment(e.target.value)}
-            placeholder="Tell others how it was (optional)"
+            placeholder={_L("phone.review.comment_placeholder")}
             rows={3}
             className="mt-3 w-full resize-none rounded-xl border border-border bg-background p-3 text-sm outline-none placeholder:text-muted-foreground"
           />
@@ -341,7 +402,8 @@ export function ReviewSheet({
             onClick={attach}
             className="mt-2 flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-sm font-semibold active:scale-[0.99]"
           >
-            <Camera className="h-4 w-4" /> {photo ? "Photo attached" : "Add a photo"}
+            <Camera className="h-4 w-4" />{" "}
+            {photo ? _L("phone.review.photo_attached") : _L("phone.review.add_photo")}
           </button>
           {photo && <img src={photo} className="mt-2 h-28 w-full rounded-xl object-cover" />}
           <button
@@ -349,7 +411,7 @@ export function ReviewSheet({
             onClick={submit}
             className="mt-4 w-full rounded-full bg-brand px-4 py-3 font-bold text-brand-ink disabled:opacity-60"
           >
-            {busy ? "Submitting…" : "Post review"}
+            {busy ? _L("phone.review.submitting") : _L("phone.review.submit")}
           </button>
         </div>
       </div>

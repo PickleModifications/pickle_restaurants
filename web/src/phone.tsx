@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import PhoneApp from "./phone/PhoneApp";
 import "./index.css";
 import "./phone/phone.css";
+import { loadLocale } from "./lib/locale";
 
 // The lb-phone host injects its bridge (components / fetchNui / settings) into this
 // iframe and, ~250ms later, posts the `componentsLoaded` handshake. We render
@@ -14,8 +15,13 @@ if (!(window as any).__lbHostPresent) {
   setTimeout(() => window.postMessage("componentsLoaded", "*"), 400);
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <PhoneApp />
-  </React.StrictMode>
-);
+// Strings live in Lua (locales/translations/*.lua) and are fetched once here, before
+// the first paint, so nothing renders raw keys. The iframe POSTs to this resource just
+// like the fullscreen NUI, so the same `getLocale` callback serves both.
+loadLocale().finally(() => {
+  ReactDOM.createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <PhoneApp />
+    </React.StrictMode>
+  );
+});

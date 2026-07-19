@@ -58,7 +58,7 @@ local DEFAULT_SETTINGS = {
     -- { primary #rrggbb, mode dark|paper, radius sharp|soft|round }. Edited in
     -- Settings → Appearance; the whole palette is derived from it on the client.
     app_theme       = { primary = "#ff7a2e", mode = "dark", radius = "soft" },
-    -- The lb-phone companion app's theme (ONE global look for every player's phone —
+    -- The companion phone app's theme (ONE global look for every player's phone —
     -- NOT per-restaurant; the phone deliberately keeps a single consistent skin so it
     -- reads like a real delivery app rather than reskinning per storefront). Same seed
     -- shape as app_theme; edited in Settings → Appearance, derived on the client.
@@ -2699,7 +2699,7 @@ function CloseOrder(restaurantId, orderId, status)
     -- skipped it actually pays out. NPC tickets no-op inside RefundOrder (they
     -- never pre-paid).
     if status == "cancelled" and o.refunded ~= 1 and o.refunded ~= true then
-        local ok, err = pcall(RefundOrder, restaurantId, o, "cancelled")
+        local ok, err = pcall(RefundOrder, restaurantId, o, _L("refund_reason_cancelled"))
         if not ok then
             print(("[pickle_restaurants] REFUND FAILED closing ticket #%s (order %s, restaurant %s): %s")
                 :format(tostring(o.ticket), tostring(orderId), tostring(restaurantId), tostring(err)))
@@ -2847,7 +2847,7 @@ function RefundOrder(restaurantId, order, reason)
     -- customer is reachable — the house never keeps money for an unserved order.
     AdjustBalance(restaurantId, -amount)
     AddLedger(restaurantId, "refund", -amount,
-        ("Ticket #%s %s"):format(tostring(order.ticket), reason or "cancelled"), order.customer_identifier)
+        _L("ledger_refund", tostring(order.ticket), reason or _L("refund_reason_cancelled")), order.customer_identifier)
 
     -- Hand back a loyalty redemption burned on this order (the free-item punches
     -- were consumed at placeOrder; PhoneRestoreRedeem is a global from

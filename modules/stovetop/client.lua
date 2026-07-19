@@ -27,14 +27,12 @@ local DOOR = {
 local OVEN = {
     slots = {
         [1] = { 
-            vector3(-0.305, -0.16, 0.5),
-            vector3(-0.305, -0.16, 0.6),
-            vector3(-0.305, -0.16, 0.725),
+            vector3(-0.305, -0.16, 0.44),
+            vector3(-0.305, -0.16, 0.64),
         },
         [2] = { 
-            vector3(0.31, -0.16, 0.45),
-            vector3(0.31, -0.16, 0.60),
-            vector3(0.31, -0.16, 0.75),
+            vector3(0.31, -0.16, 0.44),
+            vector3(0.31, -0.16, 0.64),
         },
     },
     z_seat = 0.0, -- extra lift so trayed food rests on the cavity floor

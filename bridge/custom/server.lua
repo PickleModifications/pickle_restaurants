@@ -63,7 +63,7 @@ function GetSourceFromIdentifier(identifier)
 end
 
 function GetPlayerCharacterName(source)
-    return GetPlayerName(source) or "Unknown Name"
+    return GetPlayerName(source) or _L("name_unknown")
 end
 
 function GetCharacterNameByIdentifier(identifier)

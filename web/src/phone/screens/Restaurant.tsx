@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { fetchNui } from "../../lib/nui";
 import { cn } from "../../lib/utils";
+import { _L } from "../../lib/locale";
 import { usePhone, money, CatalogItem, Mod } from "../store";
 import { Screen, TopBar, Spinner, ItemImg, Rating, PromoTag, PunchCard, Empty } from "../ui";
 
@@ -97,7 +98,7 @@ function ItemSheet({
             return (
               <div key={g} className="mt-4">
                 <div className="tape mb-1.5 text-muted-foreground">
-                  {isAddon ? "Add-ons" : (list[0]?.group || "Choose one")}
+                  {isAddon ? _L("phone.item.addons") : list[0]?.group || _L("phone.item.choose_one")}
                 </div>
                 <div className="space-y-1.5">
                   {list.map((m) => {
@@ -163,7 +164,7 @@ function ItemSheet({
             onClick={() => onAdd(qty, st)}
             className="flex flex-1 items-center justify-between rounded-full bg-brand px-4 py-2.5 font-bold text-brand-ink active:scale-[0.99]"
           >
-            <span>Add to cart</span>
+            <span>{_L("phone.item.add_to_cart")}</span>
             <span className="font-mono">{money(currency, unit * qty)}</span>
           </button>
         </div>
@@ -190,7 +191,9 @@ function ComboSheet({ combo, onClose, onAdd }: { combo: any; onClose: () => void
           <div className="font-mono text-sm text-muted-foreground">{money(currency, combo.price)}</div>
           {combo.slots.map((slot: any, i: number) => (
             <div key={i} className="mt-4">
-              <div className="tape mb-1.5 text-muted-foreground">{slot.label || `Pick ${i + 1}`}</div>
+              <div className="tape mb-1.5 text-muted-foreground">
+                {slot.label || _L("phone.combo.pick_n", i + 1)}
+              </div>
               <div className="space-y-1.5">
                 {slot.options.map((o: any) => {
                   const on = picks[i] === o.key;
@@ -218,7 +221,7 @@ function ComboSheet({ combo, onClose, onAdd }: { combo: any; onClose: () => void
             onClick={() => onAdd(combo.slots.map((_: any, i: number) => ({ key: picks[i] })))}
             className="flex w-full items-center justify-between rounded-full bg-brand px-4 py-2.5 font-bold text-brand-ink"
           >
-            <span>Add combo</span>
+            <span>{_L("phone.combo.add")}</span>
             <span className="font-mono">{money(currency, combo.price)}</span>
           </button>
         </div>
@@ -284,7 +287,7 @@ export function Restaurant({ params }: { params: any }) {
 
   const groups: Record<string, CatalogItem[]> = {};
   (data.catalog || []).forEach((c: CatalogItem) => {
-    const g = c.kind === "drink" ? "Drinks" : "Menu";
+    const g = c.kind === "drink" ? _L("phone.rest.drinks") : _L("phone.rest.menu");
     (groups[g] = groups[g] || []).push(c);
   });
 
@@ -300,7 +303,7 @@ export function Restaurant({ params }: { params: any }) {
           <h1 className="font-display text-2xl font-extrabold drop-shadow">{data.label}</h1>
           <div className="mt-1 flex items-center gap-3">
             <Rating value={data.rating} count={data.reviewCount} />
-            {data.promo && <PromoTag label={`${data.promo.percent}% off`} />}
+            {data.promo && <PromoTag label={_L("phone.promo.percent_off", data.promo.percent)} />}
           </div>
         </div>
       </div>
@@ -309,9 +312,13 @@ export function Restaurant({ params }: { params: any }) {
       {data.loyalty?.on && (
         <div className="mx-4 mt-3 rounded-2xl border border-border bg-card p-3">
           <div className="mb-2 flex items-center justify-between">
-            <span className="tape text-muted-foreground">Punch card</span>
+            <span className="tape text-muted-foreground">{_L("phone.rest.punch_card")}</span>
             <span className="text-[0.72rem] text-muted-foreground">
-              {data.loyalty.punches % data.loyalty.goal}/{data.loyalty.goal} to a free item
+              {_L(
+                "phone.rest.punch_progress",
+                data.loyalty.punches % data.loyalty.goal,
+                data.loyalty.goal
+              )}
             </span>
           </div>
           <PunchCard punches={data.loyalty.punches} goal={data.loyalty.goal} />
@@ -321,7 +328,7 @@ export function Restaurant({ params }: { params: any }) {
       {/* combos */}
       {(data.combos?.length || 0) > 0 && (
         <section className="mt-4">
-          <h2 className="mb-2 px-4 font-display text-base font-bold">Combos</h2>
+          <h2 className="mb-2 px-4 font-display text-base font-bold">{_L("phone.rest.combos")}</h2>
           <div className="space-y-2 px-4">
             {data.combos.map((cb: any) => (
               <button
@@ -335,7 +342,7 @@ export function Restaurant({ params }: { params: any }) {
                     #{cb.number} {cb.label}
                   </div>
                   <div className="text-[0.72rem] text-muted-foreground">
-                    {cb.slots.length}-item combo
+                    {_L("phone.rest.combo_items", cb.slots.length)}
                   </div>
                   <div className="mt-1 font-mono text-sm font-bold text-primary">
                     {money(currency, cb.price)}
@@ -376,7 +383,7 @@ export function Restaurant({ params }: { params: any }) {
       ))}
 
       {(data.catalog?.length || 0) === 0 && (
-        <Empty title="Menu coming soon" hint="This restaurant hasn't priced any items yet." />
+        <Empty title={_L("phone.rest.empty_menu")} hint={_L("phone.rest.empty_menu_hint")} />
       )}
 
       {sheet?.item && (
@@ -413,16 +420,18 @@ export function Restaurant({ params }: { params: any }) {
 }
 
 // ─── checkout ─────────────────────────────────────────────────────────────────
+// Label lookups are resolved per render, never at module scope — the locale table
+// arrives from Lua after this module is imported.
 const TYPES = [
-  { id: "delivery", label: "Delivery", icon: Truck },
-  { id: "pickup", label: "Pickup", icon: ShoppingBag },
-  { id: "dine_in", label: "Dine-in", icon: Utensils },
+  { id: "delivery", key: "phone.order_type.delivery", icon: Truck },
+  { id: "pickup", key: "phone.order_type.pickup", icon: ShoppingBag },
+  { id: "dine_in", key: "phone.order_type.dine_in", icon: Utensils },
 ];
 const SCHED = [
-  { id: "", label: "ASAP" },
-  { id: "+15", label: "In 15 min" },
-  { id: "+30", label: "In 30 min" },
-  { id: "+60", label: "In 1 hr" },
+  { id: "", key: "phone.checkout.sched_asap" },
+  { id: "+15", key: "phone.checkout.sched_15" },
+  { id: "+30", key: "phone.checkout.sched_30" },
+  { id: "+60", key: "phone.checkout.sched_60" },
 ];
 
 export function Checkout({ params }: { params: any }) {
@@ -450,8 +459,12 @@ export function Checkout({ params }: { params: any }) {
   if (!cart) {
     return (
       <Screen>
-        <TopBar title="Checkout" onBack={back} />
-        <Empty icon={<ShoppingBag className="h-8 w-8" />} title="Your cart is empty" hint="Add something tasty first." />
+        <TopBar title={_L("phone.checkout.title")} onBack={back} />
+        <Empty
+          icon={<ShoppingBag className="h-8 w-8" />}
+          title={_L("phone.checkout.empty")}
+          hint={_L("phone.checkout.empty_hint")}
+        />
       </Screen>
     );
   }
@@ -470,12 +483,12 @@ export function Checkout({ params }: { params: any }) {
     });
     setPlacing(false);
     if (res?.ok) {
-      toast(`Order placed — ticket #${res.ticket}`);
+      toast(_L("phone.checkout.placed", res.ticket));
       clearCart();
       await refreshHome();
       go("order", { orderId: res.orderId, rid: cart.rid });
     } else {
-      toast(res?.error || "Couldn't place the order", "err");
+      toast(res?.error || _L("phone.checkout.place_failed"), "err");
     }
   };
 
@@ -485,19 +498,23 @@ export function Checkout({ params }: { params: any }) {
     );
     const res = await fetchNui("phone:saveFavorite", { id: cart.rid, label: cart.label, cart: serverCart });
     if (res?.ok) {
-      toast("Saved to Order again");
+      toast(_L("phone.checkout.saved_fav"));
       refreshHome();
-    } else toast(res?.error || "Couldn't save", "err");
+    } else toast(res?.error || _L("phone.checkout.save_failed"), "err");
   };
 
   return (
     <Screen className="pb-4">
       <TopBar
-        title="Checkout"
+        title={_L("phone.checkout.title")}
         subtitle={cart.label}
         onBack={back}
         right={
-          <button onClick={saveFav} className="grid h-8 w-8 place-items-center rounded-full bg-muted" title="Save for later">
+          <button
+            onClick={saveFav}
+            className="grid h-8 w-8 place-items-center rounded-full bg-muted"
+            title={_L("phone.checkout.save_for_later")}
+          >
             <Heart className="h-4 w-4" />
           </button>
         }
@@ -505,7 +522,7 @@ export function Checkout({ params }: { params: any }) {
       <div className="space-y-4 p-4">
         {/* type */}
         <div>
-          <div className="tape mb-1.5 text-muted-foreground">How do you want it</div>
+          <div className="tape mb-1.5 text-muted-foreground">{_L("phone.checkout.how")}</div>
           <div className="grid grid-cols-3 gap-2">
             {TYPES.map((t) => {
               const Icon = t.icon;
@@ -519,7 +536,7 @@ export function Checkout({ params }: { params: any }) {
                   )}
                 >
                   <Icon className="h-5 w-5" />
-                  <span className="text-[0.72rem] font-semibold">{t.label}</span>
+                  <span className="text-[0.72rem] font-semibold">{_L(t.key)}</span>
                 </button>
               );
             })}
@@ -529,7 +546,7 @@ export function Checkout({ params }: { params: any }) {
         {/* schedule */}
         <div>
           <div className="tape mb-1.5 flex items-center gap-1 text-muted-foreground">
-            <Clock className="h-3 w-3" /> When
+            <Clock className="h-3 w-3" /> {_L("phone.checkout.when")}
           </div>
           <div className="pf-rail">
             {SCHED.map((s) => (
@@ -541,12 +558,12 @@ export function Checkout({ params }: { params: any }) {
                   sched === s.id ? "border-brand bg-brand text-brand-ink" : "border-border bg-card"
                 )}
               >
-                {s.label}
+                {_L(s.key)}
               </button>
             ))}
           </div>
           <p className="mt-1 text-[0.68rem] text-muted-foreground">
-            Order-ahead queues your food in the kitchen so it's ready when you arrive.
+            {_L("phone.checkout.sched_hint")}
           </p>
         </div>
 
@@ -588,9 +605,9 @@ export function Checkout({ params }: { params: any }) {
           >
             <Ticket className={cn("h-5 w-5", redeem ? "text-primary" : "text-muted-foreground")} />
             <div className="flex-1">
-              <div className="text-sm font-semibold">Redeem a free item</div>
+              <div className="text-sm font-semibold">{_L("phone.checkout.redeem")}</div>
               <div className="text-[0.7rem] text-muted-foreground">
-                You've earned it — takes the cheapest item off this order.
+                {_L("phone.checkout.redeem_hint")}
               </div>
             </div>
             <span
@@ -606,11 +623,19 @@ export function Checkout({ params }: { params: any }) {
 
         {/* totals */}
         <div className="space-y-1 rounded-2xl border border-border bg-card p-3 font-mono text-sm">
-          <Row label="Subtotal" value={money(currency, subtotal)} />
-          {promoPct > 0 && <Row label={`Promo (${promoPct}%)`} value={`-${money(currency, subtotal * promoPct / 100)}`} accent />}
-          {redeemOff > 0 && <Row label="Free item" value={`-${money(currency, redeemOff)}`} accent />}
+          <Row label={_L("phone.checkout.subtotal")} value={money(currency, subtotal)} />
+          {promoPct > 0 && (
+            <Row
+              label={_L("phone.checkout.promo_row", promoPct)}
+              value={`-${money(currency, (subtotal * promoPct) / 100)}`}
+              accent
+            />
+          )}
+          {redeemOff > 0 && (
+            <Row label={_L("phone.checkout.free_item")} value={`-${money(currency, redeemOff)}`} accent />
+          )}
           <div className="my-1 border-t border-border" />
-          <Row label="Total" value={money(currency, total)} big />
+          <Row label={_L("phone.checkout.total")} value={money(currency, total)} big />
         </div>
       </div>
 
@@ -620,7 +645,9 @@ export function Checkout({ params }: { params: any }) {
           onClick={place}
           className="flex w-full items-center justify-center gap-2 rounded-full bg-brand px-4 py-3.5 font-bold text-brand-ink active:scale-[0.99] disabled:opacity-60"
         >
-          {placing ? "Placing…" : `Place order · ${money(currency, total)}`}
+          {placing
+            ? _L("phone.checkout.placing")
+            : _L("phone.checkout.place", money(currency, total))}
         </button>
       </div>
     </Screen>

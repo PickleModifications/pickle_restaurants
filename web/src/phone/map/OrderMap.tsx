@@ -3,6 +3,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "./map.css";
 import { fetchNui, useNuiEvent } from "../../lib/nui";
+import { _L } from "../../lib/locale";
 import {
   EMPTY_TILE_URL,
   MAX_NATIVE_ZOOM,
@@ -318,12 +319,12 @@ export function OrderMap({ orderId, data }: { orderId: number; data: OrderMapDat
           so they're fully themed. They live inside `.pf-map`'s stacking context
           (see map.css) and sit above the Leaflet panes via z-index. */}
       <div className="pf-map-zoom">
-        <button type="button" aria-label="Zoom in" onClick={() => zoomBy(1)}>
+        <button type="button" aria-label={_L("phone.map.zoom_in")} onClick={() => zoomBy(1)}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round">
             <path d="M12 5v14M5 12h14" />
           </svg>
         </button>
-        <button type="button" aria-label="Zoom out" onClick={() => zoomBy(-1)}>
+        <button type="button" aria-label={_L("phone.map.zoom_out")} onClick={() => zoomBy(-1)}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round">
             <path d="M5 12h14" />
           </svg>
@@ -336,7 +337,7 @@ export function OrderMap({ orderId, data }: { orderId: number; data: OrderMapDat
         <button
           type="button"
           className="pf-map-recenter"
-          aria-label="Recenter map"
+          aria-label={_L("phone.map.recenter")}
           onClick={recenter}
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
@@ -344,12 +345,12 @@ export function OrderMap({ orderId, data }: { orderId: number; data: OrderMapDat
             <circle cx="12" cy="12" r="8" />
             <path d="M12 2v2.6M12 19.4V22M2 12h2.6M19.4 12H22" />
           </svg>
-          <span>Recenter</span>
+          <span>{_L("phone.map.recenter")}</span>
         </button>
       )}
 
       <div className="pf-map-caption">
-        {data.type === "delivery" ? "Live delivery" : "Pickup location"}
+        {data.type === "delivery" ? _L("phone.map.live_delivery") : _L("phone.map.pickup_location")}
       </div>
     </div>
   );

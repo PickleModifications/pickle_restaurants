@@ -2,6 +2,7 @@ import { ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChevronLeft, Star, ImageOff, Loader2 } from "lucide-react";
 import { cn } from "../lib/utils";
+import { _L } from "../lib/locale";
 import { usePhone } from "./store";
 
 // ─── bottom sheet host ───────────────────────────────────────────────────────
@@ -233,7 +234,7 @@ export function Rating({ value, count }: { value: number; count?: number }) {
   return (
     <span className="inline-flex items-center gap-1 text-[0.74rem] font-semibold">
       <Star className="h-3 w-3 text-warn" fill="currentColor" />
-      {value > 0 ? value.toFixed(1) : "New"}
+      {value > 0 ? value.toFixed(1) : _L("phone.rating.new")}
       {count != null && count > 0 && (
         <span className="text-muted-foreground">({count})</span>
       )}
@@ -262,7 +263,7 @@ export function PunchCard({ punches, goal }: { punches: number; goal: number }) 
           <div
             key={i}
             className={cn("pf-hole", on && "on", isFreeSlot && free && "free")}
-            title={isFreeSlot ? "Free item" : `Punch ${i + 1}`}
+            title={isFreeSlot ? _L("phone.punch.free_item") : _L("phone.punch.n", i + 1)}
           >
             {isFreeSlot ? "★" : on ? "" : i + 1}
           </div>
@@ -345,13 +346,13 @@ export function AskModal() {
               onClick={() => closeAsk(null)}
               className="flex-1 rounded-full bg-muted py-2.5 text-sm font-bold text-muted-foreground active:scale-[0.99]"
             >
-              Cancel
+              {_L("phone.common.cancel")}
             </button>
             <button
               onClick={submit}
               className="flex-1 rounded-full bg-brand py-2.5 text-sm font-bold text-brand-ink active:scale-[0.99]"
             >
-              {askState.confirm || "Confirm"}
+              {askState.confirm || _L("phone.common.confirm")}
             </button>
           </div>
         </div>

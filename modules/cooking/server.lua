@@ -1122,7 +1122,7 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         -- The lid pressed onto a filled cup: kitchen EQUIPMENT like the prep
         -- station's serving tray, not an inventory item — cups come with lids,
         -- so the tool is always on the bar and never consumed.
-        out[#out + 1] = { kind = "lid", item = "cup_lid", label = "Cup Lid",
+        out[#out + 1] = { kind = "lid", item = "cup_lid", label = _L("cook_equip_cup_lid"),
                           model = GetSetting("drink_lid_model", "pickle_drink_lid_01") }
     elseif station == "kitchen_prep" then
         -- Interactive build: the bar lists the raw components (held in inventory) used
@@ -1134,20 +1134,20 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         -- Never gated on the meal item existing — equipment doesn't require items;
         -- the meal lives in the tray holding either way (only "→ inventory" needs
         -- the item installed).
-        out[#out + 1] = { kind = "tray", item = MealItem(), label = "Serving Tray",
+        out[#out + 1] = { kind = "tray", item = MealItem(), label = _L("cook_equip_serving_tray"),
                           image = GetItemImage(MealItem()) }
         -- The pizza box rides right next to it: the same equipment pattern (never
         -- an inventory item). Drag it onto the table, click the lid to swing it
         -- open, drop a pizza in (crust-based piles only), and box it up into the
         -- same meal item — flagged so it sets back down as its box, not a tray.
-        out[#out + 1] = { kind = "pizzabox", item = MealItem(), label = "Pizza Box",
+        out[#out + 1] = { kind = "pizzabox", item = MealItem(), label = _L("cook_equip_pizza_box"),
                           image = GetItemImage(MealItem()) }
         -- The Restaurant Bag: the same free-equipment pattern. Drag it onto the
         -- table, drop a craft's components into it (each seats as its 3D prop, or a
         -- 2D pill if the item has no model), then bag it up into ONE restaurant_bag
         -- tagged with the matched craft. Only "→ inventory" needs the bag item
         -- installed; the bag lives in the tray holding either way, like the tray.
-        out[#out + 1] = { kind = "bag", item = BagItemName(), label = "Restaurant Bag",
+        out[#out + 1] = { kind = "bag", item = BagItemName(), label = _L("cook_equip_bag"),
                           image = GetItemImage(BagItemName()),
                           model = GetSetting("bag_model", "pickle_restaurant_bag_01") }
         -- Baking trays (cake tin / cookie tray) follow the same free-equipment

@@ -1,8 +1,8 @@
 -- ─────────────────────────────────────────────────────────────────────────────
--- modules/phone — lb-phone companion app backend
+-- modules/phone — companion phone app backend
 --
 -- A DoorDash/Uber-Eats-style phone app for pickle_restaurants. The UI is the React
--- build served at nui/phone.html and hosted inside lb-phone's app iframe; this file
+-- build served at nui/phone.html and hosted inside the phone's app iframe; this file
 -- is the SERVER contract behind it. It leans on the existing engine globals for the
 -- heavy lifting (BuildPricedCatalog / CreateOrder / AdjustBalance / HasPerm / the
 -- sales:orders broadcast) and only OWNS the genuinely-new customer/staff/social
@@ -28,11 +28,11 @@ AchievementCache = {}   -- [identifier][key] = { progress, unlocked }
 -- Cooking achievement ladder (progress = lifetime tickets cooked by this player).
 -- Purely additive/social — unlocking one just posts a phone notification + badge.
 PHONE_ACHIEVEMENTS = {
-    { key = "first_cook",  label = "First Ticket",   desc = "Cook your first order",        goal = 1 },
-    { key = "line_cook",   label = "Line Cook",      desc = "Cook 25 orders",               goal = 25 },
-    { key = "sous_chef",   label = "Sous Chef",      desc = "Cook 100 orders",              goal = 100 },
-    { key = "head_chef",   label = "Head Chef",      desc = "Cook 500 orders",              goal = 500 },
-    { key = "iron_chef",   label = "Iron Chef",      desc = "Cook 1000 orders",             goal = 1000 },
+    { key = "first_cook",  label = _L("ach_first_cook"), desc = _L("ach_first_cook_desc"), goal = 1 },
+    { key = "line_cook",   label = _L("ach_line_cook"),  desc = _L("ach_line_cook_desc"),  goal = 25 },
+    { key = "sous_chef",   label = _L("ach_sous_chef"),  desc = _L("ach_sous_chef_desc"),  goal = 100 },
+    { key = "head_chef",   label = _L("ach_head_chef"),  desc = _L("ach_head_chef_desc"),  goal = 500 },
+    { key = "iron_chef",   label = _L("ach_iron_chef"),  desc = _L("ach_iron_chef_desc"),  goal = 1000 },
 }
 
 local function LoyaltyGoal()  return math.max(2, math.floor(tonumber(GetSetting("loyalty_goal", 8)) or 8)) end
@@ -142,6 +142,26 @@ local function CreatePhoneTables()
             `cooked` INT UNSIGNED NOT NULL DEFAULT 0,
             `revenue` BIGINT NOT NULL DEFAULT 0,
             PRIMARY KEY (`restaurant_id`, `identifier`)
+        )
+    ]])
+    -- Delivery chat (customer ⇄ driver). Persisted, not just cached: a conversation
+    -- between two players is what admins get asked to adjudicate ("the driver was
+    -- abusive", "I gave them the gate code and they never came"), and an in-memory-only
+    -- thread also loses an active conversation to a server restart mid-run.
+    -- `identifier` is kept alongside the display name so a log entry survives a rename.
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `pickle_restaurant_delivery_chat` (
+            `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `restaurant_id` INT UNSIGNED NOT NULL,
+            `order_id` INT UNSIGNED NOT NULL,
+            `identifier` VARCHAR(80) NOT NULL,
+            `role` VARCHAR(10) NOT NULL,
+            `name` VARCHAR(100) DEFAULT NULL,
+            `text` VARCHAR(255) NOT NULL,
+            `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_order` (`order_id`),
+            KEY `idx_age` (`created_at`)
         )
     ]])
 
@@ -307,26 +327,192 @@ function RestaurantCard(r, playerCoords)
     }
 end
 
--- ─── notifications through lb-phone ──────────────────────────────────────────────
--- Server-side push to a player's equipped phone. Guarded so a missing lb-phone (or
--- a phone-less player) never errors a callback.
-function PhoneNotify(src, title, content, thumbnail)
-    if GetResourceState("lb-phone") ~= "started" then return end
-    pcall(function()
-        exports["lb-phone"]:SendNotification(src, {
-            app = "pickle_food",
-            title = title,
-            content = content,
-            thumbnail = thumbnail,
-        })
-    end)
+-- ─── shift lookups (globals — modules/npc_customers gates spawning on these) ──────
+-- "On shift" is CLOCKED IN, which is deliberately stricter than "employed and nearby":
+-- a cook standing in the kitchen off the clock isn't working, and NPC demand keying off
+-- mere presence meant a restaurant generated trade nobody had signed on to serve.
+
+-- Is anyone at all on shift at this restaurant right now?
+function AnyoneClockedIn(rid)
+    for _ in pairs(ShiftCache[rid] or {}) do return true end
+    return false
 end
+
+-- Is THIS player on shift here?
+function IsClockedIn(rid, src)
+    local sc = ShiftCache[rid]
+    return (sc and sc[GetIdentifier(src)]) ~= nil
+end
+
+-- ─── notifications through the phone ─────────────────────────────────────────────
+-- Server-side push to a player's equipped phone. `PhoneAppNotify` is defined by
+-- whichever bridge/phone/* variant matched an installed phone — nil when the server
+-- runs none, so this is a no-op rather than an error in every caller.
+function PhoneNotify(src, title, content, thumbnail)
+    if not PhoneAppNotify then return end
+    PhoneAppNotify(src, title, content, thumbnail)
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- DELIVERY CHAT — a two-party thread between a customer and their driver.
+--
+-- Write-through, like the rest of the engine: every message hits MySQL AND the cache,
+-- and reads come off the cache. Chat is PERSISTED rather than transient (unlike the
+-- claim it hangs off) because a conversation between two players is an admin record —
+-- it's what gets adjudicated after the fact — and because an in-memory thread loses an
+-- active conversation to a server restart mid-run. Rows are pruned on boot; the CACHE
+-- is dropped when the ticket closes, since nothing reads a finished order's thread.
+--
+-- Strictly TWO-party. Not the restaurant, not the boss, not an admin — the gate is
+-- "are you this order's customer, or the driver currently holding it", re-checked on
+-- every single call, because the claim can change mid-conversation.
+-- ─────────────────────────────────────────────────────────────────────────────
+DeliveryChat = {}          -- [orderId] = { { role, name, text, at }, … } (hot threads)
+
+local CHAT_KEEP       = 40    -- messages held in memory per order (oldest dropped)
+local CHAT_MAX_LEN    = 200
+local CHAT_MIN_MS     = 700   -- floor between messages from one player
+local CHAT_RETAIN_DAYS = 14   -- how long the log is kept before pruning. TUNE.
+local ChatRate        = {}    -- [src] = last send (GetGameTimer)
+
+AddEventHandler("playerDropped", function() ChatRate[source] = nil end)
+
+-- The log is an audit trail, not an archive — without this it grows forever. Runs once
+-- on boot rather than on a timer: a server that never restarts isn't accumulating
+-- meaningful volume either (a handful of rows per delivery).
+CreateThread(function()
+    while not PhoneReady do Wait(1000) end
+    -- Interpolated, not bound: a placeholder inside an INTERVAL expression is a known
+    -- rough edge across MySQL/MariaDB prepared statements. Safe here — the value is a
+    -- local numeric constant, never user input.
+    MySQL.query(("DELETE FROM `pickle_restaurant_delivery_chat` WHERE `created_at` < (NOW() - INTERVAL %d DAY)")
+        :format(CHAT_RETAIN_DAYS))
+end)
+
+-- Rehydrate one ticket's thread from the log. Only ever needed when the server
+-- restarted mid-delivery: the order is reloaded and still open, but its cache entry is
+-- gone. Reads the tail, oldest-first, so the UI order matches a live thread exactly.
+local function ChatLoad(orderId)
+    local rows = MySQL.query.await([[
+        SELECT `role`, `name`, `text`, UNIX_TIMESTAMP(`created_at`) AS `at`
+          FROM `pickle_restaurant_delivery_chat`
+         WHERE `order_id` = ?
+         ORDER BY `id` DESC LIMIT ?
+    ]], { orderId, CHAT_KEEP }) or {}
+    local thread = {}
+    for i = #rows, 1, -1 do
+        local r = rows[i]
+        thread[#thread + 1] = { role = r.role, name = r.name, text = r.text, at = tonumber(r.at) }
+    end
+    DeliveryChat[orderId] = thread
+    return thread
+end
+
+-- modules/sales has a function of this name, but it's a forward-declared LOCAL there
+-- (`local findPlayerByIdentifier` above its definition), so it isn't reachable from
+-- another file no matter how global the definition looks. Hence our own copy.
+local function ChatFindPlayer(identifier)
+    if not identifier then return nil end
+    for _, p in ipairs(GetPlayers()) do
+        p = tonumber(p)
+        if GetIdentifier(p) == identifier then return p end
+    end
+end
+
+-- Resolves the caller's SIDE of this ticket, or an error for anyone else.
+local function ChatParty(src, rid, orderId)
+    local o = OrderCache[rid] and OrderCache[rid][orderId]
+    if not o or o.status ~= "open" then return nil, nil, _L("order_not_open") end
+    if o.order_type ~= "delivery" then return nil, nil, _L("chat_not_delivery") end
+    local me = GetIdentifier(src)
+    if o.customer_identifier == me then return o, "customer" end
+    if o.driver_identifier and o.driver_identifier == me then return o, "driver" end
+    return nil, nil, _L("chat_not_yours")
+end
+
+-- Deliver to BOTH sides (including the sender, so their own message lands the same way
+-- the other side's does — one render path, no optimistic-echo divergence).
+local function ChatPush(o, rid, msg)
+    for _, ident in ipairs({ o.customer_identifier, o.driver_identifier }) do
+        local s = ChatFindPlayer(ident)
+        if s then
+            TriggerClientEvent("pickle_restaurants:phone:chat", s,
+                { orderId = o.id, rid = rid, message = msg })
+        end
+    end
+end
+
+-- Called by the order-close paths in modules/sales (alongside DeliveryTargets). Drops
+-- the CACHE only — the logged rows stay for moderation until the retention prune.
+function ClearDeliveryChat(orderId)
+    DeliveryChat[orderId] = nil
+end
+
+lib.callback.register("pickle_restaurants:phone:chatHistory", function(src, d)
+    local rid, oid = tonumber(d and d.id), tonumber(d and d.orderId)
+    local o, role, err = ChatParty(src, rid, oid)
+    if not o then return { ok = false, error = err } end
+    -- nil (not empty) means this thread was never cached — a restart mid-run. An empty
+    -- table is a real "no messages yet" and must NOT re-query on every open.
+    local thread = DeliveryChat[oid] or ChatLoad(oid)
+    return { ok = true, role = role, messages = thread }
+end)
+
+lib.callback.register("pickle_restaurants:phone:chatSend", function(src, d)
+    local rid, oid = tonumber(d and d.id), tonumber(d and d.orderId)
+    local o, role, err = ChatParty(src, rid, oid)
+    if not o then return { ok = false, error = err } end
+
+    local now = GetGameTimer()
+    if ChatRate[src] and now - ChatRate[src] < CHAT_MIN_MS then
+        return { ok = false, error = _L("chat_too_fast") }
+    end
+
+    -- Collapse all whitespace (newlines included — the bubble is one run of text) and
+    -- clamp the length. The NUI is untrusted, so the cap is enforced HERE, not by the
+    -- input's maxlength.
+    local text = (tostring(d.text or ""):gsub("%s+", " "))
+    text = (text:gsub("^%s*(.-)%s*$", "%1"))
+    if text == "" then return { ok = false, error = _L("chat_empty") } end
+    if #text > CHAT_MAX_LEN then text = text:sub(1, CHAT_MAX_LEN) end
+    ChatRate[src] = now
+
+    local thread = DeliveryChat[oid] or ChatLoad(oid)
+    local msg = {
+        role = role,
+        name = GetPlayerCharacterName and GetPlayerCharacterName(src) or nil,
+        text = text,
+        at   = os.time(),
+    }
+    thread[#thread + 1] = msg
+    -- Trim the CACHE from the front so a long run can't grow it without bound. The log
+    -- keeps every message — this only bounds what's held in memory and re-sent on open.
+    while #thread > CHAT_KEEP do table.remove(thread, 1) end
+
+    -- Write-through. Fire-and-forget: the message is already in the cache and on its
+    -- way to both phones, so a slow insert must never stall the send. A lost row costs
+    -- the audit log one line, never the conversation.
+    MySQL.insert("INSERT INTO `pickle_restaurant_delivery_chat` (restaurant_id, order_id, identifier, role, name, text) VALUES (?, ?, ?, ?, ?, ?)",
+        { rid, oid, GetIdentifier(src), role, msg.name, text })
+
+    ChatPush(o, rid, msg)
+
+    -- Nudge the OTHER side's phone: a chat nobody sees isn't a chat. The sender never
+    -- notifies themself, and an offline counterpart simply misses it (the thread is
+    -- still there when they open the ticket).
+    local otherIdent = (role == "customer") and o.driver_identifier or o.customer_identifier
+    local otherSrc = ChatFindPlayer(otherIdent)
+    if otherSrc then
+        PhoneNotify(otherSrc, _L("chat_notify_title", msg.name or "?"), text)
+    end
+    return { ok = true }
+end)
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- HOME — the app bootstrap for a customer opening the app.
 -- ─────────────────────────────────────────────────────────────────────────────
 lib.callback.register("pickle_restaurants:phone:home", function(src, d)
-    if not PhoneReady then return { ok = false, error = "Loading…" } end
+    if not PhoneReady then return { ok = false, error = _L("phone_loading") } end
     local id = GetIdentifier(src)
     local coords = d and d.coords or nil
 
@@ -427,6 +613,11 @@ function PlayerOrders(identifier, limit)
         local ready = false
         local cached = OrderCache[o.restaurant_id] and OrderCache[o.restaurant_id][o.id]
         if cached and OrderReadyForPickup then ready = OrderReadyForPickup(o.restaurant_id, o.id) end
+        -- Has a driver actually CLAIMED this delivery? Distinct from `ready`, which
+        -- only says the kitchen can fulfil it — the tracking UI needs both, or a cooked
+        -- order announces a driver that nobody has assigned. The claim is transient
+        -- (in-memory, released on cancel/disconnect), so it's only ever true while cached.
+        local driving = (cached and cached.driver_identifier ~= nil) or false
         out[#out + 1] = {
             orderId    = o.id,
             ticket     = o.ticket,
@@ -440,6 +631,7 @@ function PlayerOrders(identifier, limit)
             address    = o.address,
             rated      = (o.rated or 0) == 1,
             ready      = ready,
+            driving    = driving,
             map        = OrderMap(o, r),
             lines      = lines,
             createdAt  = o.created_at,
@@ -455,7 +647,7 @@ end
 lib.callback.register("pickle_restaurants:phone:menu", function(src, d)
     local id = tonumber(d and d.id)
     local r = GetRestaurant(id)
-    if not r then return { ok = false, error = "That restaurant is unavailable." } end
+    if not r then return { ok = false, error = _L("phone_restaurant_unavailable") } end
 
     local catalog = select(1, BuildPricedCatalog(id, true))
     local combos  = BuildComboCatalog(id)
@@ -498,7 +690,7 @@ lib.callback.register("pickle_restaurants:phone:saveFavorite", function(src, d)
     local rid = tonumber(d and d.id)
     if not GetRestaurant(rid) then return { ok = false } end
     local cart = d.cart
-    if type(cart) ~= "table" or #cart == 0 then return { ok = false, error = "Nothing to save." } end
+    if type(cart) ~= "table" or #cart == 0 then return { ok = false, error = _L("phone_nothing_to_save") } end
     local label = tostring(d.label or "Favorite"):sub(1, 60)
     local fid = MySQL.insert.await(
         "INSERT INTO pickle_restaurant_favorites (identifier, restaurant_id, label, cart) VALUES (?, ?, ?, ?)",
@@ -523,7 +715,7 @@ lib.callback.register("pickle_restaurants:phone:submitReview", function(src, d)
     -- Only guests who have actually ordered here may review (soft trust gate).
     local ordered = MySQL.scalar.await(
         "SELECT 1 FROM pickle_restaurant_orders WHERE restaurant_id = ? AND customer_identifier = ? LIMIT 1", { rid, id })
-    if not ordered then return { ok = false, error = "Order here before leaving a review." } end
+    if not ordered then return { ok = false, error = _L("phone_review_needs_order") } end
     local comment = d.comment and tostring(d.comment):sub(1, 400) or nil
     local photo = d.photo and tostring(d.photo):sub(1, 300) or nil
     MySQL.insert.await(
@@ -691,7 +883,7 @@ lib.callback.register("pickle_restaurants:phone:enterBooth", function(src, d)
     local id = GetIdentifier(src)
     local resId = tonumber(d and d.id)
     local res = ReservationCache[tonumber(d.rid)] and ReservationCache[tonumber(d.rid)][resId]
-    if not res or res.identifier ~= id then return { ok = false, error = "No reservation found." } end
+    if not res or res.identifier ~= id then return { ok = false, error = _L("reserve_not_found") } end
     local bucket = 6000 + resId
     SetPlayerRoutingBucket(tostring(src), bucket)
     return { ok = true, bucket = bucket }
@@ -714,7 +906,7 @@ lib.callback.register("pickle_restaurants:phone:shiftStatus", function(src, d)
     local id = GetIdentifier(src)
     local rid = tonumber(d and d.id)
     local perms = ResolvePerms(rid, src)
-    if not perms then return { ok = false, error = "You don't work here." } end
+    if not perms then return { ok = false, error = _L("phone_not_employed") } end
     local open = ShiftCache[rid] and ShiftCache[rid][id]
     -- Roster: everyone currently clocked in here (for the tip-pool split preview).
     local roster = {}
@@ -734,7 +926,7 @@ lib.callback.register("pickle_restaurants:phone:clockIn", function(src, d)
     local id = GetIdentifier(src)
     local rid = tonumber(d and d.id)
     local perms = ResolvePerms(rid, src)
-    if not perms then return { ok = false, error = "You don't work here." } end
+    if not perms then return { ok = false, error = _L("phone_not_employed") } end
     if ShiftCache[rid] and ShiftCache[rid][id] then return { ok = true } end
     local name = GetPlayerCharacterName(src)
     local shiftId = MySQL.insert.await(
@@ -748,7 +940,7 @@ lib.callback.register("pickle_restaurants:phone:clockOut", function(src, d)
     local id = GetIdentifier(src)
     local rid = tonumber(d and d.id)
     local sh = ShiftCache[rid] and ShiftCache[rid][id]
-    if not sh then return { ok = false, error = "You're not clocked in." } end
+    if not sh then return { ok = false, error = _L("phone_not_clocked_in") } end
     local secs = Now() - (sh.clock_in_ts or Now())
     MySQL.update.await(
         "UPDATE pickle_restaurant_shifts SET clock_out = NOW(), seconds = ?, tips = ?, orders_cooked = ? WHERE id = ?",
@@ -776,7 +968,7 @@ end
 -- ─────────────────────────────────────────────────────────────────────────────
 lib.callback.register("pickle_restaurants:phone:analytics", function(src, d)
     local rid = tonumber(d and d.id)
-    if not HasPerm(rid, src, "view_finances") then return { ok = false, error = "No access." } end
+    if not HasPerm(rid, src, "view_finances") then return { ok = false, error = _L("no_permission") } end
     local r = GetRestaurant(rid)
 
     -- Revenue / payroll / refunds from the ledger (last 30 days).
@@ -833,14 +1025,14 @@ end)
 
 lib.callback.register("pickle_restaurants:phone:promos", function(src, d)
     local rid = tonumber(d and d.id)
-    if not HasPerm(rid, src, "manage_menu") then return { ok = false, error = "No access." } end
+    if not HasPerm(rid, src, "manage_menu") then return { ok = false, error = _L("no_permission") } end
     local rows = MySQL.query.await("SELECT id, label, percent, kind, active FROM pickle_restaurant_promos WHERE restaurant_id = ? ORDER BY id DESC", { rid }) or {}
     return { ok = true, promos = rows }
 end)
 
 lib.callback.register("pickle_restaurants:phone:savePromo", function(src, d)
     local rid = tonumber(d and d.id)
-    if not HasPerm(rid, src, "manage_menu") then return { ok = false, error = "No access." } end
+    if not HasPerm(rid, src, "manage_menu") then return { ok = false, error = _L("no_permission") } end
     local label = tostring(d.label or "Promo"):sub(1, 60)
     local percent = math.max(1, math.min(90, math.floor(tonumber(d.percent) or 10)))
     local kind = (d.kind == "happy_hour") and "happy_hour" or "discount"
@@ -859,7 +1051,7 @@ lib.callback.register("pickle_restaurants:phone:savePromo", function(src, d)
     if active then
         local r = GetRestaurant(rid)
         TriggerClientEvent("pickle_restaurants:phone:pushPromo", -1, {
-            title = ("%s — %d%% off"):format(r and (r.label or r.name) or "Restaurant", percent),
+            title = _L("promo_push_title", r and (r.label or r.name) or _L("phone_order_fallback"), percent),
             content = label, rid = rid,
         })
     end
@@ -868,7 +1060,7 @@ end)
 
 lib.callback.register("pickle_restaurants:phone:deletePromo", function(src, d)
     local rid = tonumber(d and d.id)
-    if not HasPerm(rid, src, "manage_menu") then return { ok = false, error = "No access." } end
+    if not HasPerm(rid, src, "manage_menu") then return { ok = false, error = _L("no_permission") } end
     MySQL.update.await("DELETE FROM pickle_restaurant_promos WHERE id = ? AND restaurant_id = ?", { tonumber(d.promoId), rid })
     LoadPromos()
     return { ok = true }
@@ -937,7 +1129,7 @@ local function BumpAchievements(src, identifier)
                 VALUES (?, ?, ?, NOW())
                 ON DUPLICATE KEY UPDATE progress = VALUES(progress), unlocked_at = NOW()
             ]], { identifier, def.key, cooked })
-            if src then PhoneNotify(src, "Achievement unlocked", def.label .. " — " .. def.desc) end
+            if src then PhoneNotify(src, _L("ach_unlocked_title"), _L("ach_unlocked_body", def.label, def.desc)) end
         else
             MySQL.query.await([[
                 INSERT INTO pickle_restaurant_achievements (identifier, akey, progress)
@@ -963,7 +1155,7 @@ AddEventHandler("pickle_restaurants:internal:orderCompleted", function(rid, orde
         local punches = LoyaltyPunch(rid, cust)
         if punches and punches >= LoyaltyGoal() then
             local custSrc = SourceForIdentifier and SourceForIdentifier(cust)
-            if custSrc then PhoneNotify(custSrc, "Free item unlocked!", "You've earned a reward. Redeem it at checkout.") end
+            if custSrc then PhoneNotify(custSrc, _L("loyalty_reward_title"), _L("loyalty_reward_body")) end
         end
     end
 

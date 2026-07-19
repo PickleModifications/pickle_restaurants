@@ -88,7 +88,7 @@ function CreateBlip(data)
     end
     SetBlipAsShortRange(blip, true)
     BeginTextCommandSetBlipName("STRING")
-    AddTextComponentString(data.label or "Unknown Blip")
+    AddTextComponentString(data.label or _L("blip_unknown"))
     EndTextCommandSetBlipName(blip)
     if (data.radius) then
         local radiusBlip = AddBlipForRadius(x, y, z, data.radius.size)

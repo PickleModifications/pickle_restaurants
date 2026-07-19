@@ -371,7 +371,7 @@ local function payCommission(rid, src, amount, ticket)
     if commission > 0 then
         AdjustBalance(rid, -commission)
         AddMoney(src, commission, "money")
-        AddLedger(rid, "payroll", -commission, ("Commission: Ticket #%d"):format(ticket), id)
+        AddLedger(rid, "payroll", -commission, _L("ledger_commission", ticket), id)
     end
     return commission
 end
@@ -603,7 +603,7 @@ function PlanFulfillment(rid, order, mealSig)
             singles[#singles + 1] = { item = g.item, key = g.key, count = g.need }
         else
             ok = false
-            missing[#missing + 1] = ("%d× %s"):format(g.need - have, g.label or GetItemLabel(g.item))
+            missing[#missing + 1] = _L("order_qty_line", g.need - have, g.label or GetItemLabel(g.item))
         end
     end
     return { ok = ok, singles = singles, mealSig = usedMealSig, missing = (#missing > 0) and missing or nil }
@@ -773,7 +773,7 @@ local function modSummary(mods)
     local parts = {}
     for _, m in ipairs(mods) do
         local label = tostring(m.label or m.id or "?")
-        parts[#parts + 1] = (m.removed and ("no " .. label) or ("+" .. label))
+        parts[#parts + 1] = (m.removed and _L("order_mod_removed", label) or _L("order_mod_added", label))
     end
     return table.concat(parts, ", ")
 end
@@ -796,11 +796,11 @@ local function orderSummary(lines)
                 comps[#comps + 1] = cs
                 j = j + 1
             end
-            parts[#parts + 1] = ("%d× #%s %s [%s]"):format(
+            parts[#parts + 1] = _L("order_qty_combo_line",
                 l.qty, tostring(l.combo.number), l.combo.label, table.concat(comps, " / "))
             i = j
         else
-            local s = ("%d× %s"):format(l.qty, l.label)
+            local s = _L("order_qty_line", l.qty, l.label)
             local m = modSummary(l.mods)
             if m ~= "" then s = s .. " (" .. m .. ")" end
             parts[#parts + 1] = s
@@ -1012,7 +1012,7 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
         AdjustBalance(id, total)
 
         local summary = orderSummary(lines)
-        AddLedger(id, "sale", total, ("Ticket #%d — %s"):format(order.ticket, summary):sub(1, 255), customerId)
+        AddLedger(id, "sale", total, _L("ledger_sale", order.ticket, summary):sub(1, 255), customerId)
         payCommission(id, src, total, order.ticket)
 
         -- Hand the customer their receipt (metadata carries the ticket, so the same
@@ -1023,7 +1023,7 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
                 order_id      = order.id,
                 restaurant_id = id,
                 ticket        = order.ticket,
-                description   = ("%s — Ticket #%d: %s (%s)"):format(r.label, order.ticket, summary, GetCurrencyString(total)),
+                description   = _L("receipt_description", r.label, order.ticket, summary, GetCurrencyString(total)),
             })
         end
 
@@ -1133,7 +1133,7 @@ lib.callback.register("pickle_restaurants:sales:kioskOrder", function(src, d)
         AdjustBalance(id, total)
 
         local summary = orderSummary(lines)
-        AddLedger(id, "sale", total, ("Ticket #%d — %s (kiosk)"):format(order.ticket, summary):sub(1, 255), customerId)
+        AddLedger(id, "sale", total, _L("ledger_sale_kiosk", order.ticket, summary):sub(1, 255), customerId)
 
         -- Hand the customer their receipt (metadata carries the ticket, so the same
         -- item verifies the right order at completion). Skipped gracefully when the
@@ -1143,7 +1143,7 @@ lib.callback.register("pickle_restaurants:sales:kioskOrder", function(src, d)
                 order_id      = order.id,
                 restaurant_id = id,
                 ticket        = order.ticket,
-                description   = ("%s — Ticket #%d: %s (%s)"):format(r.label, order.ticket, summary, GetCurrencyString(total)),
+                description   = _L("receipt_description", r.label, order.ticket, summary, GetCurrencyString(total)),
             })
         end
 
@@ -1160,7 +1160,7 @@ lib.callback.register("pickle_restaurants:sales:kioskOrder", function(src, d)
 end)
 
 -- ─── phone companion: remote order (delivery / pickup / dine-in) ──────────────
--- Placed from the lb-phone app. The customer pays for their own order from
+-- Placed from the companion phone app. The customer pays for their own order from
 -- anywhere; the ticket enters the kitchen queue like a kiosk order (so order-ahead
 -- food queues before arrival). Applies an active promo discount and an optional
 -- loyalty redemption. order_type / scheduled / address persist on the additive
@@ -1260,19 +1260,27 @@ lib.callback.register("pickle_restaurants:phone:placeOrder", function(src, d)
         if finalTotal > 0 then RemoveMoney(src, finalTotal, "bank") end
         AdjustBalance(id, finalTotal)
 
+        -- The client supplies its number on phones that expose it client-side
+        -- (lb-phone); Quasar only offers GetCurrentPhoneNumber(src), so fall back to
+        -- the bridge's server-side lookup rather than storing a NULL number.
+        local phoneNumber = d.phone
+        if (phoneNumber == nil or phoneNumber == "") and PhoneAppNumber then
+            phoneNumber = PhoneAppNumber(src)
+        end
         -- Awaited: a phone:home landing before this commits would read order_type NULL
         -- and render a delivery as a pickup until the next refresh.
         MySQL.update.await("UPDATE `pickle_restaurant_orders` SET order_type = ?, scheduled_for = ?, address = ?, phone_number = ?, paid_account = 'bank', redeemed = ?, dest_x = ?, dest_y = ? WHERE id = ?",
-            { orderType, scheduled, address, d.phone, order.redeemed, destX, destY, order.id })
+            { orderType, scheduled, address, phoneNumber, order.redeemed, destX, destY, order.id })
 
         local summary = orderSummary(lines)
-        local tag = (orderType == "delivery") and "delivery" or (orderType == "dine_in") and "dine-in" or "pickup"
-        AddLedger(id, "sale", finalTotal, ("Ticket #%d — %s (%s)"):format(order.ticket, summary, tag):sub(1, 255), customerId)
+        local tag = (orderType == "delivery") and _L("order_type_delivery")
+            or (orderType == "dine_in") and _L("order_type_dine_in") or _L("order_type_pickup")
+        AddLedger(id, "sale", finalTotal, _L("ledger_sale_tagged", order.ticket, summary, tag):sub(1, 255), customerId)
 
         if ItemExists(ReceiptItem()) then
             Inventory.AddItem(src, ReceiptItem(), 1, {
                 order_id = order.id, restaurant_id = id, ticket = order.ticket,
-                description = ("%s — Ticket #%d: %s (%s)"):format(r.label, order.ticket, summary, GetCurrencyString(finalTotal)),
+                description = _L("receipt_description", r.label, order.ticket, summary, GetCurrencyString(finalTotal)),
             })
         end
 
@@ -1603,7 +1611,27 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
     -- below is skipped. (IsNpcOrder/NpcOrderPresent/NpcRollTip/NpcDropOrder are globals
     -- from modules/npc_customers/server.lua.)
     if IsNpcOrder and IsNpcOrder(o) then
-        if not NpcOrderPresent(id, o.id) then return fail(_L("order_customer_missing")) end
+        if o.order_type == "delivery" then
+            -- An NPC DELIVERY has no ped to stand at a counter, so "is the customer
+            -- here" becomes "did the claiming driver actually drive it there". Same
+            -- claim rules as a player delivery (see the player branch below), then a
+            -- horizontal distance check against the drop point.
+            local mine = GetIdentifier(src)
+            if not o.driver_identifier then return fail(_L("delivery_accept_first")) end
+            if o.driver_identifier ~= mine then
+                return fail(_L("delivery_not_yours", DriverName(o) or "?"))
+            end
+            local t = DeliveryTargets[o.id]
+            if not t then return fail(_L("delivery_no_target")) end
+            local ped = GetPlayerPed(src)
+            local c = ped ~= 0 and GetEntityCoords(ped) or nil
+            local radius = (NpcDeliveryRadius and NpcDeliveryRadius()) or 8.0
+            if not c or math.sqrt((c.x - t.x) ^ 2 + (c.y - t.y) ^ 2) > radius then
+                return fail(_L("order_driver_far"))
+            end
+        elseif not NpcOrderPresent(id, o.id) then
+            return fail(_L("order_customer_missing"))
+        end
 
         local mealSig = (type(d.mealSig) == "string" and d.mealSig ~= "") and d.mealSig or nil
         local plan = PlanFulfillment(id, o, mealSig)
@@ -1631,11 +1659,11 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
 
         AdjustBalance(id, o.total)
         local summary = orderSummary(o.lines)
-        AddLedger(id, "sale", o.total, ("Ticket #%d — %s"):format(o.ticket, summary):sub(1, 255), o.customer_identifier)
+        AddLedger(id, "sale", o.total, _L("ledger_sale", o.ticket, summary):sub(1, 255), o.customer_identifier)
         local tip = (NpcRollTip and NpcRollTip(o.total)) or 0
         if tip > 0 then
             AdjustBalance(id, tip)
-            AddLedger(id, "sale", tip, ("Ticket #%d — tip"):format(o.ticket), o.customer_identifier)
+            AddLedger(id, "sale", tip, _L("ledger_tip", o.ticket), o.customer_identifier)
         end
         payCommission(id, src, o.total + tip, o.ticket)
 
@@ -1649,13 +1677,30 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
         return { ok = true }
     end
 
+    -- A DELIVERY is handed over at the customer's door, not across the counter, so it
+    -- plays by different rules: the driver has to physically reach them (a tighter
+    -- 5m — this is a doorstep hand-off, not a counter reach), and there is NO receipt
+    -- to present. The paper slip is the counter's proof-of-purchase ritual; a delivery
+    -- is already authenticated by the claimed run and the tracked ticket, so demanding
+    -- it just wedged every delivery that ever got served.
+    local isDelivery = (o.order_type == "delivery")
+    -- Only the run's OWN driver hands a delivery over. An unclaimed delivery can't be
+    -- served at all — you accept it first — which also means a second employee standing
+    -- near the customer can't complete (and take commission on) someone else's run.
+    if isDelivery then
+        local mine = GetIdentifier(src)
+        if not o.driver_identifier then return fail(_L("delivery_accept_first")) end
+        if o.driver_identifier ~= mine then
+            return fail(_L("delivery_not_yours", DriverName(o) or "?"))
+        end
+    end
     local customerSrc = findPlayerByIdentifier(o.customer_identifier)
-    if not customerSrc or not playersNear(src, customerSrc, 8.0) then
-        return fail(_L("order_customer_missing"))
+    if not customerSrc or not playersNear(src, customerSrc, isDelivery and 5.0 or 8.0) then
+        return fail(isDelivery and _L("order_driver_far") or _L("order_customer_missing"))
     end
     -- Verify the receipt WITHOUT consuming it yet — it's taken last, once the
     -- food has actually changed hands.
-    if not takeReceipt(customerSrc, o, false) then
+    if not isDelivery and not takeReceipt(customerSrc, o, false) then
         return fail(_L("order_no_receipt"))
     end
 
@@ -1697,7 +1742,8 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
                 Inventory.AddItem(customerSrc, g.item, 1, BuildInvMeta(inst.cheese, inst.meta, g.item))
             end
         end
-        takeReceipt(customerSrc, o, true) -- verified above; best-effort by now
+        -- Deliveries never required one, so there is nothing to void (see above).
+        if not isDelivery then takeReceipt(customerSrc, o, true) end -- verified above; best-effort by now
     end)
     if not moved then
         return fail(_L("order_missing_items", tostring(bad)))
@@ -1707,6 +1753,7 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
     -- Phone companion seam: customer loyalty punch + cook stats/achievements/tips.
     TriggerEvent("pickle_restaurants:internal:orderCompleted", id, o, src, 0)
     if DeliveryTargets then DeliveryTargets[o.id] = nil end
+    if ClearDeliveryChat then ClearDeliveryChat(o.id) end   -- the thread dies with the ticket
     ShowNotification(src, _L("order_completed", o.ticket))
     -- The customer HAS the food at this point (it just moved into their inventory) —
     -- so this is a hand-off confirmation, not a "ready" nudge.
@@ -1759,7 +1806,7 @@ lib.callback.register("pickle_restaurants:sales:cancelOrder", function(src, d)
     -- wedged-ticket failure mode). RefundOrder claims `refunded` before it can throw,
     -- so retrying after a mid-refund error can never double-pay — it just no-ops. A
     -- failed refund is LOUD, never silent: money is involved.
-    local okr, rerr, refunded, deferred = pcall(RefundOrder, id, o, "cancelled")
+    local okr, rerr, refunded, deferred = pcall(RefundOrder, id, o, _L("refund_reason_cancelled"))
     if not okr then
         print(("[pickle_restaurants] REFUND FAILED for ticket #%s (order %s, restaurant %s): %s")
             :format(tostring(o.ticket), tostring(o.id), tostring(id), tostring(rerr)))
@@ -1791,6 +1838,7 @@ lib.callback.register("pickle_restaurants:sales:cancelOrder", function(src, d)
     end
 
     if DeliveryTargets then DeliveryTargets[o.id] = nil end
+    if ClearDeliveryChat then ClearDeliveryChat(o.id) end   -- the thread dies with the ticket
     CloseOrder(id, o.id, "cancelled")
     ShowNotification(src, deferred
         and _L("order_cancelled_refund_pending", o.ticket)

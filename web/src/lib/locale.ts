@@ -1,34 +1,51 @@
-// NUI localization — the client-side mirror of Lua's `locales/locale.lua` `_L`.
+// NUI localization: a thin reader over Lua's `locales/translations/*.lua`.
 //
-// User-facing strings across the whole front-end (admin, cooking, management,
-// ordering, register, settings, …) are routed through `_L(key, …)` rather than
-// hardcoded inline, so copy lives in one place, reads consistently, and can be
-// translated without touching component code. Placeholders use `string.format`
-// style (`%s`, `%d`) so keys line up with the Lua side.
+// There is ONE authored string table in this resource and it lives in Lua. The front
+// end used to bundle a second copy (`strings.en.json`), which meant every new string
+// had to be written twice and a translator had to be told about two files. Instead the
+// table is fetched once at boot (`getLocale`, see modules/locale/client.lua) and every
+// component localizes against it through `_L`.
 //
-// The string table is data (`strings.en.json`) so it can be regenerated/merged
-// mechanically. Add a language by shipping another JSON table and registering
-// it in `languages` below.
+// Placeholders stay `string.format` style (`%s`, `%d`) so a key reads identically
+// whether it is used from Lua or from React.
 
-import en from "./strings.en.json";
+import { fetchNui } from "./nui";
 
 type Strings = Record<string, string>;
 
-const languages: Record<string, Strings> = { en: en as Strings };
+let strings: Strings = {};
+let loaded = false;
 
-// Matches Config.Language on the Lua side; only `en` ships today.
-let active = "en";
-
-export function setLanguage(lang: string) {
-  if (languages[lang]) active = lang;
+/**
+ * Pull the language table from Lua. Awaited ONCE before the app renders (see main.tsx)
+ * so no component ever paints an unlocalized frame. Safe to call more than once.
+ */
+export async function loadLocale(): Promise<void> {
+  if (loaded) return;
+  const d = await fetchNui<{ ok?: boolean; strings?: Strings }>("getLocale", {});
+  if (d?.ok && d.strings) strings = d.strings;
+  loaded = true;
 }
 
-/** Localize `key`, filling `string.format`-style `%s`/`%d` placeholders in order. */
+/** True once the table has arrived, so a caller can tell "missing key" from "not loaded yet". */
+export function localeReady() {
+  return loaded;
+}
+
+/**
+ * Localize `key`, filling `string.format`-style `%s`/`%d` placeholders in order.
+ * An unknown key returns the key itself, which makes a missing string obvious on screen
+ * instead of rendering as a silent empty gap.
+ */
 export function _L(key: string, ...args: (string | number)[]): string {
-  const table = languages[active] || (en as Strings);
-  const template = table[key] ?? (en as Strings)[key] ?? key;
+  const template = strings[key] ?? key;
   let i = 0;
-  return template.replace(/%[sd]/g, () => {
+  // `%%` is a LITERAL percent, matching Lua's string.format. Both engines read the
+  // same table now, so they have to agree on escaping: a value written for one side
+  // must be safe on the other. Without this a bare `%` would be fine here and blow up
+  // the moment the same key was used from Lua.
+  return template.replace(/%%|%[sd]/g, (m) => {
+    if (m === "%%") return "%";
     const v = args[i++];
     return v === undefined ? "" : String(v);
   });

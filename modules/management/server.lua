@@ -308,7 +308,7 @@ lib.callback.register("pickle_restaurants:management:buyStock", function(src, d)
     if (r.balance or 0) < total then return { ok = false, error = _L("mgmt_insufficient_funds") } end
     if total > 0 then
         AdjustBalance(id, -total)
-        AddLedger(id, "supply", -total, ("Restock: %d x %s"):format(qty, GetItemLabel(item)), GetIdentifier(src))
+        AddLedger(id, "supply", -total, _L("ledger_restock", qty, GetItemLabel(item)), GetIdentifier(src))
     end
     AddStock(id, item, qty)
     ShowNotification(src, _L("mgmt_stock_bought", qty, GetItemLabel(item)))
@@ -331,7 +331,7 @@ lib.callback.register("pickle_restaurants:management:depositStock", function(src
     if (Inventory.GetItemCount(src, item) or 0) < qty then return { ok = false, error = _L("mgmt_not_enough_held") } end
     Inventory.RemoveItem(src, item, qty)
     AddStock(id, item, qty)
-    AddLedger(id, "supply", 0, ("Deposit: %d x %s"):format(qty, GetItemLabel(item)), GetIdentifier(src))
+    AddLedger(id, "supply", 0, _L("ledger_stock_deposit", qty, GetItemLabel(item)), GetIdentifier(src))
     ShowNotification(src, _L("mgmt_stock_deposited", qty, GetItemLabel(item)))
     return { ok = true, stock = GetStockCount(id, item), held = Inventory.GetItemCount(src, item) or 0 }
 end)
@@ -350,7 +350,7 @@ lib.callback.register("pickle_restaurants:management:withdrawStock", function(sr
     -- pull from the pool FIRST (write-through + fails if raced dry), then give
     if not RemoveStock(id, item, qty) then return { ok = false, error = _L("mgmt_not_enough_stock") } end
     Inventory.AddItem(src, item, qty)
-    AddLedger(id, "supply", 0, ("Withdraw: %d x %s"):format(qty, GetItemLabel(item)), GetIdentifier(src))
+    AddLedger(id, "supply", 0, _L("ledger_stock_withdraw", qty, GetItemLabel(item)), GetIdentifier(src))
     ShowNotification(src, _L("mgmt_stock_withdrawn", qty, GetItemLabel(item)))
     return { ok = true, stock = GetStockCount(id, item), held = Inventory.GetItemCount(src, item) or 0 }
 end)
@@ -365,7 +365,7 @@ lib.callback.register("pickle_restaurants:management:deposit", function(src, d)
     if GetMoney(src, "money") < amount then return { ok = false, error = _L("not_enough_cash") } end
     RemoveMoney(src, amount, "money")
     AdjustBalance(id, amount)
-    AddLedger(id, "deposit", amount, "Deposit", GetIdentifier(src))
+    AddLedger(id, "deposit", amount, _L("ledger_deposit"), GetIdentifier(src))
     return { ok = true, balance = GetRestaurant(id).balance }
 end)
 
@@ -377,7 +377,7 @@ lib.callback.register("pickle_restaurants:management:withdraw", function(src, d)
     if GetRestaurant(id).balance < amount then return { ok = false, error = _L("mgmt_insufficient_funds") } end
     AdjustBalance(id, -amount)
     AddMoney(src, amount, "money")
-    AddLedger(id, "withdraw", -amount, "Withdrawal", GetIdentifier(src))
+    AddLedger(id, "withdraw", -amount, _L("ledger_withdrawal"), GetIdentifier(src))
     return { ok = true, balance = GetRestaurant(id).balance }
 end)
 
@@ -416,7 +416,7 @@ function SetRestaurantBrand(id, key, url, crop)
     url = tostring(url or ""):gsub("^%s+", ""):gsub("%s+$", "")
     r.metadata = r.metadata or {}
     if key == "phone" then
-        -- The storefront image the lb-phone app shows for this restaurant (feed card +
+        -- The storefront image the companion phone app shows for this restaurant (feed card +
         -- menu header). Separate from the packaging default so the phone can differ.
         r.metadata.phone_image = (url ~= "") and url or nil
     elseif key ~= nil and key ~= "" then

@@ -131,7 +131,7 @@ function List({ restaurants, act, onOpen }: { restaurants: any[]; act: (e: strin
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex shrink-0 items-end gap-2 rounded-lg border border-border p-3">
-        <Field label={_L("admin.display_label")} className="flex-1"><Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Burger Shot" /></Field>
+        <Field label={_L("admin.display_label")} className="flex-1"><Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={_L("admin.display_label_hint")} /></Field>
         <Button onClick={async () => { const name = restSlug(label); if (!name) return; await act("admin:create", { name, label: label.trim() }); setLabel(""); }}>
           <Plus className="h-4 w-4" /> {_L("admin.create")}
         </Button>

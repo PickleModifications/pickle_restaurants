@@ -391,7 +391,7 @@ function StatusPanel({ c, meta }: { c: ChipItem; meta?: ItemMetaMap }) {
           <ItemThumb src={c.giveImage} alt={c.giveLabel || ""} className="h-9 w-9 object-contain" />
         </div>
         <div className="min-w-0">
-          <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Collect now</div>
+          <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{_L("cook.collect_now")}</div>
           <div className="truncate text-sm font-semibold">{c.giveLabel || "—"}</div>
         </div>
       </div>
@@ -1308,7 +1308,7 @@ export default function Cooking({ data }: { data: any }) {
           setDragging(true);
           setWorldDragging(true);
           dragSwitchTab("cooked");
-          setDragHint("Drop on the bar to box it up — or set the box down elsewhere");
+          setDragHint(_L("cook.draghint_box_meal"));
           fetchNui("cooking:trayGrab", { tid: pb.tid });
         }
       }
@@ -1322,7 +1322,7 @@ export default function Cooking({ data }: { data: any }) {
           w.dragging = true;
           setDragging(true);       // hide the tooltip while moving the prop
           setWorldDragging(true);  // darken the hotbar as the drop zone
-          setDragHint("Drop on the bar to collect it — or set it back down");
+          setDragHint(_L("cook.draghint_collect_down"));
           dragSwitchTab("cooked"); // dragging a cooked prop -> show where it'll land
           fetchNui("cooking:beginMove", { uid: w.uid });
         }
@@ -1620,7 +1620,7 @@ export default function Cooking({ data }: { data: any }) {
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-black/25">
             <div className="flex items-center gap-2 rounded-2xl border-2 border-dashed border-primary/60 bg-primary/5 px-10 py-4">
               <UtensilsCrossed className="h-6 w-6 text-primary/80" />
-              <span className="text-sm font-semibold text-primary">{dragHint || "Drop here to collect it"}</span>
+              <span className="text-sm font-semibold text-primary">{dragHint || _L("cook.drop_here_collect")}</span>
             </div>
           </div>
         )}
@@ -1814,7 +1814,7 @@ export default function Cooking({ data }: { data: any }) {
                     <span className="text-[10px] text-muted-foreground">{_L("cook.build_a_meal")}</span>
                   )}
                   {ing.kind === "pizzabox" && (
-                    <span className="text-[10px] text-muted-foreground">Boxes a pizza</span>
+                    <span className="text-[10px] text-muted-foreground">{_L("cook.boxes_a_pizza")}</span>
                   )}
                   {ing.kind === "bag" && (
                     <span className="text-[10px] text-muted-foreground">{_L("cook.craft_in_bag")}</span>
@@ -1907,7 +1907,7 @@ export default function Cooking({ data }: { data: any }) {
                 />
                 <span className="w-full truncate px-1.5 leading-tight">{ing.label}</span>
                 <span className="text-[10px] text-muted-foreground">
-                  {ing.kind === "tray" ? "Build a meal" : ing.kind === "baketray" ? "Rub in the mix" : ing.kind === "bag" ? _L("cook.craft_in_bag") : "Boxes a pizza"}
+                  {ing.kind === "tray" ? _L("cook.build_a_meal") : ing.kind === "baketray" ? _L("cook.rub_in_mix") : ing.kind === "bag" ? _L("cook.craft_in_bag") : _L("cook.boxes_a_pizza")}
                 </span>
               </div>
             ))}

@@ -8,7 +8,7 @@ local function buildAdminData()
     local data = {
         restaurants = {},
         theme       = GetSetting("app_theme", nil), -- App-level: skins /restaurants itself
-        phoneTheme  = GetSetting("phone_theme", nil), -- ONE global skin for the lb-phone app
+        phoneTheme  = GetSetting("phone_theme", nil), -- ONE global skin for the companion phone app
         settings    = SettingsCache,
         -- The three authored creation kinds, each flagged valid/missing + per-entry
         -- annotations (defaultPrice, tap, duplicate_input, *_installed). The NUI
@@ -122,7 +122,7 @@ lib.callback.register("pickle_restaurants:admin:delete", function(src, d)
     local refundedCount = 0
     for _, o in pairs(OrderCache[id] or {}) do
         if o.status == "open" then
-            local ok = pcall(RefundOrder, id, o, "restaurant closed")
+            local ok = pcall(RefundOrder, id, o, _L("refund_reason_closed"))
             if ok then refundedCount = refundedCount + 1
             else
                 print(("[pickle_restaurants] REFUND FAILED deleting restaurant %s, ticket #%s (order %s)")
@@ -228,7 +228,7 @@ lib.callback.register("pickle_restaurants:admin:setAppTheme", function(src, d)
     return { ok = true }
 end)
 
--- Phone-app theme: ONE global skin for the lb-phone companion app, stored as the
+-- Phone-app theme: ONE global skin for the companion phone app, stored as the
 -- `phone_theme` setting (not per-restaurant — the phone keeps a single consistent
 -- look). Pushed live to every open phone so the change previews without reopening.
 lib.callback.register("pickle_restaurants:admin:setPhoneTheme", function(src, d)

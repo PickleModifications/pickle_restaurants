@@ -27,7 +27,7 @@ end
 
 function GetPlayerCharacterName(source)
     local xPlayer = ESX.GetPlayerFromId(source)
-    if not xPlayer then return "Unknown Name" end
+    if not xPlayer then return _L("name_unknown") end
     return xPlayer.getName()
 end
 
@@ -129,7 +129,7 @@ end
 
 function GetPlayerJob(source)
     local xPlayer = ESX.GetPlayerFromId(tonumber(source))
-    if not xPlayer then return "Unknown Job", "Unknown Grade" end
+    if not xPlayer then return _L("job_unknown"), _L("job_grade_unknown") end
     return {label = xPlayer.job.label, rank_label = xPlayer.job.grade_label}
 end
 

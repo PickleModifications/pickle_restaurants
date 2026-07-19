@@ -1,56 +1,40 @@
 -- ─────────────────────────────────────────────────────────────────────────────
--- modules/phone (client) — lb-phone app host glue + world-side features
+-- modules/phone (client) — companion app host glue + world-side features
 --
 -- Three jobs:
---   1. Register the "Pickle Food" custom app with lb-phone (points its iframe at
---      our built nui/phone.html) and re-register on lb-phone restart.
+--   1. Register the "Pickle Eats" custom app with whichever phone the server runs
+--      (points its iframe at our built nui/phone.html) and re-register when that
+--      phone restarts.
 --   2. Relay every phone NUI action (POSTed by the iframe to this resource) to the
---      matching server callback, and PUSH server events back into the iframe via
---      lb-phone's SendCustomAppMessage (a web iframe can't RegisterNetEvent).
+--      matching server callback, and PUSH server events back into the iframe via the
+--      phone's app-message export (a web iframe can't RegisterNetEvent).
 --   3. The world side the web app can't do: the live driver GPS blip + the driver's
 --      position ping loop, the private-booth teleport, and kitchen backup alerts.
+--
+-- NOTHING here talks to a specific phone resource — that all lives in bridge/phone/*,
+-- which defines the PhoneApp table (Register / Send / Notify / Number). A server with
+-- no supported phone installed loads no bridge at all, so PhoneApp is nil and every
+-- call site below no-ops.
 -- ─────────────────────────────────────────────────────────────────────────────
 
-local APP_ID = "pickle_food"
-local RESOURCE = GetCurrentResourceName()
+-- Registering the app is the BRIDGE's job, not this module's — the phones disagree
+-- about which side it even happens on (lb-phone: client, Quasar: server), so there's
+-- nothing phone-agnostic left to do here.
 
--- ─── register with lb-phone ──────────────────────────────────────────────────
-local function AddApp()
-    if GetResourceState("lb-phone") ~= "started" then return end
-    local ok, err = exports["lb-phone"]:AddCustomApp({
-        identifier  = APP_ID,
-        name        = "Pickle Food",
-        description  = "Order food, track delivery, run your restaurant.",
-        developer    = "Pickle Modifications",
-        defaultApp   = true,          -- ships pre-installed
-        size         = 48000,
-        ui           = RESOURCE .. "/nui/phone.html",
-        icon         = "https://cfx-nui-" .. RESOURCE .. "/nui/phone-icon.svg",
-        fixBlur      = true,          -- our CSS uses rem/em (Tailwind)
-    })
-    if not ok then print(("[pickle_restaurants] AddCustomApp failed: %s"):format(tostring(err))) end
-end
-
-CreateThread(function()
-    while GetResourceState("lb-phone") ~= "started" do Wait(500) end
-    Wait(1000) -- let the AddCustomApp export come up
-    AddApp()
+-- Whether live server→app pushes work on the phone in play. Quasar publishes no
+-- Lua→iframe emitter, so its bridge may answer false and the app polls instead.
+RegisterNUICallback("phone:pushSupported", function(_, cb)
+    cb({ supported = not (PhoneApp and PhoneApp.PushSupported) or PhoneApp.PushSupported() })
 end)
 
-AddEventHandler("onResourceStart", function(res)
-    if res == "lb-phone" then Wait(1000); AddApp() end
-end)
-
--- Push a message into the app iframe. lb-phone forwards the WHOLE table as a
--- window `message`, so we flatten `action` into the payload — useNuiEvent matches
--- on `.action` and the React handlers read the sibling fields (d.rid, d.orders …).
+-- Push a message into the app iframe. Phones forward the WHOLE table into the page as
+-- a window `message`, so we flatten `action` into the payload — useNuiEvent matches on
+-- `.action` and the React handlers read the sibling fields (d.rid, d.orders …).
 local function ToApp(action, payload)
-    if GetResourceState("lb-phone") ~= "started" then return end
+    if not PhoneApp then return end
     payload = payload or {}
     payload.action = action
-    pcall(function()
-        exports["lb-phone"]:SendCustomAppMessage(APP_ID, payload)
-    end)
+    PhoneApp.Send(payload)
 end
 
 -- ─── NUI relays ───────────────────────────────────────────────────────────────
@@ -89,9 +73,9 @@ RegisterNUICallback("phone:placeOrder", function(d, cb)
     d = d or {}
     local c = GetEntityCoords(PlayerPedId())
     d.coords = { x = c.x, y = c.y, z = c.z }
-    if GetResourceState("lb-phone") == "started" then
-        d.phone = exports["lb-phone"]:GetEquippedPhoneNumber()
-    end
+    -- nil on phones that only expose the number server-side (Quasar) — the server
+    -- falls back to PhoneAppNumber(src) in that case.
+    if PhoneApp then d.phone = PhoneApp.Number() end
     cb(lib.callback.await("pickle_restaurants:phone:placeOrder", false, d) or {})
 end)
 
@@ -111,6 +95,11 @@ end)
 RegisterNUICallback("phone:startDelivery", relay("pickle_restaurants:phone:startDelivery"))
 RegisterNUICallback("phone:cancelDelivery", relay("pickle_restaurants:phone:cancelDelivery"))
 
+-- Delivery chat (both sides use the same two callbacks; the server decides which side
+-- you are and rejects anyone who is neither).
+RegisterNUICallback("phone:chatHistory", relay("pickle_restaurants:phone:chatHistory"))
+RegisterNUICallback("phone:chatSend",    relay("pickle_restaurants:phone:chatSend"))
+
 -- Set Waypoint. NOT a plain relay: the server only hands back the coordinates (it
 -- can't set a waypoint on our behalf), so this one resolves the callback and then
 -- does the client-side work itself.
@@ -118,7 +107,7 @@ RegisterNUICallback("phone:setWaypoint", function(data, cb)
     local res = lib.callback.await("pickle_restaurants:phone:deliveryTarget", false, data)
     if not res or not res.ok then cb(res or { ok = false }); return end
     SetNewWaypoint(res.x + 0.0, res.y + 0.0)
-    ShowNotification(("Waypoint set to the drop-off for ticket #%s."):format(tostring(res.ticket or "?")))
+    ShowNotification(_L("delivery_waypoint_set", tostring(res.ticket or "?")))
     cb({ ok = true })
 end)
 
@@ -168,11 +157,18 @@ RegisterNetEvent("pickle_restaurants:sales:orders", function(rid, orders)
     if ClockedRid == rid then
         local n = #orders
         if n >= BACKUP_THRESHOLD and (LastQueue or 0) < BACKUP_THRESHOLD then
-            ShowNotification(("Tickets backing up — %d orders in the queue."):format(n))
+            ShowNotification(_L("phone_queue_backup", n))
             ToApp("backup", { rid = rid, count = n })
         end
         LastQueue = n
     end
+end)
+
+-- ─── delivery chat push ──────────────────────────────────────────────────────
+-- One message, to both parties. The app appends it to whatever thread is open (and
+-- flags it unread if that ticket's chat isn't on screen).
+RegisterNetEvent("pickle_restaurants:phone:chat", function(d)
+    ToApp("chat", d)
 end)
 
 -- ─── theme push ──────────────────────────────────────────────────────────────
@@ -185,9 +181,7 @@ end)
 -- ─── promotions push ─────────────────────────────────────────────────────────
 RegisterNetEvent("pickle_restaurants:phone:pushPromo", function(p)
     ToApp("promo", p)
-    if GetResourceState("lb-phone") == "started" then
-        pcall(function() exports["lb-phone"]:SendNotification({ app = APP_ID, title = p.title, content = p.content }) end)
-    end
+    if PhoneApp then PhoneApp.Notify(p.title, p.content) end
 end)
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -234,7 +228,7 @@ RegisterNetEvent("pickle_restaurants:phone:beginDriving", function(d)
     local hasTarget = target ~= nil and target.x ~= nil
     if hasTarget then
         SetNewWaypoint(target.x + 0.0, target.y + 0.0)
-        ShowNotification("Delivery accepted. Route set to the customer.")
+        ShowNotification(_L("delivery_accepted"))
         ddbg("beginDriving order %s: waypoint set (%.1f, %.1f)", tostring(d.orderId), target.x + 0.0, target.y + 0.0)
     else
         ddbg("beginDriving order %s: TARGET IS NIL — no waypoint set (driver marker still pings)", tostring(d.orderId))
@@ -266,7 +260,7 @@ RegisterNetEvent("pickle_restaurants:phone:beginDriving", function(d)
                         ddbg("order %s: arrival check ARMED (%.0fm from drop-off)", tostring(d.orderId), away)
                     end
                 elseif away < 12.0 then
-                    ShowNotification("You've reached the customer. Complete the order at the register / hand-off.")
+                    ShowNotification(_L("delivery_arrived"))
                     ddbg("order %s: arrived — telemetry loop ending", tostring(d.orderId))
                     break
                 end
@@ -279,7 +273,7 @@ end)
 -- Customer side: a driver was assigned — start a blip we move on each ping.
 local deliveryBlip = nil
 RegisterNetEvent("pickle_restaurants:phone:driverAssigned", function(d)
-    ShowNotification("Your order is out for delivery. Track the driver on your map.")
+    ShowNotification(_L("delivery_out_for_delivery"))
     ToApp("delivery", { orderId = d.orderId, state = "driving" })
 end)
 RegisterNetEvent("pickle_restaurants:phone:driverCoords", function(d)
@@ -292,7 +286,7 @@ RegisterNetEvent("pickle_restaurants:phone:driverCoords", function(d)
         SetBlipScale(deliveryBlip, 0.9)
         SetBlipAsShortRange(deliveryBlip, false)
         BeginTextCommandSetBlipName("STRING")
-        AddTextComponentSubstringPlayerName("Your delivery")
+        AddTextComponentSubstringPlayerName(_L("delivery_blip"))
         EndTextCommandSetBlipName(deliveryBlip)
     else
         SetBlipCoords(deliveryBlip, d.x + 0.0, d.y + 0.0, 0.0)
@@ -308,7 +302,7 @@ end)
 RegisterNetEvent("pickle_restaurants:phone:driverReleased", function(d)
     if deliveryBlip and DoesBlipExist(deliveryBlip) then RemoveBlip(deliveryBlip) end
     deliveryBlip = nil
-    ShowNotification("Your delivery driver dropped the run. The restaurant is finding another.")
+    ShowNotification(_L("delivery_driver_dropped"))
     ToApp("driverGone", { orderId = d and d.orderId })
 end)
 
@@ -317,7 +311,7 @@ RegisterNetEvent("pickle_restaurants:phone:endDriving", function()
     DriveGen = DriveGen + 1   -- supersedes the running loop; it falls out on its next tick
     ClearGpsMultiRoute()
     SetWaypointOff()
-    ShowNotification("Delivery cancelled. The run is back on the board.")
+    ShowNotification(_L("delivery_cancelled_driver"))
 end)
 
 -- Drop the blip when the order is done (server pushes an updated open list without it,
@@ -345,7 +339,7 @@ RegisterNUICallback("phone:enterBooth", function(d, cb)
     SetEntityCoords(ped, BOOTH.x, BOOTH.y, BOOTH.z, false, false, false, false)
     SetEntityHeading(ped, BOOTH.heading)
     Wait(300); DoScreenFadeIn(400)
-    ShowNotification("Welcome to your private table. Leave from the app when you're done.")
+    ShowNotification(_L("reserve_booth_welcome"))
     cb(res)
 end)
 

@@ -24,8 +24,10 @@ import {
   MapPin,
   CalendarClock,
 } from "lucide-react";
-import { fetchNui, useNuiEvent } from "../../lib/nui";
+import { fetchNui, useNuiEvent, usePushFallback } from "../../lib/nui";
+import { ChatSheet, ChatButton, useChatUnreadSet } from "../DeliveryChat";
 import { cn } from "../../lib/utils";
+import { _L } from "../../lib/locale";
 import { usePhone, money } from "../store";
 import { Screen, TopBar, Empty, Spinner, ItemImg, Sheet } from "../ui";
 
@@ -42,88 +44,133 @@ function useEmployment(paramRid?: number) {
 function fmtDur(seconds: number) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  return h > 0 ? _L("phone.work.dur_hm", h, m) : _L("phone.work.dur_m", m);
 }
 
-const TYPE_LABEL: Record<string, string> = { delivery: "Delivery", pickup: "Pickup", dine_in: "Dine-in" };
+// Resolved per render, never at module scope — the locale table arrives after import.
+const typeLabel = (t?: string) =>
+  t === "delivery"
+    ? _L("phone.order_type.delivery")
+    : t === "dine_in"
+    ? _L("phone.order_type.dine_in")
+    : _L("phone.order_type.pickup");
 
 function modText(mods?: any[]) {
   if (!mods || mods.length === 0) return "";
-  return mods.map((m: any) => (m.removed ? `no ${m.label}` : `+${m.label}`)).join(", ");
+  return mods
+    .map((m: any) => (m.removed ? _L("phone.work.mod_no", m.label) : _L("phone.work.mod_add", m.label)))
+    .join(", ");
 }
 
-// The delivery claim button, shared by the queue card and the detail sheet.
-// A delivery has exactly ONE driver: the first employee to accept it holds it until
-// they cancel, serve it, or leave the server. So this is a three-state control —
-// free (accept), held by ME (cancel), held by SOMEONE ELSE (inert, just says who).
-// The server enforces all of it by identifier; this only decides what to show.
-function DeliveryAction({
+// Does OUR phone hold the claim on this delivery? A delivery has exactly ONE driver:
+// the first employee to accept it holds it until they cancel, serve it, or leave the
+// server. The server enforces all of it by identifier; this only decides what to show.
+const isMyDelivery = (t: any, me?: number) => !!(t.driver && me != null && t.driver.server === me);
+
+// The ticket's PRIMARY actions, as full-width stacked rows — at most a delivery row
+// ("Accept Delivery" → "Set Waypoint", or an inert "With <driver>") above "Serve
+// Order". Destructive actions are deliberately NOT here: cancelling a delivery or
+// voiding a paid order lives in the detail sheet (the info button), so a mis-tap on a
+// crowded queue card can never refund an order out from under the kitchen.
+function TicketActions({
   t,
   me,
   ready,
   compact,
+  onServe,
   onAccept,
-  onCancelDelivery,
   onWaypoint,
+  onChat,
+  chatUnread,
 }: {
   t: any;
   me?: number;
   ready?: boolean;
   compact?: boolean;
+  onServe: () => void;
   onAccept: () => void;
-  onCancelDelivery: () => void;
   onWaypoint: () => void;
+  onChat?: () => void;
+  chatUnread?: boolean;
 }) {
-  if (t.orderType !== "delivery") return null;
-  const pad = compact ? "py-2" : "py-2.5";
-  const mine = t.driver && me != null && t.driver.server === me;
+  const row = cn(
+    "flex w-full items-center justify-center gap-1.5 rounded-full px-3 text-sm font-bold",
+    compact ? "py-2.5" : "py-3"
+  );
+  const mine = isMyDelivery(t, me);
+  const claimedByOther = t.orderType === "delivery" && t.driver && !mine;
+  // A delivery is served by ITS driver and nobody else — you have to hold the run to
+  // hand it over. So Serve isn't merely disabled for a ticket that isn't yours, it's
+  // absent: the only thing an unclaimed delivery offers is Accept. (The server rejects
+  // it either way; this just stops the queue advertising an action that would fail.)
+  const canServe = t.orderType !== "delivery" || mine;
 
-  if (t.driver && !mine) {
-    return (
-      <div
-        className={cn(
-          "flex flex-1 items-center justify-center gap-1 rounded-full bg-muted px-3 text-sm font-bold text-muted-foreground",
-          pad
-        )}
-      >
-        <Truck className="h-4 w-4" /> With {t.driver.name || "a driver"}
-      </div>
-    );
-  }
-  if (mine) {
-    // A waypoint is a single global slot anything can clear, so the driver needs it
-    // re-settable for the whole run — not just at the moment they accepted.
-    return (
-      <>
+  return (
+    <div className={cn("space-y-2", compact ? "mt-2.5" : "")}>
+      {t.orderType === "delivery" &&
+        (claimedByOther ? (
+          <div className={cn(row, "bg-muted text-muted-foreground")}>
+            <Truck className="h-4 w-4" />{" "}
+            {_L("phone.work.with_driver", t.driver.name || _L("phone.work.a_driver"))}
+          </div>
+        ) : mine ? (
+          // A waypoint is a single global slot anything can clear, so the driver needs
+          // it re-settable for the whole run — not just at the moment they accepted.
+          <button onClick={onWaypoint} className={cn(row, "bg-brand text-brand-ink")}>
+            <MapPin className="h-4 w-4" /> {_L("phone.work.set_waypoint")}
+          </button>
+        ) : ready ? (
+          <button onClick={onAccept} className={cn(row, "bg-muted")}>
+            <Truck className="h-4 w-4" /> {_L("phone.work.accept_delivery")}
+          </button>
+        ) : null)}
+      {canServe && (
         <button
-          onClick={onWaypoint}
-          className={cn(
-            "flex flex-1 items-center justify-center gap-1 rounded-full bg-brand px-3 text-sm font-bold text-brand-ink",
-            pad
-          )}
+          disabled={!ready}
+          onClick={onServe}
+          className={cn(row, ready ? "bg-ok text-white" : "bg-muted text-muted-foreground")}
         >
-          <MapPin className="h-4 w-4" /> Set Waypoint
+          <Check className="h-4 w-4" /> {ready ? _L("phone.work.serve_order") : _L("phone.work.not_ready")}
         </button>
-        <button
-          onClick={onCancelDelivery}
-          aria-label="Cancel delivery"
-          className={cn(
-            "grid shrink-0 place-items-center rounded-full bg-destructive/15 px-3 text-destructive",
-            compact ? "h-9 w-9" : "h-11 w-11"
-          )}
-        >
-          <X className="h-4 w-4" />
-        </button>
-      </>
-    );
-  }
-  if (!ready) return null;
+      )}
+      {/* ALWAYS the last row — a secondary action shouldn't sit between the two things
+          the driver is actually here to do. Only the driver holding the run can talk to
+          the customer; the server gates it the same way, so this never offers a chat
+          that would be rejected. Never on an NPC ticket: there's nobody on the far end,
+          so the thread would just sit empty. */}
+      {mine && !t.npc && onChat && (
+        <ChatButton unread={chatUnread} onClick={onChat} className={row} label={_L("phone.work.message_customer")} />
+      )}
+    </div>
+  );
+}
+
+// The destructive half of the ticket, sheet-only. The two cancels are NOT the same
+// action and the copy has to say so: dropping a delivery just releases the claim so
+// another driver can pick the run up, while cancelling the order voids it and refunds
+// the customer. Each carries its consequence as a subtitle rather than hiding behind a
+// confirm step — the sheet is already a deliberate second tap to reach.
+function DangerRow({
+  label,
+  hint,
+  icon: Icon,
+  onClick,
+}: {
+  label: string;
+  hint: string;
+  icon: any;
+  onClick: () => void;
+}) {
   return (
     <button
-      onClick={onAccept}
-      className={cn("flex flex-1 items-center justify-center gap-1 rounded-full bg-muted px-3 text-sm font-bold", pad)}
+      onClick={onClick}
+      className="flex w-full items-center gap-3 rounded-xl border border-destructive/25 bg-destructive/5 px-3 py-2.5 text-left active:scale-[0.99]"
     >
-      <Truck className="h-4 w-4" /> Accept Delivery
+      <Icon className="h-4 w-4 shrink-0 text-destructive" />
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-bold text-destructive">{label}</span>
+        <span className="block text-[0.7rem] leading-tight text-muted-foreground">{hint}</span>
+      </span>
     </button>
   );
 }
@@ -140,6 +187,8 @@ function TicketSheet({
   onCancelDelivery,
   onWaypoint,
   onCancel,
+  onChat,
+  chatUnread,
   me,
 }: {
   t: any;
@@ -150,11 +199,13 @@ function TicketSheet({
   onCancelDelivery: () => void;
   onWaypoint: () => void;
   onCancel: () => void;
+  onChat?: () => void;
+  chatUnread?: boolean;
   me?: number;
 }) {
   const ready = t.fulfill?.ready;
   const Icon = t.npc ? Bot : TYPE_ICON[t.orderType] || ShoppingBag;
-  const typeLabel = t.npc ? "Walk-in" : TYPE_LABEL[t.orderType] || "Pickup";
+  const label = t.npc ? _L("phone.work.walk_in") : typeLabel(t.orderType);
   return (
     <Sheet onClose={onClose}>
       <>
@@ -165,9 +216,11 @@ function TicketSheet({
             <Icon className="h-5 w-5" />
           </span>
           <div className="min-w-0 flex-1">
-            <div className="font-display text-lg font-extrabold leading-tight">Ticket #{t.ticket}</div>
+            <div className="font-display text-lg font-extrabold leading-tight">
+              {_L("phone.work.ticket_no", t.ticket)}
+            </div>
             <div className="text-[0.72rem] text-muted-foreground">
-              {typeLabel} · {t.customer || "Guest"}
+              {label} · {t.customer || _L("phone.guest")}
             </div>
           </div>
           <span className="font-mono text-base font-bold">{money(currency, t.total)}</span>
@@ -185,7 +238,7 @@ function TicketSheet({
             {t.scheduled && (
               <div className="flex items-center gap-2">
                 <CalendarClock className="h-3.5 w-3.5 shrink-0 text-brand" />
-                <span className="text-foreground">Scheduled · {t.scheduled}</span>
+                <span className="text-foreground">{_L("phone.work.scheduled", t.scheduled)}</span>
               </div>
             )}
           </div>
@@ -214,34 +267,39 @@ function TicketSheet({
 
           {!ready && t.fulfill?.missing && (
             <div className="mt-3 rounded-lg bg-warn/15 px-3 py-2 text-[0.74rem] text-warn">
-              Still cooking: {t.fulfill.missing.join(", ")}
+              {_L("phone.work.still_cooking", t.fulfill.missing.join(", "))}
             </div>
           )}
         </div>
 
-        {/* actions */}
-        <div className="flex gap-2 border-t border-border p-4" style={{ paddingBottom: "calc(1rem + var(--pf-bottom))" }}>
-          <DeliveryAction
+        {/* actions — primaries stacked, then the destructive options this sheet owns */}
+        <div className="space-y-3 border-t border-border p-4" style={{ paddingBottom: "calc(1rem + var(--pf-bottom))" }}>
+          <TicketActions
             t={t}
             me={me}
             ready={ready}
+            onServe={onServe}
             onAccept={onAccept}
-            onCancelDelivery={onCancelDelivery}
             onWaypoint={onWaypoint}
+            onChat={onChat}
+            chatUnread={chatUnread}
           />
-          <button
-            disabled={!ready}
-            onClick={onServe}
-            className={cn(
-              "flex flex-1 items-center justify-center gap-1 rounded-full px-3 py-2.5 text-sm font-bold",
-              ready ? "bg-ok text-white" : "bg-muted text-muted-foreground"
+          <div className="space-y-2">
+            {isMyDelivery(t, me) && (
+              <DangerRow
+                label={_L("phone.work.cancel_delivery")}
+                hint={_L("phone.work.cancel_delivery_hint")}
+                icon={Truck}
+                onClick={onCancelDelivery}
+              />
             )}
-          >
-            <Check className="h-4 w-4" /> {ready ? "Serve" : "Not ready"}
-          </button>
-          <button onClick={onCancel} className="grid h-11 w-11 place-items-center rounded-full bg-muted">
-            <X className="h-4 w-4" />
-          </button>
+            <DangerRow
+              label={_L("phone.work.cancel_order")}
+              hint={_L("phone.work.cancel_order_hint")}
+              icon={X}
+              onClick={onCancel}
+            />
+          </div>
         </div>
       </>
     </Sheet>
@@ -275,6 +333,10 @@ export function Kitchen({ params }: { params?: any }) {
   const [tickets, setTickets] = useState<any[]>([]);
   const [shift, setShift] = useState<any>(null);
   const [detailId, setDetailId] = useState<number | null>(null);
+  // Delivery chat: which ticket's thread is open, plus per-ticket unread dots for the
+  // rest of the queue (a driver can hold one run while another ticket messages them).
+  const [chatId, setChatId] = useState<number | null>(null);
+  const chatUnread = useChatUnreadSet(chatId);
   // Our own server id, carried by BOTH the ticket seed and the live broadcast — it's how
   // a claimed delivery is recognised as OURS (see DeliveryAction).
   const [me, setMe] = useState<number | undefined>(undefined);
@@ -302,52 +364,57 @@ export function Kitchen({ params }: { params?: any }) {
     if (typeof d.me === "number") setMe(d.me);
   });
 
+  // The kitchen queue is the one screen that's useless if it goes stale, so on a phone
+  // that can't push (Quasar) it re-fetches on a timer instead. No-op on lb-phone.
+  usePushFallback(loadTickets, 4000);
+
   const clock = async () => {
     const cb = shift?.clockedIn ? "phone:clockOut" : "phone:clockIn";
     const res = await fetchNui(cb, { id: rid });
     if (res?.ok) {
-      toast(shift?.clockedIn ? "Clocked out" : "Clocked in");
+      toast(shift?.clockedIn ? _L("phone.work.clocked_out") : _L("phone.work.clocked_in"));
       loadShift();
-    } else toast(res?.error || "Failed", "err");
+    } else toast(res?.error || _L("phone.work.failed"), "err");
   };
 
   const complete = async (t: any) => {
     const sig = t.fulfill?.mealOptions?.[0]?.sig;
     const res = await fetchNui("phone:completeOrder", { id: rid, orderId: t.orderId, mealSig: sig });
     if (res?.ok) {
-      toast(`Ticket #${t.ticket} served`);
+      toast(_L("phone.work.ticket_served", t.ticket));
       setDetailId(null);
       loadTickets();
-    } else toast(res?.error || "Can't complete", "err");
+    } else toast(res?.error || _L("phone.work.complete_failed"), "err");
   };
   const cancel = async (t: any) => {
     const res = await fetchNui("phone:cancelOrder", { id: rid, orderId: t.orderId });
     if (res?.ok) {
       setDetailId(null);
       loadTickets();
-    } else toast(res?.error || "Can't cancel", "err");
+    } else toast(res?.error || _L("phone.work.cancel_failed"), "err");
   };
   const acceptDelivery = async (t: any) => {
     const res = await fetchNui("phone:startDelivery", { id: rid, orderId: t.orderId });
-    if (res?.ok) toast("Delivery accepted — route set");
-    else toast(res?.error || "Failed", "err");
+    if (res?.ok) toast(_L("phone.work.delivery_accepted"));
+    else toast(res?.error || _L("phone.work.failed"), "err");
   };
   const setWaypoint = async (t: any) => {
     const res = await fetchNui("phone:setWaypoint", { id: rid, orderId: t.orderId });
-    if (!res?.ok) toast(res?.error || "No delivery location saved", "err");
+    if (!res?.ok) toast(res?.error || _L("phone.work.no_location"), "err");
   };
   const cancelDelivery = async (t: any) => {
     const res = await fetchNui("phone:cancelDelivery", { id: rid, orderId: t.orderId });
-    if (res?.ok) toast("Delivery cancelled");
-    else toast(res?.error || "Failed", "err");
+    if (res?.ok) toast(_L("phone.work.delivery_cancelled"));
+    else toast(res?.error || _L("phone.work.failed"), "err");
   };
 
-  if (!rid) return <Empty title="You're not on any team" hint="Get hired at a restaurant to see the kitchen." />;
+  if (!rid)
+    return <Empty title={_L("phone.work.no_team")} hint={_L("phone.work.no_team_hint")} />;
 
   return (
     <Screen className="pb-20">
       <TopBar
-        title="Kitchen"
+        title={_L("phone.kitchen.title")}
         subtitle={active?.label}
         right={
           <button onClick={() => go("leaderboard", { rid })} className="grid h-8 w-8 place-items-center rounded-full bg-muted">
@@ -367,7 +434,7 @@ export function Kitchen({ params }: { params?: any }) {
           )}
         >
           {shift?.clockedIn ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-          {shift?.clockedIn ? "Clock out" : "Clock in"}
+          {shift?.clockedIn ? _L("phone.work.clock_out") : _L("phone.work.clock_in")}
         </button>
         <button onClick={() => go("staff", { rid })} className="grid place-items-center rounded-2xl bg-muted px-4">
           <Clock className="h-5 w-5" />
@@ -381,11 +448,17 @@ export function Kitchen({ params }: { params?: any }) {
 
       {/* queue */}
       <div className="flex items-center justify-between px-4 pb-2">
-        <h2 className="font-display text-base font-bold">Ticket queue</h2>
-        <span className="text-[0.72rem] text-muted-foreground">{tickets.length} open</span>
+        <h2 className="font-display text-base font-bold">{_L("phone.kitchen.queue")}</h2>
+        <span className="text-[0.72rem] text-muted-foreground">
+          {_L("phone.kitchen.open_count", tickets.length)}
+        </span>
       </div>
       {tickets.length === 0 ? (
-        <Empty icon={<Check className="h-8 w-8" />} title="All caught up" hint="No open tickets right now." />
+        <Empty
+          icon={<Check className="h-8 w-8" />}
+          title={_L("phone.kitchen.empty")}
+          hint={_L("phone.kitchen.empty_hint")}
+        />
       ) : (
         <div className="space-y-2 px-4">
           {tickets.map((t) => {
@@ -402,17 +475,20 @@ export function Kitchen({ params }: { params?: any }) {
                   </span>
                   <div className="flex-1">
                     <div className="font-display font-bold leading-tight">
-                      #{t.ticket} <span className="text-sm font-normal text-muted-foreground">{t.customer || "Guest"}</span>
+                      #{t.ticket}{" "}
+                      <span className="text-sm font-normal text-muted-foreground">
+                        {t.customer || _L("phone.guest")}
+                      </span>
                     </div>
                     <div className="text-[0.66rem] uppercase tracking-wide text-muted-foreground">
-                      {t.npc ? "Walk-in" : t.orderType || "pickup"}
+                      {t.npc ? _L("phone.work.walk_in") : typeLabel(t.orderType)}
                     </div>
                   </div>
                   <span className="font-mono text-sm">{money(currency, t.total)}</span>
                   <button
                     onClick={() => setDetailId(t.orderId)}
                     className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-muted text-muted-foreground active:scale-90"
-                    aria-label="Ticket details"
+                    aria-label={_L("phone.kitchen.details")}
                   >
                     <Info className="h-4 w-4" />
                   </button>
@@ -445,7 +521,9 @@ export function Kitchen({ params }: { params?: any }) {
                       </span>
                       {l.mods && l.mods.length > 0 && (
                         <span className="truncate pl-2 text-right text-[0.66rem]">
-                          {l.mods.map((m: any) => (m.removed ? `no ${m.label}` : m.label)).join(", ")}
+                          {l.mods
+                            .map((m: any) => (m.removed ? _L("phone.work.mod_no", m.label) : m.label))
+                            .join(", ")}
                         </span>
                       )}
                     </div>
@@ -454,34 +532,21 @@ export function Kitchen({ params }: { params?: any }) {
 
                 {!ready && t.fulfill?.missing && (
                   <div className="mt-2 rounded-lg bg-warn/15 px-2 py-1 text-[0.7rem] text-warn">
-                    Still cooking: {t.fulfill.missing.join(", ")}
+                    {_L("phone.work.still_cooking", t.fulfill.missing.join(", "))}
                   </div>
                 )}
 
-                <div className="mt-2 flex gap-2">
-                  <DeliveryAction
-                    t={t}
-                    me={me}
-                    ready={ready}
-                    compact
-                    onAccept={() => acceptDelivery(t)}
-                    onCancelDelivery={() => cancelDelivery(t)}
-                    onWaypoint={() => setWaypoint(t)}
-                  />
-                  <button
-                    disabled={!ready}
-                    onClick={() => complete(t)}
-                    className={cn(
-                      "flex flex-1 items-center justify-center gap-1 rounded-full px-3 py-2 text-sm font-bold",
-                      ready ? "bg-ok text-white" : "bg-muted text-muted-foreground"
-                    )}
-                  >
-                    <Check className="h-4 w-4" /> {ready ? "Serve" : "Not ready"}
-                  </button>
-                  <button onClick={() => cancel(t)} className="grid h-9 w-9 place-items-center rounded-full bg-muted">
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
+                <TicketActions
+                  t={t}
+                  me={me}
+                  ready={ready}
+                  compact
+                  onServe={() => complete(t)}
+                  onAccept={() => acceptDelivery(t)}
+                  onWaypoint={() => setWaypoint(t)}
+                  onChat={() => setChatId(t.orderId)}
+                  chatUnread={chatUnread.has(t.orderId)}
+                />
               </div>
             );
           })}
@@ -501,7 +566,25 @@ export function Kitchen({ params }: { params?: any }) {
             onCancelDelivery={() => cancelDelivery(t)}
             onWaypoint={() => setWaypoint(t)}
             onCancel={() => cancel(t)}
+            onChat={() => setChatId(t.orderId)}
+            chatUnread={chatUnread.has(t.orderId)}
             me={me}
+          />
+        );
+      })()}
+
+      {chatId != null && (() => {
+        const t = tickets.find((x) => x.orderId === chatId);
+        // Held open by orderId, not by the ticket object: if the run is served or
+        // cancelled while the thread is up, the ticket leaves the queue and the sheet
+        // closes itself rather than rendering against a stale row.
+        if (!t) return null;
+        return (
+          <ChatSheet
+            rid={rid}
+            orderId={chatId}
+            title={_L("phone.kitchen.chat_title", t.ticket, t.customer || _L("phone.guest"))}
+            onClose={() => setChatId(null)}
           />
         );
       })()}
@@ -528,9 +611,9 @@ export function Staff({ params }: { params?: any }) {
     const cb = shift?.clockedIn ? "phone:clockOut" : "phone:clockIn";
     const res = await fetchNui(cb, { id: rid });
     if (res?.ok) {
-      toast(shift?.clockedIn ? "Clocked out" : "Clocked in");
+      toast(shift?.clockedIn ? _L("phone.work.clocked_out") : _L("phone.work.clocked_in"));
       load();
-    } else toast(res?.error || "Failed", "err");
+    } else toast(res?.error || _L("phone.work.failed"), "err");
   };
 
   const elapsed = shift?.since ? Math.max(0, Math.floor(Date.now() / 1000) - shift.since) : 0;
@@ -538,15 +621,18 @@ export function Staff({ params }: { params?: any }) {
 
   return (
     <Screen className="pb-8">
-      <TopBar title="My shift" onBack={back} />
+      <TopBar title={_L("phone.shift.title")} onBack={back} />
       <div className="space-y-4 p-4">
         <div className="rounded-2xl border border-border bg-card p-4 text-center">
-          <div className="text-[0.66rem] font-bold uppercase tracking-wider text-muted-foreground">{shift?.clockedIn ? "On the clock" : "Off duty"}</div>
+          <div className="text-[0.66rem] font-bold uppercase tracking-wider text-muted-foreground">
+            {shift?.clockedIn ? _L("phone.shift.on_clock") : _L("phone.shift.off_duty")}
+          </div>
           <div className="my-1 font-mono text-3xl font-extrabold tabular-nums">
             {shift?.clockedIn ? fmtDur(elapsed) : "—"}
           </div>
           <div className="text-[0.72rem] text-muted-foreground">
-            Tips this shift: <span className="font-mono font-bold text-foreground">{money(currency, shift?.tips || 0)}</span>
+            {_L("phone.shift.tips_label")}{" "}
+            <span className="font-mono font-bold text-foreground">{money(currency, shift?.tips || 0)}</span>
           </div>
           <button
             onClick={clock}
@@ -555,17 +641,15 @@ export function Staff({ params }: { params?: any }) {
               shift?.clockedIn ? "bg-destructive text-destructive-foreground" : "bg-brand text-brand-ink"
             )}
           >
-            {shift?.clockedIn ? "Clock out" : "Clock in"}
+            {shift?.clockedIn ? _L("phone.work.clock_out") : _L("phone.work.clock_in")}
           </button>
         </div>
 
         <section>
-          <h2 className="mb-2 font-display text-base font-bold">Tip pool</h2>
-          <p className="mb-2 text-[0.72rem] text-muted-foreground">
-            Tips are split evenly across everyone on shift. Right now:
-          </p>
+          <h2 className="mb-2 font-display text-base font-bold">{_L("phone.shift.tip_pool")}</h2>
+          <p className="mb-2 text-[0.72rem] text-muted-foreground">{_L("phone.shift.tip_pool_hint")}</p>
           {roster.length === 0 ? (
-            <Empty title="Nobody's clocked in" hint="Clock in to join the pool." />
+            <Empty title={_L("phone.shift.nobody_in")} hint={_L("phone.shift.nobody_in_hint")} />
           ) : (
             <div className="space-y-1.5">
               {roster.map((m, i) => (
@@ -586,11 +670,11 @@ export function Staff({ params }: { params?: any }) {
 
 // ─── MANAGE (owner hub) ───────────────────────────────────────────────────────
 const MANAGE_TABS = [
-  { id: "sales", label: "Sales", icon: TrendingUp, perm: "view_finances" },
-  { id: "menu", label: "Menu", icon: Utensils, perm: "manage_menu" },
-  { id: "staff", label: "Staff", icon: Users, perm: "manage_employees" },
-  { id: "stock", label: "Stock", icon: Boxes, perm: "manage_stock" },
-  { id: "promos", label: "Promos", icon: Megaphone, perm: "manage_menu" },
+  { id: "sales", key: "phone.manage.tab_sales", icon: TrendingUp, perm: "view_finances" },
+  { id: "menu", key: "phone.manage.tab_menu", icon: Utensils, perm: "manage_menu" },
+  { id: "staff", key: "phone.manage.tab_staff", icon: Users, perm: "manage_employees" },
+  { id: "stock", key: "phone.manage.tab_stock", icon: Boxes, perm: "manage_stock" },
+  { id: "promos", key: "phone.manage.tab_promos", icon: Megaphone, perm: "manage_menu" },
 ];
 
 export function Manage({ params }: { params: any }) {
@@ -609,7 +693,7 @@ export function Manage({ params }: { params: any }) {
 
   return (
     <Screen className="pb-8">
-      <TopBar title="Manage" subtitle={emp?.label} onBack={back} />
+      <TopBar title={_L("phone.manage.title")} subtitle={emp?.label} onBack={back} />
       <div className="pf-rail px-4 pb-2">
         {allowed.map((t) => {
           const Icon = t.icon;
@@ -622,7 +706,7 @@ export function Manage({ params }: { params: any }) {
                 tab === t.id ? "border-brand bg-brand text-brand-ink" : "border-border bg-card"
               )}
             >
-              <Icon className="h-4 w-4" /> {t.label}
+              <Icon className="h-4 w-4" /> {_L(t.key)}
             </button>
           );
         })}
@@ -652,78 +736,80 @@ function SalesTab({ rid, onChange }: { rid: number; onChange: () => void }) {
 
   const bank = async (dir: "deposit" | "withdraw") => {
     const raw = await ask({
-      title: dir === "deposit" ? "Deposit funds" : "Withdraw funds",
-      label: `Balance: ${money(currency, a.balance)}`,
+      title: dir === "deposit" ? _L("phone.sales.deposit_title") : _L("phone.sales.withdraw_title"),
+      label: _L("phone.sales.balance_is", money(currency, a.balance)),
       kind: "number",
       prefix: currency,
       placeholder: "0",
-      confirm: dir === "deposit" ? "Deposit" : "Withdraw",
+      confirm: dir === "deposit" ? _L("phone.sales.deposit") : _L("phone.sales.withdraw"),
     });
     const amount = Math.floor(Number(raw));
     if (!amount || amount <= 0) return;
     const res = await fetchNui(`phone:${dir}`, { id: rid, amount });
     if (res?.ok) {
-      toast(dir === "deposit" ? "Deposited" : "Withdrawn");
+      toast(dir === "deposit" ? _L("phone.sales.deposited") : _L("phone.sales.withdrawn"));
       load();
       onChange();
-    } else toast(res?.error || "Failed", "err");
+    } else toast(res?.error || _L("phone.work.failed"), "err");
   };
 
   return (
     <div className="space-y-4">
       <div className="rounded-2xl border border-border bg-card p-4">
-        <div className="text-[0.66rem] font-bold uppercase tracking-wider text-muted-foreground">Balance</div>
+        <div className="text-[0.66rem] font-bold uppercase tracking-wider text-muted-foreground">
+          {_L("phone.sales.balance")}
+        </div>
         <div className="font-mono text-3xl font-extrabold">{money(currency, a.balance)}</div>
         <div className="mt-2 flex gap-2">
           <button onClick={() => bank("deposit")} className="flex-1 rounded-full bg-muted py-2 text-sm font-bold">
-            Deposit
+            {_L("phone.sales.deposit")}
           </button>
           <button onClick={() => bank("withdraw")} className="flex-1 rounded-full bg-brand py-2 text-sm font-bold text-brand-ink">
-            Withdraw
+            {_L("phone.sales.withdraw")}
           </button>
         </div>
       </div>
 
       <div className="grid grid-cols-2 gap-2">
-        <Kpi label="Revenue · 30d" value={money(currency, a.revenue)} />
-        <Kpi label="Tickets" value={String(a.tickets)} />
-        <Kpi label="Avg ticket" value={money(currency, a.avgTicket)} />
-        <Kpi label="Payroll" value={money(currency, a.payroll)} />
+        <Kpi label={_L("phone.sales.kpi_revenue")} value={money(currency, a.revenue)} />
+        <Kpi label={_L("phone.sales.kpi_tickets")} value={String(a.tickets)} />
+        <Kpi label={_L("phone.sales.kpi_avg")} value={money(currency, a.avgTicket)} />
+        <Kpi label={_L("phone.sales.kpi_payroll")} value={money(currency, a.payroll)} />
       </div>
 
       <section>
-        <h3 className="mb-2 font-display font-bold">Peak hours</h3>
+        <h3 className="mb-2 font-display font-bold">{_L("phone.sales.peak_hours")}</h3>
         <div className="flex h-24 items-end gap-0.5 rounded-2xl border border-border bg-card p-2">
           {a.peak.map((p: any) => (
             <div key={p.hour} className="flex flex-1 flex-col items-center gap-1">
               <div
                 className="w-full rounded-sm bg-brand"
                 style={{ height: `${(p.orders / maxPeak) * 100}%`, minHeight: p.orders ? 3 : 0 }}
-                title={`${p.hour}:00 — ${p.orders}`}
+                title={_L("phone.sales.peak_tip", p.hour, p.orders)}
               />
             </div>
           ))}
         </div>
         <div className="mt-1 flex justify-between text-[0.6rem] text-muted-foreground">
-          <span>12a</span>
-          <span>6a</span>
-          <span>12p</span>
-          <span>6p</span>
-          <span>11p</span>
+          <span>{_L("phone.sales.hour_12a")}</span>
+          <span>{_L("phone.sales.hour_6a")}</span>
+          <span>{_L("phone.sales.hour_12p")}</span>
+          <span>{_L("phone.sales.hour_6p")}</span>
+          <span>{_L("phone.sales.hour_11p")}</span>
         </div>
       </section>
 
       <section>
-        <h3 className="mb-2 font-display font-bold">Best sellers</h3>
+        <h3 className="mb-2 font-display font-bold">{_L("phone.sales.best_sellers")}</h3>
         {a.bestSellers.length === 0 ? (
-          <div className="text-[0.72rem] text-muted-foreground">No sales yet.</div>
+          <div className="text-[0.72rem] text-muted-foreground">{_L("phone.sales.no_sales")}</div>
         ) : (
           <div className="space-y-1.5">
             {a.bestSellers.map((s: any, i: number) => (
               <div key={i} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2">
                 <span className="font-mono text-sm text-muted-foreground">{i + 1}</span>
                 <span className="flex-1 text-sm font-medium">{s.label}</span>
-                <span className="font-mono text-sm">{s.qty} sold</span>
+                <span className="font-mono text-sm">{_L("phone.sales.sold", s.qty)}</span>
               </div>
             ))}
           </div>
@@ -750,33 +836,35 @@ function MenuTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () => 
   const toggle = async (it: any) => {
     const res = await fetchNui("phone:saveMenuItem", { id: rid, key: it.key, price: it.price, enabled: !it.enabled });
     if (res?.ok) reload();
-    else toast(res?.error || "Failed", "err");
+    else toast(res?.error || _L("phone.work.failed"), "err");
   };
   const reprice = async (it: any) => {
     const raw = await ask({
-      title: `Price · ${it.label}`,
-      label: "Set the menu price for this item.",
+      title: _L("phone.menu.price_title", it.label),
+      label: _L("phone.menu.price_hint"),
       kind: "number",
       prefix: currency,
       initial: it.price,
-      confirm: "Save price",
+      confirm: _L("phone.menu.save_price"),
     });
     const price = Math.floor(Number(raw));
     if (!price || price <= 0) return;
     const res = await fetchNui("phone:saveMenuItem", { id: rid, key: it.key, price, enabled: it.enabled });
     if (res?.ok) reload();
-    else toast(res?.error || "Failed", "err");
+    else toast(res?.error || _L("phone.work.failed"), "err");
   };
 
   return (
     <div className="space-y-1.5">
-      {items.length === 0 && <Empty title="No priced items" hint="Prices are set in the in-world admin panel." />}
+      {items.length === 0 && (
+        <Empty title={_L("phone.menu.empty")} hint={_L("phone.menu.empty_hint")} />
+      )}
       {items.map((it) => (
         <div key={it.key} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2">
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-semibold">{it.label}</div>
             <button onClick={() => reprice(it)} className="font-mono text-[0.72rem] text-primary">
-              {money(currency, it.price)} · edit
+              {_L("phone.menu.edit_price", money(currency, it.price))}
             </button>
           </div>
           <button
@@ -786,7 +874,7 @@ function MenuTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () => 
               it.enabled ? "bg-ok/20 text-ok" : "bg-muted text-muted-foreground"
             )}
           >
-            {it.enabled ? "Available" : "Sold out"}
+            {it.enabled ? _L("phone.menu.available") : _L("phone.menu.sold_out")}
           </button>
         </div>
       ))}
@@ -804,14 +892,14 @@ function StaffTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () =>
   const hire = async (p: any) => {
     const res = await fetchNui("phone:hire", { id: rid, target: p.id, grade: 0 });
     if (res?.ok) {
-      toast(`Hired ${p.name}`);
+      toast(_L("phone.staff.hired", p.name));
       reload();
-    } else toast(res?.error || "Failed", "err");
+    } else toast(res?.error || _L("phone.work.failed"), "err");
   };
   const fire = async (e: any) => {
     const res = await fetchNui("phone:fire", { id: rid, identifier: e.identifier });
     if (res?.ok) reload();
-    else toast(res?.error || "Failed", "err");
+    else toast(res?.error || _L("phone.work.failed"), "err");
   };
   const setGrade = async (e: any, grade: number) => {
     await fetchNui("phone:setGrade", { id: rid, identifier: e.identifier, grade });
@@ -821,9 +909,9 @@ function StaffTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () =>
   return (
     <div className="space-y-4">
       <section>
-        <h3 className="mb-2 font-display font-bold">Team</h3>
+        <h3 className="mb-2 font-display font-bold">{_L("phone.staff.team")}</h3>
         {employees.length === 0 ? (
-          <div className="text-[0.72rem] text-muted-foreground">No employees yet.</div>
+          <div className="text-[0.72rem] text-muted-foreground">{_L("phone.staff.no_employees")}</div>
         ) : (
           <div className="space-y-1.5">
             {employees.map((e) => (
@@ -831,7 +919,7 @@ function StaffTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () =>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-semibold">{e.name}</div>
                   <div className="text-[0.7rem] text-muted-foreground">
-                    {e.gradeLabel} · {e.commission}% commission
+                    {_L("phone.staff.emp_meta", e.gradeLabel, e.commission)}
                   </div>
                 </div>
                 <select
@@ -855,9 +943,9 @@ function StaffTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () =>
       </section>
 
       <section>
-        <h3 className="mb-2 font-display font-bold">Hire nearby</h3>
+        <h3 className="mb-2 font-display font-bold">{_L("phone.staff.hire_nearby")}</h3>
         {nearby.length === 0 ? (
-          <div className="text-[0.72rem] text-muted-foreground">Nobody's standing near you.</div>
+          <div className="text-[0.72rem] text-muted-foreground">{_L("phone.staff.nobody_nearby")}</div>
         ) : (
           <div className="space-y-1.5">
             {nearby.map((p) => (
@@ -868,7 +956,7 @@ function StaffTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () =>
               >
                 <UserPlus className="h-4 w-4 text-primary" />
                 <span className="flex-1 text-sm font-medium">{p.name}</span>
-                <span className="text-[0.7rem] font-bold text-primary">Hire</span>
+                <span className="text-[0.7rem] font-bold text-primary">{_L("phone.staff.hire")}</span>
               </button>
             ))}
           </div>
@@ -888,14 +976,14 @@ function StockTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () =>
     const q = qty[s.item] || 10;
     const res = await fetchNui("phone:buyStock", { id: rid, item: s.item, qty: q });
     if (res?.ok) {
-      toast(`Bought ${q}× ${s.label}`);
+      toast(_L("phone.stock.bought", q, s.label));
       reload();
-    } else toast(res?.error || "Failed", "err");
+    } else toast(res?.error || _L("phone.work.failed"), "err");
   };
 
   return (
     <div className="space-y-1.5">
-      {supplies.length === 0 && <Empty title="No supplies configured" />}
+      {supplies.length === 0 && <Empty title={_L("phone.stock.empty")} />}
       {supplies.map((s) => {
         const q = qty[s.item] || 10;
         const low = (s.stock || 0) < 10;
@@ -905,9 +993,10 @@ function StockTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () =>
               <div className="truncate text-sm font-semibold">{s.label}</div>
               <div className="text-[0.7rem]">
                 <span className={cn("font-mono", low ? "text-warn" : "text-muted-foreground")}>
-                  {s.stock} in stock{low && " · low"}
+                  {_L("phone.stock.in_stock", s.stock)}
+                  {low && _L("phone.stock.low")}
                 </span>
-                <span className="text-muted-foreground"> · {money(currency, s.cost)}/ea</span>
+                <span className="text-muted-foreground">{_L("phone.stock.each", money(currency, s.cost))}</span>
               </div>
             </div>
             <div className="flex items-center gap-1 rounded-full border border-border px-1">
@@ -920,7 +1009,7 @@ function StockTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () =>
               </button>
             </div>
             <button onClick={() => buy(s)} className="rounded-full bg-brand px-2.5 py-1.5 text-[0.7rem] font-bold text-brand-ink">
-              Buy
+              {_L("phone.stock.buy")}
             </button>
           </div>
         );
@@ -943,13 +1032,13 @@ function PromosTab({ rid }: { rid: number }) {
   }, [rid]);
 
   const save = async () => {
-    if (!label.trim()) return toast("Give it a name", "err");
+    if (!label.trim()) return toast(_L("phone.promos.need_name"), "err");
     const res = await fetchNui("phone:savePromo", { id: rid, label, percent, kind, active: true });
     if (res?.ok) {
-      toast("Promo pushed to everyone");
+      toast(_L("phone.promos.pushed"));
       setLabel("");
       load();
-    } else toast(res?.error || "Failed", "err");
+    } else toast(res?.error || _L("phone.work.failed"), "err");
   };
   const del = async (p: any) => {
     await fetchNui("phone:deletePromo", { id: rid, promoId: p.id });
@@ -963,11 +1052,13 @@ function PromosTab({ rid }: { rid: number }) {
   return (
     <div className="space-y-4">
       <div className="rounded-2xl border border-border bg-card p-3">
-        <div className="mb-2 text-[0.66rem] font-bold uppercase tracking-wider text-muted-foreground">New promotion</div>
+        <div className="mb-2 text-[0.66rem] font-bold uppercase tracking-wider text-muted-foreground">
+          {_L("phone.promos.new")}
+        </div>
         <input
           value={label}
           onChange={(e) => setLabel(e.target.value)}
-          placeholder="e.g. Happy Hour"
+          placeholder={_L("phone.promos.name_placeholder")}
           className="mb-2 w-full rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none"
         />
         <div className="mb-2 flex gap-2">
@@ -976,11 +1067,11 @@ function PromosTab({ rid }: { rid: number }) {
               key={k}
               onClick={() => setKind(k)}
               className={cn(
-                "flex-1 rounded-full py-1.5 text-[0.72rem] font-bold capitalize",
+                "flex-1 rounded-full py-1.5 text-[0.72rem] font-bold",
                 kind === k ? "bg-brand text-brand-ink" : "bg-muted text-muted-foreground"
               )}
             >
-              {k.replace("_", " ")}
+              {k === "discount" ? _L("phone.promos.kind_discount") : _L("phone.promos.kind_happy_hour")}
             </button>
           ))}
         </div>
@@ -997,7 +1088,7 @@ function PromosTab({ rid }: { rid: number }) {
           <span className="w-12 text-right font-mono font-bold">{percent}%</span>
         </div>
         <button onClick={save} className="flex w-full items-center justify-center gap-1 rounded-full bg-brand py-2.5 font-bold text-brand-ink">
-          <Megaphone className="h-4 w-4" /> Push promotion
+          <Megaphone className="h-4 w-4" /> {_L("phone.promos.push")}
         </button>
       </div>
 
@@ -1007,7 +1098,13 @@ function PromosTab({ rid }: { rid: number }) {
             <div className="flex-1">
               <div className="text-sm font-semibold">{p.label}</div>
               <div className="text-[0.7rem] text-muted-foreground">
-                {p.percent}% off · {String(p.kind).replace("_", " ")}
+                {_L(
+                  "phone.promos.row_meta",
+                  p.percent,
+                  p.kind === "happy_hour"
+                    ? _L("phone.promos.kind_happy_hour")
+                    : _L("phone.promos.kind_discount")
+                )}
               </div>
             </div>
             <button
@@ -1017,7 +1114,7 @@ function PromosTab({ rid }: { rid: number }) {
                 p.active ? "bg-ok/20 text-ok" : "bg-muted text-muted-foreground"
               )}
             >
-              {p.active ? "Live" : "Off"}
+              {p.active ? _L("phone.promos.live") : _L("phone.promos.off")}
             </button>
             <button onClick={() => del(p)} className="grid h-8 w-8 place-items-center rounded-full bg-muted text-destructive">
               <Trash2 className="h-4 w-4" />

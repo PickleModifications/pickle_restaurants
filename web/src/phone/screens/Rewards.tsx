@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { fetchNui } from "../../lib/nui";
 import { cn } from "../../lib/utils";
+import { _L } from "../../lib/locale";
 import { usePhone, money } from "../store";
 import { Screen, TopBar, PunchCard, Empty, Spinner } from "../ui";
 
@@ -24,7 +25,7 @@ export function Rewards() {
 
   return (
     <Screen className="pb-20">
-      <TopBar title="Rewards" />
+      <TopBar title={_L("phone.rewards.title")} />
       <div className="space-y-4 p-4">
         <div className="grid grid-cols-2 gap-2">
           <button
@@ -32,24 +33,24 @@ export function Rewards() {
             className="flex flex-col items-start gap-1 rounded-2xl border border-border bg-card p-3 text-left active:scale-[0.98]"
           >
             <CalendarClock className="h-5 w-5 text-primary" />
-            <div className="font-semibold">Reserve a table</div>
-            <div className="text-[0.7rem] text-muted-foreground">Private dining booth</div>
+            <div className="font-semibold">{_L("phone.reserve.title")}</div>
+            <div className="text-[0.7rem] text-muted-foreground">{_L("phone.rewards.reserve_hint")}</div>
           </button>
           <button
             onClick={() => go("leaderboard")}
             className="flex flex-col items-start gap-1 rounded-2xl border border-border bg-card p-3 text-left active:scale-[0.98]"
           >
             <Trophy className="h-5 w-5 text-warn" />
-            <div className="font-semibold">Top chefs</div>
-            <div className="text-[0.7rem] text-muted-foreground">Server leaderboard</div>
+            <div className="font-semibold">{_L("phone.leaderboard.title")}</div>
+            <div className="text-[0.7rem] text-muted-foreground">{_L("phone.rewards.leaderboard_hint")}</div>
           </button>
         </div>
 
         {/* punch cards */}
         <section>
-          <h2 className="mb-2 font-display text-base font-bold">Punch cards</h2>
+          <h2 className="mb-2 font-display text-base font-bold">{_L("phone.rewards.punch_cards")}</h2>
           {loyalty.length === 0 ? (
-            <Empty title="No cards yet" hint="Order from a restaurant to start earning free items." />
+            <Empty title={_L("phone.rewards.no_cards")} hint={_L("phone.rewards.no_cards_hint")} />
           ) : (
             <div className="space-y-3">
               {loyalty.map((l) => (
@@ -58,7 +59,9 @@ export function Rewards() {
                     <span className="font-semibold">{l.label}</span>
                     <span className="text-[0.72rem] text-muted-foreground">
                       {l.punches % l.goal}/{l.goal}
-                      {l.punches >= l.goal && <span className="ml-1 font-bold text-warn">· free item ready!</span>}
+                      {l.punches >= l.goal && (
+                        <span className="ml-1 font-bold text-warn">{_L("phone.rewards.free_ready")}</span>
+                      )}
                     </span>
                   </div>
                   <PunchCard punches={l.punches} goal={l.goal} />
@@ -71,7 +74,7 @@ export function Rewards() {
         {/* achievements */}
         <section>
           <div className="mb-2 flex items-center justify-between">
-            <h2 className="font-display text-base font-bold">Achievements</h2>
+            <h2 className="font-display text-base font-bold">{_L("phone.rewards.achievements")}</h2>
             <span className="text-[0.72rem] text-muted-foreground">
               {unlocked}/{achievements.length}
             </span>
@@ -116,7 +119,10 @@ export function Rewards() {
 }
 
 // ─── reservations ─────────────────────────────────────────────────────────────
+// The slot ID is what the server stores, so it must stay stable; only its DISPLAY
+// is localized (the clock times read the same in any language).
 const SLOTS = ["Now", "6:00 PM", "7:00 PM", "8:00 PM", "9:00 PM"];
+const slotLabel = (s?: string) => (!s || s === "Now" ? _L("phone.reserve.slot_now") : s);
 
 export function Reserve(_props: { params?: any }) {
   const { home, back, toast } = usePhone();
@@ -154,15 +160,15 @@ export function Reserve(_props: { params?: any }) {
     const res = await fetchNui("phone:reserve", { id: rid, party, slot });
     setBusy(false);
     if (res?.ok) {
-      toast("Table reserved");
+      toast(_L("phone.reserve.booked"));
       load();
       loadAvail(rid);
-    } else toast(res?.error || "Couldn't reserve", "err");
+    } else toast(res?.error || _L("phone.reserve.book_failed"), "err");
   };
 
   const enter = async (r: any) => {
     const res = await fetchNui("phone:enterBooth", { id: r.id, rid: r.restaurant_id });
-    if (!res?.ok) toast(res?.error || "Can't enter now", "err");
+    if (!res?.ok) toast(res?.error || _L("phone.reserve.enter_failed"), "err");
   };
   const cancel = async (r: any) => {
     await fetchNui("phone:cancelReservation", { id: r.id });
@@ -172,10 +178,10 @@ export function Reserve(_props: { params?: any }) {
 
   return (
     <Screen className="pb-8">
-      <TopBar title="Reserve a table" onBack={back} />
+      <TopBar title={_L("phone.reserve.title")} onBack={back} />
       <div className="space-y-4 p-4">
         <div>
-          <div className="tape mb-1.5 text-muted-foreground">Restaurant</div>
+          <div className="tape mb-1.5 text-muted-foreground">{_L("phone.reserve.restaurant")}</div>
           <div className="pf-rail">
             {restaurants.map((r) => (
               <button
@@ -193,7 +199,7 @@ export function Reserve(_props: { params?: any }) {
         </div>
 
         <div>
-          <div className="tape mb-1.5 text-muted-foreground">Party size</div>
+          <div className="tape mb-1.5 text-muted-foreground">{_L("phone.reserve.party_size")}</div>
           <div className="flex items-center gap-3">
             <button onClick={() => setParty((p) => Math.max(1, p - 1))} className="grid h-9 w-9 place-items-center rounded-full bg-muted">
               −
@@ -207,16 +213,18 @@ export function Reserve(_props: { params?: any }) {
 
         <div>
           <div className="mb-1.5 flex items-center justify-between">
-            <span className="tape text-muted-foreground">Time</span>
+            <span className="tape text-muted-foreground">{_L("phone.reserve.time")}</span>
             {avail && !noSeats && (
               <span className="text-[0.66rem] text-muted-foreground">
-                {capacity} seat{capacity === 1 ? "" : "s"}
+                {capacity === 1
+                  ? _L("phone.reserve.seat_one", capacity)
+                  : _L("phone.reserve.seat_many", capacity)}
               </span>
             )}
           </div>
           {noSeats ? (
             <p className="rounded-xl border border-border bg-card px-3 py-2 text-[0.74rem] text-muted-foreground">
-              This restaurant hasn't set up any seating to reserve yet.
+              {_L("phone.reserve.no_seats")}
             </p>
           ) : (
           <div className="pf-rail">
@@ -233,10 +241,10 @@ export function Reserve(_props: { params?: any }) {
                     full && "opacity-40"
                   )}
                 >
-                  {s}
+                  {slotLabel(s)}
                   {avail && (
                     <span className={cn("text-[0.6rem] font-medium", slot === s ? "text-brand-ink/80" : "text-muted-foreground")}>
-                      {full ? "Full" : `${remaining(s)} left`}
+                      {full ? _L("phone.reserve.full") : _L("phone.reserve.left", remaining(s))}
                     </span>
                   )}
                 </button>
@@ -248,7 +256,7 @@ export function Reserve(_props: { params?: any }) {
 
         {alreadyBooked && (
           <p className="rounded-xl border border-border bg-card px-3 py-2 text-[0.74rem] text-muted-foreground">
-            You already have a table booked here — cancel it below to book a new time.
+            {_L("phone.reserve.already_booked_note")}
           </p>
         )}
 
@@ -258,30 +266,30 @@ export function Reserve(_props: { params?: any }) {
           className="w-full rounded-full bg-brand px-4 py-3 font-bold text-brand-ink disabled:opacity-60"
         >
           {busy
-            ? "Reserving…"
+            ? _L("phone.reserve.booking")
             : noSeats
-            ? "No seating here"
+            ? _L("phone.reserve.btn_no_seats")
             : alreadyBooked
-            ? "Already booked here"
+            ? _L("phone.reserve.btn_booked")
             : slotFull(slot)
-            ? "That time is full"
-            : "Reserve table"}
+            ? _L("phone.reserve.btn_full")
+            : _L("phone.reserve.btn_book")}
         </button>
 
         {mine.length > 0 && (
           <section>
-            <h2 className="mb-2 font-display text-base font-bold">Your reservations</h2>
+            <h2 className="mb-2 font-display text-base font-bold">{_L("phone.reserve.mine")}</h2>
             <div className="space-y-2">
               {mine.map((r) => (
                 <div key={r.id} className="flex items-center gap-3 rounded-2xl border border-border bg-card p-3">
                   <div className="min-w-0 flex-1">
                     <div className="font-semibold">{r.restaurant}</div>
                     <div className="text-[0.72rem] text-muted-foreground">
-                      Party of {r.party} · {r.slot || "Now"}
+                      {_L("phone.reserve.party_of", r.party)} · {slotLabel(r.slot)}
                     </div>
                   </div>
                   <button onClick={() => enter(r)} className="flex items-center gap-1 rounded-full bg-brand px-3 py-1.5 text-sm font-bold text-brand-ink">
-                    <DoorOpen className="h-4 w-4" /> Enter
+                    <DoorOpen className="h-4 w-4" /> {_L("phone.reserve.enter")}
                   </button>
                   <button onClick={() => cancel(r)} className="grid h-8 w-8 place-items-center rounded-full bg-muted">
                     <X className="h-4 w-4" />
@@ -290,7 +298,7 @@ export function Reserve(_props: { params?: any }) {
               ))}
             </div>
             <p className="mt-2 text-[0.68rem] text-muted-foreground">
-              Tap Enter to be seated in your private booth. Leave from the booth anytime — you'll return to where you were.
+              {_L("phone.reserve.booth_hint")}
             </p>
           </section>
         )}
@@ -313,13 +321,13 @@ export function Leaderboard({ params }: { params?: any }) {
 
   return (
     <Screen className="pb-8">
-      <TopBar title="Top chefs" onBack={back} />
+      <TopBar title={_L("phone.leaderboard.title")} onBack={back} />
       <div className="flex gap-2 px-4 pb-2">
         <button
           onClick={() => setScope(null)}
           className={cn("rounded-full px-3 py-1.5 text-sm font-semibold", scope == null ? "bg-brand text-brand-ink" : "bg-muted text-muted-foreground")}
         >
-          Server-wide
+          {_L("phone.leaderboard.server_wide")}
         </button>
         {employment.map((e) => (
           <button
@@ -335,7 +343,11 @@ export function Leaderboard({ params }: { params?: any }) {
       {rows == null ? (
         <Spinner />
       ) : rows.length === 0 ? (
-        <Empty icon={<Medal className="h-8 w-8" />} title="No chefs ranked yet" hint="Cook some orders to climb the board." />
+        <Empty
+          icon={<Medal className="h-8 w-8" />}
+          title={_L("phone.leaderboard.empty")}
+          hint={_L("phone.leaderboard.empty_hint")}
+        />
       ) : (
         <div className="space-y-1.5 px-4">
           {rows.map((r, i) => (
@@ -356,13 +368,16 @@ export function Leaderboard({ params }: { params?: any }) {
               </span>
               <div className="min-w-0 flex-1">
                 <div className="truncate font-semibold">
-                  {r.name} {r.me && <span className="text-[0.68rem] text-primary">· you</span>}
+                  {r.name}{" "}
+                  {r.me && <span className="text-[0.68rem] text-primary">{_L("phone.leaderboard.you")}</span>}
                 </div>
-                <div className="text-[0.72rem] text-muted-foreground">{money(currency, r.revenue)} earned</div>
+                <div className="text-[0.72rem] text-muted-foreground">
+                  {_L("phone.leaderboard.earned", money(currency, r.revenue))}
+                </div>
               </div>
               <div className="text-right">
                 <div className="font-mono font-bold">{r.cooked}</div>
-                <div className="text-[0.62rem] text-muted-foreground">cooked</div>
+                <div className="text-[0.62rem] text-muted-foreground">{_L("phone.leaderboard.cooked")}</div>
               </div>
             </div>
           ))}
@@ -382,27 +397,30 @@ export function Profile() {
 
   return (
     <Screen className="pb-20">
-      <TopBar title="Profile" />
+      <TopBar title={_L("phone.profile.title")} />
       <div className="space-y-4 p-4">
         <div className="flex items-center gap-3 rounded-2xl border border-border bg-card p-4">
           <span className="grid h-14 w-14 place-items-center rounded-full bg-brand font-display text-xl font-extrabold text-brand-ink">
             {(home?.name || "?").charAt(0)}
           </span>
           <div>
-            <div className="font-display text-lg font-extrabold">{home?.name || "Guest"}</div>
-            <div className="text-[0.72rem] text-muted-foreground">Pickle Food member</div>
+            <div className="font-display text-lg font-extrabold">{home?.name || _L("phone.guest")}</div>
+            <div className="text-[0.72rem] text-muted-foreground">{_L("phone.profile.member")}</div>
           </div>
         </div>
 
         <div className="grid grid-cols-3 gap-2 text-center">
-          <Stat label="Orders" value={orders.length} />
-          <Stat label="Punches" value={totalPunches} />
-          <Stat label="Badges" value={achievements.filter((a) => a.unlocked).length} />
+          <Stat label={_L("phone.profile.stat_orders")} value={orders.length} />
+          <Stat label={_L("phone.profile.stat_punches")} value={totalPunches} />
+          <Stat
+            label={_L("phone.profile.stat_badges")}
+            value={achievements.filter((a) => a.unlocked).length}
+          />
         </div>
 
         {employment.length > 0 && (
           <section>
-            <h2 className="mb-2 font-display text-base font-bold">Where you work</h2>
+            <h2 className="mb-2 font-display text-base font-bold">{_L("phone.profile.where_you_work")}</h2>
             <div className="space-y-2">
               {employment.map((e) => (
                 <button
@@ -414,8 +432,8 @@ export function Profile() {
                   <div className="flex-1">
                     <div className="font-semibold">{e.label}</div>
                     <div className="text-[0.7rem] text-muted-foreground">
-                      {e.isOwner ? "Owner" : "Staff"}
-                      {e.clockedIn && <span className="ml-1 text-ok">· on shift</span>}
+                      {e.isOwner ? _L("phone.profile.owner") : _L("phone.profile.staff")}
+                      {e.clockedIn && <span className="ml-1 text-ok">{_L("phone.profile.on_shift")}</span>}
                     </div>
                   </div>
                   <ChevronRight className="h-5 w-5 text-muted-foreground" />

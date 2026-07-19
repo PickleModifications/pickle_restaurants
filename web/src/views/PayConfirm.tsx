@@ -7,7 +7,7 @@ import { groupLines, arr, type Line } from "@/components/OrderBuilder";
 
 // One "+cheese / no lettuce" caption for a line's mods.
 const modText = (mods?: { label: string; removed?: boolean }[]) =>
-  (mods || []).map((m) => (m.removed ? "no " + m.label : "+ " + m.label)).join("  ·  ");
+  (mods || []).map((m) => _L(m.removed ? "payconfirm.mod_removed" : "payconfirm.mod_added", m.label)).join("  ·  ");
 
 // The customer-facing charge prompt, printed as the restaurant's thermal
 // receipt (perforated edges, mono body, the franchise theme rides the payload).

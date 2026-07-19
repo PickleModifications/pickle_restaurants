@@ -2586,8 +2586,8 @@ local function runDragThread(drag)
                     -- anything else outlines the box red and refuses on release.
                     local t = PrepTrays[tid]
                     local block
-                    if not t.open then block = "Open the box first."
-                    elseif trayPileCount(tid) > 0 then block = "There's already something in there."
+                    if not t.open then block = _L("cook_open_box_first")
+                    elseif trayPileCount(tid) > 0 then block = _L("cook_box_occupied")
                     elseif not partsAreBoxable(drag.parts) then block = _L("cook_only_boxable_in_box")
                     end
                     if block then
@@ -3052,7 +3052,7 @@ RegisterNUICallback("cooking:beginPlace", function(d, cb)
     end
 
     local model = previewModel(d.kind, d.item)
-    if not model then return cb({ ok = false, error = "Nothing to place." }) end
+    if not model then return cb({ ok = false, error = _L("cook_nothing_to_place") }) end
     local ent = SpawnProp(model, base.x, base.y, base.z)
     if not ent then return cb({ ok = false }) end
     SetEntityRotation(ent, 0.0, 0.0, curYaw(), 2, true) -- face the station while dragging

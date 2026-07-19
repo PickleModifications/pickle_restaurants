@@ -4,6 +4,7 @@ import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Truncate } from "@/components/ui/truncate";
 import { usePanelContent } from "@/components/ui/panel-content";
+import { _L } from "@/lib/locale";
 
 // A centered dialog over a faded scrim. Inside a Panel it portals into the
 // panel's content region (published via context), so the scrim covers only the
@@ -59,7 +60,7 @@ export function Modal({
           </div>
           <button
             onClick={onClose}
-            aria-label="Close"
+            aria-label={_L("ui.close")}
             className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
           >
             <X className="h-4 w-4" />

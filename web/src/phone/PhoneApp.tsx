@@ -1,6 +1,7 @@
 import { useEffect } from "react";
-import { Home as HomeIcon, ClipboardList, Award, ChefHat, User, ShoppingBag } from "lucide-react";
+import { Home as HomeIcon, ClipboardList, Award, ChefHat, User } from "lucide-react";
 import { cn } from "../lib/utils";
+import { _L } from "../lib/locale";
 import { PhoneProvider, usePhone, money, Tab } from "./store";
 import { Spinner, Toast, AskModal } from "./ui";
 import { fetchNui, useNuiEvent } from "../lib/nui";
@@ -59,7 +60,7 @@ function CartBar() {
           <span className="grid h-6 min-w-6 place-items-center rounded-full bg-brand-ink/20 px-1.5 font-mono text-sm tabular-nums">
             {cartCount}
           </span>
-          View cart
+          {_L("phone.cart.view")}
         </span>
         <span className="font-mono font-bold tabular-nums">{money(currency, cartSubtotal)}</span>
       </button>
@@ -71,11 +72,11 @@ function TabBar() {
   const { tab, setTab, home } = usePhone();
   const employed = (home?.employment?.length || 0) > 0;
   const tabs: { id: Tab; label: string; icon: any }[] = [
-    { id: "home", label: "Order", icon: HomeIcon },
-    { id: "orders", label: "Orders", icon: ClipboardList },
-    { id: "rewards", label: "Rewards", icon: Award },
-    ...(employed ? [{ id: "work" as Tab, label: "Work", icon: ChefHat }] : []),
-    { id: "profile", label: "Profile", icon: User },
+    { id: "home", label: _L("phone.tab.order"), icon: HomeIcon },
+    { id: "orders", label: _L("phone.tab.orders"), icon: ClipboardList },
+    { id: "rewards", label: _L("phone.tab.rewards"), icon: Award },
+    ...(employed ? [{ id: "work" as Tab, label: _L("phone.tab.work"), icon: ChefHat }] : []),
+    { id: "profile", label: _L("phone.tab.profile"), icon: User },
   ];
   return (
     <div className="pf-tabs">
@@ -102,7 +103,7 @@ function LiveBridge() {
   useNuiEvent("promo", (d) => {
     if (d?.title) toast(`${d.title}`);
   });
-  useNuiEvent("backup", () => toast("Kitchen is backing up — tickets piling up", "err"));
+  useNuiEvent("backup", () => toast(_L("phone.toast.backup"), "err"));
   useEffect(() => {
     const t = setInterval(refreshHome, 30000);
     return () => clearInterval(t);
@@ -124,11 +125,14 @@ function Shell() {
           <div className="pf-statusbar" />
           <div className="grid flex-1 place-items-center">
             <div className="flex flex-col items-center gap-3">
-              <span className="pf-elev-lg grid h-16 w-16 place-items-center rounded-2xl bg-brand text-brand-ink">
-                <ShoppingBag className="h-8 w-8" strokeWidth={2.4} />
-              </span>
-              <div className="font-display text-lg font-extrabold">Pickle Food</div>
-              <Spinner label="Loading…" />
+              {/* The real app icon, not a stand-in glyph — the same file the phone
+                  shows on its home screen, so launching the app lands on something
+                  recognisably continuous. Relative path: `nui/phone-icon.png` sits
+                  beside `nui/phone.html` (Vite copies web/public verbatim), and the
+                  build's base is "./", so this resolves in-game and in dev alike. */}
+              <img src="phone-icon.png" alt="" className="pf-elev-lg h-16 w-16 rounded-2xl" />
+              <div className="font-display text-lg font-extrabold">{_L("phone.app.name")}</div>
+              <Spinner label={_L("phone.loading")} />
             </div>
           </div>
         </>

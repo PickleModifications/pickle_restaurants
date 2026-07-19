@@ -1,4 +1,4 @@
-/* Pickle Food — mobile companion app. Layers on top of index.css tokens; no new
+/* Pickle Eats — mobile companion app. Layers on top of index.css tokens; no new
    colors, only layout + motion. All color comes from the shared --brand/--bg/…
    triplets so the ONE global phone theme (applyTheme from the `phone_theme` setting)
    reskins the whole app for free. NEVER color-mix()/relative-color/backdrop-filter —
