@@ -1798,11 +1798,9 @@ local function makePart(spec)
         -- prop, so its measured height is bogus. (A melt slice riding the patty bumps
         -- this up by the slice's own height in the melt branch below.)
         part.height = DUAL.top_seat
-        -- A melt topping riding the visible face: new specs carry `top` ({ item,
-        -- state }, model server-resolved on `topModel`); LEGACY decompose specs
-        -- (old inventory slot metadata) instead carry the resolved model directly
-        -- as `cheeseModel` — tolerate both, models never derive from the numeric.
-        local meltModel = spec.topModel or toppingModel(spec.top) or spec.cheeseModel
+        -- A melt topping riding the visible face carries `top` ({ item, state },
+        -- model server-resolved on `topModel`).
+        local meltModel = spec.topModel or toppingModel(spec.top)
         if meltModel then
             local ce = SpawnProp(meltModel, base.x, base.y, base.z)
             if ce then
@@ -2654,17 +2652,11 @@ local function StopCooking()
         DoScreenFadeOut(VirtualFadeMs and VirtualFadeMs() or 400)
         while not IsScreenFadedOut() do Wait(0) end
     end
-    -- ⚠ TEMP — VIDEO DEMO ONLY, REVERT ME. When true, placed kitchen_prep items are
-    -- LEFT standing in the world on exit instead of being auto-made/saved and deleted.
-    -- Set this back to false (or delete this block) to restore normal behavior. This is
-    -- purely client-side and touches no server/DB state.
-    local DEMO_KEEP_PREP = true
-    local keepPrep = wasPrep and DEMO_KEEP_PREP
     -- Deliver completed work on the way out: each stack still on the table is saved as
     -- its closest product (the exact variation preserved). Stacks that form no product
     -- fall through to prepClose below, which drops their reservations — parts stay in
     -- the player's holdings, so nothing is lost either way.
-    if wasPrep and not keepPrep then
+    if wasPrep then
         -- Serving trays first: each arrangement becomes its meal (a failed make
         -- leaves its stacks behind for the per-stack save below; empty trays are
         -- just put away by clearPrepStacks).
@@ -2686,10 +2678,8 @@ local function StopCooking()
     cancelCondiment() -- drop any in-progress condiment-bottle drag
     HoverDual(nil)
     if HoverOvenDoor then HoverOvenDoor(nil, nil) end -- clear any door outline
-    -- keepPrep (video demo) leaves the placed props standing and keeps their server
-    -- reservations, so clearPrepStacks/prepClose are skipped for this exit only.
-    if not keepPrep then clearPrepStacks() end
-    if wasPrep and not keepPrep then TriggerServerEvent("pickle_restaurants:cooking:prepClose") end -- drop unfinished build
+    clearPrepStacks()
+    if wasPrep then TriggerServerEvent("pickle_restaurants:cooking:prepClose") end -- drop unfinished build
     StopStationCamera()
     CloseNUI()
     SendNUIMessage({ action = "cookingItems", items = {} })
@@ -3361,9 +3351,8 @@ local function partsFromDecomposeSpecs(specs)
         if spec.half then model = halfModel(spec.item, spec.half) or model end
         local p = makePart({ item = spec.item, model = model, source = spec.source,
                              dual = spec.dual, cheese = spec.cheese, half = spec.half,
-                             -- melt topping: new specs ship top/topModel; LEGACY ones
-                             -- (old inventory metadata) still ship a raw cheeseModel
-                             top = spec.top, topModel = spec.topModel, cheeseModel = spec.cheeseModel,
+                             -- melt topping: specs ship top/topModel
+                             top = spec.top, topModel = spec.topModel,
                              sig = spec.sig, stack = spec.stack, state = spec.state, finishTool = spec.finishTool })
         if p then p.id = spec.id; p.dx, p.dy = spec.dx, spec.dy; parts[#parts + 1] = p end
     end

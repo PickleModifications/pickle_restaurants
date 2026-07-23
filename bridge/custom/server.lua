@@ -18,14 +18,10 @@ MySQL.ready(function()
         CREATE TABLE IF NOT EXISTS `pickle_restaurant_accounts` (
             `identifier` VARCHAR(80) NOT NULL,
             `cash`       BIGINT      NOT NULL DEFAULT 5000,
+            `bank`       BIGINT      NOT NULL DEFAULT 5000, -- card payments (e.g. phone orders)
             PRIMARY KEY (`identifier`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
-    -- Additive migration: bank account (card payments, e.g. phone orders).
-    local cols = MySQL.query.await("SHOW COLUMNS FROM `pickle_restaurant_accounts` LIKE 'bank'")
-    if not cols or #cols == 0 then
-        MySQL.query.await("ALTER TABLE `pickle_restaurant_accounts` ADD COLUMN `bank` BIGINT NOT NULL DEFAULT 5000")
-    end
 end)
 
 -- Which account column a currency maps to. Anything unknown (incl. nil and the

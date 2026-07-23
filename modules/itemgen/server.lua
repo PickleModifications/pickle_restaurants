@@ -76,24 +76,6 @@ local KNOWN = {
 
 local DEFAULT_WEIGHT = 200
 
--- ─── retired items kept for a grace release ───────────────────────────────────
--- Outputs no code references anymore after various one-item consolidations
--- (collapsed doughnut/cake/burger variants, retired intermediates). Exported one
--- more release so ox_inventory doesn't PURGE legacy stacks players still hold.
--- Stored as a self-seeded `itemgen_retained_items` setting so it's admin-visible
--- config before it sunsets (a later release empties it). The list literal here is
--- the seed only — read the setting at generate time.
-local RETAIN_SEED = { "frosted_doughnut", "sprinkled_doughnut", "raw_pizza", "cheeseburger", "deluxe_burger", "decorated_cake", "raw_cake", "raw_cookie" }
-
-local function retainedItems()
-    local r = GetSetting("itemgen_retained_items", nil)
-    if type(r) ~= "table" then
-        r = RETAIN_SEED
-        SetSetting("itemgen_retained_items", r)
-    end
-    return r
-end
-
 -- ─── helpers ──────────────────────────────────────────────────────────────────
 
 local function humanize(name)
@@ -190,9 +172,6 @@ local function collectItems()
     add(GetSetting("meal_item", "meal"))
     -- the POS receipt handed to a paying customer (metadata carries the ticket)
     add(GetSetting("receipt_item", "receipt"))
-    -- retired outputs: no longer referenced, exported one more release so players'
-    -- existing stacks aren't purged (see retainedItems above)
-    for _, n in ipairs(retainedItems()) do add(n) end
 
     -- Admin-authored ingredient cosmetics take precedence over the KNOWN seed table,
     -- so a custom ingredient exports with its own label.

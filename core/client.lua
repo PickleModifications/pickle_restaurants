@@ -377,11 +377,11 @@ CreateThread(function()
                         SelectInteraction(k, 1, {entity = entity, coords = coords, dist = dist})
                     else 
                         lib.registerContext({
-                            id = 'dealerships_'..k,
+                            id = 'restaurants_'..k,
                             title = v.title or _L("interact_options"),
                             options = v.options
                         })
-                        lib.showContext('dealerships_'..k)
+                        lib.showContext('restaurants_'..k)
                     end
                 end
             else
@@ -390,11 +390,11 @@ CreateThread(function()
                         SelectInteraction(k, 1)
                     else 
                         lib.registerContext({
-                            id = 'dealerships_'..k,
+                            id = 'restaurants_'..k,
                             title = v.title or _L("interact_options"),
                             options = v.options
                         })
-                        lib.showContext('dealerships_'..k)
+                        lib.showContext('restaurants_'..k)
                     end
                 end
             end

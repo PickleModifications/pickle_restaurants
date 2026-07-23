@@ -424,7 +424,7 @@ local function assemblyModCounts(spec, stack)
             if spec.byItem[s.item] then
                 count[s.item] = (count[s.item] or 0) + 1
             end
-            local topv = LayerTopping(s) -- a melting topping (or a legacy numeric cheese)
+            local topv = LayerTopping(s) -- a melting topping (from the layer's `top`)
             if topv and spec.byItem[topv.item] then
                 count[topv.item] = (count[topv.item] or 0) + 1
             end

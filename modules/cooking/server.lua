@@ -136,16 +136,6 @@ local function findFinish(tool, targetItem, flavorId)
     end
 end
 
--- Retired finish OUTPUT items (from before doughnuts collapsed onto cooked_doughnut)
--- → the (tool, base item) that still describes them, so any frosted_/sprinkled_
--- doughnut instance already sitting in a tray/inventory keeps rendering correctly.
-local LEGACY_FINISH_OUTPUTS = {
-    frosted_doughnut   = { tool = "frosting",  item = "cooked_doughnut" },
-    sprinkled_doughnut = { tool = "sprinkles", item = "cooked_doughnut" },
-    -- the cake collapse (decorated_cake → cooked_cake) retired this output too
-    decorated_cake     = { tool = "frosting",  item = "cooked_cake" },
-}
-
 -- The finish target an OUTPUT item came from (first match), for rendering and
 -- classifying finished products (they live in the tray like any other product).
 -- NOTE: with the doughnut collapse, cooked_doughnut is BOTH a plain fryer output and
@@ -156,12 +146,6 @@ local function finishForOutput(item)
         for _, t in ipairs(f.targets or {}) do
             if t.output == item then return t, f end
         end
-    end
-    -- a legacy retired-output item resolves to the tool/base it used to describe
-    local leg = LEGACY_FINISH_OUTPUTS[item]
-    if leg then
-        local f, t = findFinish(leg.tool, leg.item, nil)
-        if t then return t, f end
     end
 end
 
@@ -846,7 +830,7 @@ end
 -- the previewed stack and the placed stack are identical.
 local function compSpec(c)
     local dual = dualRecipeForItem(c.item) and true or false
-    local topv = LayerTopping(c) -- the comp's `top`, or a legacy numeric cheese decoded
+    local topv = LayerTopping(c) -- the comp's `top` topping (nil if none)
     local spec = {
         item = c.item, source = isTrayItem(c.item) and "tray" or "inv", half = c.half,
         model = itemModel(c.item), dual = dual,
@@ -1849,8 +1833,6 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 topv = selfStackTop(e.item, e.meta)
                 if topv then e.meta = nil end
             end
-            -- pre-migration row (cheese > 0 in the tray key): legacy data shim
-            topv = topv or LayerTopping({ cheese = e.cheese })
             if topv then
                 e.top = topv
                 e.topModel = ToppingModel(topv)
@@ -1999,15 +1981,13 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                     entry.stack = { entry.model }
                 end
                 -- a dual patty renders two-faced; a bare topped instance stores as the
-                -- one-layer SELF stack (fold to top/topModel, suppress the stack render),
-                -- and a pre-migration slot's numeric cheese decodes via LayerTopping
+                -- one-layer SELF stack (fold to top/topModel, suppress the stack render)
                 local topv = nil
                 if dualRecipeForItem(item) then
                     entry.dual = true
                     topv = selfStackTop(item, v.meta)
                     if topv then v.meta = nil end
                 end
-                topv = topv or LayerTopping({ cheese = v.cheese })
                 if topv then
                     entry.top = topv
                     entry.topModel = ToppingModel(topv)
@@ -2091,9 +2071,8 @@ end)
 -- Inventory-slot metadata for a cooked item leaving the tray: its exact build stack
 -- (so the variation survives) + a readable description. Returns nil for a plain item
 -- with nothing to preserve (keeps stacks clean). Frameworks without slot metadata
--- (ESX) ignore whatever we pass. `cheese` is a LEGACY pass-through only — new writes
--- pass 0 and carry any topping inside `meta`; a stored numeric cheese is preserved
--- for old data on the read side.
+-- (ESX) ignore whatever we pass. Toppings ride inside `meta` (the `top` field); the
+-- `cheese` param is retained only as an addressing key and is never written to the slot.
 -- Global so the POS register (modules/sales) can hand pool-fulfilled cooked
 -- instances to the customer with the same slot metadata a cook gets on cash-out.
 -- `item` (optional): when it's the generic Restaurant Bag and the bagged craft has a
@@ -2103,9 +2082,6 @@ function BuildInvMeta(cheese, meta, item)
     local m
     if type(meta) == "table" and #meta > 0 then
         m = { stack = meta, description = stackDescription(meta) }
-        if cheese and cheese >= 1 then m.cheese = cheese end -- legacy data pass-through
-    elseif cheese and cheese >= 1 then
-        m = { cheese = cheese }
     end
     if item and item == BagItemName() and type(meta) == "table" and meta[1] and meta[1].craft then
         local cr = findCraft(meta[1].craft)
@@ -2207,8 +2183,8 @@ local function buildProvides(layers)
     local units = {}
     for _, l in ipairs(layers) do
         units[l.item] = (units[l.item] or 0) + layerUnits(l)
-        -- a melting topping riding this layer counts as one unit of its item (the
-        -- `top` field on a new layer, or a legacy numeric cheese decoded)
+        -- a melting topping riding this layer (its `top` field) counts as one unit
+        -- of its item
         local topv = LayerTopping(l)
         if topv then units[topv.item] = (units[topv.item] or 0) + 1 end
     end
@@ -2239,15 +2215,12 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     if not HasPerm(rid, src, "cook") then return { ok = false } end
     local item = d.item
     if not item then return { ok = false } end
-    -- LEGACY inventory-slot addressing: a slot whose stored metadata still carries a
-    -- numeric cheese is matched by that field (invVariations groups on it). New
-    -- writes never set it — the topping normalizes into `top` below.
+    -- `cheese` is retained only as an inventory-slot addressing key (invVariations /
+    -- reservedUnits group on it); it is always 0 now — a layer's topping rides in the
+    -- reserved instance's meta, resolved by `sig` in consumeLayers.
     local cheese = CheeseVal(d.cheese)
     -- only a halves-configured ingredient may reserve a half (the NUI is untrusted)
     local half = ((d.half == "top" or d.half == "bottom") and IngredientHalves(item)) and d.half or nil
-    -- a legacy inventory drag carrying a numeric cheese normalizes to a modern
-    -- topping on entry, so the retired field never propagates into a new layer
-    local top = (cheese >= 1) and LayerTopping({ cheese = cheese }) or nil
     -- the build variation this layer reserves (so a pepperoni pizza layer holds
     -- the pepperoni instance — tray or inventory slot — not whichever is on top);
     -- nil for plain Ingredients-bar components
@@ -2287,10 +2260,11 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     end
 
     b.seq = (b.seq or 0) + 1
-    -- cheese stays on the reservation for legacy inventory-slot addressing only
-    -- (invVariations/reservedUnits key on it); the topping rides `top`
+    -- cheese stays on the reservation as an inventory-slot addressing key only
+    -- (invVariations/reservedUnits key on it); the topping is resolved from the
+    -- reserved instance's meta by `sig` in consumeLayers.
     b.layers[#b.layers + 1] = { id = b.seq, source = d.source, item = item,
-                                cheese = cheese, half = half, top = top, sig = sig }
+                                cheese = cheese, half = half, sig = sig }
     return { ok = true, id = b.seq }
 end)
 
