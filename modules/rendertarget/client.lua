@@ -195,17 +195,6 @@ local function setTargetBrand(t, spec)
     end
 end
 
--- Destroy + rebuild a target's DUI at its current w/h (used by the live-resize debug
--- command). Bumps gen so the fresh runtime texture gets fresh names, and re-applies
--- whatever it was showing.
-local function recreateDui(t)
-    local wasApplied, wasSpec = t.applied, t.cur
-    removeReplacement(t)
-    if t.dui then DestroyDui(t.dui); t.dui = nil end
-    t.ready, t.cur, t.sig = false, nil, nil
-    if wasApplied or wasSpec ~= nil then setTargetBrand(t, wasSpec) end
-end
-
 -- Warm every DUI at resource start: create the surface and let brand.html paint a
 -- frame BEFORE any replacement or model streaming. A COLD DUI (created the instant
 -- the replacement registered) branded only one prop on the first run — the runtime
@@ -349,35 +338,9 @@ RegisterNUICallback("rt:painted", function(d, cb)
     cb("ok")
 end)
 
--- ─── debug zone ──────────────────────────────────────────────────────────────
--- /pickle_brand_debug [url]  — spawns every branded model in a row with the render
---   target forced on, teleports you there, and toggles off on a second call. With
---   no url each texture shows a CALIBRATION grid (circle + WxH) so you can spot a
---   wrong aspect ratio per prop; pass a url to preview a real image on all of them.
--- /pickle_brand_res [key w h] — with no args, lists every target + its resolution;
---   with a key + w + h, resizes that texture's DUI live so you can find the number
---   that makes the calibration circle round, then bake it into TARGETS above.
--- /pickle_brand_orient [key rot flipx flipy] — with no args, lists each target's
---   orientation; with a key it sets rot (0/90/180/270) + optional flipx/flipy (0/1)
---   live so you can turn the calibration "UP" arrow upright, then bake it into TARGETS.
-
-local DEBUG_COORD = vector3(-1190.8749, -891.9343, 14.8598)
+-- Debug-preview cleanup scaffolding (the /pickle_brand_* tuning commands were
+-- removed for ship; `debugForce` stays nil, so the guards below are inert).
 local debugProps  = {}
-
-local function spawnModel(model, x, y, z)
-    local hash = GetHashKey(model)
-    if not IsModelInCdimage(hash) then return nil end
-    RequestModel(hash)
-    local started = GetGameTimer()
-    while not HasModelLoaded(hash) and GetGameTimer() - started < 5000 do Wait(0) end
-    if not HasModelLoaded(hash) then return nil end
-    local ent = CreateObject(hash, x, y, z, false, false, false)
-    SetModelAsNoLongerNeeded(hash)
-    if not ent or not DoesEntityExist(ent) then return nil end
-    SetEntityCoordsNoOffset(ent, x, y, z, false, false, false)
-    FreezeEntityPosition(ent, true)
-    return ent
-end
 
 local function clearDebug()
     for _, e in ipairs(debugProps) do
@@ -386,98 +349,6 @@ local function clearDebug()
     debugProps = {}
     debugForce = nil
 end
-
-RegisterCommand("pickle_brand_debug", function(_, args)
-    if #debugProps > 0 then -- second call: clean up
-        clearDebug()
-        applyBrand(nil)
-        print("[brand] debug zone cleared")
-        return
-    end
-    -- no url = calibration grid (default); a url previews a real image on every prop
-    debugForce = (args[1] and args[1] ~= "") and { url = args[1] } or { calib = true }
-
-    -- Register the replacements and load the DUI images FIRST — AddReplaceTexture
-    -- only takes on textures streamed *after* it's active, so the models spawn after.
-    for _, t in ipairs(TARGETS) do setTargetBrand(t, debugForce) end
-    SetEntityCoords(PlayerPedId(), DEBUG_COORD.x, DEBUG_COORD.y - 1.5, DEBUG_COORD.z, false, false, false, false)
-    CreateThread(function()
-        local t0 = GetGameTimer()
-        for _, t in ipairs(TARGETS) do
-            while t.dui and not IsDuiAvailable(t.dui) and GetGameTimer() - t0 < 3000 do Wait(50) end
-        end
-        Wait(300) -- let brand.html fetch + paint before the props stream in
-        -- Lay the props out along X, each centred in its own footprint (debugGap)
-        -- with half-gap padding on both sides, so a wide model (the kiosk) never
-        -- overlaps its neighbours the way a fixed 0.8m step did.
-        local x = DEBUG_COORD.x
-        for _, t in ipairs(TARGETS) do
-            local half = (t.debugGap or 0.8) * 0.5
-            x = x + half
-            -- txd == model name for these props, so it doubles as the model to spawn
-            local ent = spawnModel(t.txd, x, DEBUG_COORD.y, DEBUG_COORD.z)
-            if ent then debugProps[#debugProps + 1] = ent end
-            x = x + half
-        end
-        print(("[brand] debug zone: spawned %d/%d models -> %s")
-            :format(#debugProps, #TARGETS, debugForce.calib and "calibration grid" or debugForce.url))
-    end)
-end, false)
-
-RegisterCommand("pickle_brand_res", function(_, args)
-    local key, w, h = args[1], tonumber(args[2]), tonumber(args[3])
-    if not key then
-        print("[brand] texture resolutions (bake the tuned values into TARGETS):")
-        for _, t in ipairs(TARGETS) do
-            print(("  %-10s %s  ->  %d x %d"):format(t.key, t.txd, t.w, t.h))
-        end
-        print("[brand] usage: /pickle_brand_res <key> <width> <height>")
-        return
-    end
-    local t = TARGET_BY_KEY[key]
-    if not t then return print(("[brand] unknown texture key '%s'"):format(key)) end
-    if not (w and h and w > 0 and h > 0) then
-        return print("[brand] usage: /pickle_brand_res <key> <width> <height>")
-    end
-    t.w, t.h = math.floor(w), math.floor(h)
-    recreateDui(t)
-    print(("[brand] %s resized to %d x %d — bake this into TARGETS when it looks right")
-        :format(t.key, t.w, t.h))
-end, false)
-
--- /pickle_brand_reload — re-assert the render-target bindings without restarting the
--- resource (what you used to restart for). Run after editing a brand, then re-stream
--- the branded model (cook/hold the item) to see the new art.
-RegisterCommand("pickle_brand_reload", function()
-    RefreshBrands()
-    print("[brand] replacements re-asserted — re-spawn/hold the branded item to see it")
-end, false)
-
-RegisterCommand("pickle_brand_orient", function(_, args)
-    local key = args[1]
-    if not key then
-        print("[brand] texture orientations (bake the tuned values into TARGETS):")
-        for _, t in ipairs(TARGETS) do
-            print(("  %-10s rot=%-3d flipx=%s flipy=%s"):format(
-                t.key, t.rot or 0, tostring(t.flipx or false), tostring(t.flipy or false)))
-        end
-        print("[brand] usage: /pickle_brand_orient <key> <rot 0|90|180|270> [flipx 0|1] [flipy 0|1]")
-        return
-    end
-    local t = TARGET_BY_KEY[key]
-    if not t then return print(("[brand] unknown texture key '%s'"):format(key)) end
-    local rot = tonumber(args[2])
-    if not rot then return print("[brand] usage: /pickle_brand_orient <key> <rot 0|90|180|270> [flipx 0|1] [flipy 0|1]") end
-    t.rot   = (math.floor(rot / 90 + 0.5) * 90) % 360
-    t.flipx = (args[3] == "1" or args[3] == "true")
-    t.flipy = (args[4] == "1" or args[4] == "true")
-    -- A 90/270 turn changes the SURFACE aspect (the upright w/h swap), so rebuild the DUI
-    -- at the new surface rather than just repainting.
-    recreateDui(t)
-    print(("[brand] %s orient rot=%d flipx=%s flipy=%s — bake this into Config.RenderTargets when the UP arrow points up")
-        :format(t.key, t.rot, tostring(t.flipx), tostring(t.flipy)))
-end, false)
-
 -- ─── teardown ────────────────────────────────────────────────────────────────
 
 AddEventHandler("onResourceStop", function(res)

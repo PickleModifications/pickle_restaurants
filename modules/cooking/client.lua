@@ -84,13 +84,12 @@ local MELT_SEAT = { z = 0.01, roll = 180.0 }
 -- each part's flush height, so relayout() assigns every z and stacks are flush by
 -- construction.
 --   PrepStacks[sid] = { x, y, z0, parts = { part, part, ... } }  -- parts[1] on table
---   part = { pid, ents = {…}, height, item, half, source, cheese, top, id,
+--   part = { pid, ents = {…}, height, item, half, source, top, id,
 --            dual?, faces = {e1,e2}, meltEnt?, meltModel? }
 -- Most parts are one prop on their centre-bottom origin. A dual-sided item (beef
 -- patty) is a `dual` part: the same two-faced item (+ melt topping) the stovetop
 -- renders, so it looks identical in a burger. A halves ingredient (a bun) is
--- dragged as a bottom+top PAIR; a lone top half sits flipped. (The `cheese`
--- numeric is legacy reservation plumbing only — models never derive from it.)
+-- dragged as a bottom+top PAIR; a lone top half sits flipped.
 local PrepStacks = {}
 local prepSid = 0        -- monotonic stack id
 local prepPid = 0        -- monotonic part id (stable handle for NUI hover/grab)
@@ -1437,15 +1436,15 @@ local function previewModel(kind, item)
 end
 
 -- The build stack (ordered component models) of an uncooked assembled tray item,
--- keyed "item|cheese|sig" (sig = the entry's build-variation signature), refreshed
+-- keyed "item|sig" (sig = the entry's build-variation signature), refreshed
 -- from the tray payload. Lets the drag-to-oven preview render the whole stack
 -- (matching what gets placed), not just the base model.
 local PreviewStacks = {}
-local function previewStackKey(item, cheese, sig)
-    return tostring(item) .. "|" .. (tonumber(cheese) or 0) .. "|" .. tostring(sig or "")
+local function previewStackKey(item, sig)
+    return tostring(item) .. "|" .. tostring(sig or "")
 end
-local function previewStackFor(item, cheese, sig)
-    return PreviewStacks[previewStackKey(item, cheese, sig)]
+local function previewStackFor(item, sig)
+    return PreviewStacks[previewStackKey(item, sig)]
 end
 
 -- Lay an ordered set of props flush bottom-to-top at (x,y,z), all facing `headingZ`
@@ -1694,7 +1693,7 @@ local function RefreshTray()
     -- whole stack, exactly what placement will render.
     PreviewStacks = {}
     for _, e in ipairs(tray or {}) do
-        if e.stack then PreviewStacks[previewStackKey(e.item, e.cheese, e.sig)] = e.stack end
+        if e.stack then PreviewStacks[previewStackKey(e.item, e.sig)] = e.stack end
     end
     SendNUIMessage({ action = "cookingTray", tray = tray })
 end
@@ -1731,7 +1730,7 @@ local function makePart(spec)
     local base = currentCookProp; if not base then return nil end
     prepPid = prepPid + 1
     local part = { pid = prepPid, item = spec.item, half = spec.half,
-                   source = spec.source, cheese = spec.cheese or 0, sig = spec.sig,
+                   source = spec.source, sig = spec.sig,
                    top = spec.top, finishTool = spec.finishTool, ents = {} }
 
     if type(spec.stack) == "table" and #spec.stack > 1 then
@@ -2919,7 +2918,7 @@ RegisterNUICallback("cooking:beginPlace", function(d, cb)
             SafeDeleteEntity(e1); SafeDeleteEntity(e2)
             return cb({ ok = false })
         end
-        local p = { dual = true, ent = { e1, e2 }, kind = d.kind, item = d.item, source = d.source, cheese = d.cheese, hit = false }
+        local p = { dual = true, ent = { e1, e2 }, kind = d.kind, item = d.item, source = d.source, hit = false }
         placing = p
         CreateThread(function()
             while placing == p do
@@ -2942,7 +2941,7 @@ RegisterNUICallback("cooking:beginPlace", function(d, cb)
     if recipe and (method == "oven" or method == "fry") then
         -- An uncooked assembled item (topped pizza) previews its WHOLE build stack, so
         -- the drag reads the same as what placement renders — not just the base model.
-        local stackModels = (d.source == "tray") and previewStackFor(d.item, d.cheese, d.sig) or nil
+        local stackModels = (d.source == "tray") and previewStackFor(d.item, d.sig) or nil
         -- A containered bake (cake tin, cookie tray…) previews as container + food,
         -- mirroring what the server folds into the placed stack.
         if recipe.container_model and recipe.container_model ~= "" then
@@ -2963,7 +2962,7 @@ RegisterNUICallback("cooking:beginPlace", function(d, cb)
             local headingZ = stationHeadingZ(base.id, base)
             local baseDz = stackBaseLift(stackModels[1]) -- container mesh-bottom correction
             local p = { stackEnts = ents, stackHeights = heights, kind = d.kind, item = d.item,
-                        slotmode = method, source = d.source, cheese = d.cheese, sig = d.sig, hit = false }
+                        slotmode = method, source = d.source, sig = d.sig, hit = false }
             placing = p
             CreateThread(function()
                 while placing == p do
@@ -2986,7 +2985,7 @@ RegisterNUICallback("cooking:beginPlace", function(d, cb)
         local ent = model and SpawnProp(model, base.x, base.y, base.z) or nil
         if not ent then return cb({ ok = false }) end
         SetEntityRotation(ent, 0.0, 0.0, curYaw(), 2, true) -- face the station while dragging
-        local p = { entity = ent, kind = d.kind, item = d.item, slotmode = method, source = d.source, cheese = d.cheese, sig = d.sig, hit = false }
+        local p = { entity = ent, kind = d.kind, item = d.item, slotmode = method, source = d.source, sig = d.sig, hit = false }
         placing = p
         CreateThread(function()
             while placing == p do
@@ -3046,7 +3045,7 @@ RegisterNUICallback("cooking:beginPlace", function(d, cb)
     local ent = SpawnProp(model, base.x, base.y, base.z)
     if not ent then return cb({ ok = false }) end
     SetEntityRotation(ent, 0.0, 0.0, curYaw(), 2, true) -- face the station while dragging
-    local p = { entity = ent, kind = d.kind, item = d.item, source = d.source, cheese = d.cheese, hit = false }
+    local p = { entity = ent, kind = d.kind, item = d.item, source = d.source, hit = false }
     placing = p
     CreateThread(function()
         while placing == p do
@@ -3074,7 +3073,7 @@ RegisterNUICallback("cooking:endPlace", function(d, cb)
         return cb({ ok = false })
     end
     local payload = { prop_id = currentCookProp and currentCookProp.id, kind = p.kind, item = p.item,
-                      source = p.source, cheese = p.cheese, sig = p.sig } -- source "tray" cooks a tray item (of that exact build variation)
+                      source = p.source, sig = p.sig } -- source "tray" cooks a tray item (of that exact build variation)
     if p.slotmode then
         payload.door, payload.slot = p.door, p.slot   -- oven/fryer: seat into a slot
     else
@@ -3197,7 +3196,7 @@ end)
 -- take a Cooked Items tray entry out into the real inventory
 RegisterNUICallback("cooking:trayToInventory", function(d, cb)
     local res = lib.callback.await("pickle_restaurants:cooking:trayToInventory", false, {
-        prop_id = currentCookProp and currentCookProp.id, item = d.item, cheese = d.cheese, count = d.count, sig = d.sig,
+        prop_id = currentCookProp and currentCookProp.id, item = d.item, count = d.count, sig = d.sig,
     })
     if res and res.ok then
         if res.label then ShowNotification(_L("cook_took", res.label)) end
@@ -3211,7 +3210,7 @@ end)
 -- throw a tray entry (or, with burnt_only, everything burnt) in the bin
 RegisterNUICallback("cooking:trayDiscard", function(d, cb)
     local res = lib.callback.await("pickle_restaurants:cooking:trayDiscard", false, {
-        prop_id = currentCookProp and currentCookProp.id, item = d.item, cheese = d.cheese,
+        prop_id = currentCookProp and currentCookProp.id, item = d.item,
         count = d.count, sig = d.sig, burnt_only = d.burnt_only,
     })
     if res and res.ok then
@@ -3238,10 +3237,6 @@ RegisterNUICallback("cooking:beginPrepPlace", function(d, cb)
     if not currentCookProp then return cb({ ok = false }) end
 
     local dual      = (d.dual == 1 or d.dual == true)
-    -- the numeric `cheese` is LEGACY reservation plumbing (it addresses old inventory
-    -- slots server-side); keep the exact value so a tray reservation matches, but
-    -- rendering NEVER derives a model from it — that's `top` / `topModel`'s job.
-    local cheeseVal = tonumber(d.cheese) or 0
 
     local specs = {}
     local hv = halvesFor(d.item)
@@ -3257,7 +3252,7 @@ RegisterNUICallback("cooking:beginPrepPlace", function(d, cb)
         -- product with a build stack renders as its whole layer tower; `sig` keeps
         -- the reservation pinned to that exact build variation.
         specs[1] = { item = d.item, model = d.model, source = d.source, half = d.half,
-                     dual = dual, cheese = cheeseVal, sig = d.sig,
+                     dual = dual, sig = d.sig,
                      stack = stack, state = d.state, finishTool = d.finishTool,
                      label = d.label, image = d.image, -- carried for a model-less pill chip
                      top = dual and d.top or nil, topModel = dual and d.topModel or nil }
@@ -3311,7 +3306,7 @@ RegisterNUICallback("cooking:endPrepPlace", function(d, cb)
         p.source = d and d.source
         res = lib.callback.await("pickle_restaurants:cooking:prepAdd", false, {
             prop_id = currentCookProp and currentCookProp.id, source = p.source,
-            item = p.item, cheese = p.cheese, half = p.half, sig = p.sig,
+            item = p.item, half = p.half, sig = p.sig,
         })
         if not (res and res.ok) then failed = res; break end
         p.id = res.id
@@ -3350,7 +3345,7 @@ local function partsFromDecomposeSpecs(specs)
         local model = spec.model
         if spec.half then model = halfModel(spec.item, spec.half) or model end
         local p = makePart({ item = spec.item, model = model, source = spec.source,
-                             dual = spec.dual, cheese = spec.cheese, half = spec.half,
+                             dual = spec.dual, half = spec.half,
                              -- melt topping: specs ship top/topModel
                              top = spec.top, topModel = spec.topModel,
                              sig = spec.sig, stack = spec.stack, state = spec.state, finishTool = spec.finishTool })
@@ -3610,7 +3605,7 @@ end)
 -- still updates the bar counts). Default configs give every component a model.
 RegisterNUICallback("cooking:prepAdd", function(d, cb)
     local res = lib.callback.await("pickle_restaurants:cooking:prepAdd", false, {
-        prop_id = currentCookProp and currentCookProp.id, source = d.source, item = d.item, cheese = d.cheese, sig = d.sig,
+        prop_id = currentCookProp and currentCookProp.id, source = d.source, item = d.item, sig = d.sig,
     })
     if res and res.ok then
         RefreshTray(); RefreshBar()
@@ -3646,7 +3641,7 @@ RegisterNUICallback("cooking:prepMakeStack", function(d, cb)
         if tid and PrepTrays[tid] and res.spec then
             local add = lib.callback.await("pickle_restaurants:cooking:prepAdd", false, {
                 prop_id = currentCookProp and currentCookProp.id, source = res.spec.source,
-                item = res.spec.item, cheese = res.spec.cheese or 0, sig = res.spec.sig,
+                item = res.spec.item, sig = res.spec.sig,
             })
             if add and add.ok then
                 local spec = res.spec; spec.id = add.id
@@ -4093,7 +4088,7 @@ local function replacePartWithFinished(sid, idx, res)
     if res.spec then
         local add = lib.callback.await("pickle_restaurants:cooking:prepAdd", false, {
             prop_id = currentCookProp and currentCookProp.id, source = res.spec.source,
-            item = res.spec.item, cheese = res.spec.cheese or 0, sig = res.spec.sig,
+            item = res.spec.item, sig = res.spec.sig,
         })
         if add and add.ok then
             local spec = res.spec; spec.id = add.id
@@ -4549,56 +4544,3 @@ AddEventHandler("onResourceStop", function(res)
     cancelBakeMix()
     cancelCondiment()
 end)
-
--- Measurement aid: arm a one-shot dump of the next stack that gets laid out (see
--- StackDebug in expandStackLayers). Run it, then re-open/re-render the burger tower
--- and read the console for per-layer mn.z/mx.z/height/seatZ.
-RegisterCommand("pickle_stackdbg", function()
-    StackDebug = true
-    print("[stackdbg] armed — render a stack (open the item/preview) to dump it")
-end, false)
-
--- Print raw GetModelDimensions for one or more models: /pickle_modeldim pickle_patty_beef_02
--- Reports mn.z/mx.z (physics box, ~0.04 margin), total height and modelHeight. Use it to
--- set DUAL.face_gap to the patty's visual thickness and DUAL.top_seat to where toppings sit.
-RegisterCommand("pickle_modeldim", function(_, argsIn)
-    local models = (argsIn and #argsIn > 0) and argsIn
-        or { "pickle_patty_beef_02", "pickle_cheese_applied_01", "pickle_cheese_applied_02" }
-    for _, model in ipairs(models) do
-        local mn, mx = GetModelDimensions(EnsureModel(model))
-        if mn and mx then
-            print(("[modeldim] %-32s mn.z=%.4f mx.z=%.4f  totalZ=%.4f  modelH(mx+mn)=%.4f"):format(
-                model, mn.z, mx.z, mx.z - mn.z, mx.z + mn.z))
-        else
-            print(("[modeldim] %-32s <no dimensions / model failed to load>"):format(model))
-        end
-    end
-end, false)
-
--- Live dump of the current prep piles: for each part its item/model, dual flag,
--- height, sink and the z it lands at — the discrete-part path (layoutParts) that a
--- hand-assembled burger actually uses. Also prints what StackTweaks holds client-side,
--- so we can see whether a sink even reached the client.
-RegisterCommand("pickle_prepdbg", function()
-    local n = 0
-    for k in pairs(StackTweaks or {}) do n = n + 1 end
-    print(("[prepdbg] StackTweaks has %d entries:"):format(n))
-    for model, t in pairs(StackTweaks or {}) do
-        print(("[prepdbg]   %-32s sink=%s rise=%s"):format(model, tostring(t.sink), tostring(t.rise)))
-    end
-    local piles = 0
-    for sid, stack in pairs(PrepStacks or {}) do
-        piles = piles + 1
-        print(("[prepdbg] pile %s at z0=%.4f, %d parts:"):format(tostring(sid), stack.z0 or 0.0, #(stack.parts or {})))
-        local z, prevSeat = stack.z0 or 0.0, nil
-        for i, part in ipairs(stack.parts or {}) do
-            if i > 1 then z = math.max(z + (part.sink or 0.0), prevSeat + 0.001) end
-            print(("[prepdbg]   %d  item=%-16s dual=%-5s stacked=%-5s height=%.4f sink=%s seatZ=%.4f"):format(
-                i, tostring(part.item), tostring(part.dual or false), tostring(part.stacked or false),
-                part.height or 0.0, tostring(part.sink), z))
-            prevSeat = z
-            z = z + (part.height or 0.0)
-        end
-    end
-    if piles == 0 then print("[prepdbg] no active prep piles (stand at a prep station with items placed)") end
-end, false)

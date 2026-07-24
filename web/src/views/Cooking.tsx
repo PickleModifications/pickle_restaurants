@@ -25,12 +25,10 @@ type SideInfo = { state: string; percent: number; cooking?: boolean };
 // One aggregated component of a build stack (bun halves collapse to one bun).
 type TrayComp = { item: string; label: string; image?: string; count: number };
 // The melted-topping state riding a tray/inventory entry: which ingredient sits
-// on it and how far along the melt is (1 = applied, 2 = melted in). The numeric
-// `cheese` field STAYS on every entry/payload purely as the legacy inventory
-// addressing key — display comes from `top`/`topModel` only.
+// on it and how far along the melt is. Display comes from `top`/`topModel`.
 type TopState = { item: string; state: number | string };
 type TrayEntry = {
-  item: string; cheese?: number; count: number; label?: string; image?: string; model?: string;
+  item: string; count: number; label?: string; image?: string; model?: string;
   dual?: boolean; top?: TopState; topModel?: string; decompose?: boolean; uncooked?: boolean; cookStation?: string;
   // per-build-variation identity: sig addresses exactly this variation on the server;
   // stack/stackState render its full layer tower; extras (toppings over the base
@@ -793,7 +791,7 @@ export default function Cooking({ data }: { data: any }) {
   const bakeMixRef = useRef<string | null>(null); // rubbing the baking mix over an empty baking tray
   const condimentRef = useRef<string | null>(null); // squeezing a condiment bottle over a build stack
   const [finishFlavor, setFinishFlavor] = useState<Record<string, string>>({}); // chosen flavor per finish tool
-  const prepDragRef = useRef<{ source: string; item: string; cheese: number; model?: string | null; pill?: boolean; decompose?: boolean; sig?: string } | null>(null); // dragging a NEW part (or a product/meal to take apart) onto the prep table
+  const prepDragRef = useRef<{ source: string; item: string; model?: string | null; pill?: boolean; decompose?: boolean; sig?: string } | null>(null); // dragging a NEW part (or a product/meal to take apart) onto the prep table
   const prepHoveredRef = useRef<number | null>(null); // placed prep part under the cursor (grab target)
   const trayHoveredRef = useRef<number | null>(null); // placed serving tray/box under the cursor (grab target)
   const trayHoveredBoxRef = useRef(false); // the hovered tray is a pizza box (click toggles its lid)
@@ -1063,7 +1061,7 @@ export default function Cooking({ data }: { data: any }) {
   const discardEntry = (e: TrayEntry, key: string) => {
     if (confirmKey !== key) return armConfirm(key);
     setConfirmKey(null);
-    fetchNui("cooking:trayDiscard", { item: e.item, cheese: e.cheese || 0, count: e.count, sig: e.sig || "" });
+    fetchNui("cooking:trayDiscard", { item: e.item, count: e.count, sig: e.sig || "" });
   };
   const discardBurnt = () => {
     if (confirmKey !== "__burnt__") return armConfirm("__burnt__");
@@ -1130,12 +1128,12 @@ export default function Cooking({ data }: { data: any }) {
     }
   };
   const takeEntry = (e: TrayEntry, count: number) =>
-    fetchNui("cooking:trayToInventory", { item: e.item, cheese: e.cheese || 0, count, sig: e.sig || "" });
+    fetchNui("cooking:trayToInventory", { item: e.item, count, sig: e.sig || "" });
   const startTrayCook = (ev: React.PointerEvent, e: TrayEntry) => {
     ev.preventDefault();
     placingRef.current = true;
     setDragging(true);
-    fetchNui("cooking:beginPlace", { kind: "cook", item: e.item, source: e.source || "tray", cheese: e.cheese || 0, sig: e.sig || "" });
+    fetchNui("cooking:beginPlace", { kind: "cook", item: e.item, source: e.source || "tray", sig: e.sig || "" });
   };
   // the serving tray / pizza box (kitchen prep): equipment, not an item — drag it
   // onto the table, arrange food on/in it, then turn the whole thing into one
@@ -1206,7 +1204,7 @@ export default function Cooking({ data }: { data: any }) {
   // stovetop); without one it falls back to a 2D ghost + auto-stack.
   const startPrepDrag = (
     e: React.PointerEvent, source: string,
-    entry: { item: string; cheese?: number; model?: string; label?: string; image?: string; dual?: boolean; top?: TopState; topModel?: string; decompose?: boolean; uncooked?: boolean; sig?: string; stack?: string[]; stackState?: string; finishTool?: string }
+    entry: { item: string; model?: string; label?: string; image?: string; dual?: boolean; top?: TopState; topModel?: string; decompose?: boolean; uncooked?: boolean; sig?: string; stack?: string[]; stackState?: string; finishTool?: string }
   ) => {
     e.preventDefault();
     // A bun is one item spawned as a bottom+top pair (handled client-side), so no
@@ -1222,7 +1220,7 @@ export default function Cooking({ data }: { data: any }) {
     // model doubles as the "3D drag in progress" marker on release — a stack-only
     // entry uses its base layer so the endPrepPlace commit path still runs
     const dragModel = entry.model || (entry.stack && entry.stack.length > 1 ? entry.stack[0] : null);
-    prepDragRef.current = { source, item: entry.item, cheese: entry.cheese || 0, model: dragModel, decompose, sig };
+    prepDragRef.current = { source, item: entry.item, model: dragModel, decompose, sig };
     // stay on the tab the card actually lives in: tray entries AND inventory-held
     // products (they carry a sig) file under Cooked/Uncooked; only true
     // Ingredients-bar components switch to Ingredients
@@ -1239,7 +1237,7 @@ export default function Cooking({ data }: { data: any }) {
       // layer tower, not just the base model
       fetchNui("cooking:beginPrepPlace", {
         item: entry.item, model: entry.model,
-        dual: entry.dual ? 1 : 0, cheese: entry.cheese || 0, top: entry.top, topModel: entry.topModel,
+        dual: entry.dual ? 1 : 0, top: entry.top, topModel: entry.topModel,
         sig, stack: entry.stack, state: entry.stackState, finishTool: entry.finishTool,
       });
     } else {
@@ -1247,9 +1245,9 @@ export default function Cooking({ data }: { data: any }) {
       // into the Restaurant Bag as an ent-less "pill" part. There's no world prop to
       // preview, so the 2D ghost gives cursor feedback; `pill` routes release to
       // endPrepPlace (the pill only lands in a bag; refused elsewhere, server-side).
-      prepDragRef.current = { source, item: entry.item, cheese: entry.cheese || 0, model: null, pill: true, sig };
+      prepDragRef.current = { source, item: entry.item, model: null, pill: true, sig };
       fetchNui("cooking:beginPrepPlace", {
-        item: entry.item, source, cheese: entry.cheese || 0, sig,
+        item: entry.item, source, sig,
         label: entry.label || entry.item, image: entry.image,
       });
       setGhost({ x: e.clientX, y: e.clientY, label: entry.label || entry.item, image: entry.image });
@@ -1419,9 +1417,9 @@ export default function Cooking({ data }: { data: any }) {
         } else if (p.model || p.pill) {
           // live 3D placement (or a model-less pill destined for a bag) — commit,
           // or cancel back over the bar
-          fetchNui("cooking:endPrepPlace", { cancel: overBar, source: p.source, item: p.item, cheese: p.cheese, sig: p.sig });
+          fetchNui("cooking:endPrepPlace", { cancel: overBar, source: p.source, item: p.item, sig: p.sig });
         } else if (!overBar) {
-          fetchNui("cooking:prepAdd", { source: p.source, item: p.item, cheese: p.cheese, sig: p.sig });
+          fetchNui("cooking:prepAdd", { source: p.source, item: p.item, sig: p.sig });
         }
         return;
       }
@@ -1499,7 +1497,7 @@ export default function Cooking({ data }: { data: any }) {
 
   // Take / Discard live on the hovered card's tooltip, not the card itself —
   // tray-held entries only (inventory "Item" entries are already taken).
-  const entryKey = (e: TrayEntry) => e.item + "|" + (e.cheese || 0) + "|" + (e.sig || "") + "|" + (e.source || "tray");
+  const entryKey = (e: TrayEntry) => e.item + "|" + (e.sig || "") + "|" + (e.source || "tray");
   const tipEntry = barTip?.tray;
   const tipKey = tipEntry ? entryKey(tipEntry) : "";
   const tipActions =
@@ -1776,7 +1774,7 @@ export default function Cooking({ data }: { data: any }) {
                 else if (ing.kind === "finish") startFinish(e, ing);
                 else if (ing.kind === "bakemix") startBakeMix(e, ing);
                 else if (ing.kind === "condiment") startCondiment(e, ing);
-                else if (isPrep) startPrepDrag(e, "inv", { item: ing.item, cheese: 0, model: ing.model, label: ing.label, image: ing.image, dual: ing.dual });
+                else if (isPrep) startPrepDrag(e, "inv", { item: ing.item, model: ing.model, label: ing.label, image: ing.image, dual: ing.dual });
                 else startPlace(e, ing);
               };
               return (
@@ -1926,7 +1924,7 @@ export default function Cooking({ data }: { data: any }) {
             {trayList.map((e, i) => {
               const cookHere = canCookHere(e);
               const fromInv = e.source === "inv";
-              const cardKey = e.item + "|" + (e.cheese || 0) + "|" + (e.sig || "") + "|" + (e.source || "tray") + "|" + i;
+              const cardKey = e.item + "|" + (e.sig || "") + "|" + (e.source || "tray") + "|" + i;
               // freshness: show a red countdown only in the final minute before it spoils
               const secs = expirySecs(e);
               const expiring = secs != null && secs > 0 && secs <= 59;

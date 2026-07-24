@@ -14,7 +14,7 @@ RecipeByInput   = {}    -- [input_item]    = recipe
 RecipeByOutput  = {}    -- [output_cooked_item] = recipe (reverse map for cost tracing)
 EmployeeCache   = {}    -- [restaurantId][identifier] = employee row
 StockCache      = {}    -- [restaurantId][item] = count
-TrayCache       = {}    -- [restaurantId][identifier][item.."|"..cheese] = { item, cheese, count, metas } (metas: one build stack — or false — per counted instance; TraySig(meta) addresses a variation)
+TrayCache       = {}    -- [restaurantId][identifier][item] = { item, count, metas } (metas: one build stack — or false — per counted instance; TraySig(meta) addresses a variation)
 SettingsCache   = {}    -- [key]           = decoded value
 OrderCache      = {}    -- [restaurantId][orderId] = open POS ticket row (lines decoded)
 NextTicket      = {}    -- [restaurantId]  = next kitchen ticket number
@@ -114,19 +114,19 @@ local DEFAULT_SETTINGS = {
     cooked_expire_seconds = 900,
     -- The inventory item a serving-tray arrangement becomes at kitchen prep. The
     -- meal's metadata records every item WITH its position on the tray, so it
-    -- re-renders 1:1 wherever it's set back down. The item is what gets GENERATED
-    -- (itemgen exports it) — never a requirement to use the tray; only moving a
+    -- re-renders 1:1 wherever it's set back down. This is a HANDOUT item (shipped in
+    -- the install/ folder) — never a requirement to use the tray; only moving a
     -- meal into the real inventory needs it installed.
     meal_item       = "meal",
     -- The inventory item EVERY poured drink becomes ("Restaurant Drink") — one
     -- item for all flavors, the flavor riding as build-stack metadata (a layer
     -- holding the drinks[].output key), exactly like the meal item. The per-flavor
-    -- `output` keys below stop being items; itemgen exports only this one.
+    -- `output` keys are NOT items; only this one ships in the install/ folder.
     drink_item      = "drink",
     -- The inventory item a paying customer receives when a POS order is rung up —
     -- its slot metadata carries the order id/ticket so completion can verify the
-    -- holder. Like meal_item it's what gets GENERATED (itemgen exports it); if the
-    -- item isn't installed the POS still works, just without a physical receipt.
+    -- holder. Like meal_item it's a HANDOUT item (shipped in install/); if the item
+    -- isn't installed the POS still works, just without a physical receipt.
     receipt_item    = "receipt",
     -- The inventory item EVERY crafted "Restaurant Bag" becomes — one item for
     -- all crafts, the craft identity (`id`) + its component layers riding as
@@ -450,27 +450,27 @@ local function CreateTables()
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
 
-    -- Per-player, per-restaurant "Cooked Items" tray: cooked products held as a
-    -- state (with a cheese flag) between the grill and the prep station.
+    -- Per-player, per-restaurant "Cooked Items" tray: cooked products held between
+    -- the grill and the prep station. One row per (restaurant, cook, item); every
+    -- build variation (toppings, alterations) lives inside the per-instance metadata.
     MySQL.query.await([[
         CREATE TABLE IF NOT EXISTS `pickle_restaurant_cooked_items` (
             `id`            INT UNSIGNED NOT NULL AUTO_INCREMENT,
             `restaurant_id` INT UNSIGNED NOT NULL,
             `identifier`    VARCHAR(80)  NOT NULL,
             `item`          VARCHAR(60)  NOT NULL,
-            -- NOT TINYINT(1): oxmysql boolean-casts TINYINT(1), which can't hold the
-            -- third cheese state (0=none, 1=applied, 2=melted) — 2 would read back wrong.
-            `cheese`        TINYINT UNSIGNED NOT NULL DEFAULT 0,
             `count`         INT          NOT NULL DEFAULT 0,
             -- Per-instance build stacks (JSON array, one entry per counted item) so an
-            -- assembled product remembers what actually went into it — alterations and
-            -- cheese states included — and can be taken back apart faithfully.
+            -- assembled product remembers what actually went into it — toppings (a
+            -- melting cheese slice), alterations and all — and can be taken back apart
+            -- faithfully. Melt state rides each layer's `top` field (config-driven,
+            -- from the ingredient's `melts`), never a hardcoded column.
             `metadata`      JSON         DEFAULT NULL,
             -- UNIX seconds the row's items were cooked (freshness clock for expiration);
             -- set when the row is created, preserved as more are stacked onto it.
             `cooked_at`     BIGINT       NOT NULL DEFAULT 0,
             PRIMARY KEY (`id`),
-            UNIQUE KEY `uniq_tray` (`restaurant_id`, `identifier`, `item`, `cheese`),
+            UNIQUE KEY `uniq_tray` (`restaurant_id`, `identifier`, `item`),
             KEY `idx_rest_id` (`restaurant_id`, `identifier`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
@@ -899,7 +899,7 @@ end
 
 -- ─── unified menu: derivation layer ──────────────────────────────────────────
 -- Rebuilds the exact legacy runtime shapes the 5k-line cooking engine / sales /
--- itemgen / sync consume — RecipeCache rows, assembly/drinks/crafts/finishes/
+-- sync consume — RecipeCache rows, assembly/drinks/crafts/finishes/
 -- condiments lists, the baking config (now a LIST, one per fill tool) and the
 -- item->prep-prop map — from the three authored arrays. Run at boot and after
 -- every save of foods/tools/ingredients. Gameplay code never reads the authored
@@ -1108,21 +1108,15 @@ local function LoadCombos()
     end
 end
 
--- Cheese state on a cooked item: 0 = none, 1 = applied (unmelted), 2 = melted. Kept
--- distinct through the tray + DB so a collected burger renders at the melt state it
--- was in; anything > 0 counts as "has cheese" for recipe matching.
-function CheeseVal(v) return tonumber(v) or (v == true and 1) or 0 end
-
 local function LoadCookedItems()
     TrayCache = {}
     local rows = MySQL.query.await("SELECT * FROM pickle_restaurant_cooked_items") or {}
     for _, row in ipairs(rows) do
         if (row.count or 0) > 0 then
-            local cheese = CheeseVal(row.cheese)
             TrayCache[row.restaurant_id] = TrayCache[row.restaurant_id] or {}
             TrayCache[row.restaurant_id][row.identifier] = TrayCache[row.restaurant_id][row.identifier] or {}
-            TrayCache[row.restaurant_id][row.identifier][row.item .. "|" .. cheese] =
-                { item = row.item, cheese = cheese, count = row.count, metas = dec(row.metadata, {}),
+            TrayCache[row.restaurant_id][row.identifier][row.item] =
+                { item = row.item, count = row.count, metas = dec(row.metadata, {}),
                   cookedAt = tonumber(row.cooked_at) or 0 }
         end
     end
@@ -1478,30 +1472,6 @@ function AnnotateIngredients()
     end
     return out
 end
-
--- Diagnostic: a finish tool card only appears on the prep bar when its tool AND
--- at least one target's (item + output) are all installed inventory items — so a
--- tool you're carrying still stays hidden if its target/output items are missing.
--- Prints exactly what each finish tool is missing so a hidden card can be traced
--- to the item(s) still needing /restaurants_items + install.
-CreateThread(function()
-    while not RestaurantsReady do Wait(200) end
-    RegisterCommand("restaurants_finishes", function(src)
-        if src ~= 0 and not IsPlayerAdmin(src) then return ShowNotification(src, _L("no_permission")) end
-        local function line(s) print(s); if src ~= 0 then ShowNotification(src, s) end end
-        line("[pickle_restaurants] Finish tools:")
-        for _, f in ipairs(GetFinishes()) do
-            local toolOk = ItemExists(f.tool)
-            line((" • %s  tool=%s%s"):format(f.tool or "?", tostring(f.tool), toolOk and " ✓" or " ✗ NOT INSTALLED"))
-            for _, t in ipairs(f.targets or {}) do
-                -- a tray PRODUCT (recipe/assembly/finish output) is valid uninstalled
-                local iOk = ItemExists(t.item)   and " ✓" or (IsProductItem(t.item)   and " ✓ (cooked item)" or " ✗ NOT INSTALLED")
-                local oOk = ItemExists(t.output) and " ✓" or (IsProductItem(t.output) and " ✓ (cooked item)" or " ✗ NOT INSTALLED")
-                line(("     target %s%s  ->  %s%s"):format(tostring(t.item), iOk, tostring(t.output), oOk))
-            end
-        end
-    end, false)
-end)
 
 -- ─── permissions ─────────────────────────────────────────────────────────────
 
@@ -1984,10 +1954,8 @@ end
 -- (the tray mutates in tight loops — a per-op broadcast would spam clients).
 function MarkOrdersDirty(rid) if rid then OrdersDirty[rid] = true end end
 
-local function trayKey(item, cheese) return item .. "|" .. CheeseVal(cheese) end
-
 -- Canonical signature of one instance's build stack: its ordered layers as
--- "item|cheese|half" joined with ",". "" = no recorded stack (a plain instance).
+-- "item|half" joined with ",". "" = no recorded stack (a plain instance).
 -- Two builds of the same item with different stacks (e.g. a pizza with and without
 -- pepperoni) get different signatures, so the tray can tell the variations apart
 -- instead of merging them into one count and popping the wrong one on removal.
@@ -1997,14 +1965,9 @@ function TraySig(meta)
     for _, l in ipairs(meta) do
         -- tolerate the older aggregated `count` layer format
         for _ = 1, (tonumber(l.count) or 1) do
-            -- the middle field is a historical artifact (the layer's numeric cheese
-            -- state) — toppings are canonicalized into the "+item:state" token below,
-            -- so it's pinned to 0 and legacy/modern encodings of the same build
-            -- produce IDENTICAL sigs (plain layers are byte-identical to always)
-            local part = tostring(l.item) .. "|0|" .. tostring(l.half or "")
-            -- a melting topping riding this layer (modern `top` field, or a legacy
-            -- numeric `cheese` decoded via LayerTopping): its item + melt state are
-            -- part of the variation identity
+            local part = tostring(l.item) .. "|" .. tostring(l.half or "")
+            -- a melting topping riding this layer (its `top` field): its item + melt
+            -- state are part of the variation identity
             local topv = LayerTopping(l)
             if topv then
                 part = part .. "+" .. tostring(topv.item) .. ":" .. tostring(topv.state)
@@ -2052,8 +2015,8 @@ end
 
 -- `sig` (optional, here and below): address only the instances whose build stack
 -- matches that signature. nil = any instance (the legacy LIFO behaviour).
-function GetTrayCount(rid, identifier, item, cheese, sig)
-    local e = TrayCache[rid] and TrayCache[rid][identifier] and TrayCache[rid][identifier][trayKey(item, cheese)]
+function GetTrayCount(rid, identifier, item, sig)
+    local e = TrayCache[rid] and TrayCache[rid][identifier] and TrayCache[rid][identifier][item]
     if not e then return 0 end
     if sig == nil then return e.count or 0 end
     local n = 0
@@ -2064,11 +2027,10 @@ function GetTrayCount(rid, identifier, item, cheese, sig)
 end
 
 -- The build stack of the most-recently-added (matching) instance of a tray entry,
--- or nil for a plain/legacy instance with no recorded stack. `metas` holds one
--- entry per counted item (a stack table, or false when that instance wasn't
--- assembled from parts).
-function TrayTopMeta(rid, identifier, item, cheese, sig)
-    local e = TrayCache[rid] and TrayCache[rid][identifier] and TrayCache[rid][identifier][trayKey(item, cheese)]
+-- or nil for a plain instance with no recorded stack. `metas` holds one entry per
+-- counted item (a stack table, or false when that instance wasn't assembled from parts).
+function TrayTopMeta(rid, identifier, item, sig)
+    local e = TrayCache[rid] and TrayCache[rid][identifier] and TrayCache[rid][identifier][item]
     if not e then return nil end
     for i = e.count or 0, 1, -1 do
         if sig == nil or traySigAt(e, i) == sig then
@@ -2081,17 +2043,15 @@ end
 
 -- `meta` (optional) is this add's build stack, stored per-instance so an assembled
 -- product can later be taken back apart into exactly what went into it.
-function AddTray(rid, identifier, item, cheese, count, meta)
+function AddTray(rid, identifier, item, count, meta)
     if not rid or not identifier or not item then return end
-    cheese = CheeseVal(cheese)
     count = count or 1
     TrayCache[rid] = TrayCache[rid] or {}
     TrayCache[rid][identifier] = TrayCache[rid][identifier] or {}
-    local key = trayKey(item, cheese)
-    local e = TrayCache[rid][identifier][key]
+    local e = TrayCache[rid][identifier][item]
     if not e then
-        e = { item = item, cheese = cheese, count = 0, metas = {}, cookedAt = os.time() }
-        TrayCache[rid][identifier][key] = e
+        e = { item = item, count = 0, metas = {}, cookedAt = os.time() }
+        TrayCache[rid][identifier][item] = e
     end
     e.metas = e.metas or {}
     e.count = e.count + count
@@ -2100,18 +2060,16 @@ function AddTray(rid, identifier, item, cheese, count, meta)
     -- the full window again instead of inheriting the oldest instance's leftovers.
     e.cookedAt = os.time()
     for _ = 1, count do e.metas[#e.metas + 1] = meta or false end
-    MySQL.update("INSERT INTO pickle_restaurant_cooked_items (restaurant_id, identifier, item, cheese, count, metadata, cooked_at) "
-        .. "VALUES (?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE count = count + VALUES(count), metadata = VALUES(metadata), cooked_at = VALUES(cooked_at)",
-        { rid, identifier, item, cheese, count, json.encode(e.metas), e.cookedAt })
+    MySQL.update("INSERT INTO pickle_restaurant_cooked_items (restaurant_id, identifier, item, count, metadata, cooked_at) "
+        .. "VALUES (?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE count = count + VALUES(count), metadata = VALUES(metadata), cooked_at = VALUES(cooked_at)",
+        { rid, identifier, item, count, json.encode(e.metas), e.cookedAt })
     MarkOrdersDirty(rid)
 end
 
-function RemoveTray(rid, identifier, item, cheese, count, sig)
-    cheese = CheeseVal(cheese)
+function RemoveTray(rid, identifier, item, count, sig)
     count = count or 1
-    if GetTrayCount(rid, identifier, item, cheese, sig) < count then return false end
-    local key = trayKey(item, cheese)
-    local e = TrayCache[rid][identifier][key]
+    if GetTrayCount(rid, identifier, item, sig) < count then return false end
+    local e = TrayCache[rid][identifier][item]
     e.metas = e.metas or {}
     -- Drop the newest matching instances alongside the count (LIFO, matching
     -- TrayTopMeta). An instance past #metas is plain (""), so removing it only
@@ -2125,12 +2083,12 @@ function RemoveTray(rid, identifier, item, cheese, count, sig)
         e.count = e.count - 1
     end
     if e.count <= 0 then
-        TrayCache[rid][identifier][key] = nil
-        MySQL.update("DELETE FROM pickle_restaurant_cooked_items WHERE restaurant_id = ? AND identifier = ? AND item = ? AND cheese = ?",
-            { rid, identifier, item, cheese })
+        TrayCache[rid][identifier][item] = nil
+        MySQL.update("DELETE FROM pickle_restaurant_cooked_items WHERE restaurant_id = ? AND identifier = ? AND item = ?",
+            { rid, identifier, item })
     else
-        MySQL.update("UPDATE pickle_restaurant_cooked_items SET count = count - ?, metadata = ? WHERE restaurant_id = ? AND identifier = ? AND item = ? AND cheese = ?",
-            { count, json.encode(e.metas), rid, identifier, item, cheese })
+        MySQL.update("UPDATE pickle_restaurant_cooked_items SET count = count - ?, metadata = ? WHERE restaurant_id = ? AND identifier = ? AND item = ?",
+            { count, json.encode(e.metas), rid, identifier, item })
     end
     MarkOrdersDirty(rid)
     return true
@@ -2159,7 +2117,7 @@ function GetTray(rid, identifier)
             end
             for _, s in ipairs(order) do
                 out[#out + 1] = {
-                    item = e.item, cheese = e.cheese, count = groups[s].count,
+                    item = e.item, count = groups[s].count,
                     sig = s, meta = groups[s].meta, cookedAt = e.cookedAt or 0,
                     label = GetItemLabel(e.item), image = GetItemImage(e.item),
                 }
@@ -2184,7 +2142,7 @@ function PoolCount(rid, item, matchSig)
     for identifier, byKey in pairs(byId) do
         for _, e in pairs(byKey) do
             if e.item == item then
-                n = n + GetTrayCount(rid, identifier, item, e.cheese, matchSig)
+                n = n + GetTrayCount(rid, identifier, item, matchSig)
             end
         end
     end
@@ -2199,7 +2157,7 @@ function PoolTopMeta(rid, item, matchSig)
     for identifier, byKey in pairs(byId) do
         for _, e in pairs(byKey) do
             if e.item == item then
-                local m = TrayTopMeta(rid, identifier, item, e.cheese, matchSig)
+                local m = TrayTopMeta(rid, identifier, item, matchSig)
                 if m ~= nil then return m end
             end
         end
@@ -2229,7 +2187,7 @@ function PoolVariations(rid, item)
 end
 
 -- Consume up to `count` matching instances of `item` from the pool (any identifier,
--- any cheese, LIFO within each row). Returns a list of { cheese, meta } for every
+-- LIFO within each row). Returns a list of { meta } for every
 -- consumed instance (meta read BEFORE its RemoveTray, like trayToInventory), or nil
 -- if the pool can't cover `count` — in which case nothing is consumed.
 function PoolConsume(rid, item, matchSig, count)
@@ -2240,11 +2198,10 @@ function PoolConsume(rid, item, matchSig, count)
     for identifier, byKey in pairs(byId) do
         for _, e in pairs(byKey) do
             if e.item == item then
-                local cheese = e.cheese
-                while #taken < count and GetTrayCount(rid, identifier, item, cheese, matchSig) > 0 do
-                    local meta = TrayTopMeta(rid, identifier, item, cheese, matchSig)
-                    if not RemoveTray(rid, identifier, item, cheese, 1, matchSig) then break end
-                    taken[#taken + 1] = { cheese = cheese, meta = meta }
+                while #taken < count and GetTrayCount(rid, identifier, item, matchSig) > 0 do
+                    local meta = TrayTopMeta(rid, identifier, item, matchSig)
+                    if not RemoveTray(rid, identifier, item, 1, matchSig) then break end
+                    taken[#taken + 1] = { meta = meta }
                 end
             end
             if #taken >= count then break end
@@ -2277,7 +2234,7 @@ function PoolCountMatch(rid, item, match)
 end
 
 -- Consume up to `count` instances of `item` for which match(meta) is true (any
--- identifier/cheese, LIFO within each row). Returns { {cheese, meta}, … } for every
+-- identifier, LIFO within each row). Returns { {meta}, … } for every
 -- consumed instance (meta read BEFORE its removal), or nil if the pool can't cover
 -- `count` — in which case nothing is consumed. Removal pins the instance's EXACT sig
 -- so a broader variation match never pops the wrong stack.
@@ -2289,15 +2246,14 @@ function PoolConsumeMatch(rid, item, match, count)
     for identifier, byKey in pairs(byId) do
         for _, e in pairs(byKey) do
             if e.item == item then
-                local cheese = e.cheese
                 local i = e.count or 0
                 while #taken < count and i >= 1 do
                     local m = e.metas and e.metas[i]
                     local mt = (type(m) == "table") and m or nil
                     if match(mt) then
                         local sig = traySigAt(e, i)
-                        if RemoveTray(rid, identifier, item, cheese, 1, sig) then
-                            taken[#taken + 1] = { cheese = cheese, meta = mt }
+                        if RemoveTray(rid, identifier, item, 1, sig) then
+                            taken[#taken + 1] = { meta = mt }
                         end
                         i = e.count or 0 -- the row shrank; rescan from the (new) top
                     else

@@ -320,40 +320,9 @@ function RefreshScreens()
     end
 end
 
--- ─── debug / calibration ──────────────────────────────────────────────────────
--- /pickle_screen_debug [rid]  — spawn both screen models on a wall with the given
---   restaurant's live data forced on (defaults to the nearest restaurant that has any
---   menu); a second call tears the debug zone down.
--- /pickle_screen_res [key w h] — list, or resize a screen's DUI live to find the
---   aspect that makes its content un-stretched, then bake it into SCREENS.
--- /pickle_screen_orient [key rot flipx flipy] — list, or set a screen's rotation/mirror
---   live so the content lands upright on the prop, then bake it into SCREENS.
-
-local DEBUG_COORD = vector3(-1190.8749, -891.9343, 15.5)
+-- Debug-preview cleanup scaffolding (the /pickle_screen_* tuning commands were
+-- removed for ship; `debugForce` stays nil, so the guards below are inert).
 local debugProps  = {}
-
-local function recreateDui(t)
-    local wasApplied = t.applied
-    removeReplacement(t)
-    if t.dui then DestroyDui(t.dui); t.dui = nil end
-    t.ready, t.cur, t.sig, t.rid = false, nil, nil, nil
-    if wasApplied then applyReplacement(t) end -- next tick re-pushes fresh data
-end
-
-local function spawnModel(model, x, y, z)
-    local hash = GetHashKey(model)
-    if not IsModelInCdimage(hash) then return nil end
-    RequestModel(hash)
-    local t0 = GetGameTimer()
-    while not HasModelLoaded(hash) and GetGameTimer() - t0 < 5000 do Wait(0) end
-    if not HasModelLoaded(hash) then return nil end
-    local ent = CreateObject(hash, x, y, z, false, false, false)
-    SetModelAsNoLongerNeeded(hash)
-    if not ent or not DoesEntityExist(ent) then return nil end
-    SetEntityCoordsNoOffset(ent, x, y, z, false, false, false)
-    FreezeEntityPosition(ent, true)
-    return ent
-end
 
 local function clearScreenDebug()
     for _, e in ipairs(debugProps) do
@@ -362,102 +331,6 @@ local function clearScreenDebug()
     debugProps = {}
     debugForce = nil
 end
-
-RegisterCommand("pickle_screen_debug", function(_, args)
-    if #debugProps > 0 then
-        clearScreenDebug()
-        print("[screens] debug zone cleared")
-        return
-    end
-    local rid = tonumber(args[1])
-    if not rid then
-        -- default: the nearest restaurant that has a menu to show
-        local here = GetEntityCoords(PlayerPedId())
-        local bestDist
-        for _, r in pairs(Restaurants or {}) do
-            if r.menu and #r.menu > 0 then
-                local c = r.counter and vector3(r.counter.x + 0.0, r.counter.y + 0.0, r.counter.z + 0.0)
-                local dist = c and #(here - c) or 0.0
-                if not bestDist or dist < bestDist then bestDist, rid = dist, r.id end
-            end
-        end
-    end
-    if not rid or not Restaurants[rid] then return print("[screens] no restaurant to preview (pass a valid rid)") end
-    debugForce = { rid = rid }
-    seededOrders[rid] = nil; seedOrders(rid)
-    for _, t in ipairs(SCREENS) do applyReplacement(t) end
-    SetEntityCoords(PlayerPedId(), DEBUG_COORD.x, DEBUG_COORD.y - 2.0, DEBUG_COORD.z, false, false, false, false)
-    CreateThread(function()
-        Wait(400)
-        local x = DEBUG_COORD.x
-        for _, t in ipairs(SCREENS) do
-            local half = (t.gap or 3.0) * 0.5
-            x = x + half
-            local ent = spawnModel(t.txd, x, DEBUG_COORD.y, DEBUG_COORD.z)
-            if ent then debugProps[#debugProps + 1] = ent; ReassertScreenFor(t.txd) end
-            x = x + half
-        end
-        print(("[screens] debug zone: previewing restaurant #%d on %d screens"):format(rid, #debugProps))
-    end)
-end, false)
-
--- /pickle_screen_state — dump each screen's live state to F8, to diagnose a black
--- board: is a restaurant found, is the DUI up, is the replacement applied + bound.
-RegisterCommand("pickle_screen_state", function()
-    print("[screens] state:")
-    for _, t in ipairs(SCREENS) do
-        local r = debugForce and Restaurants[debugForce.rid] or nearestFor(t)
-        local propHere = false
-        for _, rr in pairs(Restaurants or {}) do
-            for _, p in ipairs(rr.props or {}) do if p.prop_type == t.prop_type then propHere = true end end
-        end
-        local n = 0
-        if r then
-            if t.kind == "menu" then n = #(r.menu or {})
-            else n = #(ScreenOrders[r.id] or {}) end
-        end
-        print(("  %-7s model=%s txn=%s prop_placed=%s dui=%s ready=%s applied=%s rid=%s data=%d")
-            :format(t.key, t.txd, t.txn, tostring(propHere), tostring(t.dui ~= nil),
-                    tostring(t.ready == true), tostring(t.applied == true), tostring(r and r.id or "-"), n))
-    end
-    print("[screens] if prop_placed=false → the screen prop isn't placed for any restaurant;")
-    print("[screens] if applied=true but still black → try /pickle_screen_res (aspect) or a FULL resource restart (new html file).")
-end, false)
-
-RegisterCommand("pickle_screen_res", function(_, args)
-    local key, w, h = args[1], tonumber(args[2]), tonumber(args[3])
-    if not key then
-        print("[screens] resolutions (bake tuned values into SCREENS):")
-        for _, t in ipairs(SCREENS) do print(("  %-8s %s  ->  %d x %d"):format(t.key, t.txd, t.w, t.h)) end
-        return print("[screens] usage: /pickle_screen_res <menu|orders> <width> <height>")
-    end
-    local t = SCREEN_BY_KEY[key]; if not t then return print(("[screens] unknown screen '%s'"):format(key)) end
-    if not (w and h and w > 0 and h > 0) then return print("[screens] usage: /pickle_screen_res <menu|orders> <width> <height>") end
-    t.w, t.h = math.floor(w), math.floor(h)
-    recreateDui(t)
-    print(("[screens] %s resized to %d x %d"):format(t.key, t.w, t.h))
-end, false)
-
-RegisterCommand("pickle_screen_orient", function(_, args)
-    local key = args[1]
-    if not key then
-        print("[screens] orientations (bake tuned values into SCREENS):")
-        for _, t in ipairs(SCREENS) do
-            print(("  %-8s rot=%-3d flipx=%s flipy=%s"):format(t.key, t.rot or 0, tostring(t.flipx or false), tostring(t.flipy or false)))
-        end
-        return print("[screens] usage: /pickle_screen_orient <menu|orders> <rot 0|90|180|270> [flipx 0|1] [flipy 0|1]")
-    end
-    local t = SCREEN_BY_KEY[key]; if not t then return print(("[screens] unknown screen '%s'"):format(key)) end
-    local rot = tonumber(args[2]); if not rot then return print("[screens] usage: /pickle_screen_orient <menu|orders> <rot 0|90|180|270> [flipx 0|1] [flipy 0|1]") end
-    t.rot   = (math.floor(rot / 90 + 0.5) * 90) % 360
-    t.flipx = (args[3] == "1" or args[3] == "true")
-    t.flipy = (args[4] == "1" or args[4] == "true")
-    -- A 90/270 turn changes the SURFACE aspect (upright w/h swap), so rebuild the DUI at
-    -- the new surface rather than just repainting.
-    recreateDui(t)
-    print(("[screens] %s orient rot=%d flipx=%s flipy=%s"):format(t.key, t.rot, tostring(t.flipx), tostring(t.flipy)))
-end, false)
-
 -- ─── teardown ────────────────────────────────────────────────────────────────
 
 AddEventHandler("onResourceStop", function(res)

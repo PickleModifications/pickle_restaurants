@@ -1392,14 +1392,6 @@ DriverTelemetry = {}
 -- by startDelivery above. Production stays silent; the relay gate is otherwise a
 -- black hole (every rejection is a silent drop, by design against griefers).
 DeliveryDebug = false
-
-RegisterCommand("pickle_delivery_debug", function(src)
-    if src ~= 0 and not IsPlayerAdmin(src) then return end
-    DeliveryDebug = not DeliveryDebug
-    print(("[delivery] server debug %s"):format(DeliveryDebug and "ON" or "OFF"))
-    if src ~= 0 then ShowNotification(src, _L("delivery_debug", DeliveryDebug and "ON" or "OFF")) end
-end, false)
-
 local function ddbg(fmt, ...)
     if not DeliveryDebug then return end
     print(("[delivery] " .. fmt):format(...))
@@ -1733,13 +1725,13 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
         if plan.mealSig then
             local taken = PoolConsume(id, mealItem, plan.mealSig, 1)
             if not taken or #taken < 1 then error(GetItemLabel(mealItem), 0) end
-            Inventory.AddItem(customerSrc, mealItem, 1, BuildInvMeta(0, taken[1].meta, mealItem))
+            Inventory.AddItem(customerSrc, mealItem, 1, BuildInvMeta(taken[1].meta, mealItem))
         end
         for _, g in ipairs(plan.singles) do
             local taken = PoolConsumeMatch(id, g.item, variationMatcher(g.item, g.key), g.count)
             if not taken or #taken < g.count then error(GetItemLabel(g.item), 0) end
             for _, inst in ipairs(taken) do
-                Inventory.AddItem(customerSrc, g.item, 1, BuildInvMeta(inst.cheese, inst.meta, g.item))
+                Inventory.AddItem(customerSrc, g.item, 1, BuildInvMeta(inst.meta, g.item))
             end
         end
         -- Deliveries never required one, so there is nothing to void (see above).

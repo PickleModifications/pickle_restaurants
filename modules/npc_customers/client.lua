@@ -120,10 +120,13 @@ local function makeNpc(rid, orderId, model, counter, geo, index, ticket, spawn, 
     end
 end
 
--- Walk a ped clear of the queue, then delete it. `happy` reserved for a future
--- reaction difference; both currently step aside and leave.
+-- Walk a ped clear of the queue, then delete it. `happy` drives the parting facial
+-- expression: a served customer leaves smiling, an impatient one leaves scowling.
 local function walkAwayAndDelete(ped, counter, happy)
     if not DoesEntityExist(ped) then return end
+    -- a mood facial override reads on any human ped; cleared automatically when the
+    -- ped is deleted below (the ped is transient — spawned per order, walked off, gone)
+    SetFacialIdleAnimOverride(ped, happy and "mood_happy_1" or "mood_angry_1", 0)
     FreezeEntityPosition(ped, false)
     ClearPedTasks(ped)
     local away = GetEntityCoords(ped) + (rightVec(counter and counter.heading or 0.0) * 2.5)

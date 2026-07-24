@@ -49,9 +49,9 @@ end)
 -- so the ingredient/tray callbacks can subtract what a build has reserved from the
 -- counts they show — items aren't consumed until Make, but the bar reflects them
 -- as "spoken for" the moment they're placed on the table.
-local PrepBuilds = {} -- [src] = { prop_id, rid, seq, layers = { {id, source, item, cheese, half, top, sig} … } }
-                      -- (cheese is legacy inventory-slot ADDRESSING only; a layer's
-                      -- topping rides `top` = { item, state } on every new write)
+local PrepBuilds = {} -- [src] = { prop_id, rid, seq, layers = { {id, source, item, half, sig} … } }
+                      -- (a layer's topping, if any, is resolved from the reserved
+                      -- instance's meta by `sig` in consumeLayers)
 -- Filled baking trays awaiting collection. Rubbing the mix into a tray consumes 1
 -- mix immediately (cheat-safe: you can't conjure a raw bake without spending mix)
 -- and records a pending credit here; dragging the filled tray to the hotbar redeems
@@ -674,7 +674,7 @@ end
 
 -- Drop every spoiled row from one player's tray (cache + DB). Returns true if it
 -- removed anything (so callers can resync). Uses GetTray's grouped entries only for
--- the cookedAt/item; removal is by the full (item, cheese) row.
+-- the cookedAt/item; removal is by the full item row.
 local function PurgeExpiredTray(rid, identifier)
     local byKey = TrayCache[rid] and TrayCache[rid][identifier]
     if not byKey then return false end
@@ -685,11 +685,11 @@ local function PurgeExpiredTray(rid, identifier)
     for _, e in pairs(byKey) do
         local exp = TrayExpiresAt(e.item, e.cookedAt)
         if exp and now >= exp and (e.count or 0) > 0 then
-            spoiled[#spoiled + 1] = { item = e.item, cheese = e.cheese, count = e.count }
+            spoiled[#spoiled + 1] = { item = e.item, count = e.count }
         end
     end
     for _, s in ipairs(spoiled) do
-        if RemoveTray(rid, identifier, s.item, s.cheese, s.count) then removed = true end
+        if RemoveTray(rid, identifier, s.item, s.count) then removed = true end
     end
     return removed
 end
@@ -981,31 +981,29 @@ local function extrasComponents(item, meta)
 end
 
 -- ─── inventory variations ────────────────────────────────────────────────────
--- An inventory-held product carries its build stack / cheese state on its SLOT
--- metadata (written by trayToInventory's buildInvMeta). Where the bridge exposes
--- slots (ox_inventory / qb), these helpers group and consume by exact variation,
--- so a pepperoni pizza item stays a pepperoni pizza through the round-trip.
--- Without slot access they degrade to plain per-item counts.
+-- An inventory-held product carries its build stack on its SLOT metadata (written
+-- by trayToInventory's buildInvMeta). Where the bridge exposes slots (ox_inventory /
+-- qb), these helpers group and consume by exact variation, so a pepperoni pizza item
+-- stays a pepperoni pizza through the round-trip. Without slot access they degrade to
+-- plain per-item counts.
 
--- The distinct (cheese, sig) variations of an item in a player's inventory:
--- array of { cheese, sig, count, meta }.
+-- The distinct build-stack (sig) variations of an item in a player's inventory:
+-- array of { sig, count, meta }.
 local function invVariations(src, item)
     if not Inventory.GetItemSlots then
         local count = Inventory.GetItemCount(src, item) or 0
-        return (count > 0) and { { cheese = 0, sig = "", count = count } } or {}
+        return (count > 0) and { { sig = "", count = count } } or {}
     end
     local groups, order = {}, {}
     for _, s in ipairs(Inventory.GetItemSlots(src, item) or {}) do
         local m = type(s.metadata) == "table" and s.metadata or {}
         local stack = type(m.stack) == "table" and m.stack or nil
-        local cheese = CheeseVal(m.cheese)
         local sig = TraySig(stack)
-        local key = cheese .. "|" .. sig
-        if not groups[key] then
-            groups[key] = { cheese = cheese, sig = sig, count = 0, meta = stack }
-            order[#order + 1] = key
+        if not groups[sig] then
+            groups[sig] = { sig = sig, count = 0, meta = stack }
+            order[#order + 1] = sig
         end
-        groups[key].count = groups[key].count + (s.count or 1)
+        groups[sig].count = groups[sig].count + (s.count or 1)
     end
     local out = {}
     for _, k in ipairs(order) do out[#out + 1] = groups[k] end
@@ -1013,34 +1011,33 @@ local function invVariations(src, item)
 end
 
 -- Count / stack-meta / remove for one exact inventory variation. sig nil = the
--- whole item regardless of metadata (the legacy raw-component behaviour).
-local function invVariationCount(src, item, cheese, sig)
+-- whole item regardless of metadata (the raw-component behaviour).
+local function invVariationCount(src, item, sig)
     if sig == nil then return Inventory.GetItemCount(src, item) or 0 end
     local n = 0
     for _, v in ipairs(invVariations(src, item)) do
-        if v.sig == sig and v.cheese == CheeseVal(cheese) then n = n + v.count end
+        if v.sig == sig then n = n + v.count end
     end
     return n
 end
 
-local function invVariationMeta(src, item, cheese, sig)
+local function invVariationMeta(src, item, sig)
     if sig == nil then return nil end
     for _, v in ipairs(invVariations(src, item)) do
-        if v.sig == sig and v.cheese == CheeseVal(cheese) then return v.meta end
+        if v.sig == sig then return v.meta end
     end
 end
 
-local function removeInvVariation(src, item, cheese, sig, count)
+local function removeInvVariation(src, item, sig, count)
     if sig == nil or not Inventory.GetItemSlots then
         Inventory.RemoveItem(src, item, count)
         return
     end
-    cheese = CheeseVal(cheese)
     for _, s in ipairs(Inventory.GetItemSlots(src, item) or {}) do
         if count <= 0 then return end
         local m = type(s.metadata) == "table" and s.metadata or {}
         local stack = type(m.stack) == "table" and m.stack or nil
-        if TraySig(stack) == sig and CheeseVal(m.cheese) == cheese then
+        if TraySig(stack) == sig then
             local take = math.min(count, s.count or 1)
             Inventory.RemoveItemSlot(src, item, take, s.slot)
             count = count - take
@@ -1306,7 +1303,6 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         local id = GetIdentifier(src)
         local fromTray = d.source == "tray"
         local sig = (type(d.sig) == "string") and d.sig or nil
-        local cheese = CheeseVal(d.cheese)
         -- A raw simple ingredient comes from the shared restaurant stock POOL while
         -- the pool carries it, and from the cook's personal inventory once it runs
         -- dry; an assembled/uncooked product dragged from inventory keeps its
@@ -1315,17 +1311,17 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
             and (GetStockCount(rid, d.item) or 0) > 0
         local have
         if fromTray then
-            have = GetTrayCount(rid, id, d.item, cheese, sig)
+            have = GetTrayCount(rid, id, d.item, sig)
         elseif fromPool then
             have = GetStockCount(rid, d.item)
         else
-            have = invVariationCount(src, d.item, cheese, sig)
+            have = invVariationCount(src, d.item, sig)
         end
         if have < 1 then return { ok = false, error = _L("cook_missing_ingredient") } end
         local function consume()
-            if fromTray then RemoveTray(rid, id, d.item, cheese, 1, sig)
+            if fromTray then RemoveTray(rid, id, d.item, 1, sig)
             elseif fromPool then RemoveStock(rid, d.item, 1)
-            else removeInvVariation(src, d.item, cheese, sig, 1) end
+            else removeInvVariation(src, d.item, sig, 1) end
         end
 
         -- Oven / fryer: seat into a station slot and cook on a gated single timeline
@@ -1344,9 +1340,9 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
             -- the exact stack to the tray.
             local stackMeta
             if fromTray then
-                stackMeta = TrayTopMeta(rid, id, d.item, cheese, sig)
+                stackMeta = TrayTopMeta(rid, id, d.item, sig)
             else
-                stackMeta = invVariationMeta(src, d.item, cheese, sig)
+                stackMeta = invVariationMeta(src, d.item, sig)
             end
             -- An assembled input whose recorded stack ISN'T readable (a plain/legacy
             -- tray instance, or an inventory slot on a bridge without slot metadata)
@@ -1358,7 +1354,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
                 if asm and type(asm.components) == "table" and #asm.components > 0 then
                     stackMeta = {}
                     for _, comp in ipairs(asm.components) do
-                        stackMeta[#stackMeta + 1] = { item = comp, cheese = 0 }
+                        stackMeta[#stackMeta + 1] = { item = comp }
                     end
                 end
             end
@@ -1818,7 +1814,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
     local out = {}
     for _, e in ipairs(list) do
         if build then
-            e.count = e.count - math.ceil(reservedUnits(build, "tray", e.item, e.cheese, e.sig))
+            e.count = e.count - math.ceil(reservedUnits(build, "tray", e.item, e.sig))
         end
         if e.count > 0 then
             e.model = itemModel(e.item)
@@ -1950,15 +1946,15 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
     -- assembled-but-raw cook inputs (an uncooked pizza item) under "Uncooked Items".
     -- The Ingredients bar keeps only true raw components — a cooked patty in your
     -- inventory is not an "ingredient". Where the bridge exposes slot metadata,
-    -- each build variation is its own entry (exact stack, toppings, cheese state);
+    -- each build variation is its own entry (exact stack, toppings);
     -- otherwise everything groups under the base-recipe look.
     local function addInvEntries(item)
         if not ItemExists(item) then return end
         for _, v in ipairs(invVariations(src, item)) do
             local count = v.count
-            if build then count = count - math.ceil(reservedUnits(build, "inv", item, v.cheese, v.sig)) end
+            if build then count = count - math.ceil(reservedUnits(build, "inv", item, v.sig)) end
             if count > 0 then
-                local entry = { item = item, cheese = v.cheese, count = count, source = "inv", sig = v.sig,
+                local entry = { item = item, count = count, source = "inv", sig = v.sig,
                                 label = GetItemLabel(item), image = GetItemImage(item), model = itemModel(item) }
                 -- the generic drink item: label + capped-cup render from its
                 -- recorded flavor (mirrors the tray path above)
@@ -2071,14 +2067,13 @@ end)
 -- Inventory-slot metadata for a cooked item leaving the tray: its exact build stack
 -- (so the variation survives) + a readable description. Returns nil for a plain item
 -- with nothing to preserve (keeps stacks clean). Frameworks without slot metadata
--- (ESX) ignore whatever we pass. Toppings ride inside `meta` (the `top` field); the
--- `cheese` param is retained only as an addressing key and is never written to the slot.
+-- (ESX) ignore whatever we pass. Toppings ride inside `meta` (the `top` field).
 -- Global so the POS register (modules/sales) can hand pool-fulfilled cooked
 -- instances to the customer with the same slot metadata a cook gets on cash-out.
 -- `item` (optional): when it's the generic Restaurant Bag and the bagged craft has a
 -- `display_item`, stamp that item's label/image onto the slot so the bag reads in the
 -- inventory as the food it holds (ox_inventory honours `label`/`imageurl` natively).
-function BuildInvMeta(cheese, meta, item)
+function BuildInvMeta(meta, item)
     local m
     if type(meta) == "table" and #meta > 0 then
         m = { stack = meta, description = stackDescription(meta) }
@@ -2106,10 +2101,9 @@ lib.callback.register("pickle_restaurants:cooking:trayToInventory", function(src
     if not HasPerm(rid, src, "cook") then return { ok = false } end
     local id = GetIdentifier(src)
     local item   = d.item
-    local cheese = CheeseVal(d.cheese)
     local sig    = (type(d.sig) == "string") and d.sig or nil
     local count  = tonumber(d.count) or 1
-    if not item or GetTrayCount(rid, id, item, cheese, sig) < count then return { ok = false, error = _L("cook_not_enough") } end
+    if not item or GetTrayCount(rid, id, item, sig) < count then return { ok = false, error = _L("cook_not_enough") } end
     -- Burnt food is UNEXCHANGEABLE: it can never leave the tray into real inventory —
     -- the only way to get rid of it is the bin (trayDiscard), where it's destroyed for
     -- good. See memory: burnt-unexchangeable-destroyed.
@@ -2127,9 +2121,9 @@ lib.callback.register("pickle_restaurants:cooking:trayToInventory", function(src
     -- inventory slot (ox/qb slot metadata). TrayTopMeta must be read before the
     -- matching RemoveTray, which pops that instance's stack (LIFO).
     for _ = 1, count do
-        local meta = TrayTopMeta(rid, id, item, cheese, sig)
-        if not RemoveTray(rid, id, item, cheese, 1, sig) then break end
-        Inventory.AddItem(src, item, 1, buildInvMeta(cheese, meta, item))
+        local meta = TrayTopMeta(rid, id, item, sig)
+        if not RemoveTray(rid, id, item, 1, sig) then break end
+        Inventory.AddItem(src, item, 1, buildInvMeta(meta, item))
     end
     return { ok = true, item = item, count = count, label = GetItemLabel(item) }
 end)
@@ -2147,7 +2141,7 @@ lib.callback.register("pickle_restaurants:cooking:trayDiscard", function(src, d)
         local n = 0
         for _, e in ipairs(GetTray(rid, id)) do
             local _, state = recipeForOutput(e.item)
-            if state == "burnt" and e.count > 0 and RemoveTray(rid, id, e.item, e.cheese, e.count, e.sig) then
+            if state == "burnt" and e.count > 0 and RemoveTray(rid, id, e.item, e.count, e.sig) then
                 n = n + e.count
             end
         end
@@ -2155,12 +2149,11 @@ lib.callback.register("pickle_restaurants:cooking:trayDiscard", function(src, d)
         return { ok = true, count = n }
     end
     local item   = d.item
-    local cheese = CheeseVal(d.cheese)
     local sig    = (type(d.sig) == "string") and d.sig or nil
     local count  = tonumber(d.count) or 1
     if not item or count < 1 then return { ok = false } end
-    count = math.min(count, GetTrayCount(rid, id, item, cheese, sig))
-    if count < 1 or not RemoveTray(rid, id, item, cheese, count, sig) then
+    count = math.min(count, GetTrayCount(rid, id, item, sig))
+    if count < 1 or not RemoveTray(rid, id, item, count, sig) then
         return { ok = false, error = _L("cook_not_enough") }
     end
     return { ok = true, item = item, count = count, label = GetItemLabel(item) }
@@ -2197,10 +2190,10 @@ end
 -- reserve; nothing is pulled from the tray/inventory until Make, so this guards
 -- against reserving more than the player actually holds. `sig` (tray layers only)
 -- narrows the match to one build variation; nil matches any.
-function reservedUnits(b, source, item, cheese, sig)
+function reservedUnits(b, source, item, sig)
     local n = 0
     for _, l in ipairs(b.layers) do
-        if l.source == source and l.item == item and (l.cheese or 0) == (cheese or 0)
+        if l.source == source and l.item == item
             and (sig == nil or (l.sig or "") == sig) then
             n = n + layerUnits(l)
         end
@@ -2215,10 +2208,8 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     if not HasPerm(rid, src, "cook") then return { ok = false } end
     local item = d.item
     if not item then return { ok = false } end
-    -- `cheese` is retained only as an inventory-slot addressing key (invVariations /
-    -- reservedUnits group on it); it is always 0 now — a layer's topping rides in the
-    -- reserved instance's meta, resolved by `sig` in consumeLayers.
-    local cheese = CheeseVal(d.cheese)
+    -- a layer's topping rides in the reserved instance's meta, resolved by `sig` in
+    -- consumeLayers — there is no separate cheese/topping dimension on the reservation.
     -- only a halves-configured ingredient may reserve a half (the NUI is untrusted)
     local half = ((d.half == "top" or d.half == "bottom") and IngredientHalves(item)) and d.half or nil
     -- the build variation this layer reserves (so a pepperoni pizza layer holds
@@ -2236,23 +2227,22 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     -- Make). Validate against what's left after this build's existing reservations.
     local addUnits = (half and 0.5) or 1.0
     if d.source == "tray" then
-        local needed = math.ceil(reservedUnits(b, "tray", item, cheese, sig) + addUnits)
-        if GetTrayCount(rid, GetIdentifier(src), item, cheese, sig) < needed then
+        local needed = math.ceil(reservedUnits(b, "tray", item, sig) + addUnits)
+        if GetTrayCount(rid, GetIdentifier(src), item, sig) < needed then
             return { ok = false, error = _L("cook_not_enough_tray") }
         end
     elseif sig then
         -- an inventory-held PRODUCT reserves its exact variation (cheese + sig)
-        local needed = math.ceil(reservedUnits(b, "inv", item, cheese, sig) + addUnits)
-        if invVariationCount(src, item, cheese, sig) < needed then
+        local needed = math.ceil(reservedUnits(b, "inv", item, sig) + addUnits)
+        if invVariationCount(src, item, sig) < needed then
             return { ok = false, error = _L("cook_missing_item") }
         end
     else
-        cheese = 0
         -- a plain raw component comes from the shared restaurant stock pool (personal
         -- inventory once dry) — only reserved here; consumed on Make. Reservations are
         -- per-cook, so two cooks can optimistically reserve the same units — the pool
         -- (or inventory) re-checks on Make.
-        local needed = math.ceil(reservedUnits(b, "inv", item, 0) + addUnits)
+        local needed = math.ceil(reservedUnits(b, "inv", item) + addUnits)
         local have = poolInvCount(src, rid, item)
         if have < needed then
             return { ok = false, error = _L("cook_missing_item") }
@@ -2260,11 +2250,10 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     end
 
     b.seq = (b.seq or 0) + 1
-    -- cheese stays on the reservation as an inventory-slot addressing key only
-    -- (invVariations/reservedUnits key on it); the topping is resolved from the
-    -- reserved instance's meta by `sig` in consumeLayers.
+    -- the topping (if any) is resolved from the reserved instance's meta by `sig` in
+    -- consumeLayers, so the reservation only needs item/half/sig.
     b.layers[#b.layers + 1] = { id = b.seq, source = d.source, item = item,
-                                cheese = cheese, half = half, sig = sig }
+                                half = half, sig = sig }
     return { ok = true, id = b.seq }
 end)
 
@@ -2414,8 +2403,8 @@ local function consumeLayers(src, b, id, layers)
     for _, l in ipairs(layers) do
         if l.sig and l.sig ~= "" then
             l.stack = (l.source == "tray")
-                and TrayTopMeta(b.rid, id, l.item, l.cheese or 0, l.sig)
-                or invVariationMeta(src, l.item, l.cheese or 0, l.sig)
+                and TrayTopMeta(b.rid, id, l.item, l.sig)
+                or invVariationMeta(src, l.item, l.sig)
             -- A bare TOPPED product (a cheesed patty) is stored standalone as its
             -- one-layer SELF stack; flatten it back onto the layer so this layer
             -- records `top` directly (like a grill-cheesed patty) instead of a
@@ -2432,17 +2421,17 @@ local function consumeLayers(src, b, id, layers)
 
     local trayUnits, invUnits = {}, {}
     for _, l in ipairs(layers) do
-        local k = l.item .. "|" .. (l.cheese or 0) .. "|" .. (l.sig or "")
+        local k = l.item .. "|" .. (l.sig or "")
         local units = (l.source == "tray") and trayUnits or invUnits
-        units[k] = units[k] or { item = l.item, cheese = l.cheese or 0, sig = l.sig, u = 0 }
+        units[k] = units[k] or { item = l.item, sig = l.sig, u = 0 }
         units[k].u = units[k].u + layerUnits(l)
     end
     local needTray, needInv = {}, {}
-    for k, t in pairs(trayUnits) do needTray[k] = { item = t.item, cheese = t.cheese, sig = t.sig, n = math.ceil(t.u) } end
-    for k, t in pairs(invUnits) do needInv[k] = { item = t.item, cheese = t.cheese, sig = t.sig, n = math.ceil(t.u) } end
+    for k, t in pairs(trayUnits) do needTray[k] = { item = t.item, sig = t.sig, n = math.ceil(t.u) } end
+    for k, t in pairs(invUnits) do needInv[k] = { item = t.item, sig = t.sig, n = math.ceil(t.u) } end
 
     for _, t in pairs(needTray) do
-        if GetTrayCount(b.rid, id, t.item, t.cheese, t.sig) < t.n then
+        if GetTrayCount(b.rid, id, t.item, t.sig) < t.n then
             return nil, _L("cook_cooked_changed")
         end
     end
@@ -2452,16 +2441,16 @@ local function consumeLayers(src, b, id, layers)
         -- matching inventory slot. A pool item's variation is always plain.
         local fromPool = isPoolItem(t.item) and (GetStockCount(b.rid, t.item) or 0) > 0
         local have = fromPool and GetStockCount(b.rid, t.item)
-            or invVariationCount(src, t.item, t.cheese, t.sig)
+            or invVariationCount(src, t.item, t.sig)
         if have < t.n then
             return nil, _L("cook_missing_components")
         end
     end
-    for _, t in pairs(needTray) do RemoveTray(b.rid, id, t.item, t.cheese, t.n, t.sig) end
+    for _, t in pairs(needTray) do RemoveTray(b.rid, id, t.item, t.n, t.sig) end
     for _, t in pairs(needInv) do
         if isPoolItem(t.item) and (GetStockCount(b.rid, t.item) or 0) >= t.n then
             RemoveStock(b.rid, t.item, t.n)
-        else removeInvVariation(src, t.item, t.cheese, t.sig, t.n) end
+        else removeInvVariation(src, t.item, t.sig, t.n) end
     end
     return true
 end
@@ -2684,8 +2673,8 @@ lib.callback.register("pickle_restaurants:cooking:applyFinish", function(src, d)
     if target.requires_finish then
         local pmeta = (layer.sig and layer.sig ~= "")
             and ((layer.source == "tray")
-                and TrayTopMeta(b.rid, id, layer.item, layer.cheese or 0, layer.sig)
-                or invVariationMeta(src, layer.item, layer.cheese or 0, layer.sig)) or nil
+                and TrayTopMeta(b.rid, id, layer.item, layer.sig)
+                or invVariationMeta(src, layer.item, layer.sig)) or nil
         local top = type(pmeta) == "table" and pmeta[1]
         if not (type(top) == "table" and top.tool == target.requires_finish) then
             return { ok = false, error = _L("cook_frost_first") }
@@ -2892,7 +2881,7 @@ lib.callback.register("pickle_restaurants:cooking:prepDecompose", function(src, 
         local st = compStack(c)
         b.seq = (b.seq or 0) + 1
         b.layers[#b.layers + 1] = { id = b.seq, source = isTrayItem(c.item) and "tray" or "inv",
-                                    item = c.item, cheese = 0, half = c.half,
+                                    item = c.item, half = c.half,
                                     top = (not st) and c.top or nil,
                                     sig = (st and isTrayItem(c.item)) and TraySig(st) or nil, stack = st }
         local spec = compSpec(c); spec.id = b.seq

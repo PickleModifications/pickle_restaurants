@@ -202,12 +202,6 @@ local function ddbg(fmt, ...)
     print(("[delivery] " .. fmt):format(...))
 end
 
-RegisterCommand("pickle_delivery_debug", function()
-    DeliveryDebug = not DeliveryDebug
-    print(("[delivery] client debug %s"):format(DeliveryDebug and "ON" or "OFF"))
-end, false)
-
-
 -- How far the driver must get from the drop-off before the 12m ARRIVAL check (which
 -- ends the telemetry loop) is allowed to trigger. Comfortably above 12m so leaving
 -- and returning can't chatter the two thresholds. TUNE IN-GAME.

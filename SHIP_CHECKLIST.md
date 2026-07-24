@@ -24,31 +24,31 @@ These were fixed or confirmed in code this pass — listed so you don't re-check
   via `top` metadata + `sig`. *(This one still needs the in-game re-tests in §C6 — a fresh
   boot can't exercise it.)*
 - **`dealerships_` context-menu ids renamed** to `restaurants_` in `core/client.lua`.
-- **All server/core Lua compiles** (`luac5.4 -p`), no dangling references.
+- **XP integration dropped** — `bridge/xp` deleted (it was never called; the phone's
+  achievements/leveling covers progression).
+- **All debug/tuning console commands removed** — every `/pickle_*` and `/virtual_*` debug/
+  calibration command plus their orphaned scaffolding (kept only the always-off internal
+  `debugForce`/`DEBUG` guards, which are inert). Bake any tuning into the config tables.
+- **NPC facial reactions wired** — a served customer walks off with a happy face, an impatient
+  one with an angry face (`SetFacialIdleAnimOverride`).
+- **itemgen replaced by static `install/` files** — the module + `/restaurants_items` command
+  are gone; `install/{ox_inventory.lua, esx_items.sql, qbcore_items.lua, README.md}` define
+  the exact item set: handout items (bag/meal/drink/receipt) + every raw input the kitchen
+  consumes. Cooked/assembled foods are intentionally NOT items (they stay tray/pool
+  intermediates, packaged into a container before sale).
+- **`cheese` column fully removed.** The tray DB column, its unique-key dimension, the
+  `TrayCache`/reservation/`item|cheese|sig` keys, `CheeseVal`, `trayKey`, and every `cheese`
+  param/field across core + cooking (server & client) + sales + the NUI (`Cooking.tsx`,
+  rebuilt) are gone. Melting cheese still works — it's config-driven off the ingredient's
+  `melts` and rides each build layer's `top` metadata, nothing hardcoded. **Re-test via §C6.**
+- **All server/core Lua compiles** (`luac5.4 -p`); the NUI **rebuilds clean** (`npm run build`).
 
 ---
 
-## 🧭 Decisions for you (not testable — product calls)
+## 🧭 Decisions / remaining work
 
-- [ ] **XP integration is unwired.** Confirmed in code: `bridge/xp` exposes `AddPlayerXP` /
-  `GetPlayerLevel`, but **nothing in the resource ever calls them**. Either wire XP into the
-  cook/sell flow or drop the `bridge/xp` folder — as shipped it does nothing.
-- [ ] **`bridge/phone/gksphone/` is untracked in git** (`?? bridge/phone/gksphone/`). Commit
-  it (it's a supported phone bridge) or remove it — right now it isn't part of the resource.
-- [ ] **Debug/tuning console commands ship enabled** (all admin/console-gated). Keep for
-  server owners to calibrate, or gate behind a debug flag: `/pickle_stackdbg`,
-  `/pickle_modeldim`, `/pickle_prepdbg`, `/pickle_brand_debug|res|orient|reload`,
-  `/pickle_screen_debug|state|res|orient`, `/pickle_kiosk_cam|res`,
-  `/pickle_register_cam|sens|orient|res`, `/pickle_delivery_debug`, `/virtual_debug`,
-  `/virtual_tune`.
-- [ ] **NPC `happy` walk-away reaction** is reserved but currently identical to unhappy
-  (`modules/npc_customers/client.lua`). Intended for ship, or wire a visible difference?
-- [ ] **itemgen still exports per-flavor drink `output` keys** (`add(d.output)`) as a grace
-  measure — harmless (only affects the generated item files, no runtime effect), but they
-  aren't real items anymore. Drop on a later pass if you want the export minimal.
-- [ ] **The `cheese` addressing column is now always `0`** but still threads the tray key +
-  reservation keys. Fully removing it (re-key the tray table, drop the param everywhere) is a
-  separate structural refactor — not required to ship.
+- [ ] **NPC `happy` reaction** — now shows a happy vs angry face; confirm the expressions read
+  well in-game (⚙ the mood clips `mood_happy_1` / `mood_angry_1` are swappable).
 
 ---
 
@@ -56,10 +56,10 @@ These were fixed or confirmed in code this pass — listed so you don't re-check
 
 - [ ] Start the server against an **empty database**. Expect: boots with no errors; console
   prints `Booted: N restaurants, N props, N recipes.` On a clean DB that's `0, 0, N`.
-- [ ] Run `/restaurants_items` as an admin, then install the generated items from
-  `generated_items/` for your inventory (ox_inventory / ESX SQL / QBCore). Restart, run
-  `/restaurants_items` again — the export should reflect your live menu and **not** contain
-  retired items (`frosted_doughnut`, `decorated_cake`, `cheeseburger`, `raw_pizza`, etc.).
+- [ ] Install the items from the **`install/`** folder for your inventory (`ox_inventory.lua`
+  / `esx_items.sql` / `qbcore_items.lua`). Confirm the handout items (bag / meal / drink /
+  receipt) and raw inputs (buns, patties, cups, mix, sauces…) exist; cooked foods
+  (burger, fries, cooked patty…) are deliberately **not** installed — they stay tray-only.
 - [ ] Confirm the resource boots on your **framework** (ESX / QBCore / standalone) — only the
   matching bridge should load; no bridge errors in console.
 
@@ -122,8 +122,9 @@ These were fixed or confirmed in code this pass — listed so you don't re-check
 - [ ] **Condiment** (ketchup): drag the bottle over a stack → it flips, squeezes once, adds a
   sauce layer. Confirm it **can't** be the bottom layer.
 
-### C6. 🚩 Legacy-removal re-tests (must pass — a fresh boot can't exercise these)
-These validate the cooking numeric-cheese decode removal. If any fails, the removal regressed:
+### C6. 🚩 Cheese/variation re-tests (must pass — a fresh boot can't exercise these)
+These validate the full `cheese`-column removal (tray key, reservations, inventory slots, NUI)
+and that config-driven cheese melt still round-trips. If any fails, the refactor regressed:
 - [ ] **Cheese survives the sale.** Grill-cheese a patty (let it melt), build it into a burger
   at prep, sell it at the register, and take the food — the sold item still has cheese.
 - [ ] **Variations stay distinct.** Make a plain burger and a cheeseburger (and a plain vs a
@@ -187,10 +188,12 @@ These validate the cooking numeric-cheese decode removal. If any fails, the remo
 ## H. Screens, branding & DUIs
 
 - [ ] **Menu board** pages through the priced menu + combos; **orders board** shows live
-  PREPARING/READY tickets newest-first. ⚙ `/pickle_screen_res|orient` to fit your prop.
+  PREPARING/READY tickets newest-first. ⚙ tune each board's aspect/orientation in the
+  `SCREENS` table (`modules/screens/client.lua`) so content lands upright on your prop.
 - [ ] **Packaging brands** (cup/box/tray/kiosk) paint the nearest branded restaurant's image;
-  ⚙ `/pickle_brand_res|orient`. Screens read as albedo (only as bright as the room) — a dim
-  screen is an **emissive-shader/asset** fix, not a code one.
+  ⚙ tune each texture's resolution/orientation in `Config.RenderTargets` (`core/shared.lua`).
+  Screens read as albedo (only as bright as the room) — a dim screen is an
+  **emissive-shader/asset** fix, not a code one.
 
 ## I. Seating
 
@@ -207,4 +210,3 @@ These validate the cooking numeric-cheese decode removal. If any fails, the remo
 
 - [ ] `cd web && npm run build` produces `nui/`, and the built output is **committed**. The game
   serves `nui/`, not `web/src`, so an un-built change won't show up in-game.
-</content>
