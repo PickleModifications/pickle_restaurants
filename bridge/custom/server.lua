@@ -190,8 +190,25 @@ CreateThread(function()
         Inventory.RemoveItemSlot = function(source, name, count, slot)
             exports.ox_inventory:RemoveItem(source, name, count, nil, slot)
         end
+        -- Rewrite ONE slot's metadata in place. Used when a customer eats one thing
+        -- out of a Restaurant Bag: the bag keeps its slot (and its stack position),
+        -- only its recorded contents shrink. Absent on a framework with no slot
+        -- metadata — callers fall back to remove + re-add.
+        Inventory.SetItemMetadata = function(source, _name, slot, metadata)
+            exports.ox_inventory:SetMetadata(source, slot, metadata)
+            return true
+        end
     end
 
     Inventory.RefreshItems()
     Inventory.Ready = true
 end)
+
+-- No framework needs system on the standalone bridge: eating still consumes the
+-- item and plays its animation, there is just nothing built in to top up. Both
+-- values are 0-100 percentages of a needs bar. Hook the public event below from
+-- your own status resource (or replace this function) to apply them.
+function Nourish(source, hunger, thirst)
+    TriggerEvent("pickle_restaurants:nourish", source,
+        math.floor(tonumber(hunger) or 0), math.floor(tonumber(thirst) or 0))
+end

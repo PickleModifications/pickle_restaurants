@@ -28,7 +28,10 @@ export type Combo = {
 };
 
 // The combo card photo aspect (landscape food shot, like a menu-board hero image).
-const COMBO_PHOTO: PhotoAspect = { label: _L("combo.tex_label"), w: 1200, h: 800, hint: _L("combo.photo_hint") };
+// LAZY getter (memoized): `_L()` resolves at render, not at module import — a
+// module-scope `_L()` runs before loadLocale() and would freeze to the raw key.
+let _comboPhoto: PhotoAspect | null = null;
+const COMBO_PHOTO = (): PhotoAspect => (_comboPhoto ??= { label: _L("combo.tex_label"), w: 1200, h: 800, hint: _L("combo.photo_hint") });
 
 // A group pick is a normal option key with a reserved `group:` prefix (mirrors the
 // server's ComboOptionGroup). Kept as one key so storage/sanitize stay unchanged.
@@ -248,7 +251,7 @@ function ComboCard({
             </Field>
             <div className="w-44">
               <span className="tape mb-1 block">{_L("combo.photo")}</span>
-              <PhotoField aspect={COMBO_PHOTO} entry={combo.photo} onChange={(e) => set({ photo: e })}
+              <PhotoField aspect={COMBO_PHOTO()} entry={combo.photo} onChange={(e) => set({ photo: e })}
                 empty={_L("combo.photo_hint")} />
             </div>
           </div>

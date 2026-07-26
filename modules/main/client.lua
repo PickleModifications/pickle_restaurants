@@ -18,8 +18,11 @@ IngredientsByModel = {}  -- [model] = its ingredient entry (reverse lookup incl.
 BoxBaseModels    = {}    -- model names the pizza box accepts as a carried pile's BOTTOM layer
 StackTweaks      = {}    -- [model] = { sink?, rise? } manual stacking corrections (synced setting)
 ConfigGen        = 0     -- bumped every sync so lazily-built hash caches invalidate
-BagItem          = "restaurant_bag" -- the ONE item every craft becomes
+BagItem          = "restaurant_bag" -- the ONE takeaway CARRIER item (its contents ride as metadata)
 BagModel         = "pickle_restaurant_bag_01" -- the Restaurant Bag vessel prop
+BoxItem          = "takeout_box"    -- the ONE item every bag-KIND food (soup, salad…) becomes
+BoxBaseModel     = "pickle_takeout_box_01" -- takeout box: base half
+BoxLidModel      = "pickle_takeout_box_02" -- takeout box: hinged lid
 
 -- prop_type → localization key (resolved via _L at interaction-build time)
 local STATION_LABELS = {
@@ -359,6 +362,9 @@ local function DoApplySync(payload)
         Crafts   = payload.settings.crafts or {}
         BagItem  = payload.settings.bag_item or "restaurant_bag"
         BagModel = payload.settings.bag_model or "pickle_restaurant_bag_01"
+        BoxItem      = payload.settings.box_item or "takeout_box"
+        BoxBaseModel = payload.settings.box_base_model or "pickle_takeout_box_01"
+        BoxLidModel  = payload.settings.box_lid_model or "pickle_takeout_box_02"
         SideContainerModel = payload.settings.side_container_model or ""
         -- Synced ingredient config (only installed items ship): the item map plus a
         -- reverse map from EVERY model an ingredient can render as (its base model,

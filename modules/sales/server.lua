@@ -9,9 +9,21 @@
 --  or Cancel it (full refund). Nothing sells "from stock" any more.
 -- =============================================
 
-local function ReceiptItem() return GetSetting("receipt_item", "receipt") end
+local function ReceiptItem() return GetSetting("receipt_item", "restaurant_receipt") end
 local function DrinkItemName() return GetSetting("drink_item", "drink") end
 local function MealItemName() return GetSetting("meal_item", "meal") end
+
+-- The two PACKED VESSELS a ticket can be filled from: the eat-in serving tray meal
+-- and the takeaway Restaurant Bag. Both record one top-level metadata layer per
+-- thing packed into them, so fulfillment treats them identically — the only
+-- difference is which item is consumed and handed over. Anything else a client
+-- names falls back to the meal, so a bad payload can never make the POS hand over
+-- an arbitrary item.
+local function VesselItem(item)
+    if item and item == BagItemName() then return item end
+    return MealItemName()
+end
+local function VesselItems() return { MealItemName(), BagItemName() } end
 
 -- The display image for a drink FLAVOR (its `drinks[].output` key). Every poured
 -- drink collapses into the ONE generic drink item, so a flavor has no inventory
@@ -160,10 +172,11 @@ function BuildSellableCatalog(rid)
         end
     end
 
-    -- Crafts: every craft collapses to the ONE bag item, disambiguated by its `id`
-    -- as the POS variant (like a drink flavor). A price row per craft
-    -- (restaurant_bag::soup). Modifiers enriched exactly like the assembly block.
-    local bagItem = BagItemName()
+    -- Bag-kind foods (made in the takeout box): every one collapses to the ONE box
+    -- item, disambiguated by its `id` as the POS variant (like a drink flavor). A
+    -- price row per food (takeout_box::soup). Modifiers enriched exactly like the
+    -- assembly block.
+    local bagItem = BoxItemName()
     if ItemExists(bagItem) then
         for _, cr in ipairs(GetCrafts()) do
             if cr.id and cr.id ~= "" and cr.components and #cr.components > 0
@@ -184,7 +197,10 @@ function BuildSellableCatalog(rid)
                         }
                     end
                 end
-                if ok then add(bagItem, cr.id, cr.label, "craft", CraftCost(cr), mods, cr.group) end
+                -- the food's OWN picture on the POS card (a bag-kind food has no prop
+                -- and no inventory item of its own to borrow art from)
+                if ok then add(bagItem, cr.id, cr.label, "craft", CraftCost(cr), mods, cr.group,
+                               FoodImageUrl(cr, bagItem)) end
             end
         end
     end
@@ -443,10 +459,12 @@ local function variationKey(item, meta)
         local key = (type(meta) == "table" and meta[1] and meta[1].item) or ""
         return "d:" .. tostring(key)
     end
-    if item == BagItemName() then
-        -- the craft id riding on the bag's first meta layer (its variation identity)
-        local key = (type(meta) == "table" and meta[1] and meta[1].craft) or ""
-        return "c:" .. tostring(key)
+    -- A made takeout box (a bag-kind food) is identified by the food id on its first
+    -- meta layer. A LEGACY bag instance carries the same flag — it was the vessel
+    -- before the takeout box existed — so it still fills the same line.
+    if item == BoxItemName() or item == BagItemName() then
+        local key = (type(meta) == "table" and meta[1] and meta[1].craft) or nil
+        if key then return "c:" .. tostring(key) end
     end
     return "" -- item-name match: any variation of the item fills the line
 end
@@ -508,8 +526,8 @@ end
 -- toppings (a burger's cheese/lettuce as item images, a cake/doughnut's frosting +
 -- sprinkles as coloured swatches, a drink shown by its flavor) so the cashier sees
 -- exactly what's inside before fulfilling with it.
-local function mealItemsDetail(meta)
-    local mealItem = MealItemName()
+local function mealItemsDetail(meta, vesselItem)
+    local mealItem = vesselItem or MealItemName()
     local out = {}
     for _, l in ipairs(type(meta) == "table" and meta or {}) do
         if l.item ~= mealItem then
@@ -518,6 +536,13 @@ local function mealItemsDetail(meta)
                 local key = type(l.stack) == "table" and l.stack[1] and l.stack[1].item or nil
                 entry.label = drinkFlavorView(key).label
                 entry.image = DrinkFlavorImage(key) or entry.image
+            elseif l.item == BoxItemName() then
+                -- a made takeout box reads as the FOOD it holds (soup, salad), not as
+                -- the generic box: its own authored label + picture, resolved from the
+                -- food id riding its first component layer
+                local food = FoodForItem(l.item, l.stack)
+                entry.label = (food and food.label) or GetItemLabel(l.item)
+                entry.image = FoodImageUrl(food, l.item) or entry.image
             else
                 local top = type(l.stack) == "table" and l.stack[1] or nil
                 entry.label = GetItemLabel(l.item)
@@ -545,14 +570,15 @@ local function mealItemsDetail(meta)
     return out
 end
 
--- Given a meal's build stack, remove the required units its top-level layers cover
--- (EXACT variation match — a cheeseburger layer covers a "+cheese" burger line,
--- never a plain-burger line). Returns the leftovers.
-local function mealCovers(meta, required)
-    local mealItem = MealItemName()
+-- Given a VESSEL's build stack (a serving-tray meal or a packed Restaurant Bag —
+-- both record one top-level layer per thing inside them), remove the required units
+-- its layers cover (EXACT variation match — a cheeseburger layer covers a "+cheese"
+-- burger line, never a plain-burger line). Returns the leftovers.
+local function mealCovers(meta, required, vesselItem)
+    local mealItem = vesselItem or MealItemName()
     local provide = {}
     for _, l in ipairs(type(meta) == "table" and meta or {}) do
-        if l.item ~= mealItem then -- ignore any nested meal layer
+        if l.item ~= mealItem then -- ignore any nested vessel layer
             provide[#provide + 1] = { item = l.item, key = variationKey(l.item, l.stack) }
         end
     end
@@ -570,17 +596,20 @@ local function mealCovers(meta, required)
     return uncovered
 end
 
--- Can the pool complete this order (optionally using the one meal `mealSig`)?
--- Returns { ok, singles = { {item, key, count}, … }, mealSig, missing }.
-function PlanFulfillment(rid, order, mealSig)
+-- Can the pool complete this order, optionally using ONE packed vessel — a serving
+-- tray meal (`mealItem`, the default) or a Restaurant Bag? Both supply an order the
+-- same way: their top-level layers cover required units and the rest come from the
+-- pool as singles.
+-- Returns { ok, singles = { {item, key, count}, … }, mealSig, mealItem, missing }.
+function PlanFulfillment(rid, order, mealSig, vesselItem)
     local req = requiredUnits(order)
     local usedMealSig = nil
+    local mealItem = VesselItem(vesselItem)
     if type(mealSig) == "string" and mealSig ~= "" then
-        local mealItem = MealItemName()
         if PoolCount(rid, mealItem, mealSig) < 1 then
             return { ok = false, missing = { _L("order_meal_gone") } }
         end
-        req = mealCovers(PoolTopMeta(rid, mealItem, mealSig), req)
+        req = mealCovers(PoolTopMeta(rid, mealItem, mealSig), req, mealItem)
         usedMealSig = mealSig
     end
 
@@ -606,7 +635,9 @@ function PlanFulfillment(rid, order, mealSig)
             missing[#missing + 1] = _L("order_qty_line", g.need - have, g.label or GetItemLabel(g.item))
         end
     end
-    return { ok = ok, singles = singles, mealSig = usedMealSig, missing = (#missing > 0) and missing or nil }
+    return { ok = ok, singles = singles, mealSig = usedMealSig,
+             mealItem = usedMealSig and mealItem or nil,
+             missing = (#missing > 0) and missing or nil }
 end
 
 -- Attach per-ticket fulfillment state:
@@ -626,25 +657,34 @@ end
 local findPlayerByIdentifier
 
 local function AnnotateOrders(rid, list)
-    local mealItem = MealItemName()
-    -- Only offer meals the customer can actually be handed: single items come from
-    -- the sellable catalog (ItemExists-filtered), but a meal can sit in the tray
-    -- without being an installed item — never hand over something that'd vanish.
-    local meals = ItemExists(mealItem) and PoolVariations(rid, mealItem) or {}
+    local bagItem = BagItemName()
+    -- Only offer vessels the customer can actually be handed: single items come from
+    -- the sellable catalog (ItemExists-filtered), but a meal or bag can sit in the
+    -- tray without being an installed item — never hand over something that'd vanish.
+    -- Meals and bags are pooled together here: a ticket is completable from either.
+    local vessels = {}
+    for _, vi in ipairs(VesselItems()) do
+        if ItemExists(vi) then
+            for _, v in ipairs(PoolVariations(rid, vi)) do
+                vessels[#vessels + 1] = { item = vi, sig = v.sig, meta = v.meta }
+            end
+        end
+    end
     for _, o in ipairs(list) do
         local base = PlanFulfillment(rid, o)
         local ready = base.ok
         local bestMissing = base.ok and nil or base.missing
         local opts = {}
-        for _, m in ipairs(meals) do
-            local plan = PlanFulfillment(rid, o, m.sig)
+        for _, m in ipairs(vessels) do
+            local plan = PlanFulfillment(rid, o, m.sig, m.item)
             if plan.ok then
                 ready = true
-                opts[#opts + 1] = { sig = m.sig, label = GetItemLabel(mealItem),
-                                    items = mealItemsDetail(m.meta) }
+                opts[#opts + 1] = { sig = m.sig, item = m.item, bag = (m.item == bagItem) or nil,
+                                    label = GetItemLabel(m.item),
+                                    items = mealItemsDetail(m.meta, m.item) }
             elseif not ready and plan.missing
                 and (not bestMissing or #plan.missing < #bestMissing) then
-                -- this meal covers more than singles alone: report the smaller shortfall
+                -- this vessel covers more than singles alone: report the smaller shortfall
                 bestMissing = plan.missing
             end
         end
@@ -1625,12 +1665,13 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
             return fail(_L("order_customer_missing"))
         end
 
+        -- the one packed vessel (meal or Restaurant Bag) the cashier filled from
         local mealSig = (type(d.mealSig) == "string" and d.mealSig ~= "") and d.mealSig or nil
-        local plan = PlanFulfillment(id, o, mealSig)
+        local mealItem = VesselItem(d.mealItem)
+        local plan = PlanFulfillment(id, o, mealSig, mealItem)
         if not plan.ok then
             return fail(_L("order_missing_items", table.concat(plan.missing or {}, ", ")))
         end
-        local mealItem = MealItemName()
         if plan.mealSig and not ItemExists(mealItem) then
             return fail(_L("cook_item_not_installed", mealItem))
         end
@@ -1698,13 +1739,15 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
 
     -- Fulfil from the restaurant-wide cooked-items pool (every cook's tray), not
     -- the cashier's inventory. Plan first so a shortfall never half-hands an order;
-    -- `d.mealSig` (optional) is the one meal the cashier chose to combine in.
+    -- `d.mealSig` (optional) is the one packed VESSEL the cashier chose to fill from
+    -- — a serving-tray meal or a Restaurant Bag; `d.mealItem` says which (VesselItem
+    -- rejects anything else, so it always resolves to one of the two).
     local mealSig = (type(d.mealSig) == "string" and d.mealSig ~= "") and d.mealSig or nil
-    local plan = PlanFulfillment(id, o, mealSig)
+    local mealItem = VesselItem(d.mealItem)
+    local plan = PlanFulfillment(id, o, mealSig, mealItem)
     if not plan.ok then
         return fail(_L("order_missing_items", table.concat(plan.missing or {}, ", ")))
     end
-    local mealItem = MealItemName()
     if plan.mealSig and not ItemExists(mealItem) then
         return fail(_L("cook_item_not_installed", mealItem))
     end

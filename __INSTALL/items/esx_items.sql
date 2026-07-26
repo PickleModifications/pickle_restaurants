@@ -10,9 +10,10 @@
 INSERT IGNORE INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VALUES
     -- handout items
     ('restaurant_bag',   'Restaurant Bag',  1, 0, 1),
+    ('takeout_box',      'Takeout Box',     1, 0, 1),
     ('meal',             'Meal',            1, 0, 1),
     ('drink',            'Restaurant Drink', 1, 0, 1),
-    ('receipt',          'Receipt',         1, 0, 1),
+    ('restaurant_receipt', 'Receipt',       1, 0, 1),
     -- raw cook inputs
     ('raw_beef_patty',   'Raw Beef Patty',    1, 0, 1),
     ('raw_chicken_patty', 'Raw Chicken Patty', 1, 0, 1),

@@ -65,7 +65,10 @@ export type OptView = { label: string; image?: string; color?: string };
 export type MealItem = { item: string; label: string; image?: string; mods?: OptView[] };
 // A meal in the shared pool that (with single items) would complete the whole
 // order — offered as a fulfillment option. `items` is its full contents.
-export type MealOption = { sig: string; label: string; items?: MealItem[] };
+// A packed VESSEL in the pool that can fill a ticket: a serving-tray meal or a
+// takeaway Restaurant Bag (`bag`). `item` is the inventory item handed over — it
+// rides back to the server on fulfilment so it knows which one to consume.
+export type MealOption = { sig: string; item?: string; bag?: boolean; label: string; items?: MealItem[] };
 // Per-ticket fulfillment state from the shared cooked-items pool (server-computed).
 // `ok` = completable with single items alone; `mealOptions` = meals that complete it;
 // `missing` = the single-item shortfall shown when nothing can complete it.

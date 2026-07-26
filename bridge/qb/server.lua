@@ -360,6 +360,41 @@ CreateThread(function()
         Inventory.UpdateInventory(source)
     end
 
+    -- Rewrite ONE slot's metadata in place (a Restaurant Bag losing the item the
+    -- customer just ate) so the bag keeps its slot instead of being re-added.
+    Inventory.SetItemMetadata = function(source, _name, slot, metadata)
+        if usingOx() then
+            exports.ox_inventory:SetMetadata(source, slot, metadata)
+            return true
+        end
+        local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
+        local items = xPlayer and xPlayer.PlayerData.items
+        local it = items and items[slot]
+        if not it then return false end
+        it.info = metadata
+        xPlayer.Functions.SetInventory(items)
+        Inventory.UpdateInventory(source)
+        return true
+    end
+
     Inventory.RefreshItems()
     Inventory.Ready = true
 end)
+-- Feed the framework's needs system after a customer eats/drinks something out of
+-- a restaurant vessel (modules/consume). `hunger`/`thirst` are plain 0-100
+-- percentages; QBCore keeps both as 0-100 player metadata and repaints the HUD from
+-- one event, so they apply directly. The public event at the end lets ANY other
+-- needs system hook in without touching this bridge.
+function Nourish(source, hunger, thirst)
+    hunger, thirst = math.floor(tonumber(hunger) or 0), math.floor(tonumber(thirst) or 0)
+    local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
+    if xPlayer and (hunger > 0 or thirst > 0) then
+        local meta = xPlayer.PlayerData.metadata or {}
+        local h = math.min(100, (tonumber(meta.hunger) or 0) + hunger)
+        local t = math.min(100, (tonumber(meta.thirst) or 0) + thirst)
+        if hunger > 0 then xPlayer.Functions.SetMetaData("hunger", h) end
+        if thirst > 0 then xPlayer.Functions.SetMetaData("thirst", t) end
+        TriggerClientEvent("hud:client:UpdateNeeds", source, h, t)
+    end
+    TriggerEvent("pickle_restaurants:nourish", source, hunger, thirst)
+end

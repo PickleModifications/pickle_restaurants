@@ -378,8 +378,10 @@ export function Kitchen({ params }: { params?: any }) {
   };
 
   const complete = async (t: any) => {
-    const sig = t.fulfill?.mealOptions?.[0]?.sig;
-    const res = await fetchNui("phone:completeOrder", { id: rid, orderId: t.orderId, mealSig: sig });
+    // the first packed vessel that completes this ticket (a meal or a takeaway bag);
+    // `mealItem` tells the server which of the two to hand over
+    const opt = t.fulfill?.mealOptions?.[0];
+    const res = await fetchNui("phone:completeOrder", { id: rid, orderId: t.orderId, mealSig: opt?.sig, mealItem: opt?.item });
     if (res?.ok) {
       toast(_L("phone.work.ticket_served", t.ticket));
       setDetailId(null);

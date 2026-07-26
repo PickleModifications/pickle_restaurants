@@ -298,7 +298,11 @@ function StartGizmoEditor(data)
     if data.entity then
         SetEntityCoords(data.entity, coords.x, coords.y, coords.z, false, false, false, false)
         SetEntityRotation(data.entity, rotation.x, rotation.y, rotation.z, 2, true)
+        -- onSpawn/onDespawn let a caller hang extra preview props off the gizmo
+        -- entity (the stovetop's oven doors) without the gizmo knowing about them.
+        if data.onSpawn then data.onSpawn(data.entity) end
         local result = StartMovement(data.entity, data)
+        if data.onDespawn then data.onDespawn() end
         inGizmo = false
         return result
     else
@@ -320,7 +324,9 @@ function StartGizmoEditor(data)
         end
         SetEntityRotation(gizmoEntity, rotation.x, rotation.y, rotation.z, 2, true)
         SetEntityCollision(gizmoEntity, false, false)
+        if data.onSpawn then data.onSpawn(gizmoEntity) end
         local result = StartMovement(gizmoEntity, data)
+        if data.onDespawn then data.onDespawn() end
         CleanupGizmoEntity(gizmoEntity)
         gizmoEntity = nil
         inGizmo = false

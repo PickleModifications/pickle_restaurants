@@ -3,9 +3,33 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Field, TextField, NumberField, Select, Toggle, GroupField } from "@/components/form";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
+import { Modal } from "@/components/ui/modal";
+import { PhotoField, type PhotoEntry, type PhotoAspect } from "@/components/Branding";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { Plus, Trash2, TriangleAlert, ImageOff, ChevronDown, ChevronRight, Link2 } from "lucide-react";
+import { Plus, Trash2, TriangleAlert, ImageOff, ChevronDown, ChevronRight, Link2, ImagePlus, Pencil } from "lucide-react";
+
+// A custom per-item image map (item name → { url, crop }), authored on the item
+// thumbnails in the admin menu editors and stored in the `item_images` setting. When
+// present it overrides the item's catalogue image everywhere it's shown. See
+// `ItemField`'s editable thumbnail + `EntryThumb`.
+export type ItemImages = Record<string, PhotoEntry>;
+export type SetItemImage = (item: string, entry: PhotoEntry | null) => void;
+
+// The item-image crop frame: a square (inventory-thumbnail shape). LAZY getter so
+// `_L()` resolves at render, not module import.
+let _itemPhoto: PhotoAspect | null = null;
+const ITEM_PHOTO = (): PhotoAspect => (_itemPhoto ??= { label: _L("menu.item_image"), w: 512, h: 512, hint: _L("menu.item_image_hint") });
+// The crop frame for the picture painted INSIDE a takeout box: the same rectangle
+// the world quad is drawn at (Config.BoxQuad in core/shared.lua, metres — embedded
+// config, fed to the panel read-only), so what an admin crops here is exactly what
+// lands in the box. Falls back to the shipped values if the payload hasn't arrived.
+export const BOX_PHOTO = (quad?: { w?: number; h?: number }): PhotoAspect => ({
+  label: _L("menu.box_image"),
+  w: Math.round((Number(quad?.w) || 0.295) * 1000),
+  h: Math.round((Number(quad?.h) || 0.2) * 1000),
+  hint: _L("menu.box_image_hint"),
+});
 
 // ─── shared item thumbnail ─────────────────────────────────────────────────────
 // Inventory thumbnail for an item, with a graceful fallback when the image is
@@ -22,6 +46,24 @@ export function ItemImage({ items, name, className }: { items: Item[]; name: str
     );
   }
   return <img src={img} alt={name} onError={() => setBroken(true)} className={cn("rounded object-contain", className)} />;
+}
+
+// A thumbnail that prefers a custom item image (the live `itemImages` map, so it
+// updates the instant one is set) and otherwise falls back to the catalogue image /
+// icon via ItemImage. Custom photos render cover (they're real photos, not icons).
+export function EntryThumb({ items, name, itemImages, className, url }: {
+  items: Item[]; name: string; itemImages?: ItemImages; className?: string;
+  /** An explicit image that wins over everything — a food's own authored picture,
+   *  which belongs to no inventory item. */
+  url?: string;
+}) {
+  const custom = url ? { url } : name ? itemImages?.[name] : undefined;
+  const [broken, setBroken] = useState(false);
+  useEffect(() => setBroken(false), [custom?.url]);
+  if (custom?.url && !broken) {
+    return <img src={custom.url} alt={name} onError={() => setBroken(true)} className={cn("rounded object-cover", className)} />;
+  }
+  return <ItemImage items={items} name={name} className={className} />;
 }
 
 // "frosting" / "raw_beef_patty" -> "Frosting" / "Raw Beef Patty". Fallback for a
@@ -54,6 +96,13 @@ export type Step =
     }
   | { type: "pour"; input?: string; flavor?: string; model?: string; fill_ms?: number; color?: [number, number, number] };
 
+// The eat/drink animations a food can be assigned (the `consume_anims` setting,
+// seeded with defaults server-side and editable in Settings → Eating).
+export type ConsumeAnim = { id: string; label?: string; dict: string; clip: string; prop?: string; ms?: number };
+// What eating ONE serving of a food does. Anything left blank falls back to the
+// global `consume` setting, so a food only states what makes it different.
+export type FoodConsume = { hunger?: number | null; thirst?: number | null; anim?: string };
+
 export type Food = {
   id?: string;
   label?: string;
@@ -61,11 +110,23 @@ export type Food = {
   group?: string | null;
   steps?: Step[];
   components?: string[];
+  /** LEGACY: a bag food used to borrow an inventory item's label + picture. Foods
+   *  author their own `image` now; this is only still read as a fallback. */
   display_item?: string;
+  /** The food's OWN picture as an ITEM — the kitchen bar card, the POS, a bag's
+   *  contents menu, the inventory slot. */
+  image?: PhotoEntry | null;
+  /** What's painted on the quad INSIDE an open takeout box, when the card art
+   *  doesn't work lying in a box. Falls back to `image`. Bag-kind foods only. */
+  box_image?: PhotoEntry | null;
+  consume?: FoodConsume;
   modifiers?: Modifier[];
   // server annotations
   valid?: boolean; missing?: string[]; defaultPrice?: number;
-  bag_item_installed?: boolean; drink_item_installed?: boolean; tap?: number;
+  box_item_installed?: boolean; drink_item_installed?: boolean; tap?: number;
+  /** which part of this food consumes nothing — it can't be made in-game until
+   *  it does ("components" | "cook_input" | "pour_cup" | "steps"). */
+  no_input?: string;
   duplicate_input?: string; invalid_models?: string[];
 };
 
@@ -91,15 +152,20 @@ export type IngredientDef = {
 };
 
 // The cook methods valid for a station (fryer is always a basket fry).
-const METHODS: Record<string, { value: string; label: string }[]> = {
+// LAZY getter (memoized): `_L()` resolves at render, not at module import — a
+// module-scope `_L()` runs before loadLocale() and would freeze to the raw key.
+let _methods: Record<string, { value: string; label: string }[]> | null = null;
+const METHODS = () => (_methods ??= {
   fryer: [{ value: "fry", label: _L("recipes.method_fry") }],
   stovetop: [
     { value: "grill", label: _L("recipes.method_grill") },
     { value: "oven", label: _L("recipes.method_oven") },
   ],
-};
+});
 
 // Derived sub-badge for a food row: where (and in what order) it gets made.
+// (`kind === "bag"` is the historical stored key for "made in the takeout box" —
+// see the preset list in views/admin/Menu.tsx.)
 export function foodSubBadge(food: Food): string {
   if (food.kind === "bag") return _L("menu.sub_bag");
   const steps = food.steps ?? [];
@@ -124,7 +190,14 @@ export function foodSubBadge(food: Food): string {
   return _L("menu.sub_prep");
 }
 
-// The item whose catalogue image best represents a food in the row list.
+// A food's OWN picture for the row list, if it has one (foods author their own art
+// rather than borrowing an item's — see foodImageItem for the fallback).
+export function foodImageUrl(food: Food): string | undefined {
+  return food.image?.url || undefined;
+}
+
+// The item whose catalogue image best represents a food in the row list, for a food
+// with no picture of its own (a legacy bag food falls back to its display item).
 export function foodImageItem(food: Food): string {
   if (food.kind === "bag") return food.display_item || "";
   const steps = food.steps ?? [];
@@ -177,22 +250,65 @@ function ModelField({
   );
 }
 
-// An item field with the catalogue thumbnail beside the picker.
+// An item field with the catalogue thumbnail beside the picker. When `onSetItemImage`
+// is supplied the thumbnail becomes a button that opens the custom-image editor for
+// the CURRENT item value (so a server can give proper art to tray-only products — a
+// burger, a burnt patty — that have no inventory image). The chosen url overrides the
+// item's image everywhere it's shown.
 function ItemField({
-  label, hint, items, value, onChange, allowFree, placeholder, className,
+  label, hint, items, value, onChange, allowFree, placeholder, className, itemImages, onSetItemImage,
 }: {
   label: string; hint?: string; items: Item[]; value: string; onChange: (v: string) => void;
   allowFree?: boolean; placeholder?: string; className?: string;
+  itemImages?: ItemImages; onSetItemImage?: SetItemImage;
 }) {
+  const [editImg, setEditImg] = useState(false);
+  const editable = !!onSetItemImage && !!value;
   return (
     <Field label={label} hint={hint} className={className}>
       <div className="flex items-center gap-2">
-        <ItemImage items={items} name={value || ""} className="h-9 w-9 shrink-0" />
+        {editable ? (
+          <button type="button" onClick={() => setEditImg(true)} title={_L("menu.set_item_image")}
+            className="group relative h-9 w-9 shrink-0 overflow-hidden rounded outline-none focus-visible:ring-2 focus-visible:ring-primary/60">
+            <EntryThumb items={items} name={value || ""} itemImages={itemImages} className="h-9 w-9" />
+            <span className="absolute inset-0 flex items-center justify-center bg-black/45 text-white opacity-0 transition-opacity group-hover:opacity-100">
+              {itemImages?.[value]?.url ? <Pencil className="h-3.5 w-3.5" /> : <ImagePlus className="h-3.5 w-3.5" />}
+            </span>
+          </button>
+        ) : (
+          <EntryThumb items={items} name={value || ""} itemImages={itemImages} className="h-9 w-9 shrink-0" />
+        )}
         <div className="min-w-0 flex-1">
           <ItemPicker items={items} value={value || ""} onChange={onChange} allowFree={allowFree} placeholder={placeholder} />
         </div>
       </div>
+      {editImg && onSetItemImage && (
+        <ItemImageModal
+          item={value}
+          items={items}
+          entry={itemImages?.[value] || null}
+          onChange={(e) => onSetItemImage(value, e)}
+          onClose={() => setEditImg(false)}
+        />
+      )}
     </Field>
+  );
+}
+
+// The custom-image editor dialog for one item: a square-cropped photo (reusing the
+// same PhotoField URL+crop picker as combos/brand textures). Clearing it (Remove)
+// falls the item back to its catalogue image / icon.
+function ItemImageModal({ item, items, entry, onChange, onClose }: {
+  item: string; items: Item[]; entry: PhotoEntry | null; onChange: (e: PhotoEntry | null) => void; onClose: () => void;
+}) {
+  return (
+    <Modal open onClose={onClose} title={labelOf(items, item)} subtitle={_L("menu.item_image")} icon={<ImagePlus className="h-4 w-4" />}
+      footer={<Button size="sm" onClick={onClose}>{_L("recipes.done")}</Button>}>
+      <p className="mb-3 text-xs text-muted-foreground">{_L("menu.item_image_desc")}</p>
+      <div className="w-48">
+        <PhotoField aspect={ITEM_PHOTO()} entry={entry} onChange={onChange} empty={_L("menu.item_image_hint")} />
+      </div>
+    </Modal>
   );
 }
 
@@ -260,16 +376,18 @@ function StepShell({ title, onRemove, children }: { title: string; onRemove: () 
 }
 
 function AssembleStepCard({
-  step, isMiddle, suggestedId, items, badModels, onChange, onRemove,
+  step, isMiddle, suggestedId, items, badModels, onChange, onRemove, itemImages, onSetItemImage,
 }: {
   step: Extract<Step, { type: "assemble" }>; isMiddle: boolean; suggestedId: string;
   items: Item[]; badModels: Set<string>; onChange: (patch: any) => void; onRemove: () => void;
+  itemImages?: ItemImages; onSetItemImage?: SetItemImage;
 }) {
   return (
     <StepShell title={_L("steps.assemble_title")} onRemove={onRemove}>
       <div className="grid grid-cols-2 gap-3">
         <div>
           <ItemField label={_L("steps.assemble_output")} items={items} value={step.output || ""} allowFree
+            itemImages={itemImages} onSetItemImage={onSetItemImage}
             placeholder={isMiddle ? `raw_${suggestedId}` : undefined} onChange={(v) => onChange({ output: v })} />
           {isMiddle && (
             <div className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground">
@@ -287,10 +405,11 @@ function AssembleStepCard({
 }
 
 function CookStepCard({
-  step, fedByPrevious, items, badModels, onChange, onRemove,
+  step, fedByPrevious, items, badModels, onChange, onRemove, itemImages, onSetItemImage,
 }: {
   step: Extract<Step, { type: "cook" }>; fedByPrevious: boolean;
   items: Item[]; badModels: Set<string>; onChange: (patch: any) => void; onRemove: () => void;
+  itemImages?: ItemImages; onSetItemImage?: SetItemImage;
 }) {
   const [advanced, setAdvanced] = useState(false);
   const stationLabel = step.station === "fryer" ? _L("recipes.station_fryer") : _L("recipes.station_stovetop");
@@ -310,16 +429,18 @@ function CookStepCard({
             onChange={(v) => onChange({ input: v })} />
         )}
         <Select label={_L("recipes.station")} className="col-span-2" value={step.station}
-          onChange={(v) => onChange({ station: v, method: (METHODS[v] || [])[0]?.value || "grill" })}
+          onChange={(v) => onChange({ station: v, method: (METHODS()[v] || [])[0]?.value || "grill" })}
           options={[{ value: "fryer", label: _L("recipes.station_fryer") }, { value: "stovetop", label: _L("recipes.station_stovetop") }]} />
-        <Select label={_L("recipes.method")} className="col-span-2" value={step.method || (METHODS[step.station] || [])[0]?.value || "grill"}
-          onChange={(v) => onChange({ method: v })} options={METHODS[step.station] || METHODS.stovetop} />
+        <Select label={_L("recipes.method")} className="col-span-2" value={step.method || (METHODS()[step.station] || [])[0]?.value || "grill"}
+          onChange={(v) => onChange({ method: v })} options={METHODS()[step.station] || METHODS().stovetop} />
         <ModelField label={_L("recipes.raw_model")} className="col-span-2" value={step.raw_model || ""} onChange={(v) => onChange({ raw_model: v })} badModels={badModels} />
         <ModelField label={_L("recipes.cooked_model")} className="col-span-2" value={step.cooked_model || ""} onChange={(v) => onChange({ cooked_model: v })} badModels={badModels} />
         <ModelField label={_L("recipes.burnt_model")} className="col-span-2" value={step.burnt_model || ""} onChange={(v) => onChange({ burnt_model: v })} badModels={badModels} />
         <ItemField label={_L("recipes.cooked_output")} className="col-span-3" items={items} value={step.output || ""} allowFree
+          itemImages={itemImages} onSetItemImage={onSetItemImage}
           onChange={(v) => onChange({ output: v })} />
         <ItemField label={_L("recipes.burnt_output")} className="col-span-3" items={items} value={step.output_burnt || ""} allowFree
+          itemImages={itemImages} onSetItemImage={onSetItemImage}
           placeholder={step.output ? `burnt_${step.output}` : undefined} onChange={(v) => onChange({ output_burnt: v })} />
         <NumberField label={_L("recipes.cook_time")} className={step.station === "stovetop" ? "col-span-2" : "col-span-3"}
           value={step.cook_ms ?? 15000} min={0} step={1000} onChange={(v) => onChange({ cook_ms: v })} />
@@ -381,7 +502,55 @@ function PourStepCard({
   );
 }
 
-export function FoodForm({ food, onChange, items, groups }: { food: Food; onChange: (patch: any) => void; items: Item[]; groups: string[] }) {
+// A food's OWN picture + what eating one serving does. Every food has both, whether
+// it's cooked, assembled, poured or made in a takeout box — a food is never
+// identified by borrowing an inventory item.
+function FoodIdentity({ food, onChange, anims, boxQuad }: {
+  food: Food; onChange: (patch: any) => void; anims: ConsumeAnim[];
+  boxQuad?: { w?: number; h?: number };
+}) {
+  const c = food.consume ?? {};
+  const setConsume = (patch: Partial<FoodConsume>) => onChange({ consume: { ...c, ...patch } });
+  return (
+    <div className="mt-3 flex flex-wrap items-start gap-4 rounded-md border border-border/60 p-3">
+      <div className="w-32">
+        <div className="mb-1.5 text-xs font-medium text-muted-foreground">{_L("menu.food_image")}</div>
+        <PhotoField aspect={ITEM_PHOTO()} entry={food.image ?? null}
+          onChange={(e) => onChange({ image: e })} empty={_L("menu.food_image_hint")} />
+      </div>
+      {/* a bag-kind food is served in the takeout box, and the picture lying in the
+          box often wants to be a different shot from the card art */}
+      {food.kind === "bag" && (
+        <div className="w-32">
+          <div className="mb-1.5 text-xs font-medium text-muted-foreground">{_L("menu.box_image")}</div>
+          {/* cropped at the box quad's own shape, so the crop IS what's painted */}
+          <PhotoField aspect={BOX_PHOTO(boxQuad)} entry={food.box_image ?? null}
+            onChange={(e) => onChange({ box_image: e })} empty={_L("menu.box_image_hint")} />
+        </div>
+      )}
+      <div className="min-w-[16rem] flex-1">
+        <div className="mb-1.5 text-xs font-medium text-muted-foreground">{_L("menu.when_eaten")}</div>
+        <div className="grid grid-cols-3 gap-3">
+          <Select label={_L("menu.consume_anim")} value={c.anim || ""} onChange={(v) => setConsume({ anim: v })}
+            options={[{ value: "", label: _L("menu.consume_anim_default") },
+                      ...anims.map((a) => ({ value: a.id, label: a.label || a.id }))]} />
+          {/* 0-100 percentages of the framework's needs bars; the server clamps them */}
+          <NumberField label={_L("menu.consume_hunger")} value={Number(c.hunger ?? 0)} min={0}
+            onChange={(v) => setConsume({ hunger: Math.max(0, Math.min(100, v)) })} />
+          <NumberField label={_L("menu.consume_thirst")} value={Number(c.thirst ?? 0)} min={0}
+            onChange={(v) => setConsume({ thirst: Math.max(0, Math.min(100, v)) })} />
+        </div>
+        <div className="mt-1.5 text-[11px] text-muted-foreground">{_L("menu.when_eaten_hint")}</div>
+      </div>
+    </div>
+  );
+}
+
+export function FoodForm({ food, onChange, items, groups, itemImages, onSetItemImage, anims, boxQuad }: {
+  food: Food; onChange: (patch: any) => void; items: Item[]; groups: string[];
+  itemImages?: ItemImages; onSetItemImage?: SetItemImage; anims?: ConsumeAnim[];
+  boxQuad?: { w?: number; h?: number };
+}) {
   const steps: Step[] = food.steps ?? [];
   const badModels = new Set(food.invalid_models || []);
   const patchStep = (i: number, patch: any) => onChange({ steps: steps.map((s, idx) => (idx === i ? { ...s, ...patch } : s)) });
@@ -410,12 +579,10 @@ export function FoodForm({ food, onChange, items, groups }: { food: Food; onChan
         </Field>
       </div>
 
+      <FoodIdentity food={food} onChange={onChange} anims={anims ?? []} boxQuad={boxQuad} />
+
       {food.kind === "bag" ? (
         <>
-          <div className="mt-3">
-            <ItemField label={_L("steps.bag_display_item")} hint={_L("steps.bag_display_hint")}
-              items={items} value={food.display_item || ""} onChange={(v) => onChange({ display_item: v })} />
-          </div>
           <Field label={_L("settings.components")} className="mt-3">
             <ComponentList comps={food.components ?? []} onChange={(c) => onChange({ components: c })} items={items} />
           </Field>
@@ -425,10 +592,12 @@ export function FoodForm({ food, onChange, items, groups }: { food: Food; onChan
           {steps.map((s, i) =>
             s.type === "assemble" ? (
               <AssembleStepCard key={i} step={s} isMiddle={i < steps.length - 1} suggestedId={suggestedId}
-                items={items} badModels={badModels} onChange={(p) => patchStep(i, p)} onRemove={() => removeStep(i)} />
+                items={items} badModels={badModels} onChange={(p) => patchStep(i, p)} onRemove={() => removeStep(i)}
+                itemImages={itemImages} onSetItemImage={onSetItemImage} />
             ) : s.type === "cook" ? (
               <CookStepCard key={i} step={s} fedByPrevious={i > 0}
-                items={items} badModels={badModels} onChange={(p) => patchStep(i, p)} onRemove={() => removeStep(i)} />
+                items={items} badModels={badModels} onChange={(p) => patchStep(i, p)} onRemove={() => removeStep(i)}
+                itemImages={itemImages} onSetItemImage={onSetItemImage} />
             ) : (
               <PourStepCard key={i} step={s}
                 items={items} badModels={badModels} onChange={(p) => patchStep(i, p)} onRemove={() => removeStep(i)} />
@@ -549,8 +718,9 @@ function TrayRow({ tray, items, badModels, onChange, onRemove }:
   );
 }
 
-export function ToolForm({ tool, cost, allTools, onChange, onChangeCost, items, groups }:
-  { tool: Tool; cost: number; allTools: Tool[]; onChange: (patch: any) => void; onChangeCost: (v: number) => void; items: Item[]; groups: string[] }) {
+export function ToolForm({ tool, cost, allTools, onChange, onChangeCost, items, groups, itemImages, onSetItemImage }:
+  { tool: Tool; cost: number; allTools: Tool[]; onChange: (patch: any) => void; onChangeCost: (v: number) => void;
+    items: Item[]; groups: string[]; itemImages?: ItemImages; onSetItemImage?: SetItemImage }) {
   const badModels = new Set(tool.invalid_models || []);
   const targets: any[] = tool.targets ?? [];
   // Other decorate finishes this one can require first (a finish can't require
@@ -564,7 +734,8 @@ export function ToolForm({ tool, cost, allTools, onChange, onChangeCost, items, 
   return (
     <>
       <div className="grid grid-cols-2 gap-3">
-        <ItemField label={_L("settings.finish_tool")} items={items} value={tool.item || ""} onChange={(v) => onChange({ item: v })} />
+        <ItemField label={_L("settings.finish_tool")} items={items} value={tool.item || ""} onChange={(v) => onChange({ item: v })}
+          itemImages={itemImages} onSetItemImage={onSetItemImage} />
         <NumberField label={_L("settings.finish_cost")} hint={_L("settings.finish_cost_hint")}
           value={cost} min={0} onChange={onChangeCost} />
         <ModelField label={_L("settings.finish_tool_model")} value={tool.tool_model || ""} onChange={(v) => onChange({ tool_model: v })} badModels={badModels} />
@@ -635,15 +806,17 @@ function PropertyBlock({
   );
 }
 
-export function IngredientForm({ ing, cost, onChange, onChangeCost, items, groups }:
-  { ing: IngredientDef; cost: number; onChange: (patch: any) => void; onChangeCost: (v: number) => void; items: Item[]; groups: string[] }) {
+export function IngredientForm({ ing, cost, onChange, onChangeCost, items, groups, itemImages, onSetItemImage }:
+  { ing: IngredientDef; cost: number; onChange: (patch: any) => void; onChangeCost: (v: number) => void;
+    items: Item[]; groups: string[]; itemImages?: ItemImages; onSetItemImage?: SetItemImage }) {
   const badModels = new Set(ing.invalid_models || []);
   const halves = ing.halves;
   const melts = ing.melts;
   return (
     <>
       <div className="grid grid-cols-2 gap-3">
-        <ItemField label={_L("ing.item")} items={items} value={ing.item || ""} onChange={(v) => onChange({ item: v })} />
+        <ItemField label={_L("ing.item")} items={items} value={ing.item || ""} onChange={(v) => onChange({ item: v })}
+          itemImages={itemImages} onSetItemImage={onSetItemImage} />
         <NumberField label={_L("settings.finish_cost")} hint={_L("settings.finish_cost_hint")}
           value={cost} min={0} onChange={onChangeCost} />
         <ModelField label={_L("settings.prop_model")} value={ing.model || ""} onChange={(v) => onChange({ model: v })} badModels={badModels} />

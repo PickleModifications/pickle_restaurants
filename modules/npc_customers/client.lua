@@ -73,17 +73,34 @@ local function walkToSlot(rid, orderId, ped, target, headingFace)
     FreezeEntityPosition(ped, false)
     entry.isWalking = true
     -- NavMesh (not straight-line) so the ped paths AROUND counters/props instead of
-    -- shoving into them and stalling. A hard timeout below snaps it into the slot if
-    -- it still can't reach — a queued customer must never be left wandering.
+    -- shoving into them and stalling. BUT a freshly-spawned ped is often tasked before
+    -- its navmesh tile has loaded — the task then silently no-ops and the ped just
+    -- stands until the timeout below teleports it in (the "stands, then pops to the
+    -- counter" bug). So we watch for real movement and, if it hasn't budged ~1s after
+    -- tasking, fall back to a straight-line walk (the admin-placed spawn point is a
+    -- clear spot near the register, so a straight line reaches the slot fine).
     TaskFollowNavMeshToCoord(ped, target.x, target.y, target.z, 1.0, 20000, 0.35, false, 0.0)
     CreateThread(function()
         local waited = 0
+        local startPos = GetEntityCoords(ped)
+        local usedFallback = false
         while DoesEntityExist(ped) and OrderNPCs[rid] and OrderNPCs[rid][orderId]
             and OrderNPCs[rid][orderId].isWalking do
-            Wait(400)
-            waited = waited + 400
-            -- Reached the slot, or gave up finding a path: settle into place either way.
-            if #(GetEntityCoords(ped) - target) < 0.5 or waited >= 20000 then
+            Wait(250)
+            waited = waited + 250
+            local pos = GetEntityCoords(ped)
+            -- Still glued to the spawn a beat after tasking: NavMesh never found a path.
+            -- Re-issue as a straight-line walk so the customer actually approaches.
+            if not usedFallback and waited >= 1000 and #(pos - startPos) < 0.25 then
+                usedFallback = true
+                ClearPedTasks(ped)
+                TaskGoStraightToCoord(ped, target.x, target.y, target.z, 1.0, 20000, headingFace, 0.35)
+            end
+            -- Arrival is checked HORIZONTALLY: the slot Z (counter height) can differ from
+            -- where the ped actually stands, and a Z gap would otherwise stall the ped at
+            -- the counter for the full timeout before snapping in. Settle either way.
+            local dx, dy = pos.x - target.x, pos.y - target.y
+            if math.sqrt(dx * dx + dy * dy) < 0.6 or waited >= 20000 then
                 ClearPedTasks(ped)
                 SetEntityCoordsNoOffset(ped, target.x, target.y, target.z, false, false, false)
                 SetEntityHeading(ped, headingFace)

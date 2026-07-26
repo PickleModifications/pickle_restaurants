@@ -359,6 +359,13 @@ CreateThread(function()
         Inventory.RemoveItemSlot = function(source, name, count, slot)
             exports.ox_inventory:RemoveItem(source, name, count, nil, slot)
         end
+        -- Rewrite ONE slot's metadata in place (a Restaurant Bag losing the item the
+        -- customer just ate). Absent without slot metadata — callers fall back to
+        -- remove + re-add.
+        Inventory.SetItemMetadata = function(source, _name, slot, metadata)
+            exports.ox_inventory:SetMetadata(source, slot, metadata)
+            return true
+        end
     end
 
     if GetResourceState("ox_inventory") == "started" or GetResourceState("qs-inventory") == "started" then
@@ -375,3 +382,16 @@ CreateThread(function()
         end)
     end
 end)
+-- Feed the framework's needs system after a customer eats/drinks something out of
+-- a restaurant vessel (modules/consume). `hunger`/`thirst` are plain 0-100
+-- percentages of the bar — each framework scales them its own way. ESX keeps both
+-- in esx_status, which counts 0..1,000,000. A server without esx_status simply has
+-- no status to add to: the events go nowhere and eating still works (item consumed,
+-- animation played). The public event at the end lets ANY other needs system hook
+-- in without touching this bridge.
+function Nourish(source, hunger, thirst)
+    hunger, thirst = math.floor(tonumber(hunger) or 0), math.floor(tonumber(thirst) or 0)
+    if hunger > 0 then TriggerClientEvent("esx_status:add", source, "hunger", hunger * 10000) end
+    if thirst > 0 then TriggerClientEvent("esx_status:add", source, "thirst", thirst * 10000) end
+    TriggerEvent("pickle_restaurants:nourish", source, hunger, thirst)
+end

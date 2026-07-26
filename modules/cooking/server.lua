@@ -474,7 +474,10 @@ function itemModel(item)
     for _, dd in ipairs(GetDrinks()) do if dd.output == item then return dd.model end end
     -- A finished/held Restaurant Bag renders as the vessel prop (a sealed bag; its
     -- contents aren't re-rendered once bagged, like a closed box).
-    if item == BagItemName() then return GetSetting("bag_model", "pickle_restaurant_bag_01") end
+    if item == BagItemName() then return BagModel() end
+    -- A made takeout box renders as its BASE prop; the hinged lid + the food image
+    -- quad inside it are added by the client's takeout branch (compSpec flags it).
+    if item == BoxItemName() then return BoxBaseModel() end
     -- A melting-topping ingredient with no explicit prep prop falls back to its
     -- APPLIED (unmelted) slice — the melted variant is only ever a live melt
     -- state, never the stackable/held slice.
@@ -526,6 +529,10 @@ local function isTrayItem(item)
     -- the generic collected drink lives in the tray too (its flavor is metadata),
     -- so a drink layer in a meal refunds back to the tray with its flavor intact
     if item == GetSetting("drink_item", "drink") then return true end
+    -- both takeaway vessels are kitchen PRODUCTS: a made takeout box (a bag-kind
+    -- food) and a packed Restaurant Bag are collected into the tray, never bought
+    -- into the ingredient pool
+    if item == BoxItemName() or item == BagItemName() then return true end
     -- a baking-tray output (an assembled-but-uncooked batter/dough) is a tray-only
     -- uncooked intermediate — it lives in the tray until it's baked
     for _, b in ipairs(GetBakingList()) do
@@ -825,6 +832,94 @@ local function finishRender(item, meta)
     return (fl and fl.model) or base, nil
 end
 
+-- ─── the two takeaway vessels ────────────────────────────────────────────────
+-- A TAKEOUT BOX instance is a bag-kind food (soup, salad…): its food id rides the
+-- first meta layer (the `craft` field — the same flag TraySig appends `~` for, so
+-- the POS variation grammar is byte-stable across the rename). Returns that id, or
+-- nil. LEGACY SHIM: before the takeout box existed these foods were made in — and
+-- collected as — the Restaurant Bag, so a bag instance carrying the flag is read as
+-- a box too (player inventory slots can't be migrated server-side).
+local function boxFoodId(item, meta)
+    if item ~= BoxItemName() and item ~= BagItemName() then return nil end
+    local id = type(meta) == "table" and meta[1] and meta[1].craft
+    return (type(id) == "string" and id ~= "") and id or nil
+end
+
+-- An ABSOLUTE image url for an item — what a DUI/render target needs (the NUI can
+-- resolve a bare filename itself, a CEF page loading a texture cannot). An admin
+-- override is already absolute; a catalogue filename is resolved against the
+-- inventory's image folder.
+function AbsItemImage(item)
+    if not item or item == "" then return nil end
+    local img = GetItemImage(item)
+    if type(img) == "string" and (img:find("^nui://") or img:find("^https?://")) then return img end
+    return InvImageUrl(InventoryImageBase(), item, img)
+end
+
+-- What a MADE takeout box shows, all authored on the food itself — it never borrows
+-- an inventory item's identity. Returns its label, the ITEM picture (the hotbar/tray
+-- card, the POS, the inventory slot) and the BOX picture (painted on the quad inside
+-- the open box, falling back to the item picture). Both fall back further to the
+-- legacy display item's art and then the box item's, so nothing is ever blank.
+local function boxFoodRender(cr)
+    if not cr then return nil, nil, nil, nil end
+    local box = BoxItemName()
+    local boxUrl, boxCrop = FoodBoxImageUrl(cr, box)
+    return cr.label, FoodImageUrl(cr, box), boxUrl, boxCrop
+end
+
+-- ONE build-stack layer described for a CONSUMER: what a customer sees when they
+-- open a Restaurant Bag or look at a meal in front of them. Every generic item
+-- resolves to what it actually is — a drink to its flavor, a takeout box to its
+-- food, everything else to its own label/art. `drink` marks it for the drinking
+-- animation (and thirst rather than hunger). Global: the consume + dining modules
+-- read it, and they must agree with the kitchen's own naming exactly.
+function LayerDisplay(l)
+    if type(l) ~= "table" or not l.item then return nil end
+    local item = l.item
+    local food = FoodForItem(item, l.stack)
+    local out = { item = item,
+                  label = (food and food.label) or GetItemLabel(item),
+                  image = FoodImageUrl(food, item) }
+    if item == DrinkItem() then
+        local dd = drinkFlavor(l.stack)
+        if dd then
+            out.label = dd.label or out.label
+            out.drink = true
+            if DrinkFlavorImage then out.image = DrinkFlavorImage(dd.output) or out.image end
+        else
+            out.drink = true
+        end
+        return out
+    end
+    local fid = boxFoodId(item, l.stack)
+    if fid then
+        local label, image = boxFoodRender(findCraft(fid))
+        out.label = label or out.label
+        out.image = image or out.image
+        return out
+    end
+    return out
+end
+
+-- How a build-stack layer is COUNTED and NAMED in a contents list. Normally that's
+-- just its item, but a GENERIC VESSEL item is only told apart by what it holds — a
+-- takeout box by its food, a drink by its flavor — so a meal tray or a bag lists
+-- "Soup" and "Cola" with their own art instead of two indistinguishable "Takeout
+-- Box" rows. Returns: grouping key, label, image, real item name.
+local function layerIdentity(l)
+    local d = LayerDisplay(l)
+    local key = l.item
+    local fid = boxFoodId(l.item, l.stack)
+    if fid then
+        key = "craft:" .. fid
+    elseif l.item == DrinkItem() then
+        local flavor = type(l.stack) == "table" and l.stack[1] and l.stack[1].item
+        if flavor then key = "drink:" .. tostring(flavor) end
+    end
+    return key, (d and d.label) or GetItemLabel(l.item), (d and d.image) or GetItemImage(l.item), l.item
+end
+
 -- A client part spec for one decomposed layer (no reservation id — that's stamped on
 -- when the take-apart actually commits). Shared by the drag preview and the commit so
 -- the previewed stack and the placed stack are identical.
@@ -863,11 +958,27 @@ local function compSpec(c)
             return spec
         end
     end
+    -- a made takeout box renders as the box PAIR (base + hinged lid, swung open) with
+    -- the food's image drawn on a quad inside it — the components themselves are never
+    -- re-rendered (a soup has no tower). The client's takeout branch owns the pair.
+    local fid = boxFoodId(c.item, c.stack)
+    if fid then
+        local label, _, boxImage, boxCrop = boxFoodRender(findCraft(fid))
+        spec.takeout = true
+        spec.model   = BoxBaseModel()
+        spec.lidModel = BoxLidModel()
+        spec.label   = label
+        spec.image   = boxImage -- makePart paints this on the quad inside the box
+        spec.imageCrop = boxCrop
+        spec.stack   = nil
+        if c.stack then spec.sig = TraySig(c.stack) end
+        return spec
+    end
     -- the generic restaurant_bag renders as its SEALED vessel prop — the contents
-    -- aren't shown once bagged (like a closed box). The craft id + component layers
-    -- ride in meta only, for POS matching and un-bagging.
+    -- aren't shown once bagged (like a closed box). The contents ride in meta only,
+    -- for POS matching and for the customer eating out of it.
     if c.item == BagItemName() then
-        spec.model = GetSetting("bag_model", "pickle_restaurant_bag_01")
+        spec.model = BagModel()
         spec.stack = nil
         if c.stack then spec.sig = TraySig(c.stack) end
         return spec
@@ -915,15 +1026,16 @@ local function stackDescription(stack)
     if #stack == 1 and type(stack[1]) == "table" and stack[1].flavorLabel then
         return stack[1].flavorLabel .. " " .. GetItemLabel(stack[1].item)
     end
-    local order, counts = {}, {}
+    local order, counts, labels = {}, {}, {}
     for _, l in ipairs(stack) do
-        if not counts[l.item] then order[#order + 1] = l.item; counts[l.item] = 0 end
-        counts[l.item] = counts[l.item] + (l.half and 0.5 or 1.0)
+        local key, label = layerIdentity(l)
+        if not counts[key] then order[#order + 1] = key; counts[key] = 0; labels[key] = label end
+        counts[key] = counts[key] + (l.half and 0.5 or 1.0)
     end
     local parts = {}
     for _, key in ipairs(order) do
         local n = math.ceil(counts[key])
-        local lbl = GetItemLabel(key)
+        local lbl = labels[key]
         parts[#parts + 1] = (n > 1) and (n .. "x " .. lbl) or lbl
     end
     return #parts > 0 and table.concat(parts, ", ") or nil
@@ -934,16 +1046,21 @@ end
 -- tray hover tooltip so a variation shows exactly what it's made of, with icons.
 local function stackComponents(meta)
     if type(meta) ~= "table" or #meta == 0 then return nil end
-    local order, counts = {}, {}
+    local order, counts, view = {}, {}, {}
     for _, l in ipairs(meta) do
+        local key, label, image, item = layerIdentity(l)
         for _ = 1, (tonumber(l.count) or 1) do
-            if not counts[l.item] then order[#order + 1] = l.item; counts[l.item] = 0 end
-            counts[l.item] = counts[l.item] + (l.half and 0.5 or 1.0)
+            if not counts[key] then
+                order[#order + 1] = key; counts[key] = 0
+                view[key] = { item = item, label = label, image = image }
+            end
+            counts[key] = counts[key] + (l.half and 0.5 or 1.0)
         end
     end
     local out = {}
     for _, key in ipairs(order) do
-        out[#out + 1] = { item = key, label = GetItemLabel(key), image = GetItemImage(key), count = math.ceil(counts[key]) }
+        local v = view[key]
+        out[#out + 1] = { item = v.item, label = v.label, image = v.image, count = math.ceil(counts[key]) }
     end
     return out
 end
@@ -955,11 +1072,15 @@ end
 -- exactly the base recipe (no toppings worth calling out).
 local function extrasComponents(item, meta)
     if type(meta) ~= "table" or #meta == 0 then return nil end
-    local order, counts = {}, {}
+    local order, counts, view = {}, {}, {}
     for _, l in ipairs(meta) do
+        local key, label, image, lit = layerIdentity(l)
         for _ = 1, (tonumber(l.count) or 1) do
-            if not counts[l.item] then order[#order + 1] = l.item; counts[l.item] = 0 end
-            counts[l.item] = counts[l.item] + (l.half and 0.5 or 1.0)
+            if not counts[key] then
+                order[#order + 1] = key; counts[key] = 0
+                view[key] = { item = lit, label = label, image = image }
+            end
+            counts[key] = counts[key] + (l.half and 0.5 or 1.0)
         end
     end
     local asm = findAssembly(item)
@@ -967,6 +1088,7 @@ local function extrasComponents(item, meta)
         local r = recipeForOutput(item)
         asm = r and findAssembly(r.input_item)
     end
+    -- a base component is a plain ingredient, so its identity key IS its item name
     for _, c in ipairs(asm and asm.components or {}) do
         if counts[c] then counts[c] = counts[c] - 1 end
     end
@@ -974,7 +1096,8 @@ local function extrasComponents(item, meta)
     for _, key in ipairs(order) do
         local n = math.ceil(counts[key])
         if n > 0 then
-            parts[#parts + 1] = { item = key, label = GetItemLabel(key), image = GetItemImage(key), count = n }
+            local v = view[key]
+            parts[#parts + 1] = { item = v.item, label = v.label, image = v.image, count = n }
         end
     end
     return #parts > 0 and parts or nil
@@ -1123,14 +1246,23 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
         -- same meal item — flagged so it sets back down as its box, not a tray.
         out[#out + 1] = { kind = "pizzabox", item = MealItem(), label = _L("cook_equip_pizza_box"),
                           image = GetItemImage(MealItem()) }
-        -- The Restaurant Bag: the same free-equipment pattern. Drag it onto the
-        -- table, drop a craft's components into it (each seats as its 3D prop, or a
-        -- 2D pill if the item has no model), then bag it up into ONE restaurant_bag
-        -- tagged with the matched craft. Only "→ inventory" needs the bag item
-        -- installed; the bag lives in the tray holding either way, like the tray.
+        -- The TAKEOUT BOX: where every bag-KIND food is created (soup, salad — the
+        -- non-stack miscellaneous foods). Same free-equipment pattern, same hinged
+        -- lid as the pizza box. Drag it out, open the lid, drop the food's
+        -- components in (each seats as its 3D prop, or a 2D pill if the item has no
+        -- model), then "Create <food>" — the contents become ONE takeout_box showing
+        -- that food's image inside.
+        out[#out + 1] = { kind = "takeout", item = BoxItemName(), label = _L("cook_equip_takeout_box"),
+                          image = GetItemImage(BoxItemName()),
+                          model = BoxBaseModel() }
+        -- The RESTAURANT BAG: the takeaway carrier — the serving tray's sibling for
+        -- food leaving the restaurant. Drop finished foods and drinks in, "Bag It
+        -- Up", and they become ONE restaurant_bag the customer eats out of. Only
+        -- "→ inventory" needs the bag item installed; the bag lives in the tray
+        -- holding either way, like the tray.
         out[#out + 1] = { kind = "bag", item = BagItemName(), label = _L("cook_equip_bag"),
                           image = GetItemImage(BagItemName()),
-                          model = GetSetting("bag_model", "pickle_restaurant_bag_01") }
+                          model = BagModel() }
         -- Baking trays (cake tin / cookie tray) follow the same free-equipment
         -- pattern: drag one out, rub the matching fill tool's mix over it to fill
         -- it, then drag the filled tray into the hotbar to collect its oven-ready
@@ -1788,7 +1920,7 @@ lib.callback.register("pickle_restaurants:cooking:collect", function(src, d)
     -- (tray items, with build metadata) go to the per-player tray.
     if giveItem then
         if isPoolItem(giveItem) then AddStock(it.rid, giveItem, giveCount)
-        else AddTray(it.rid, GetIdentifier(src), giveItem, 0, giveCount, giveMeta) end
+        else AddTray(it.rid, GetIdentifier(src), giveItem, giveCount, giveMeta) end
     end
     CookingItems[it.uid] = nil
     TriggerClientEvent("pickle_restaurants:cooking:remove", -1, it.uid)
@@ -1861,15 +1993,27 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                     e.flavor = dd.output -- flavor key → per-flavor NUI card art (items/<output>.png)
                 end
             end
-            -- the generic restaurant_bag: resolve its craft label from the id its
-            -- metadata records and render as the SEALED vessel (contents hidden once
-            -- bagged, like a closed box). Terminal — not decomposable.
-            if e.item == bagItem then
-                local craftId = type(e.meta) == "table" and e.meta[1] and e.meta[1].craft
-                local cr = craftId and findCraft(craftId) or nil
-                if cr then e.label = cr.label or e.label end
+            -- a made takeout box: labelled as the food it holds, rendered as the box
+            -- pair with that food's image on the quad inside. Terminal — not
+            -- decomposable (a soup can't be taken back apart).
+            local trayFid = boxFoodId(e.item, e.meta)
+            if trayFid then
+                local label, image, boxImage, boxCrop = boxFoodRender(findCraft(trayFid))
+                e.label    = label or e.label
+                e.image    = image or e.image  -- the card in the bar
+                e.takeout  = true
+                e.quad     = boxImage          -- what's painted inside the box
+                e.quadCrop = boxCrop           -- …at exactly the rect that was cropped
+                e.model    = BoxBaseModel()
+                e.lidModel = BoxLidModel()
+                e.stack    = { e.model }
+            elseif e.item == bagItem then
+                -- the packed Restaurant Bag: the SEALED vessel (contents hidden once
+                -- bagged, like a closed box), counted in the label so staff can tell
+                -- two bags apart on the shelf. Terminal — not decomposable.
                 e.bag = true
-                e.model = GetSetting("bag_model", "pickle_restaurant_bag_01")
+                e.contents = #(type(e.meta) == "table" and e.meta or {})
+                e.model = BagModel()
                 e.stack = { e.model }
             end
             if isPrep and (findAssembly(e.item) or e.meal) and not isFinished then e.decompose = true end
@@ -1924,12 +2068,13 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
             -- how this variation differs from the base recipe (its toppings), plus
             -- the full component list for the hover tooltip. A drink's meta is just
             -- its flavor key — already the card label, not a topping.
-            if e.meta and not ftarget and e.item ~= drinkItem and e.item ~= bagItem then
+            if e.meta and not ftarget and e.item ~= drinkItem and e.item ~= bagItem and not e.takeout then
                 e.extras = extrasComponents(e.item, e.meta)
                 e.comps  = stackComponents(e.meta)
             end
-            -- a bag has no base recipe to diff against — just list what's inside
-            if e.item == bagItem and e.meta then e.comps = stackComponents(e.meta) end
+            -- a bag / takeout box has no base recipe to diff against — just list
+            -- what's inside it
+            if (e.item == bagItem or e.takeout) and e.meta then e.comps = stackComponents(e.meta) end
             e.meta = nil -- the NUI keys variations by sig; no need to ship the raw stack
             -- freshness clock: SECONDS LEFT until this item spoils (nil = never). Sent as
             -- a remaining count, not an epoch, so the NUI counts down against its own
@@ -1967,13 +2112,24 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                         entry.flavor = dd.output -- flavor key → per-flavor NUI card art (items/<output>.png)
                     end
                 end
-                -- the generic restaurant_bag: craft label + sealed-vessel render
-                if item == bagItem then
-                    local craftId = type(v.meta) == "table" and v.meta[1] and v.meta[1].craft
-                    local cr = craftId and findCraft(craftId) or nil
-                    if cr then entry.label = cr.label or entry.label end
+                -- a made takeout box (or a legacy bag food): the food's label + the
+                -- box pair with its image on the quad inside. The bag proper is the
+                -- sealed carrier.
+                local invFid = boxFoodId(item, v.meta)
+                if invFid then
+                    local label, image, boxImage, boxCrop = boxFoodRender(findCraft(invFid))
+                    entry.label    = label or entry.label
+                    entry.image    = image or entry.image
+                    entry.takeout  = true
+                    entry.quad     = boxImage
+                    entry.quadCrop = boxCrop
+                    entry.model    = BoxBaseModel()
+                    entry.lidModel = BoxLidModel()
+                    entry.stack    = { entry.model }
+                elseif item == bagItem then
                     entry.bag = true
-                    entry.model = GetSetting("bag_model", "pickle_restaurant_bag_01")
+                    entry.contents = #(type(v.meta) == "table" and v.meta or {})
+                    entry.model = BagModel()
                     entry.stack = { entry.model }
                 end
                 -- a dual patty renders two-faced; a bare topped instance stores as the
@@ -2035,7 +2191,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 end
                 -- a collected drink renders cup+lid, a side renders in its box — never bare
                 if not entry.stack then entry.stack = servedStack(item, entry.model) end
-                if v.meta and not ftarget and item ~= drinkItem then
+                if v.meta and not ftarget and item ~= drinkItem and not entry.takeout and not entry.bag then
                     entry.extras = extrasComponents(item, v.meta)
                     entry.comps  = stackComponents(v.meta)
                 end
@@ -2060,6 +2216,8 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
     end
     once(mealItem)  -- meals aren't a recipe/assembly output, so list them explicitly
     once(drinkItem) -- neither is the generic drink item (flavor rides its metadata)
+    once(BoxItemName()) -- nor a made takeout box (the food id rides its metadata)
+    once(bagItem)       -- nor a packed Restaurant Bag (its contents ride its metadata)
 
     return out
 end)
@@ -2070,28 +2228,61 @@ end)
 -- (ESX) ignore whatever we pass. Toppings ride inside `meta` (the `top` field).
 -- Global so the POS register (modules/sales) can hand pool-fulfilled cooked
 -- instances to the customer with the same slot metadata a cook gets on cash-out.
--- `item` (optional): when it's the generic Restaurant Bag and the bagged craft has a
--- `display_item`, stamp that item's label/image onto the slot so the bag reads in the
--- inventory as the food it holds (ox_inventory honours `label`/`imageurl` natively).
+-- `item` (optional): when it's a made TAKEOUT BOX, stamp the FOOD's own label +
+-- picture onto the slot so the box reads in the inventory as the food it holds
+-- (ox_inventory honours `label`/`imageurl` natively). A packed RESTAURANT BAG
+-- describes itself by what's inside it.
 function BuildInvMeta(meta, item)
     local m
     if type(meta) == "table" and #meta > 0 then
         m = { stack = meta, description = stackDescription(meta) }
     end
-    if item and item == BagItemName() and type(meta) == "table" and meta[1] and meta[1].craft then
-        local cr = findCraft(meta[1].craft)
-        if cr and cr.display_item and cr.display_item ~= "" and ItemExists(cr.display_item) then
-            m = m or {}
-            local label = cr.label or GetItemLabel(cr.display_item)
-            m.label = label
-            m.description = label
-            local url = InvImageUrl(InventoryImageBase(), cr.display_item, GetItemImage(cr.display_item))
-            if url then m.imageurl = url end
+    local fid = item and boxFoodId(item, meta) or nil
+    if fid then
+        local cr = findCraft(fid)
+        if cr then
+            local label, url = boxFoodRender(cr)
+            if label then
+                m = m or {}
+                m.label = label
+                m.description = label
+            end
+            if url then m = m or {}; m.imageurl = url end
         end
     end
     return m
 end
 local buildInvMeta = BuildInvMeta
+
+-- The render specs for a MEAL held in a player's inventory — what modules/dining
+-- lays out on the table in front of a seated customer. Each recorded layer becomes
+-- one compSpec (the very same the prep table builds from, so a meal looks identical
+-- wherever it is set down) stamped with its INDEX in the metadata, which is what the
+-- eat callback addresses. `box` reports the meal was packed in a pizza box, so it is
+-- laid out in its box rather than on a tray.
+lib.callback.register("pickle_restaurants:consume:mealSpecs", function(src, d)
+    local item = d and d.item
+    if not item or item ~= MealItem() then return { ok = false } end
+    if not (Inventory and Inventory.GetItemSlots) then return { ok = false } end
+    local meta
+    for _, s in ipairs(Inventory.GetItemSlots(src, item) or {}) do
+        if not d.slot or s.slot == tonumber(d.slot) then meta = s.metadata break end
+    end
+    local stack = (type(meta) == "table" and type(meta.stack) == "table") and meta.stack or nil
+    if not stack or #stack == 0 then return { ok = false } end
+    local parts = {}
+    for i, l in ipairs(stack) do
+        local spec = compSpec(l)
+        spec.id = i          -- the layer this pile eats
+        spec.dx, spec.dy = l.dx, l.dy
+        local disp = LayerDisplay(l)
+        spec.label = disp and disp.label or spec.label
+        spec.image = disp and disp.image or spec.image
+        spec.drink = disp and disp.drink or nil
+        parts[#parts + 1] = spec
+    end
+    return { ok = true, box = (stack[1] and stack[1].box) and true or nil, parts = parts }
+end)
 
 -- cash a tray item out into the real inventory (so it can be stocked/sold)
 lib.callback.register("pickle_restaurants:cooking:trayToInventory", function(src, d)
@@ -2312,7 +2503,8 @@ lib.callback.register("pickle_restaurants:cooking:getCrafts", function(src, d)
     local prop = PropCache[tonumber(d and d.prop_id)]
     if not prop or StationType(prop) ~= "kitchen_prep" then return {} end
     if not HasPerm(prop.restaurant_id, src, "cook") then return {} end
-    local bagImg = GetItemImage(BagItemName())
+    -- a bag-kind food shows its OWN authored picture in the takeout box's tooltip
+    -- ranking, falling back to the box item's image
     local out = {}
     for _, cr in ipairs(GetCrafts()) do
         if cr.id and cr.id ~= "" and cr.components and #cr.components > 0
@@ -2326,7 +2518,8 @@ lib.callback.register("pickle_restaurants:cooking:getCrafts", function(src, d)
             if valid then
                 out[#out + 1] = {
                     output = cr.id, label = cr.label or cr.id,
-                    image = bagImg, components = comps,
+                    image = FoodImageUrl(cr, BoxItemName()),
+                    components = comps,
                 }
             end
         end
@@ -2483,7 +2676,7 @@ local function makeStack(src, b, id, ids, asm)
     for _, l in ipairs(layers) do
         stackMeta[#stackMeta + 1] = { item = l.item, top = l.top, half = l.half, stack = l.stack }
     end
-    AddTray(b.rid, id, asm.output, 0, 1, stackMeta)
+    AddTray(b.rid, id, asm.output, 1, stackMeta)
     -- sig + a render spec for the made product, so the client can seat it back in
     -- place (a burger built directly on a serving tray stays on the tray).
     return { ok = true, output = asm.output, label = asm.label or asm.output,
@@ -2578,46 +2771,90 @@ lib.callback.register("pickle_restaurants:cooking:prepMakeMeal", function(src, d
     -- the box flag rides the FIRST layer (layer tables are dicts, so it's JSON-safe;
     -- TraySig appends ^box) — that's what makes it set back down as its box
     if boxed then meta[1].box = true end
-    AddTray(b.rid, id, mealItem, 0, 1, meta)
+    AddTray(b.rid, id, mealItem, 1, meta)
     return { ok = true, output = mealItem,
              label = (boxed and "Boxed " or "") .. GetItemLabel(mealItem) }
 end)
 
--- Turn everything dropped in the Restaurant Bag into ONE restaurant_bag item.
--- Unlike a meal, arrangement doesn't matter — the bag's contents must MATCH a
--- defined craft (all its required components present; the most specific craft
--- wins). The craft id rides the FIRST meta layer (TraySig appends ~craft), so each
--- craft is its own POS variation; the component layers are recorded so an un-bagged
--- bag rebuilds 1:1. The bag item is what gets GENERATED — never a requirement; it
--- lands in the tray holding whether or not installed (only → inventory needs it).
-lib.callback.register("pickle_restaurants:cooking:prepMakeBag", function(src, d)
+-- Turn everything dropped in the TAKEOUT BOX into ONE takeout_box item — how every
+-- bag-KIND food (soup, salad…) is created. Unlike a meal, arrangement doesn't
+-- matter: the contents must MATCH a defined food (all its required components
+-- present; the most specific wins). The food id rides the FIRST meta layer (TraySig
+-- appends ~id), so each food is its own POS variation; the component layers are
+-- recorded so the box's contents stay readable. The box item is what gets
+-- GENERATED — never a requirement; it lands in the tray holding whether or not
+-- installed (only → inventory needs it).
+lib.callback.register("pickle_restaurants:cooking:prepMakeBox", function(src, d)
     local b = PrepBuilds[src]; if not b then return { ok = false } end
     if not HasPerm(b.rid, src, "cook") then return { ok = false } end
-    local bagItem = BagItemName()
+    local boxItem = BoxItemName()
     local id = GetIdentifier(src)
     -- flatten every dropped pile into one component list (arrangement is irrelevant)
     local layers = {}
     for _, pile in ipairs((d and d.items) or {}) do
         for _, l in ipairs(orderedLayers(b, pile.ids)) do layers[#layers + 1] = l end
     end
-    if #layers == 0 then return { ok = false, error = _L("cook_nothing_in_bag") } end
-    -- must form a defined craft; re-checked server-side (the NUI is untrusted)
+    if #layers == 0 then return { ok = false, error = _L("cook_nothing_in_box_food") } end
+    -- must form a defined food; re-checked server-side (the NUI is untrusted)
     local cr = bestCraftForLayers(layers, b.rid)
     if not cr then return { ok = false, error = _L("cook_no_craft_match") } end
     local ok, err = consumeLayers(src, b, id, layers) -- pins each product layer's nested stack
     if not ok then return { ok = false, error = err } end
     dropLayerReservations(src, b, layers)
 
-    -- component layers recorded (each keeping cheese/half/nested stack); the craft
+    -- component layers recorded (each keeping topping/half/nested stack); the food
     -- id flagged on the first layer so TraySig makes it its own variation
     local meta = {}
     for _, l in ipairs(layers) do
         meta[#meta + 1] = { item = l.item, top = l.top, half = l.half, stack = l.stack }
     end
     meta[1].craft = cr.id
-    AddTray(b.rid, id, bagItem, 0, 1, meta)
-    return { ok = true, output = bagItem, craft = cr.id,
-             label = cr.label or GetItemLabel(bagItem),
+    AddTray(b.rid, id, boxItem, 1, meta)
+    local label = boxFoodRender(cr)
+    return { ok = true, output = boxItem, craft = cr.id,
+             label = label or GetItemLabel(boxItem),
+             sig = TraySig(meta), spec = compSpec({ item = boxItem, stack = meta }) }
+end)
+
+-- Pack everything dropped in the RESTAURANT BAG into ONE restaurant_bag item — the
+-- takeaway carrier (the eat-in serving tray's counterpart). No recipe matching and
+-- no arrangement: whatever finished food and drink is in the bag is recorded, one
+-- meta layer per pile, and the customer eats it back out one item at a time. A pile
+-- of loose parts that happens to form a recipe is assembled into that product first
+-- (exactly like the serving tray), so a bagged burger is one burger, not four parts.
+lib.callback.register("pickle_restaurants:cooking:prepMakeBag", function(src, d)
+    local b = PrepBuilds[src]; if not b then return { ok = false } end
+    if not HasPerm(b.rid, src, "cook") then return { ok = false } end
+    local bagItem = BagItemName()
+    local id = GetIdentifier(src)
+    local piles, layers = {}, {}
+    for _, pile in ipairs((d and d.items) or {}) do
+        local ordered = orderedLayers(b, pile.ids)
+        piles[#piles + 1] = { ordered = ordered, asm = bestAssemblyForLayers(ordered, b.rid) }
+        for _, l in ipairs(ordered) do layers[#layers + 1] = l end
+    end
+    if #layers == 0 then return { ok = false, error = _L("cook_nothing_in_bag") } end
+    local ok, err = consumeLayers(src, b, id, layers)
+    if not ok then return { ok = false, error = err } end
+    dropLayerReservations(src, b, layers)
+
+    local meta = {}
+    for _, pile in ipairs(piles) do
+        if pile.asm then
+            local compStack = {}
+            for _, l in ipairs(pile.ordered) do
+                compStack[#compStack + 1] = { item = l.item, top = l.top, half = l.half, stack = l.stack }
+            end
+            meta[#meta + 1] = { item = pile.asm.output, stack = compStack }
+        else
+            for _, l in ipairs(pile.ordered) do
+                meta[#meta + 1] = { item = l.item, top = l.top, half = l.half, stack = l.stack }
+            end
+        end
+    end
+    AddTray(b.rid, id, bagItem, 1, meta)
+    return { ok = true, output = bagItem, count = #meta,
+             label = GetItemLabel(bagItem),
              sig = TraySig(meta), spec = compSpec({ item = bagItem, stack = meta }) }
 end)
 
@@ -2692,7 +2929,7 @@ lib.callback.register("pickle_restaurants:cooking:applyFinish", function(src, d)
     local meta = { { item = layer.item, top = layer.top, half = layer.half,
                      stack = layer.stack, tool = cfg.tool,
                      flavor = flavor.id, flavorLabel = flavor.label or flavor.id } }
-    AddTray(b.rid, id, target.output, 0, 1, meta)
+    AddTray(b.rid, id, target.output, 1, meta)
     return { ok = true, output = target.output,
              label = (flavor.label or flavor.id) .. " " .. GetItemLabel(target.output),
              sig = TraySig(meta), spec = compSpec({ item = target.output, stack = meta }) }
@@ -2763,7 +3000,7 @@ lib.callback.register("pickle_restaurants:cooking:bakeTrayToInv", function(src, 
         return { ok = false, error = _L("cook_item_changed") }
     end
     p.outs[output] = p.outs[output] - 1
-    AddTray(rid, GetIdentifier(src), output, 0, 1, nil)
+    AddTray(rid, GetIdentifier(src), output, 1, nil)
     return { ok = true, output = output, label = GetItemLabel(output) }
 end)
 
@@ -2820,14 +3057,14 @@ lib.callback.register("pickle_restaurants:cooking:prepDecompose", function(src, 
         if isFinishedMeta(meta) then return { ok = false, error = _L("cook_cant_take_apart") } end
         removeInvVariation(src, item, 0, sig, 1)
     else
-        if GetTrayCount(rid, id, item, 0, sig) < 1 then return { ok = false, error = _L("cook_none_to_take") } end
+        if GetTrayCount(rid, id, item, sig) < 1 then return { ok = false, error = _L("cook_none_to_take") } end
         -- The exact stack this was built from (order/cheese/bun-half intact), else recipe.
-        meta = TrayTopMeta(rid, id, item, 0, sig)
+        meta = TrayTopMeta(rid, id, item, sig)
         if isMeal and not (type(meta) == "table" and #meta > 0) then
             return { ok = false, error = _L("cook_meal_empty") }
         end
         if isFinishedMeta(meta) then return { ok = false, error = _L("cook_cant_take_apart") } end
-        RemoveTray(rid, id, item, 0, 1, sig)
+        RemoveTray(rid, id, item, 1, sig)
     end
     local comps = compsFromMeta(asm or { components = {} }, meta)
 
@@ -2854,7 +3091,7 @@ lib.callback.register("pickle_restaurants:cooking:prepDecompose", function(src, 
     for _, c in ipairs(comps) do
         local st = compStack(c)
         if st and isTrayItem(c.item) then
-            AddTray(rid, id, c.item, 0, 1, st)
+            AddTray(rid, id, c.item, 1, st)
         else
             local u = c.half and 0.5 or 1.0
             local key = c.item
@@ -2867,7 +3104,7 @@ lib.callback.register("pickle_restaurants:cooking:prepDecompose", function(src, 
         -- a raw component pulled out of a decomposed product returns to the shared
         -- stock POOL (symmetric with how it was consumed); tray products go to the
         -- tray, anything else falls back to personal inventory
-        if r.tray then AddTray(rid, id, r.item, 0, n)
+        if r.tray then AddTray(rid, id, r.item, n)
         elseif isPoolItem(r.item) then AddStock(rid, r.item, n)
         else Inventory.AddItem(src, r.item, n) end
     end
@@ -2910,8 +3147,8 @@ lib.callback.register("pickle_restaurants:cooking:prepDecomposePeek", function(s
         if invVariationCount(src, item, 0, sig) < 1 then return { ok = false } end
         meta = invVariationMeta(src, item, 0, sig)
     else
-        if GetTrayCount(prop.restaurant_id, id, item, 0, sig) < 1 then return { ok = false } end
-        meta = TrayTopMeta(prop.restaurant_id, id, item, 0, sig)
+        if GetTrayCount(prop.restaurant_id, id, item, sig) < 1 then return { ok = false } end
+        meta = TrayTopMeta(prop.restaurant_id, id, item, sig)
     end
     if isMeal and not (type(meta) == "table" and #meta > 0) then return { ok = false } end
     -- finished (frosted) instances never come apart — mirror prepDecompose

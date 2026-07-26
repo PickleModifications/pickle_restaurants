@@ -437,12 +437,142 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   New Condiment; `CondimentFields` edits item/container_model/applied_model + ingredient cost),
   fed by `AnnotateCondiments()` and saved whole via `admin:saveSettings`, like finishes.
 
+## Eat-in vs takeaway (the two vessels + eating)
+
+Food leaves the kitchen two ways, and BOTH are multi-item vessels whose contents
+ride as build-stack metadata:
+
+- **Serving tray → `meal_item` (EAT-IN).** Unchanged in the kitchen. It can only be
+  eaten while SEATED on a placed seat anchor: using it opens `modules/dining`, an
+  interactive in-world view (the kiosk/register pattern) that lays the real tray out
+  on the table in front of the diner, frames a scripted camera, hovers/outlines each
+  pile with a tooltip, and eats the pile you click. The ped keeps its sit loop
+  throughout. The layout is rendered by the KITCHEN's own machinery —
+  `SpawnMealRender`/`DeleteMealRender`/`MealRenderPileAnchor`/`MealRenderPileIndices`/
+  `OutlineMealPile` at the bottom of `modules/cooking/client.lua`, which run the prep
+  renderer against an external anchor (`extAnchor`) instead of a station — so a meal
+  on a diner's table is identical to the one the cook built. TUNE IN-GAME: `DINE` in
+  `modules/dining/client.lua`.
+- **Restaurant Bag → `bag_item` (TAKEAWAY).** The tray's sibling at prep: drop
+  finished foods/drinks in, "Bag It Up", and `prepMakeBag` records one meta layer per
+  pile. Usable anywhere: `modules/consume` opens an **ox_lib context menu** of the
+  contents, eating one removes that layer, and the bag itself disappears when the last
+  one goes.
+
+**A bag SUPPLIES an order exactly like a meal.** Both are "packed vessels" in the POS:
+`VesselItem`/`VesselItems` in `modules/sales/server.lua` name the pair, `PlanFulfillment
+(rid, order, sig, vesselItem)` lets one of them cover required units (`mealCovers`, exact
+variation match) with the rest coming from the pool as singles, and `AnnotateOrders`
+offers meals AND bags in one `mealOptions` list — each option carrying `item` (which one
+to consume) and `bag`. The wire field is still `mealSig`, now paired with `mealItem`;
+`VesselItem` rejects anything that isn't the meal or bag item, so a forged payload can
+never hand over an arbitrary item.
+- **Takeout box → `box_item` (`pickle_takeout_box_01` + `_02`).** Where every
+  `kind = "bag"` FOOD (soup, salad — the non-stack miscellaneous foods) is now
+  created; the bag used to be that vessel. Mechanically the pizza box's twin (`TAKEP`
+  ≡ `BOXP`: `LidCfg(kind)` returns either, and the seat/swing/close-before-make maths
+  are shared) but it accepts loose food like a tray. `prepMakeBox` matches the
+  contents against the food catalogue (`bestCraftForLayers`) and trays ONE `box_item`
+  with the food id on its first meta layer — the SAME `craft` flag, so `TraySig`'s
+  `~id` grammar and the POS `c:` variant key are byte-stable across the rename.
+  A one-time `takeout_box_migrated` backfill re-keys held bag instances; a legacy
+  `restaurant_bag` carrying a `craft` flag still READS as a box everywhere
+  (`boxFoodId`), since player inventory slots can't be migrated.
+
+A made takeout box renders as base + open lid + the food's **image on a textured
+quad** (`modules/quad`): a DUI (`html/quad.html`) per distinct image + shape, pooled
+and ref-counted, drawn with `DrawSpritePoly` from the entity matrix so it follows the
+box everywhere. That's how a food with no prop of its own (a soup) is visible at all.
+
+The quad HONOURS THE CROP: `FoodBoxImageUrl` returns url + the admin's normalised
+source rect, which rides through `spec.imageCrop` → `part.quadCrop` → `QuadAttach`'s
+`crop` → the DUI's query string, and `html/quad.html` draws exactly that rect across
+the surface (with a `cover` fallback when there is none) — the same contract
+`html/brand.html` honours. A page that merely CSS-`contain`s the image ignores the
+crop and letterboxes anything whose natural shape differs; that was the bug. The
+texture pool key is `url|aspect|crop`, since all three change what's painted.
+(NUI thumbnails still render `object-cover` on purpose — the crop matters where the
+image is drawn at the crop's own ratio: brand textures, the boards, the box quad.)
+
+**The quad's rectangle is `Config.BoxQuad`** (`{ w, h, dz }` in metres of the box's
+local space, in `core/shared.lua`) — EMBEDDED config, deliberately not a settings row:
+it's a property of the shipped box mesh, tuned once, not a per-install knob. It sits in
+`shared` rather than the cooking client so all three readers get the same numbers: the
+drawn quad, the DUI **surface aspect** (built at `w:h` by `surfaceSize`, so the art maps
+1:1 instead of being squashed onto a square texture — the pool key is `url|aspect|crop`
+for the same reason), and the admin panel's "Inside the box" cropper, which the server
+feeds READ-ONLY as `boxQuad` in `buildAdminData` (`BOX_PHOTO(quad)`) so a crop lands in
+the box exactly as it was dragged. Nothing in the panel writes it back. Do not
+re-introduce a second copy of these numbers in `TAKEP` or as a setting.
+TUNE IN-GAME: `DRAW_DIST`/`MAX_TEXTURES` in `modules/quad/client.lua`.
+
+**A food authors its own identity and effect — it never borrows an inventory item's.**
+Two fields on every authored food (both optional, edited in the Menu tab):
+- `image` = `{ url, crop }`, the food's OWN picture AS AN ITEM — the kitchen bar card,
+  the POS, a bag's contents menu, the inventory slot, the admin row thumbnail.
+  `FoodImageUrl(food, item)` resolves it, falling back to the LEGACY `display_item`'s
+  art (the field the bag-food editor used to offer; still read, no longer written) and
+  then to the item's own.
+- `box_image` = the picture painted on the quad INSIDE an open takeout box, for when
+  the card art doesn't work lying in a box. `FoodBoxImageUrl` falls back to `image`.
+  Bag-kind foods only. `boxFoodRender(cr)` returns `label, itemImage, boxImage` — keep
+  the two straight: the tray entry's `image` is the card, its `quad` is the box.
+
+Any CONTENTS LIST (a meal's or bag's parts on a tray card, an inventory slot
+description, the bag's eat menu, the POS vessel picker) groups by `layerIdentity(l)`,
+not by item name: a generic vessel item is only told apart by what it holds, so a
+takeout box counts and reads as its FOOD (`craft:<id>`, the food's label + art) and a
+drink as its flavor. Grouping by item name would collapse a soup and a salad into two
+indistinguishable "Takeout Box" rows.
+- `consume` = `{ hunger, thirst, anim }` — what eating ONE serving restores (0-100
+  percentages of the framework's bars) and which `consume_anims` entry plays.
+  `ConsumeSpecFor(item, meta)` resolves it, filling gaps from the global `consume`
+  setting; an un-authored DRINK is special-cased to thirst + a drinking clip so an
+  upgraded config doesn't feed the wrong bar. A one-time `food_consume_seeded` backfill
+  copies the shipped values onto matching stored foods (merge() only adds whole missing
+  entries, never fields).
+
+`consume_anims` (settings, seeded internally, edited in Settings → Eating) is the
+animation catalogue: `{ id, label, dict, clip, prop, ms }`. The server resolves a
+food's pick into the FULL clip spec and returns it with the eat response, so the client
+holds no catalogue and an admin's retune applies immediately.
+
+**A food's identity is its LABEL.** `SanitizeFoods` derives `id` from an explicit id →
+the final step's output/flavor → the label slug (`foodSlug`), and an id-less food is
+dropped on save. That last fallback is what a bag-kind food relies on now that it no
+longer borrows an inventory item's name (`display_item`), and what lets a half-built
+recipe survive being saved before its outputs are typed.
+
+**Nothing is made from nothing.** Every food has to CONSUME something — components to
+combine, an input to cook, a cup to pour. `RebuildDerived` refuses to derive a
+component-less craft/assembly or an input-less pour (a component-less assembly would
+satisfy `stackSatisfies` trivially, i.e. be buildable from an empty table), and
+`AnnotateFoods` flags the offending part as `no_input` so the admin row says which step
+is empty rather than the entry being silently inert in-game.
+
+`FoodForItem(item, meta)` is what maps a held thing back to its authoring food:
+`DerivedFoodById` (a takeout box's food id, a drink's flavor key) + `DerivedFoodByOutput`
+(every terminal cook/assemble/pour output), both rebuilt in `RebuildDerived`.
+
+**Item use** has no single cross-framework hook: ESX/QB take a per-name callback
+(`RegisterUsableItem`, re-registered on a `bag_item`/`meal_item` rename via the
+`pickle_restaurants:settingChanged` event), while ox_inventory calls the
+`pickle_restaurants.useItem` **export** named in the item definition — so the bag and
+meal ship as `stack = false, consume = 0` in `__INSTALL/items/`, and this resource
+(never ox) decides when the vessel is destroyed. Eating tops up the framework's needs
+via the bridge's `Nourish(source, hunger, thirst)` (0-100 percentages, scaled per
+framework: esx_status ×10,000, QB metadata + HUD event, standalone none). Every
+variant also fires `pickle_restaurants:nourish(source, hunger, thirst)`, so a server
+running its own needs system hooks that instead of editing the bridge.
+
 ## One-item consolidation rule
 
 Variants NEVER multiply items — they collapse into ONE item with the variation in
 build-stack metadata: all doughnuts are `cooked_doughnut` (frosting/sprinkles =
 finish meta), all drinks are the `drink_item` item (flavor meta), all meals the
-`meal_item` item (layout meta, `^box` for pizza boxes). Assembled-but-uncooked
+`meal_item` item (layout meta, `^box` for pizza boxes), every bag-kind food the
+`box_item` (food id meta) and every takeaway the `bag_item` (contents meta).
+Assembled-but-uncooked
 INTERMEDIATES (an assembly output that is some recipe's input, e.g. `raw_pizza`)
 are tray-only — never exported by itemgen (grace-retained one release in `RETAIN`),
 never required by sync/annotate validation (`assemblyMissing`/BuildSyncPayload skip

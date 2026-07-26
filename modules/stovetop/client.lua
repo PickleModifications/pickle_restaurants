@@ -191,6 +191,58 @@ function SpawnOvenDoors(prop, stove)
     OvenDoors[prop.id] = { stove = stove, doors = doors }
 end
 
+-- Hide/show a placed stovetop's doors along with the stove itself (the reposition
+-- gizmo hides the live station while you drag its preview — its doors have to go
+-- with it, or they hang in mid-air next to the ghost).
+function SetOvenDoorsVisible(propId, visible)
+    local rec = OvenDoors[propId]
+    if not rec then return end
+    for _, d in pairs(rec.doors) do
+        if d.entity and DoesEntityExist(d.entity) then
+            SetEntityVisible(d.entity, visible and true or false, false)
+        end
+    end
+end
+
+-- ─── placement preview ───────────────────────────────────────────────────────
+--  The placement gizmo previews the stove WITH its doors, at exactly the offsets
+--  the placed station uses, so what you aim is what you get. SpawnOvenDoors seats
+--  a door once against a station that never moves again; the gizmo prop moves
+--  every frame, so these track it in a loop until the placement ends.
+
+local PreviewDoors = nil -- { stove = entity, doors = { [door] = entity } }
+
+function DespawnPreviewOvenDoors()
+    local rec = PreviewDoors
+    PreviewDoors = nil
+    if not rec then return end
+    for _, ent in pairs(rec.doors) do SafeDeleteEntity(ent) end
+end
+
+function SpawnPreviewOvenDoors(stove)
+    DespawnPreviewOvenDoors()
+    if not stove or not DoesEntityExist(stove) then return end
+    local doors = {}
+    for door = 1, 2 do
+        local ent = createDoorEntity(stove, door, false) -- previewed closed
+        if ent then
+            SetEntityCollision(ent, false, false) -- the gizmo prop is non-colliding too
+            doors[door] = ent
+        end
+    end
+    local rec = { stove = stove, doors = doors }
+    PreviewDoors = rec
+    CreateThread(function()
+        while PreviewDoors == rec and DoesEntityExist(stove) do
+            for door, ent in pairs(rec.doors) do
+                applyDoorTransform(stove, ent, door, 0.0)
+            end
+            Wait(0)
+        end
+        if PreviewDoors == rec then DespawnPreviewOvenDoors() end
+    end)
+end
+
 -- ─── cursor hover + click ────────────────────────────────────────────────────
 --  The cooking session raycasts the NUI cursor into the world each frame; if it
 --  lands on a door we outline it, and a click toggles whatever is hovered.

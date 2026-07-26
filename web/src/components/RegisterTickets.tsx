@@ -3,7 +3,7 @@ import { fetchNui } from "@/lib/nui";
 import { Button } from "@/components/ui/button";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { Trash2, Check, X, Loader2, Ban, UtensilsCrossed } from "lucide-react";
+import { Trash2, Check, X, Loader2, Ban, UtensilsCrossed, ShoppingBag } from "lucide-react";
 import {
   Thumb, OptRow, arr, groupLines,
   type Ticket, type MealOption, type MealItem, type OptView,
@@ -27,10 +27,12 @@ export function Tickets({ id, tickets, big }: { id: number; tickets: Ticket[]; b
     if (picker && !tickets.some((t) => t.orderId === picker.orderId)) setPicker(null);
   }, [tickets]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const fulfillMeal = async (sig: string) => {
+  // `item` says which packed vessel is being handed over — a serving-tray meal or a
+  // Restaurant Bag. The server re-validates it (anything else falls back to the meal).
+  const fulfillMeal = async (sig: string, item?: string) => {
     if (!picker) return;
     setBusy(true);
-    await fetchNui("sales:completeOrder", { id, orderId: picker.orderId, mealSig: sig });
+    await fetchNui("sales:completeOrder", { id, orderId: picker.orderId, mealSig: sig, mealItem: item });
     setBusy(false);
     setPicker(null); // (also clears via the `orders` broadcast on success)
   };
@@ -156,12 +158,15 @@ function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?:
                 className={cn("inline-flex items-center gap-1.5 rounded-md border border-border font-semibold text-foreground transition-colors hover:border-destructive hover:text-destructive disabled:opacity-50", big ? "px-4 py-2.5 text-sm" : "px-3 py-1.5 text-xs")}>
                 <Trash2 className={ic} /> {_L("register.cancel")}
               </button>
-              {/* a meal (with any single items) can complete this order — open the
-                  in-depth picker to review the contents and hand one over */}
+              {/* a packed vessel — a meal or a takeaway bag — (with any single items)
+                  can complete this order: open the in-depth picker to review the
+                  contents and hand one over */}
               {mealOptions.length > 0 && (
                 <button disabled={busy} onClick={() => onOpenPicker(mealOptions)}
                   className={cn(btn, "border border-primary/50 bg-primary/10 text-primary hover:bg-primary/20")}>
-                  <UtensilsCrossed className={ic} /> {_L("register.fulfill_with_meal", mealOptions.length)}
+                  {mealOptions.every((m) => m.bag) ? <ShoppingBag className={ic} /> : <UtensilsCrossed className={ic} />}
+                  {" "}
+                  {_L(mealOptions.some((m) => m.bag) ? "register.fulfill_with_packed" : "register.fulfill_with_meal", mealOptions.length)}
                 </button>
               )}
               {f?.ok ? (
@@ -191,14 +196,14 @@ function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?:
 // ABSOLUTE overlay so it dims + centres over the ticket LIST only (never the panel
 // header), and fades its backdrop + card in on mount and out on close.
 function MealPicker({ meals, busy, big, onFulfill, onClose }: {
-  meals: MealOption[]; busy: boolean; big?: boolean; onFulfill: (sig: string) => void; onClose: () => void;
+  meals: MealOption[]; busy: boolean; big?: boolean; onFulfill: (sig: string, item?: string) => void; onClose: () => void;
 }) {
   const [visible, setVisible] = useState(false);
   // fade in on mount (next frame so the transition has a 0→1 to animate)
   useEffect(() => { const r = requestAnimationFrame(() => setVisible(true)); return () => cancelAnimationFrame(r); }, []);
   // fade out, then unmount via the parent's onClose
   const close = () => { setVisible(false); window.setTimeout(onClose, 180); };
-  const fulfill = (sig: string) => { setVisible(false); window.setTimeout(() => onFulfill(sig), 160); };
+  const fulfill = (sig: string, item?: string) => { setVisible(false); window.setTimeout(() => onFulfill(sig, item), 160); };
   return (
     <div
       className={cn("absolute inset-0 z-30 flex items-center justify-center p-4 transition-opacity duration-200",
@@ -213,7 +218,9 @@ function MealPicker({ meals, busy, big, onFulfill, onClose }: {
       >
         <div className="flex items-center gap-2 border-b border-border px-4 py-3">
           <UtensilsCrossed className="h-4 w-4 text-primary" />
-          <span className="font-semibold">{_L("register.meal_picker_title")}</span>
+          <span className="font-semibold">
+            {_L(meals.some((m) => m.bag) ? "register.packed_picker_title" : "register.meal_picker_title")}
+          </span>
           <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] font-bold tabular-nums text-muted-foreground">{meals.length}</span>
           <button onClick={close} className="ml-auto text-muted-foreground transition-colors hover:text-foreground"><X className="h-4 w-4" /></button>
         </div>
@@ -221,8 +228,11 @@ function MealPicker({ meals, busy, big, onFulfill, onClose }: {
           {meals.map((m, mi) => {
             const items = arr<MealItem>(m.items);
             return (
-              <div key={m.sig} className="rounded-lg border border-border bg-muted/30 p-3">
-                <div className="tape mb-2 text-muted-foreground">{_L("register.meal_n", mi + 1)}</div>
+              <div key={m.item + m.sig} className="rounded-lg border border-border bg-muted/30 p-3">
+                <div className="tape mb-2 flex items-center gap-1.5 text-muted-foreground">
+                  {m.bag ? <ShoppingBag className="h-3 w-3" /> : <UtensilsCrossed className="h-3 w-3" />}
+                  {_L(m.bag ? "register.bag_n" : "register.meal_n", mi + 1)}
+                </div>
                 <div className="space-y-2">
                   {items.map((it, i) => (
                     <div key={i} className="flex items-start gap-2.5 rounded-sm bg-card/60 p-1.5">
@@ -245,8 +255,10 @@ function MealPicker({ meals, busy, big, onFulfill, onClose }: {
                     </div>
                   ))}
                 </div>
-                <Button className="mt-3 w-full" size="sm" disabled={busy} onClick={() => fulfill(m.sig)}>
-                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} {_L("register.fulfill_this_meal")}
+                <Button className="mt-3 w-full" size="sm" disabled={busy} onClick={() => fulfill(m.sig, m.item)}>
+                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                  {" "}
+                  {_L(m.bag ? "register.fulfill_this_bag" : "register.fulfill_this_meal")}
                 </Button>
               </div>
             );

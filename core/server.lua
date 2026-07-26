@@ -16,6 +16,7 @@ EmployeeCache   = {}    -- [restaurantId][identifier] = employee row
 StockCache      = {}    -- [restaurantId][item] = count
 TrayCache       = {}    -- [restaurantId][identifier][item] = { item, count, metas } (metas: one build stack — or false — per counted instance; TraySig(meta) addresses a variation)
 SettingsCache   = {}    -- [key]           = decoded value
+ItemImageCache  = {}    -- [item]          = custom image url (admin-set override, from the `item_images` setting; consulted first by GetItemImage so tray-only products — burger, burnt patty — that have no inventory image can still show art everywhere)
 OrderCache      = {}    -- [restaurantId][orderId] = open POS ticket row (lines decoded)
 NextTicket      = {}    -- [restaurantId]  = next kitchen ticket number
 ComboCache      = {}    -- [restaurantId][comboId] = combo-meal row (slots/photo_crop decoded)
@@ -49,6 +50,9 @@ function SetSetting(key, value)
     SettingsCache[key] = value
     MySQL.update("INSERT INTO pickle_restaurant_settings (setting_key, setting_value) VALUES (?, ?) "
         .. "ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)", { key, json.encode(value) })
+    -- Anything keyed to a CONFIGURABLE setting re-reads it here (the usable-item
+    -- registration in modules/consume watches bag_item / meal_item).
+    TriggerEvent("pickle_restaurants:settingChanged", key, value)
 end
 
 local DEFAULT_SETTINGS = {
@@ -64,6 +68,14 @@ local DEFAULT_SETTINGS = {
     -- shape as app_theme; edited in Settings → Appearance, derived on the client.
     phone_theme     = { primary = "#ff7a2e", mode = "dark", radius = "round" },
     currency        = "money",
+    -- Admin-set custom images for items, keyed by item name → { url, crop? }. Lets a
+    -- server give proper art to tray-only PRODUCTS that aren't real inventory items
+    -- (a burger, a burnt patty, a cooked pizza…) and so have no catalogue image. The
+    -- url overrides GetItemImage for that item EVERYWHERE it's shown (POS, kitchen,
+    -- boards, phone). Rendered as a plain cover image on live surfaces; the crop is
+    -- kept for the editor's WYSIWYG preview (mirrors how combo photos behave). Edited
+    -- on the item thumbnails in the Food & Drinks / Ingredients admin tabs.
+    item_images     = {},
     starting_balance = 0,
     default_commission = 10,
     -- Menu pricing. A sellable's DEFAULT price is what its ingredients cost the
@@ -127,17 +139,52 @@ local DEFAULT_SETTINGS = {
     -- its slot metadata carries the order id/ticket so completion can verify the
     -- holder. Like meal_item it's a HANDOUT item (shipped in install/); if the item
     -- isn't installed the POS still works, just without a physical receipt.
-    receipt_item    = "receipt",
-    -- The inventory item EVERY crafted "Restaurant Bag" becomes — one item for
-    -- all crafts, the craft identity (`id`) + its component layers riding as
-    -- build-stack metadata, exactly like meal_item/drink_item. `bag_model` is the
-    -- vessel prop dropped on the prep table (kitchen equipment, never an item) and
-    -- the model a finished/held bag renders as. Crafts are code-less combine
-    -- recipes (soup, salad…): drop the components into the bag, bag it up, get one
-    -- restaurant_bag. Component prop models are OPTIONAL — a component with no
-    -- model (via prep_models/itemModel) shows the NUI pill instead of a 3D prop.
+    receipt_item    = "restaurant_receipt",
+    -- ── the two takeaway vessels ──────────────────────────────────────────────
+    -- TAKEOUT BOX — where every `kind = "bag"` FOOD (soup, salad… the non-stack
+    -- miscellaneous foods that have no build tower of their own) is made. The
+    -- box is a base + hinged-lid pair on the prep table (the pizza box's
+    -- machinery): drop the food's components in, "Create <food>", and the
+    -- contents become ONE `box_item` carrying the food identity (`id`) + its
+    -- component layers as build-stack metadata, exactly like meal_item /
+    -- drink_item. Component prop models are OPTIONAL — a component with no model
+    -- (via prep_models/itemModel) shows the NUI pill instead of a 3D prop; what a
+    -- MADE box shows is the food's OWN authored picture (`image`), drawn as a
+    -- textured quad inside the open box (see modules/quad).
+    box_item        = "takeout_box",
+    box_base_model  = "pickle_takeout_box_01",
+    box_lid_model   = "pickle_takeout_box_02",
+    -- RESTAURANT BAG — the TAKEOUT CARRIER (the eat-in serving tray's sibling).
+    -- Drop finished foods and drinks into the bag on the prep table, "Bag It Up",
+    -- and they become ONE `bag_item` whose build-stack metadata lists everything
+    -- inside it. The customer USES the bag (usable item), picks a thing out of it,
+    -- eats/drinks that one, and the bag disappears once it's empty. `bag_model` is
+    -- both the prep-table vessel and the model a finished/held bag renders as.
     bag_item        = "restaurant_bag",
     bag_model       = "pickle_restaurant_bag_01",
+    -- FALLBACK consume values for a food that doesn't set its own: how much of the
+    -- framework's needs bars ONE serving restores (0-100 percentages — the bridge
+    -- scales them, see Nourish) and which animation it's eaten with. Every food can
+    -- override all three in the menu editor ("When eaten").
+    consume         = { hunger = 25, thirst = 0, anim = "eat_burger" },
+    -- The eat/drink ANIMATIONS a food can be assigned, as a pickable list (seeded
+    -- with these defaults; an admin can retune them or add their own). `prop` is
+    -- held in the right hand for the duration and deleted after; `ms` is how long
+    -- one serving takes. Referenced by id from a food's `consume.anim`.
+    consume_anims   = {
+        { id = "eat_burger", label = "Eating (two-handed)",
+          dict = "mp_player_inteat@burger", clip = "mp_player_int_eat_burger",
+          prop = "prop_cs_burger_01", ms = 3000 },
+        { id = "eat_snack", label = "Eating (snack)",
+          dict = "amb@code_human_wander_eating_donut@male@idle_a", clip = "idle_c",
+          prop = "prop_amb_donut", ms = 2500 },
+        { id = "drink_bottle", label = "Drinking (bottle)",
+          dict = "mp_player_intdrink", clip = "loop_bottle",
+          prop = "prop_ld_flow_bottle", ms = 3000 },
+        { id = "drink_cup", label = "Drinking (cup)",
+          dict = "amb@world_human_drinking@coffee@male@idle_a", clip = "idle_c",
+          prop = "p_amb_coffeecup_01", ms = 3500 },
+    },
     blip            = { sprite = 93, color = 1, scale = 0.8, enabled = true },
     default_roles   = {
         ["0"] = { label = "Trainee", commission = 5,  permissions = { cook = true } },
@@ -194,8 +241,8 @@ local DEFAULT_SETTINGS = {
 --   • FOOD ("New Recipe"): a sellable, made either as an interactive experience
 --     (ordered `steps`: assemble at prep / cook at a station / pour at the
 --     fountain — a multi-step food like pizza is ONE entry) or as a combinable
---     `kind = "bag"` (components dropped into the Restaurant Bag; `display_item`'s
---     label+image ride the bag's slot metadata so it reads as the food itself).
+--     `kind = "bag"` (components dropped into the TAKEOUT BOX; the food's own
+--     `label` + `image` ride the box's slot metadata so it reads as the food itself).
 --   • TOOL ("New Tool"): a quantity-based item applied over food. `mode` picks the
 --     gesture/effect: "layer" squeezes its `applied_model` onto a build stack
 --     (condiments), "decorate" rubs over a finished product (frosting targets +
@@ -272,16 +319,19 @@ DEFAULT_FOODS = {
     -- fryer batches: the basket cooks as a pile (the step's models); each collected
     -- serving is held/stacked as one item (serving_model / serving_burnt_model)
     { id = "cooked_drumstick", label = "Drumsticks", kind = "interactive", group = "Fast Food",
+      consume = { hunger = 20, anim = "eat_snack" },
       steps = { { type = "cook", input = "raw_drumstick", station = "fryer", method = "fry",
         raw_model = "pickle_fryer_drumstick_01", cooked_model = "pickle_fryer_drumstick_02", burnt_model = "pickle_fryer_drumstick_03",
         output = "cooked_drumstick", output_burnt = "burnt_drumstick", cook_ms = 15000, burn_ms = 15000,
         output_count = 4, serving_model = "pickle_chicken_drumstick_02", serving_burnt_model = "pickle_chicken_drumstick_03" } } },
     { id = "cooked_fries", label = "Fries", kind = "interactive", group = "Fast Food",
+      consume = { hunger = 15, anim = "eat_snack" },
       steps = { { type = "cook", input = "raw_fries", station = "fryer", method = "fry",
         raw_model = "pickle_fryer_fries_01", cooked_model = "pickle_fryer_fries_02", burnt_model = "pickle_fryer_fries_03",
         output = "cooked_fries", output_burnt = "burnt_fries", cook_ms = 12000, burn_ms = 12000,
         output_count = 4, serving_model = "pickle_side_fries_02", serving_burnt_model = "pickle_side_fries_03" } } },
     { id = "cooked_nuggets", label = "Nuggets", kind = "interactive", group = "Fast Food",
+      consume = { hunger = 15, anim = "eat_snack" },
       steps = { { type = "cook", input = "raw_nuggets", station = "fryer", method = "fry",
         raw_model = "pickle_fryer_nuggets_01", cooked_model = "pickle_fryer_nuggets_02", burnt_model = "pickle_fryer_nuggets_03",
         output = "cooked_nuggets", output_burnt = "burnt_nuggets", cook_ms = 12000, burn_ms = 12000,
@@ -289,6 +339,7 @@ DEFAULT_FOODS = {
     -- cook-then-assemble: the patty grills dual-sided, then builds into the burger
     -- at kitchen prep. ONE entry — the intermediate patty is implied by the steps.
     { id = "burger", label = "Burger", kind = "interactive", group = "Fast Food",
+      consume = { hunger = 40, anim = "eat_burger" },
       steps = {
         { type = "cook", input = "raw_beef_patty", station = "stovetop", method = "grill", dual_sided = 1,
           raw_model = "pickle_patty_beef_01", cooked_model = "pickle_patty_beef_02", burnt_model = "pickle_patty_beef_03",
@@ -303,6 +354,7 @@ DEFAULT_FOODS = {
         { id = "pickle",  label = "Pickle",  item = "pickle",  price = 0 },
       } },
     { id = "chicken_sandwich", label = "Chicken Sandwich", kind = "interactive", group = "Fast Food",
+      consume = { hunger = 40, anim = "eat_burger" },
       steps = {
         { type = "cook", input = "raw_chicken_patty", station = "fryer", method = "fry",
           raw_model = "pickle_patty_friedchicken_01", cooked_model = "pickle_patty_friedchicken_02", burnt_model = "pickle_patty_friedchicken_03",
@@ -317,6 +369,7 @@ DEFAULT_FOODS = {
         { id = "pickle",  label = "Pickle",  item = "pickle",  price = 0 },
       } },
     { id = "cooked_doughnut", label = "Doughnut", kind = "interactive", group = "Bakery",
+      consume = { hunger = 15, anim = "eat_snack" },
       steps = { { type = "cook", input = "raw_doughnut", station = "fryer", method = "fry",
         raw_model = "pickle_doughnut_01", cooked_model = "pickle_doughnut_02", burnt_model = "pickle_doughnut_03",
         output = "cooked_doughnut", output_burnt = "burnt_doughnut", cook_ms = 12000, burn_ms = 12000 } } },
@@ -324,6 +377,7 @@ DEFAULT_FOODS = {
     -- DEFAULT_TOOLS) rubbed into the matching free tray; the oven bakes it inside
     -- its container prop (visual only, never an item).
     { id = "cooked_cookie", label = "Cookies", kind = "interactive", group = "Bakery",
+      consume = { hunger = 10, anim = "eat_snack" },
       steps = { { type = "cook", input = "raw_cookie", station = "stovetop", method = "oven",
         raw_model = "pickle_cookie_01", cooked_model = "pickle_cookie_02", burnt_model = "pickle_cookie_03",
         container_model = "pickle_cookie_tray_01", output_count = 6,
@@ -349,16 +403,22 @@ DEFAULT_FOODS = {
     -- poured drink collects as the ONE `drink_item` item with the flavor as
     -- build-stack metadata. `color` tints the poured liquid stream.
     { id = "water", label = "Pure Aqua", kind = "interactive",
+      consume = { thirst = 30, anim = "drink_cup" },
       steps = { { type = "pour", input = "empty_cup", flavor = "water", model = "pickle_drink_container_01", fill_ms = 3000, color = { 160, 205, 230 } } } },
     { id = "lemonade", label = "Lemonade Bliss", kind = "interactive",
+      consume = { thirst = 30, anim = "drink_cup" },
       steps = { { type = "pour", input = "empty_cup", flavor = "lemonade", model = "pickle_drink_container_01", fill_ms = 3000, color = { 235, 215, 90 } } } },
     { id = "soda", label = "Classic Cola", kind = "interactive",
+      consume = { thirst = 30, anim = "drink_cup" },
       steps = { { type = "pour", input = "empty_cup", flavor = "soda", model = "pickle_drink_container_01", fill_ms = 3000, color = { 90, 50, 25 } } } },
     { id = "diet_cola", label = "Diet Cola", kind = "interactive",
+      consume = { thirst = 30, anim = "drink_cup" },
       steps = { { type = "pour", input = "empty_cup", flavor = "diet_cola", model = "pickle_drink_container_01", fill_ms = 3000, color = { 120, 80, 55 } } } },
     { id = "grape_soda", label = "Grape Zap", kind = "interactive",
+      consume = { thirst = 30, anim = "drink_cup" },
       steps = { { type = "pour", input = "empty_cup", flavor = "grape_soda", model = "pickle_drink_container_01", fill_ms = 3000, color = { 135, 70, 170 } } } },
     { id = "coffee", label = "Coffee", kind = "interactive",
+      consume = { thirst = 30, anim = "drink_cup" },
       steps = { { type = "pour", input = "empty_cup", flavor = "coffee", model = "pickle_drink_container_01", fill_ms = 3000, color = { 80, 50, 30 } } } },
 }
 
@@ -578,7 +638,52 @@ local function CreateTables()
     ]])
 end
 
+-- Every table CreateTables is responsible for. The boot refuses to open the
+-- RestaurantsReady gate until all of these exist — oxmysql only LOGS a failed
+-- query, it doesn't raise, so a CREATE that fell over transiently (or a schema
+-- yanked out from under a live resource) would otherwise let the gate open on a
+-- broken DB and the schedulers would spam "table doesn't exist".
+local REQUIRED_TABLES = {
+    "pickle_restaurants", "pickle_restaurant_employees", "pickle_restaurant_props",
+    "pickle_restaurant_menu", "pickle_restaurant_stock", "pickle_restaurant_cooked_items",
+    "pickle_restaurant_ledger", "pickle_restaurant_settings", "pickle_restaurant_orders",
+    "pickle_restaurant_pending_refunds", "pickle_restaurant_combos",
+}
+
+-- Returns the first required table that is still missing (nil = schema is whole).
+local function FirstMissingTable()
+    local rows = MySQL.query.await([[
+        SELECT table_name AS t FROM information_schema.tables
+        WHERE table_schema = DATABASE() AND table_name LIKE 'pickle_restaurant%'
+    ]]) or {}
+    local present = {}
+    for _, row in ipairs(rows) do present[row.t or row.table_name] = true end
+    for _, name in ipairs(REQUIRED_TABLES) do
+        if not present[name] then return name end
+    end
+    return nil
+end
+
 -- ─── loaders ─────────────────────────────────────────────────────────────────
+
+-- Tray-only PRODUCTS the default menu makes (cooked/burnt/assembled/decorated foods).
+-- They are NOT real inventory items (they live in the cooked-items tray, never a slot),
+-- so they have no catalogue image — but the resource SHIPS 2D art for them in
+-- `nui/items/`. These get seeded as default custom images (item_images) below so the
+-- shipped menu looks right out of the box. Deliberately excludes: drink flavors (art
+-- resolved by DrinkFlavorImage, keyed by the drink `output`, item is `drink`), kitchen
+-- equipment (serving_tray / pizza_box / cake_tin / cookie_tray / cup_lid — EQUIP_IMAGE,
+-- not items) and restaurant_bag (a real installed item with its own inventory image).
+local DEFAULT_PRODUCT_IMAGES = {
+    "burger", "cheeseburger", "deluxe_burger", "chicken_sandwich",
+    "cooked_beef_patty", "burnt_beef_patty", "cooked_chicken_patty", "burnt_chicken_patty",
+    "cooked_drumstick", "burnt_drumstick", "cooked_fries", "burnt_fries",
+    "cooked_nuggets", "burnt_nuggets",
+    "cooked_doughnut", "burnt_doughnut", "frosted_doughnut",
+    "cooked_cake", "burnt_cake", "raw_cake", "decorated_cake",
+    "cooked_cookie", "burnt_cookie", "raw_cookie",
+    "cooked_pizza", "burnt_pizza", "raw_pizza",
+}
 
 local function LoadSettings()
     SettingsCache = {}
@@ -589,6 +694,13 @@ local function LoadSettings()
     -- Seed any missing defaults (idempotent; only writes keys that don't exist).
     for key, value in pairs(DEFAULT_SETTINGS) do
         if SettingsCache[key] == nil then SetSetting(key, value) end
+    end
+
+    -- One-time: the receipt handout item was renamed `receipt` → `restaurant_receipt`
+    -- (avoids clashing with other resources' generic "receipt"). Repoint only the
+    -- untouched old default — an admin who chose their own receipt_item keeps it.
+    if SettingsCache.receipt_item == "receipt" then
+        SetSetting("receipt_item", "restaurant_receipt")
     end
 
     -- Back-fill any newly-added npc_customers sub-key (a new tunable in a later
@@ -604,6 +716,60 @@ local function LoadSettings()
             end
             if changed then SetSetting("npc_customers", map) end
         end
+    end
+
+    -- One-time: seed default custom images for the tray-only products from the shipped
+    -- nui/items art. Only files that EXIST are seeded (a server can drop art or not),
+    -- and only keys the admin hasn't already set — an edit or a removal is preserved.
+    -- Gated by a flag so it runs once; bump the reseed by clearing the flag.
+    if not SettingsCache.item_images_seeded then
+        local map = type(SettingsCache.item_images) == "table" and SettingsCache.item_images or {}
+        local res, changed = GetCurrentResourceName(), false
+        for _, item in ipairs(DEFAULT_PRODUCT_IMAGES) do
+            if map[item] == nil and LoadResourceFile(res, "nui/items/" .. item .. ".png") then
+                map[item] = { url = ("nui://%s/nui/items/%s.png"):format(res, item) }
+                changed = true
+            end
+        end
+        if changed then SetSetting("item_images", map) end
+        SetSetting("item_images_seeded", true)
+    end
+
+    -- One-time: bag-kind foods (soup, salad…) used to be made IN the Restaurant Bag
+    -- and collected as the bag item. They are now made in the TAKEOUT BOX and
+    -- collect as `box_item`, freeing the bag to be the multi-item takeaway carrier.
+    -- Re-key every held instance that carries a food id (`craft`) on its first meta
+    -- layer — that flag is exactly what made it a bag food. Player INVENTORY slots
+    -- can't be reached from here, so a legacy `restaurant_bag` with craft metadata
+    -- stays readable everywhere as a box (the read-shims in cooking/sales).
+    -- One-time: `consume` (what eating one serving does + which animation plays) was
+    -- added to the food schema after these foods shipped. merge() only ever adds
+    -- whole MISSING entries, so an existing config would keep the global fallback
+    -- for everything — copy each default's values onto the stored food of the same
+    -- id, but ONLY where the admin hasn't authored their own.
+    if not SettingsCache.food_consume_seeded then
+        local list = GetSetting("foods", nil)
+        if type(list) == "table" then
+            local byId = {}
+            for _, d in ipairs(DEFAULT_FOODS) do if d.id then byId[d.id] = d end end
+            local changed = false
+            for _, f in ipairs(list) do
+                local d = f.id and byId[f.id]
+                if d and d.consume and type(f.consume) ~= "table" then
+                    f.consume = dec(json.encode(d.consume), nil)
+                    changed = true
+                end
+            end
+            if changed then SetSetting("foods", list) end
+        end
+        SetSetting("food_consume_seeded", true)
+    end
+
+    if not SettingsCache.takeout_box_migrated then
+        MySQL.update.await(
+            "UPDATE pickle_restaurant_cooked_items SET item = ? WHERE item = ? AND metadata LIKE ?",
+            { BoxItemName(), BagItemName(), '%"craft"%' })
+        SetSetting("takeout_box_migrated", true)
     end
 end
 
@@ -716,6 +882,129 @@ local function sanitizeComponents(comps)
     return out
 end
 
+-- A normalized crop rectangle (all fractions 0..1) or nil. Mirrors the brand-image
+-- crop sanitizer in modules/management (kept local there); item images reuse the
+-- exact { url, crop } shape combos/brands use.
+local function sanitizeImageCrop(c)
+    if type(c) ~= "table" then return nil end
+    local x, y, w, h = tonumber(c.x), tonumber(c.y), tonumber(c.w), tonumber(c.h)
+    if not (x and y and w and h) or w <= 0 or h <= 0 then return nil end
+    local function clamp(v) return math.max(0.0, math.min(1.0, v)) end
+    x, y = clamp(x), clamp(y)
+    w, h = math.min(w, 1.0 - x), math.min(h, 1.0 - y)
+    if w <= 0 or h <= 0 then return nil end
+    return { x = x, y = y, w = w, h = h }
+end
+
+-- Sanitize the admin `item_images` map (untrusted NUI): item name → { url, crop? }.
+-- Blank/oversized urls are dropped; an item with no valid url is omitted entirely.
+function SanitizeItemImages(map)
+    local out = {}
+    for item, v in pairs(type(map) == "table" and map or {}) do
+        if type(item) == "string" and item ~= "" and type(v) == "table" then
+            local url = trimStr(v.url)
+            if url then
+                out[item] = { url = url:sub(1, 512), crop = sanitizeImageCrop(v.crop) }
+            end
+        end
+    end
+    return out
+end
+
+-- A FOOD's own picture — the same { url, crop } shape items/combos/brands use, but
+-- authored on the food itself rather than borrowed from an inventory item. This is
+-- what a takeout-box food shows on its in-world quad, in the tray, on the POS and
+-- in the bag's contents menu; a food with no prop of its own has nothing else.
+local function sanitizeFoodImage(v)
+    if type(v) ~= "table" then return nil end
+    local url = trimStr(v.url)
+    if not url then return nil end
+    return { url = url:sub(1, 512), crop = sanitizeImageCrop(v.crop) }
+end
+
+-- What eating ONE serving of a food does: the needs it restores (0-100 percentages
+-- of the framework's bars) and which `consume_anims` entry plays. All three are
+-- optional — anything missing falls back to the global `consume` setting.
+local function sanitizeConsume(v)
+    if type(v) ~= "table" then return nil end
+    local function pct(n)
+        n = tonumber(n)
+        if not n then return nil end
+        return math.max(0, math.min(100, math.floor(n)))
+    end
+    local out = { hunger = pct(v.hunger), thirst = pct(v.thirst), anim = trimStr(v.anim) }
+    if out.hunger == nil and out.thirst == nil and not out.anim then return nil end
+    return out
+end
+
+-- The admin-editable eat/drink animation catalogue (`consume_anims`), sanitized on
+-- read so a bad NUI write can never hand the client a malformed clip. Entries with
+-- no id/dict/clip are dropped.
+function ConsumeAnims()
+    local out = {}
+    for _, a in ipairs(GetSetting("consume_anims", {}) or {}) do
+        if type(a) == "table" then
+            local id, dict, clip = trimStr(a.id), trimStr(a.dict), trimStr(a.clip)
+            if id and dict and clip then
+                out[#out + 1] = { id = id, label = trimStr(a.label) or id, dict = dict, clip = clip,
+                                  prop = trimStr(a.prop),
+                                  ms = math.max(500, math.min(20000, math.floor(tonumber(a.ms) or 3000))) }
+            end
+        end
+    end
+    return out
+end
+
+function SanitizeConsumeAnims(list)
+    local out, seen = {}, {}
+    for _, a in ipairs(type(list) == "table" and list or {}) do
+        if type(a) == "table" then
+            local id, dict, clip = trimStr(a.id), trimStr(a.dict), trimStr(a.clip)
+            if id and dict and clip and not seen[id] then
+                seen[id] = true
+                out[#out + 1] = { id = id, label = trimStr(a.label) or id, dict = dict, clip = clip,
+                                  prop = trimStr(a.prop),
+                                  ms = math.max(500, math.min(20000, math.floor(tonumber(a.ms) or 3000))) }
+            end
+        end
+    end
+    return out
+end
+
+-- Rebuild the item → url override cache from the stored `item_images` setting.
+-- Called from RebuildDerived (boot + every menu/settings save).
+function RebuildItemImages()
+    ItemImageCache = {}
+    for item, v in pairs(GetSetting("item_images", {}) or {}) do
+        if type(v) == "table" and type(v.url) == "string" and v.url ~= "" then
+            ItemImageCache[item] = v.url
+        end
+    end
+end
+
+-- Set (or clear, blank url) ONE item's custom image, MERGING into the stored map so
+-- concurrent edits from the two menu tabs can't clobber each other's entries. Returns
+-- true on a valid item. Caller re-syncs the world.
+function SetItemImageOverride(item, url, crop)
+    if type(item) ~= "string" or item == "" then return false end
+    local next = {}
+    for k, v in pairs(GetSetting("item_images", {}) or {}) do next[k] = v end
+    url = trimStr(url)
+    next[item] = url and { url = url:sub(1, 512), crop = sanitizeImageCrop(crop) } or nil
+    SetSetting("item_images", next)
+    RebuildItemImages()
+    return true
+end
+
+-- A stable food id derived from its display label — the same slug the NUI shows,
+-- computed SERVER-side. A bag-KIND food used to take its id from the inventory item
+-- it borrowed its name from (`display_item`); foods author their own identity now,
+-- so the label IS the identity. Without this a newly created food has no id, and an
+-- id-less food is dropped on save — it would vanish the moment the tab was left.
+local function foodSlug(s)
+    return (tostring(s or ""):lower():gsub("[^a-z0-9]+", "_"):gsub("^_+", ""):gsub("_+$", ""))
+end
+
 function SanitizeFoods(list)
     local out, seen = {}, {}
     for _, f in ipairs(type(list) == "table" and list or {}) do
@@ -726,11 +1015,25 @@ function SanitizeFoods(list)
                 kind  = (f.kind == "bag") and "bag" or "interactive",
                 group = trimStr(f.group),
                 modifiers = sanitizeModifiers(f.modifiers),
+                -- A food's OWN face + effect, authored (never borrowed from an
+                -- inventory item): the picture it shows everywhere it has no prop of
+                -- its own, and what eating one serving does.
+                image   = sanitizeFoodImage(f.image),
+                -- what's painted on the quad INSIDE a takeout box, when that should
+                -- differ from the card art (the card wants a packshot; the box wants
+                -- the bare food, top-down). Falls back to `image`.
+                box_image = sanitizeFoodImage(f.box_image),
+                consume = sanitizeConsume(f.consume),
             }
             if food.kind == "bag" then
                 food.components   = sanitizeComponents(f.components)
+                -- `display_item` is LEGACY (a bag food used to borrow an inventory
+                -- item's label + art). Kept only so an un-migrated config still
+                -- resolves a picture and an id; the editor no longer offers it.
                 food.display_item = trimStr(f.display_item)
-                food.id = food.id or food.display_item
+                -- identity: an explicit id, else the LEGACY display item, else the
+                -- label slug (what a food created today gets)
+                food.id = food.id or food.display_item or trimStr(foodSlug(food.label))
             else
                 local steps, cooks, pours = {}, 0, 0
                 local prevOutput = nil
@@ -791,7 +1094,10 @@ function SanitizeFoods(list)
                 food.steps = steps
                 -- deterministic identity: the final step's output / flavor (this is
                 -- what lets the default merge + migration agree on the same id)
-                food.id = food.id or prevOutput
+                -- identity: the final step's output / flavor, else the label slug —
+                -- so a half-built recipe (no outputs typed yet) still SURVIVES the
+                -- save and can be finished later instead of disappearing
+                food.id = food.id or prevOutput or trimStr(foodSlug(food.label))
             end
             if food.id and not seen[food.id] then
                 seen[food.id] = true
@@ -913,6 +1219,12 @@ DerivedCondiments = {}
 DerivedBaking     = {}
 DerivedPrepModels = {}
 
+-- Food lookups for anything that needs a food's OWN presentation/effect from just
+-- an item (its picture, its label, what eating it does): by authored id, and by
+-- every terminal output the food produces. Built in RebuildDerived.
+DerivedFoodById     = {}
+DerivedFoodByOutput = {}
+
 function GetAssembly()   return DerivedAssembly end
 function GetDrinks()     return DerivedDrinks end
 function GetCrafts()     return DerivedCrafts end
@@ -926,17 +1238,35 @@ function RebuildDerived()
     DerivedAssembly, DerivedDrinks, DerivedCrafts = {}, {}, {}
     DerivedFinishes, DerivedCondiments, DerivedBaking = {}, {}, {}
     DerivedPrepModels = {}
+    DerivedFoodById, DerivedFoodByOutput = {}, {}
 
     for _, ing in ipairs(GetIngredientsCfg()) do
         if ing.item and ing.model then DerivedPrepModels[ing.item] = ing.model end
     end
 
     for _, food in ipairs(GetFoods()) do
+        if food.id then DerivedFoodById[food.id] = food end
+        -- every terminal output this food can be HELD as, so an item alone resolves
+        -- back to the food that authored it (its picture, label and consume effect):
+        -- a cook step's cooked output, an assemble step's product, a pour's flavor.
+        for _, st in ipairs(food.steps or {}) do
+            local out = st.output or st.flavor
+            if out and out ~= "" then DerivedFoodByOutput[out] = food end
+        end
         if food.kind == "bag" then
-            if food.id then
+            -- NOTHING IS MADE FROM NOTHING: a food with no components would match an
+            -- EMPTY takeout box and let anyone create it out of thin air. Such an
+            -- entry is never derived (the admin panel still lists it, flagged
+            -- invalid, so it can be fixed).
+            if food.id and #(food.components or {}) > 0 then
                 DerivedCrafts[#DerivedCrafts + 1] = {
                     id = food.id, label = food.label or food.id, group = food.group,
                     components = food.components or {}, modifiers = food.modifiers,
+                    -- BOTH pictures ride along: the item card art and the one painted
+                    -- inside the box. Dropping `box_image` here silently fell every
+                    -- box back to the card art (FoodBoxImageUrl's fallback).
+                    image = food.image, box_image = food.box_image,
+                    consume = food.consume,
                     display_item = food.display_item, food_id = food.id,
                 }
             end
@@ -976,7 +1306,10 @@ function RebuildDerived()
                     end
                     prevOutput = st.output or prevOutput
                 elseif st.type == "assemble" then
-                    if st.output then
+                    -- likewise: a component-less assembly would be satisfied by any
+                    -- stack (stackSatisfies over an empty requirement is trivially
+                    -- true), i.e. buildable from nothing — never derive one
+                    if st.output and #(st.components or {}) > 0 then
                         DerivedAssembly[#DerivedAssembly + 1] = {
                             output = st.output,
                             label = isLast and (food.label or st.output)
@@ -989,7 +1322,9 @@ function RebuildDerived()
                     end
                     prevOutput = st.output or prevOutput
                 elseif st.type == "pour" then
-                    if st.flavor then
+                    -- a pour CONSUMES its cup: no cup item, no drink (the fountain
+                    -- would otherwise fill nothing into nothing)
+                    if st.flavor and st.input and st.input ~= "" then
                         DerivedDrinks[#DerivedDrinks + 1] = {
                             input = st.input, output = st.flavor,
                             label = food.label or st.flavor,
@@ -1020,6 +1355,8 @@ function RebuildDerived()
             }
         end
     end
+
+    RebuildItemImages()
 end
 
 
@@ -1292,7 +1629,9 @@ function ItemExists(name)
     return items[name] ~= nil or items[toupper(name)] ~= nil
 end
 
--- Sorted array of every known item: { { name, label }, ... }
+-- Sorted array of every known item: { { name, label, image }, ... }. A custom
+-- admin image (ItemImageCache) wins over the inventory catalogue image, so the NUI
+-- pickers/thumbnails show the same art the world does.
 function BuildItemList()
     local list = {}
     local items = (Inventory and Inventory.Items) or {}
@@ -1300,42 +1639,33 @@ function BuildItemList()
         list[#list + 1] = {
             name  = name,
             label = (type(data) == "table" and data.label) or name,
-            image = (type(data) == "table" and data.image) or nil,
+            image = ItemImageCache[name] or (type(data) == "table" and data.image) or nil,
         }
     end
     table.sort(list, function(a, b) return (a.label or a.name):lower() < (b.label or b.name):lower() end)
     return list
 end
 
--- The inventory image url for an item (nil when unknown / no catalogue yet).
+-- The image url for an item. An admin custom image (the `item_images` setting) wins;
+-- otherwise the inventory catalogue image; nil when neither is known. Consulted by
+-- every payload that shows an item, so a custom image propagates everywhere at once.
 function GetItemImage(name)
+    if not name then return nil end
+    local override = ItemImageCache[name] or ItemImageCache[toupper(name)]
+    if override then return override end
     local items = Inventory and Inventory.Items
     local data = items and (items[name] or items[toupper(name)])
     return (type(data) == "table" and data.image) or nil
 end
 
--- Is `item` consumed as a COMPONENT of some assembly recipe? A cooked output that
--- feeds an assembly (a beef/chicken patty → burger/sandwich) is a POOL-ONLY
--- intermediate: it lives in the per-player cooked-items pool and is built into the
--- assembly at prep, never handed to a customer on its own — so it is NEVER an
--- installed inventory item. See memory: cooked-intermediate-not-an-item.
-function IsAssemblyComponent(item)
-    if not item or item == "" then return false end
-    for _, a in ipairs(GetAssembly()) do
-        for _, c in ipairs(a.components or {}) do
-            if c == item then return true end
-        end
-    end
-    return false
-end
-
 -- Items a recipe references that don't exist in the catalogue. Cook OUTPUTS are
 -- tray-held products, not necessarily items:
 --   • the INPUT is always a real consumed item (bought into the shared stock pool);
---   • the COOKED output must be installed ONLY when it's an END product handed to a
---     customer directly (a side like fries). When it's an assembly COMPONENT (a patty)
---     it's a pool-only intermediate — never an item (aligns recipe validity with
---     IsProductItem, which already treats the patties as products);
+--   • the COOKED output is a kitchen PRODUCT — it collects into the per-player
+--     cooked-items pool and is only ever handed on via a MEAL or RESTAURANT BAG (or
+--     built into an assembly), never as a bare inventory item, so it is NEVER
+--     required to be installed (aligns recipe validity with IsProductItem, which
+--     treats every cook output as a product);
 --   • the BURNT output is NEVER an item — burnt food is unexchangeable and destroyed
 --     when binned, so it's never required to be installed.
 function RecipeMissingItems(r)
@@ -1345,7 +1675,7 @@ function RecipeMissingItems(r)
     if not ItemExists(r.input_item) and not IsProductItem(r.input_item) then
         missing[#missing + 1] = r.input_item
     end
-    if not IsAssemblyComponent(r.output_cooked_item) and not ItemExists(r.output_cooked_item) then
+    if not IsProductItem(r.output_cooked_item) and not ItemExists(r.output_cooked_item) then
         missing[#missing + 1] = r.output_cooked_item
     end
     return missing
@@ -1357,9 +1687,97 @@ function IsRecipeValid(r) return #RecipeMissingItems(r) == 0 end
 -- "fry" (fryer basket). Defaults to grill for legacy/untagged rows.
 function RecipeMethod(r) return (r and r.method) or "grill" end
 
--- The item every crafted Restaurant Bag becomes (one item for all bag foods; the
--- food id is its POS variant). Mirrors DrinkItemName/MealItem.
+-- The item every bag-KIND food (soup, salad…) becomes when it is created in the
+-- takeout box (one item for all of them; the food id is its POS variant).
+-- Mirrors DrinkItemName/MealItem.
+function BoxItemName() return GetSetting("box_item", "takeout_box") end
+
+-- ─── a held thing → the FOOD that authored it ────────────────────────────────
+-- Every generic vessel item is one of many foods, told apart by its metadata: a
+-- takeout box by the food id on its first layer, a drink by its flavor key. Anything
+-- else is looked up by the terminal output it was made as. This is what lets a food's
+-- OWN picture / label / eating effect follow it everywhere without borrowing an
+-- inventory item's identity.
+function FoodForItem(item, meta)
+    if not item or item == "" then return nil end
+    local first = (type(meta) == "table") and meta[1] or nil
+    if item == BoxItemName() or item == BagItemName() then
+        local fid = type(first) == "table" and first.craft or nil
+        if fid then return DerivedFoodById[fid] end
+    end
+    if item == GetSetting("drink_item", "drink") then
+        local flavor = type(first) == "table" and first.item or nil
+        if flavor then return DerivedFoodById[flavor] or DerivedFoodByOutput[flavor] end
+    end
+    return DerivedFoodByOutput[item] or DerivedFoodById[item]
+end
+
+-- The picture a food shows AS AN ITEM — the hotbar/tray card, the POS, the bag's
+-- contents menu, the inventory slot. Authored on the food; falls back to the LEGACY
+-- display item's art, then to the item's own, so an un-migrated config still shows
+-- something.
+function FoodImageUrl(food, item)
+    local url = type(food) == "table" and type(food.image) == "table" and food.image.url or nil
+    if url and url ~= "" then return url end
+    local legacy = type(food) == "table" and food.display_item or nil
+    if legacy and legacy ~= "" then return AbsItemImage(legacy) end
+    return item and AbsItemImage(item) or nil
+end
+
+-- The picture painted on the quad INSIDE an open takeout box: its url AND the
+-- normalised source rectangle the admin cropped ({x,y,w,h}, 0..1) — the quad's DUI
+-- draws exactly that rect, the same contract brand textures use, so what was cropped
+-- in the panel is what lands in the box. Its own setting when the card art doesn't
+-- work lying in a box (a packshot vs the bare food), otherwise the picture the item
+-- shows (with ITS crop). Returns url, crop.
+function FoodBoxImageUrl(food, item)
+    local box = type(food) == "table" and type(food.box_image) == "table" and food.box_image or nil
+    if box and type(box.url) == "string" and box.url ~= "" then return box.url, box.crop end
+    local own = type(food) == "table" and type(food.image) == "table" and food.image or nil
+    if own and type(own.url) == "string" and own.url ~= "" then return own.url, own.crop end
+    return FoodImageUrl(food, item), nil
+end
+
+-- What eating ONE serving of a held thing does: { hunger, thirst, anim }, resolved
+-- from the food that authored it and filled in from the global `consume` setting.
+-- `anim` is the full clip spec (dict/clip/prop/ms) so the client needs no catalogue.
+function ConsumeSpecFor(item, meta)
+    local fallback = GetSetting("consume", {}) or {}
+    local own = (FoodForItem(item, meta) or {}).consume or {}
+    -- A DRINK whose food states no effect of its own quenches thirst rather than
+    -- hunger, and is drunk rather than eaten. Without this an upgraded server (whose
+    -- stored foods predate `consume`) would have every drink feed the wrong bar
+    -- until someone edited it — the seeded defaults only reach a fresh install.
+    local isDrink = (item == GetSetting("drink_item", "drink"))
+    local silent = own.hunger == nil and own.thirst == nil
+    local function pick(k, d)
+        local v = own[k]
+        if v == nil and isDrink and silent then
+            -- swap the fallback's food value onto thirst for an un-authored drink
+            v = (k == "thirst") and (fallback.thirst ~= nil and fallback.thirst ~= 0
+                and fallback.thirst or fallback.hunger) or 0
+        end
+        if v == nil then v = fallback[k] end
+        v = tonumber(v)
+        if not v then v = d end
+        return math.max(0, math.min(100, math.floor(v)))
+    end
+    local animId = own.anim or (isDrink and not own.anim and silent and "drink_cup") or fallback.anim
+    local anim, first
+    for _, a in ipairs(ConsumeAnims()) do
+        first = first or a
+        if a.id == animId then anim = a break end
+    end
+    return { hunger = pick("hunger", 25), thirst = pick("thirst", 0), anim = anim or first }
+end
+function BoxBaseModel() return GetSetting("box_base_model", "pickle_takeout_box_01") end
+function BoxLidModel()  return GetSetting("box_lid_model", "pickle_takeout_box_02") end
+
+-- The TAKEOUT CARRIER item: one Restaurant Bag holding any number of finished
+-- foods/drinks as its build-stack metadata (the takeaway counterpart of the
+-- eat-in meal). Mirrors MealItem.
 function BagItemName() return GetSetting("bag_item", "restaurant_bag") end
+function BagModel() return GetSetting("bag_model", "pickle_restaurant_bag_01") end
 
 -- A bag food's raw ingredient cost = the sum of its component costs (the bag
 -- output itself is free packaging, never an ingredient). Default menu price.
@@ -1375,13 +1793,15 @@ end
 --   • a raw consumed item (cook input, component, cup, tool bottle) must be an
 --     installed inventory item — UNLESS it's itself a kitchen product (an
 --     intermediate like raw_pizza / a cooked patty), which is tray-only;
---   • a cook output handed to customers directly must be installed; one that only
---     feeds an assembly is a pool-only intermediate and needn't be;
+--   • a cook output is a kitchen product (tray-held) — it's handed on only via a
+--     meal or restaurant bag (or built into an assembly), never as a bare inventory
+--     item, so it is never required to be installed;
 --   • burnt outputs are never required.
 
 function AnnotateFoods()
     local drinkInstalled = ItemExists(GetSetting("drink_item", "drink"))
-    local bagInstalled = ItemExists(BagItemName())
+    -- a bag-kind food is created in the TAKEOUT BOX and collects as the box item
+    local boxInstalled = ItemExists(BoxItemName())
     local inputOwner = {}  -- duplicate cook-input detection (replaces the SQL unique key)
     local pourIndex = 0
     local out = {}
@@ -1393,12 +1813,21 @@ function AnnotateFoods()
                 missing[#missing + 1] = item
             end
         end
+        -- NOTHING IS MADE FROM NOTHING. Every step of every food has to CONSUME
+        -- something: components to combine, an input to cook, a cup to pour into.
+        -- A step with none would be creatable out of thin air, so the derivation
+        -- refuses to build it (RebuildDerived) and this flags it here with the step
+        -- that's empty, rather than leaving the entry silently inert in-game.
+        local empty = nil
+        local function needsInput(what) empty = empty or what end
         if f.kind == "bag" then
+            if #(f.components or {}) == 0 then needsInput("components") end
             for _, c in ipairs(f.components or {}) do needItem(c) end
-            if f.display_item and not ItemExists(f.display_item) then
-                missing[#missing + 1] = f.display_item
-            end
-            copy.bag_item_installed = bagInstalled
+            -- NOTE: no display-item check. A bag-kind food authors its own picture
+            -- and label (`image`/`label`); it never borrows an inventory item's
+            -- identity, so there is nothing here that has to be installed except the
+            -- takeout box item it collects as.
+            copy.box_item_installed = boxInstalled
             copy.defaultPrice = MarkupPrice(CraftCost(f))
         else
             local prevOutput, priceItem = nil, nil
@@ -1406,6 +1835,7 @@ function AnnotateFoods()
                 if st.type == "cook" then
                     local input = st.input or prevOutput
                     needItem(input)
+                    if not input or input == "" then needsInput("cook_input") end
                     if input then
                         if inputOwner[input] and inputOwner[input] ~= f.id then
                             copy.duplicate_input = input
@@ -1413,14 +1843,16 @@ function AnnotateFoods()
                             inputOwner[input] = f.id
                         end
                     end
-                    if st.output and not IsAssemblyComponent(st.output) and not ItemExists(st.output) then
+                    if st.output and not IsProductItem(st.output) and not ItemExists(st.output) then
                         missing[#missing + 1] = st.output
                     end
                     prevOutput, priceItem = st.output, st.output
                 elseif st.type == "assemble" then
+                    if #(st.components or {}) == 0 then needsInput("components") end
                     for _, c in ipairs(st.components or {}) do needItem(c) end
                     prevOutput, priceItem = st.output, st.output
                 elseif st.type == "pour" then
+                    if not st.input or st.input == "" then needsInput("pour_cup") end
                     if st.input and not ItemExists(st.input) then missing[#missing + 1] = st.input end
                     copy.drink_item_installed = drinkInstalled
                     pourIndex = pourIndex + 1
@@ -1428,9 +1860,11 @@ function AnnotateFoods()
                     priceItem = st.input
                 end
             end
+            if #(f.steps or {}) == 0 then needsInput("steps") end
             copy.defaultPrice = MarkupPrice(ResolveItemCost(priceItem))
         end
-        copy.valid, copy.missing = #missing == 0, missing
+        copy.no_input = empty
+        copy.valid, copy.missing = (#missing == 0 and not empty), missing
         out[#out + 1] = copy
     end
     return out
@@ -2386,11 +2820,11 @@ function BuildSyncPayload()
         end
         if ok then assembly[#assembly + 1] = a end
     end
-    -- Bag foods: shipped only when the ONE bag item is installed (every bag food
-    -- collects as it — no bag item, nothing to hand out) AND every component
-    -- resolves (a real consumed item OR a cooked-pool product).
+    -- Bag foods: shipped only when the ONE takeout-box item is installed (every
+    -- bag food collects as it — no box item, nothing to hand out) AND every
+    -- component resolves (a real consumed item OR a cooked-pool product).
     local crafts = {}
-    if ItemExists(BagItemName()) then
+    if ItemExists(BoxItemName()) then
         for _, cr in ipairs(GetCrafts()) do
             local ok = (cr.id and cr.id ~= "" and cr.components and #cr.components > 0)
             for _, comp in ipairs(cr.components or {}) do
@@ -2485,10 +2919,15 @@ function BuildSyncPayload()
         drinks   = drinks,
         assembly = assembly,
         crafts   = crafts,
-        -- the Restaurant Bag vessel prop + the one item every bag food becomes, so
-        -- the client can spawn the bag equipment and render a finished/held bag
+        -- The two takeaway vessels, so the client can spawn the equipment and
+        -- render a finished/held one: the TAKEOUT BOX (base + hinged lid) every
+        -- bag-kind food is created in, and the RESTAURANT BAG carrier a takeaway
+        -- order is packed into.
+        box_item       = BoxItemName(),
+        box_base_model = BoxBaseModel(),
+        box_lid_model  = BoxLidModel(),
         bag_item  = BagItemName(),
-        bag_model = GetSetting("bag_model", "pickle_restaurant_bag_01"),
+        bag_model = BagModel(),
         finishes = finishes,
         condiments = condiments,
         baking   = baking,
@@ -2527,6 +2966,16 @@ end)
 CreateThread(function()
     MySQL.ready(function()
         CreateTables()
+        -- Do not open the gate on a broken schema. oxmysql swallows a failed CREATE
+        -- (logs, never raises), so verify the tables actually landed and retry
+        -- rather than letting every downstream query spam "table doesn't exist".
+        local missing = FirstMissingTable()
+        while missing do
+            print(("[pickle_restaurants] schema incomplete after CreateTables (missing `%s`) — retrying in 2s. If you just wiped SQL, RESTART this resource; a live DROP doesn't re-run migrations."):format(missing))
+            Wait(2000)
+            CreateTables()
+            missing = FirstMissingTable()
+        end
         LoadSettings()
         SeedUnifiedMenu()
         RebuildDerived()

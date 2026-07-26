@@ -13,7 +13,10 @@ import {
   Plus, Trash2, Pencil, MapPin, ChevronRight, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X, Building2, Sparkles, Monitor, Users,
 } from "lucide-react";
 
-const STATIONS = [
+// LAZY getter (memoized): `_L()` resolves at render, not at module import — a
+// module-scope `_L()` runs before loadLocale() and would freeze to the raw key.
+let _stations: { key: string; label: string; icon: any; physicalOnly?: boolean }[] | null = null;
+const STATIONS = () => (_stations ??= [
   { key: "soda_machine", label: _L("admin.station_soda_machine"), icon: CupSoda },
   { key: "fryer", label: _L("admin.station_fryer"), icon: Flame },
   { key: "stovetop", label: _L("admin.station_stovetop"), icon: CookingPot },
@@ -25,7 +28,7 @@ const STATIONS = [
   // Customer info SCREENS — wall boards driven by a render target (menu / orders).
   { key: "menu_screen", label: _L("admin.station_menu_screen"), icon: Monitor, physicalOnly: true },
   { key: "orders_screen", label: _L("admin.station_orders_screen"), icon: Monitor, physicalOnly: true },
-];
+]);
 
 // Human name for a placed prop, so a chip reads "Fryer #12" instead of just "#12".
 // Virtual points resolve through their target station; counters/seats are named
@@ -35,7 +38,7 @@ function propLabel(p: any): string {
   if (p.prop_type === "virtual_register") return _L("admin.virtual_register");
   if (p.prop_type === "seat") return _L("admin.seat_one");
   const key = p.prop_type === "virtual_point" ? p.target : p.prop_type;
-  return STATIONS.find((s) => s.key === key)?.label || key || _L("admin.prop_one");
+  return STATIONS().find((s) => s.key === key)?.label || key || _L("admin.prop_one");
 }
 
 // One placed prop: a named chip with Edit (reposition) + Remove. Hovering beams
@@ -329,7 +332,7 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
             {!r.hasCounter ? _L("admin.shell_needs_counter") : r.hasShell ? _L("admin.shell_placed") : _L("admin.no_shell")}
           </p>
           <div className="space-y-3">
-            {STATIONS.map((s) => {
+            {STATIONS().map((s) => {
               const physical = byType(s.key);
               const virtual = props.filter((p) => p.prop_type === "virtual_point" && p.target === s.key);
               const isVirtual = !s.physicalOnly && (modes[s.key] || "physical") === "virtual";

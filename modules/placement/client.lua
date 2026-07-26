@@ -49,6 +49,13 @@ function StartPropPlacement(restaurantId, propType)
     Wait(250) -- let the NUI fully release focus before the gizmo takes input
     local opts = { model = GetHashKey(model), enableCancel = true, deleteEntity = true }
     if WALL_MOUNTED[propType] then opts.wallOffset = WallMountDepth(model) end
+    -- The stovetop's oven doors are separate props seated off the stove's transform
+    -- (modules/stovetop): preview them on the gizmo prop at the SAME offsets so what
+    -- you aim is exactly what gets spawned.
+    if propType == "stovetop" and SpawnPreviewOvenDoors then
+        opts.onSpawn   = SpawnPreviewOvenDoors
+        opts.onDespawn = DespawnPreviewOvenDoors
+    end
     local result = StartGizmoEditor(opts)
     if not result or not result.position then return end
     local res = lib.callback.await("pickle_restaurants:placement:saveProp", false, {
@@ -318,8 +325,11 @@ function StartPropReposition(propId)
     -- it at the new spot; on cancel / failure we restore its visibility below.
     local liveEnt = GetStationEntity and GetStationEntity(tonumber(propId))
     if liveEnt and DoesEntityExist(liveEnt) then SetEntityVisible(liveEnt, false, false) end
+    -- a stovetop's oven doors are separate entities — hide/restore them with it
+    if SetOvenDoorsVisible then SetOvenDoorsVisible(tonumber(propId), false) end
     local function restoreLive()
         if liveEnt and DoesEntityExist(liveEnt) then SetEntityVisible(liveEnt, true, false) end
+        if SetOvenDoorsVisible then SetOvenDoorsVisible(tonumber(propId), true) end
     end
 
     local seed = {
@@ -345,6 +355,10 @@ function StartPropReposition(propId)
         if not model then restoreLive(); return ShowNotification(_L("place_unknown_station")) end
         seed.model = GetHashKey(model)
         if WALL_MOUNTED[ptype] then seed.wallOffset = WallMountDepth(model) end
+        if ptype == "stovetop" and SpawnPreviewOvenDoors then
+            seed.onSpawn   = SpawnPreviewOvenDoors
+            seed.onDespawn = DespawnPreviewOvenDoors
+        end
     end
 
     local result = StartGizmoEditor(seed)

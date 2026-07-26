@@ -39,6 +39,11 @@ type TrayEntry = {
   meal?: boolean;
   // a meal made in a pizza box — sets back down as its box (lid open), not a tray
   boxed?: boolean;
+  // a made TAKEOUT BOX (a bag-kind food: soup, salad…): renders as the box pair with
+  // the food's image (`quad`) drawn inside it, never as a build tower
+  takeout?: boolean; quad?: string; quadCrop?: Crop; lidModel?: string;
+  // a packed RESTAURANT BAG: how many things the customer will find inside it
+  contents?: number;
   // a finished (frosted…) product's recorded flavor, e.g. "Strawberry"
   flavorLabel?: string;
   // a poured drink's flavor output key (e.g. "soda") — picks its per-flavor card
@@ -67,12 +72,16 @@ type PrepTip = {
   // a baking tray (cake tin / cookie tray): no Make Meal — a hint to rub the mix in
   // (empty) or drag it to the hotbar (filled).
   bake?: boolean; filled?: boolean;
-  // a Restaurant Bag: "Bag It Up" instead of Make Meal, and its contents are listed
-  // right in the tooltip (with a craft-match ranking) rather than floating as pills.
+  // a Restaurant Bag: "Bag It Up" instead of Make Meal — the takeaway carrier, so
+  // its tooltip just lists what's been packed into it.
   bag?: boolean;
+  // a TAKEOUT BOX: the vessel every bag-kind food (soup, salad…) is created in. Its
+  // tooltip lists the contents AND ranks the foods they form ("Create <food>"),
+  // exactly the way a build stack ranks recipes. Hinged lid like the pizza box.
+  takeout?: boolean;
   contents?: PrepContent[];
 };
-// One aggregated item sitting in the Restaurant Bag (shown in its tooltip).
+// One aggregated item sitting in a takeaway vessel (shown in its tooltip).
 type PrepContent = { item: string; label?: string; image?: string; qty: number };
 // A recipe scored against a stack: how many components are satisfied + what's short.
 type Ranked = { rec: RecipeCat; matched: number; ready: boolean; missing: { item: string; label: string; image?: string; short: number }[] };
@@ -93,6 +102,9 @@ type ChipItem = {
 // Resolve a topping ingredient's display label/image from whatever catalogue
 // entry mentions it; falls back to a prettified codename so it never reads raw.
 type ItemMetaMap = Record<string, { label?: string; image?: string }>;
+// A normalised (0..1) source rectangle cropped in the admin panel; forwarded to the
+// world render untouched so what was cropped is what's painted.
+type Crop = { x: number; y: number; w: number; h: number };
 const prettyItem = (name: string) => name.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const metaLabel = (meta: ItemMetaMap | undefined, item: string) => meta?.[item]?.label || prettyItem(item);
 const metaImage = (meta: ItemMetaMap | undefined, item: string) => meta?.[item]?.image;
@@ -100,20 +112,27 @@ const topMelted = (state: number | string) => state === 2 || state === "2" || st
 
 // The stovetop's camera views as icon tabs (sidebar left of the item listings):
 // a cooktop for the stovetop, the same oven icon twice with a #1/#2 badge.
-const STOVE_VIEWS: { key: string; label: string; icon: any; num?: number }[] = [
+// These label tables are built through LAZY getters (memoized on first call), never
+// eager module-scope literals: `_L()` at module scope runs at IMPORT time, before
+// loadLocale() has populated the string table, and would freeze to the raw key.
+// Resolving on first render (after the locale has loaded) is what makes them localize.
+let _stoveViews: { key: string; label: string; icon: any; num?: number }[] | null = null;
+const STOVE_VIEWS = () => (_stoveViews ??= [
   { key: "stovetop", label: _L("cook.view_stovetop"), icon: Heater },
   { key: "door1", label: _L("cook.view_oven_door_1"), icon: Microwave, num: 1 },
   { key: "door2", label: _L("cook.view_oven_door_2"), icon: Microwave, num: 2 },
-];
+]);
 
-const STATION_META: Record<string, { label: string; icon: any; hint: string }> = {
+let _stationMeta: Record<string, { label: string; icon: any; hint: string }> | null = null;
+const STATION_META = () => (_stationMeta ??= {
   fryer: { label: _L("cook.station_fryer_label"), icon: Flame, hint: _L("cook.station_fryer_hint") },
   stovetop: { label: _L("cook.station_stovetop_label"), icon: Flame, hint: _L("cook.station_stovetop_hint") },
   soda_machine: { label: _L("cook.station_soda_label"), icon: CupSoda, hint: _L("cook.station_soda_hint") },
   kitchen_prep: { label: _L("cook.station_prep_label"), icon: Sandwich, hint: _L("cook.station_prep_hint") },
-};
+});
 
-const STATE_STYLE: Record<string, { label: string; cls: string }> = {
+let _stateStyle: Record<string, { label: string; cls: string }> | null = null;
+const STATE_STYLE = () => (_stateStyle ??= {
   raw: { label: _L("cook.state_raw"), cls: "bg-rose-500/80 border-rose-300" },
   filling: { label: _L("cook.state_filling"), cls: "bg-sky-500/80 border-sky-300" },
   cooked: { label: _L("cook.state_cooked"), cls: "bg-emerald-500/80 border-emerald-300" },
@@ -123,9 +142,9 @@ const STATE_STYLE: Record<string, { label: string; cls: string }> = {
   empty: { label: _L("cook.state_empty"), cls: "bg-zinc-600/80 border-zinc-400" },
   filled: { label: _L("cook.state_filled"), cls: "bg-emerald-500/80 border-emerald-300" },
   capped: { label: _L("cook.state_ready"), cls: "bg-emerald-500/80 border-emerald-300" },
-};
+});
 
-const stateMeta = (s?: string) => STATE_STYLE[s || "raw"] || STATE_STYLE.raw;
+const stateMeta = (s?: string) => STATE_STYLE()[s || "raw"] || STATE_STYLE().raw;
 
 // Item thumbnail that quietly disappears if the inventory has no image for it — or,
 // when a `fallback` node is given (e.g. a vector icon for a non-inventory equipment
@@ -642,24 +661,27 @@ function MealTooltip({
   );
 }
 
-// Floating tooltip over a hovered Restaurant Bag. Lists what's in the bag (was a
-// floating pill per item) and, like the burger build guide, ranks the CRAFTS its
-// contents most relate to — closest first, each showing what it still needs — and
-// reveals "Bag It Up" once the bag forms one. The server always bags the best match;
-// the ranking just makes the match (and any shortfall) visible instead of a blind
-// "nothing happens" on click.
+// Floating tooltip over a hovered TAKEOUT BOX — the vessel every bag-kind food
+// (soup, salad…) is created in. Lists what's in the box and, like the burger build
+// guide, ranks the FOODS its contents most relate to — closest first, each showing
+// what it still needs — revealing "Create <food>" once they match one. The server
+// always creates the best match; the ranking just makes the match (and any
+// shortfall) visible instead of a blind "nothing happens" on click. The box closes
+// itself before creating, so the button doubles as the lid's cue.
 function BagTooltip({
-  contents, ranked, selected, count, onSelect, onBag, onPin,
+  contents, ranked, selected, count, open, boxing, onSelect, onBag, onPin,
 }: {
   contents: PrepContent[];
   ranked: Ranked[];
   selected: Ranked | null;
   count: number;
+  open?: boolean;
+  boxing?: boolean;
   onSelect: (output: string) => void;
   onBag: () => void;
   onPin: (pinned: boolean) => void;
 }) {
-  const ready = !!selected?.ready;
+  const ready = !!selected?.ready && !boxing;
   return (
     <div
       onPointerEnter={() => onPin(true)}
@@ -667,8 +689,8 @@ function BagTooltip({
       className="w-64 rounded-xl border border-border bg-card p-3 shadow-2xl"
     >
       <div className="flex items-center gap-2">
-        <ShoppingBag className="h-4 w-4 shrink-0 text-primary" />
-        <span className="text-sm font-semibold">{_L("cook.restaurant_bag")}</span>
+        <Package className="h-4 w-4 shrink-0 text-primary" />
+        <span className="text-sm font-semibold">{_L("cook.takeout_box")}</span>
         <span className="ml-auto shrink-0 rounded bg-secondary px-1.5 py-0.5 text-[11px] font-semibold tabular-nums">
           {count === 1 ? _L("cook.item_one", count) : _L("cook.items_other", count)}
         </span>
@@ -686,10 +708,12 @@ function BagTooltip({
         </div>
       )}
 
-      {/* craft-match ranking — the crafts the contents most closely form */}
+      {/* food-match ranking — the bag-kind foods the contents most closely form */}
       {ranked.length === 0 ? (
         <div className="mt-2 text-[11px] leading-snug text-muted-foreground">
-          {count === 0 ? _L("cook.bag_empty_hint") : _L("cook.bag_no_craft")}
+          {count === 0
+            ? (open ? _L("cook.takeout_empty_open_hint") : _L("cook.takeout_empty_closed_hint"))
+            : _L("cook.bag_no_craft")}
         </div>
       ) : (
         <>
@@ -741,7 +765,11 @@ function BagTooltip({
           ready ? "bg-primary text-primary-foreground hover:opacity-90" : "cursor-not-allowed bg-muted text-muted-foreground"
         )}
       >
-        {_L("cook.bag_it_up")}
+        {boxing
+          ? _L("cook.box_closing")
+          : selected
+            ? _L("cook.takeout_create", selected.rec.label)
+            : _L("cook.takeout_create_generic")}
       </button>
     </div>
   );
@@ -943,7 +971,8 @@ export default function Cooking({ data }: { data: any }) {
   // kitchen equipment (serving tray, pizza box, baking tray) is its own "Containers &
   // Packaging" category — the gear food gets arranged on/in — split out of both the
   // raw ingredients and the cooked-food tabs so neither is crowded by it
-  const isEquipment = (ing: Ingredient) => ing.kind === "tray" || ing.kind === "pizzabox" || ing.kind === "baketray" || ing.kind === "bag";
+  const isEquipment = (ing: Ingredient) =>
+    ing.kind === "tray" || ing.kind === "pizzabox" || ing.kind === "baketray" || ing.kind === "bag" || ing.kind === "takeout";
   const equipmentCards = isPrep
     ? ingredients.filter((ing) => isEquipment(ing) && (!q || ing.label.toLowerCase().includes(q)))
     : [];
@@ -983,7 +1012,7 @@ export default function Cooking({ data }: { data: any }) {
   //    way recipes rank against a stack, so the closest craft (and what it still needs)
   //    shows the same "Minecraft-style" way burgers do; keep a selection to compare. ──
   const bagRanked = useMemo(
-    () => (tip?.bag ? rankRecipes(crafts, tip.provides || {}) : []),
+    () => (tip?.takeout ? rankRecipes(crafts, tip.provides || {}) : []),
     [crafts, tip]
   );
   // Prop-based bag contents don't carry a label/image (only model-less pills do), so
@@ -1096,6 +1125,7 @@ export default function Cooking({ data }: { data: any }) {
     if (ing.kind === "tray") return _L("cook.inghint_tray");
     if (ing.kind === "pizzabox") return _L("cook.inghint_pizzabox");
     if (ing.kind === "bag") return _L("cook.inghint_bag");
+    if (ing.kind === "takeout") return _L("cook.inghint_takeout");
     if (ing.kind === "topping") return _L("cook.inghint_topping");
     if (ing.kind === "finish") return _L("cook.inghint_finish");
     if (ing.kind === "condiment") return _L("cook.inghint_condiment");
@@ -1142,7 +1172,12 @@ export default function Cooking({ data }: { data: any }) {
     e.preventDefault();
     trayPlaceRef.current = true;
     setDragging(true);
-    setDragHint(kind === "box" ? _L("cook.draghint_box_down") : kind === "bag" ? _L("cook.draghint_bag_down") : _L("cook.draghint_tray_down"));
+    setDragHint(
+      kind === "box" ? _L("cook.draghint_box_down")
+        : kind === "bag" ? _L("cook.draghint_bag_down")
+        : kind === "takeout" ? _L("cook.draghint_takeout_down")
+        : _L("cook.draghint_tray_down")
+    );
     fetchNui("cooking:beginTrayPlace", { kind });
   };
   // the lid (soda machine): dragged as its real 3D prop and released over a
@@ -1204,7 +1239,7 @@ export default function Cooking({ data }: { data: any }) {
   // stovetop); without one it falls back to a 2D ghost + auto-stack.
   const startPrepDrag = (
     e: React.PointerEvent, source: string,
-    entry: { item: string; model?: string; label?: string; image?: string; dual?: boolean; top?: TopState; topModel?: string; decompose?: boolean; uncooked?: boolean; sig?: string; stack?: string[]; stackState?: string; finishTool?: string }
+    entry: { item: string; model?: string; label?: string; image?: string; dual?: boolean; top?: TopState; topModel?: string; decompose?: boolean; uncooked?: boolean; sig?: string; stack?: string[]; stackState?: string; finishTool?: string; takeout?: boolean; quad?: string; quadCrop?: Crop; lidModel?: string }
   ) => {
     e.preventDefault();
     // A bun is one item spawned as a bottom+top pair (handled client-side), so no
@@ -1239,6 +1274,10 @@ export default function Cooking({ data }: { data: any }) {
         item: entry.item, model: entry.model,
         dual: entry.dual ? 1 : 0, top: entry.top, topModel: entry.topModel,
         sig, stack: entry.stack, state: entry.stackState, finishTool: entry.finishTool,
+        // a made takeout box: the box pair + the food image drawn inside it, at the
+        // exact source rect the admin cropped (the world quad honours it)
+        takeout: entry.takeout ? 1 : 0, lidModel: entry.lidModel,
+        image: entry.quad, imageCrop: entry.quadCrop,
       });
     } else {
       // A model-less component (no prop): still run the Lua drag so it can be dropped
@@ -1475,12 +1514,13 @@ export default function Cooking({ data }: { data: any }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const meta = STATION_META[station] || STATION_META.fryer;
+  const meta = STATION_META()[station] || STATION_META().fryer;
   const Icon = meta.icon;
 
   const draggable = (ing: Ingredient) =>
     // tray + pizza box + lid are kitchen equipment, never gated on an item count
-    ing.kind === "tray" || ing.kind === "pizzabox" || ing.kind === "bag" || ing.kind === "lid" ? true : ing.kind === "assembly" ? !!ing.canMake : (ing.count || 0) > 0;
+    ing.kind === "tray" || ing.kind === "pizzabox" || ing.kind === "bag" || ing.kind === "takeout" || ing.kind === "lid"
+      ? true : ing.kind === "assembly" ? !!ing.canMake : (ing.count || 0) > 0;
 
   // One-row strip by default (wheel scrolls it sideways); expanded — or while
   // searching — the strip wraps into a scrollable grid. A drag always collapses
@@ -1578,9 +1618,10 @@ export default function Cooking({ data }: { data: any }) {
         <div className="relative">
           {tip?.bake ? (
             <BakeTrayTooltip filled={!!tip.filled} onPin={onTipPin} />
-          ) : tip?.bag ? (
+          ) : tip?.takeout ? (
             <BagTooltip contents={bagContentsResolved} ranked={bagRanked} selected={craftSelected}
-              count={tip.count || 0} onSelect={setSelectedCraftId} onBag={onMealMake} onPin={onTipPin} />
+              count={tip.count || 0} open={!!tip.open} boxing={!!tip.boxing}
+              onSelect={setSelectedCraftId} onBag={onMealMake} onPin={onTipPin} />
           ) : tip?.tray ? (
             <MealTooltip count={tip.count || 0} box={!!tip.box} bag={!!tip.bag} open={!!tip.open} boxing={!!tip.boxing}
               onMake={onMealMake} onTakeOut={onBoxTakeOut} onPin={onTipPin} />
@@ -1644,7 +1685,7 @@ export default function Cooking({ data }: { data: any }) {
               the pictures do the talking (labels only on hover) */}
           {isStove && (
             <div className="flex shrink-0 flex-col justify-center gap-1.5 border-r border-border pr-3">
-              {STOVE_VIEWS.map((v) => {
+              {STOVE_VIEWS().map((v) => {
                 const VIcon = v.icon;
                 const active = view === v.key;
                 return (
@@ -1769,6 +1810,7 @@ export default function Cooking({ data }: { data: any }) {
                 if (ing.kind === "tray") startTrayPlace(e);
                 else if (ing.kind === "pizzabox") startTrayPlace(e, "box");
                 else if (ing.kind === "bag") startTrayPlace(e, "bag");
+                else if (ing.kind === "takeout") startTrayPlace(e, "takeout");
                 else if (ing.kind === "lid") startLid(e, ing);
                 else if (ing.kind === "topping") startTopping(e, ing);
                 else if (ing.kind === "finish") startFinish(e, ing);
@@ -1815,6 +1857,9 @@ export default function Cooking({ data }: { data: any }) {
                     <span className="text-[10px] text-muted-foreground">{_L("cook.boxes_a_pizza")}</span>
                   )}
                   {ing.kind === "bag" && (
+                    <span className="text-[10px] text-muted-foreground">{_L("cook.pack_a_bag")}</span>
+                  )}
+                  {ing.kind === "takeout" && (
                     <span className="text-[10px] text-muted-foreground">{_L("cook.craft_in_bag")}</span>
                   )}
                   {ing.kind === "lid" && (
@@ -1850,7 +1895,7 @@ export default function Cooking({ data }: { data: any }) {
                       })}
                     </div>
                   )}
-                  {ing.kind !== "assembly" && ing.kind !== "tray" && ing.kind !== "pizzabox" && ing.kind !== "bag" && ing.kind !== "lid" && (
+                  {ing.kind !== "assembly" && ing.kind !== "tray" && ing.kind !== "pizzabox" && ing.kind !== "bag" && ing.kind !== "takeout" && ing.kind !== "lid" && (
                     <Badge variant="secondary" className="absolute right-1 top-1">{ing.count ?? 0}</Badge>
                   )}
                   {ing.kind === "assembly" && !ing.canMake && (
@@ -1879,6 +1924,7 @@ export default function Cooking({ data }: { data: any }) {
                   if (ing.kind === "tray") startTrayPlace(e);
                   else if (ing.kind === "baketray") startTrayPlace(e, ing.subkind);
                   else if (ing.kind === "bag") startTrayPlace(e, "bag");
+                  else if (ing.kind === "takeout") startTrayPlace(e, "takeout");
                   else startTrayPlace(e, "box");
                 }}
                 onPointerEnter={(ev) => showBarTip(ev, { ing, hint: ingHint(ing) })}
@@ -1905,7 +1951,11 @@ export default function Cooking({ data }: { data: any }) {
                 />
                 <span className="w-full truncate px-1.5 leading-tight">{ing.label}</span>
                 <span className="text-[10px] text-muted-foreground">
-                  {ing.kind === "tray" ? _L("cook.build_a_meal") : ing.kind === "baketray" ? _L("cook.rub_in_mix") : ing.kind === "bag" ? _L("cook.craft_in_bag") : _L("cook.boxes_a_pizza")}
+                  {ing.kind === "tray" ? _L("cook.build_a_meal")
+                    : ing.kind === "baketray" ? _L("cook.rub_in_mix")
+                    : ing.kind === "bag" ? _L("cook.pack_a_bag")
+                    : ing.kind === "takeout" ? _L("cook.craft_in_bag")
+                    : _L("cook.boxes_a_pizza")}
                 </span>
               </div>
             ))}

@@ -34,6 +34,7 @@ files {
     'nui/**/*',
     'html/brand.html', -- DUI page for the render-target brand texture
     'html/screens.html', -- DUI page for the menu / orders info screens (modules/screens)
+    'html/quad.html', -- DUI page for the food image drawn inside a takeout box (modules/quad)
 }
 
 dependencies {

@@ -19,6 +19,10 @@ local function buildAdminData()
         -- The shipped default menu, verbatim — feeds the NUI's "Import Defaults"
         -- dialog (restore a deleted default / reset an edited one, no restart).
         defaults    = { foods = DEFAULT_FOODS, tools = DEFAULT_TOOLS, ingredients = DEFAULT_INGREDIENTS },
+        -- READ-ONLY, not a setting: the embedded takeout-box quad (core/shared.lua).
+        -- The "Inside the box" cropper locks its frame to this aspect so a crop lands
+        -- in the box exactly as it was dragged. Nothing in the panel writes it back.
+        boxQuad     = Config.BoxQuad,
         items       = BuildItemList(),     -- catalogue for item-pickers
         groups      = CollectGroups(),     -- every group name in use (UI suggestions)
         players     = {},
@@ -199,6 +203,18 @@ lib.callback.register("pickle_restaurants:admin:setBrandImage", function(src, d)
     return res
 end)
 
+-- Custom per-item image: MERGE one item's { url, crop } into the global `item_images`
+-- setting (a blank url clears it). Targeted so an edit in the Food & Drinks tab can't
+-- clobber one made in the Ingredients tab. The override wins over the inventory image
+-- in GetItemImage, so a re-sync pushes it to every world/board surface at once.
+lib.callback.register("pickle_restaurants:admin:setItemImage", function(src, d)
+    if not IsPlayerAdmin(src) then return { ok = false } end
+    if not SetItemImageOverride(d.item, d.url, d.crop) then return { ok = false } end
+    SyncToClient(-1)
+    ShowNotification(src, _L("admin_settings_saved"))
+    return { ok = true }
+end)
+
 -- Theme: same seed config as the boss panel, admin-gated. Shares
 -- SetRestaurantTheme (management).
 lib.callback.register("pickle_restaurants:admin:setTheme", function(src, d)
@@ -250,6 +266,12 @@ local MENU_SANITIZERS = {
     foods       = SanitizeFoods,
     tools       = SanitizeTools,
     ingredients = SanitizeIngredients,
+    -- Custom per-item images (item → { url, crop }). Rebuild picks up the new
+    -- ItemImageCache so a saved image propagates to every surface via GetItemImage.
+    item_images = SanitizeItemImages,
+    -- The eat/drink animation catalogue foods pick from (`consume.anim`): clips are
+    -- handed straight to the client, so a malformed entry is dropped here.
+    consume_anims = SanitizeConsumeAnims,
 }
 
 -- Apply a settings write, routing the three authored menu keys through their

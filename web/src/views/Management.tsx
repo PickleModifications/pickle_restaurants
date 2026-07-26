@@ -15,7 +15,10 @@ import { _L } from "@/lib/locale";
 import { UserPlus, Trash2, Pencil, Plus, Minus, MapPin, Banknote, Armchair, Receipt, ImageOff, PackagePlus, ArrowDownToLine, ArrowUpFromLine, Sparkles, Users } from "lucide-react";
 
 // The station types placeable from the boss/admin panels, with display labels.
-const MGMT_STATIONS = [
+// LAZY getter (memoized): `_L()` resolves at render, not at module import — a
+// module-scope `_L()` runs before loadLocale() and would freeze to the raw key.
+let _mgmtStations: { key: string; label: string; physicalOnly?: boolean }[] | null = null;
+const MGMT_STATIONS = () => (_mgmtStations ??= [
   { key: "soda_machine", label: _L("admin.station_soda_machine") },
   { key: "fryer", label: _L("admin.station_fryer") },
   { key: "stovetop", label: _L("admin.station_stovetop") },
@@ -24,7 +27,7 @@ const MGMT_STATIONS = [
   { key: "kiosk_ground", label: _L("admin.station_kiosk_ground"), physicalOnly: true },
   { key: "menu_screen", label: _L("admin.station_menu_screen"), physicalOnly: true },
   { key: "orders_screen", label: _L("admin.station_orders_screen"), physicalOnly: true },
-];
+]);
 
 // Human name for a placed prop (so a chip reads "Fryer #12", not "#12").
 function mgmtPropLabel(p: any): string {
@@ -32,7 +35,7 @@ function mgmtPropLabel(p: any): string {
   if (p.prop_type === "virtual_register") return _L("admin.virtual_register");
   if (p.prop_type === "seat") return _L("admin.seat_one");
   const key = p.prop_type === "virtual_point" ? p.target : p.prop_type;
-  return MGMT_STATIONS.find((s) => s.key === key)?.label || key || _L("admin.prop_one");
+  return MGMT_STATIONS().find((s) => s.key === key)?.label || key || _L("admin.prop_one");
 }
 
 // One placed prop in the boss panel: named chip with Edit (reposition) + Remove.
@@ -405,7 +408,7 @@ function Finances({ id, balance, ledger, canManage }: any) {
 }
 
 function Stations({ id, props, hasShell, hasNpcSpawn, focusSection }: any) {
-  const STATIONS = MGMT_STATIONS;
+  const STATIONS = MGMT_STATIONS();
   const seats = (props as any[]).filter((p) => p.prop_type === "seat");
   const counters = (props as any[]).filter((p) => p.prop_type === "counter");
   const virtualRegisters = (props as any[]).filter((p) => p.prop_type === "virtual_register");

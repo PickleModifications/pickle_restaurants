@@ -55,7 +55,9 @@ end)
 CreateThread(function()
     while true do
         local wait = 500
-        if NUIView ~= "none" and NUIView ~= "cooking" then
+        -- the cooking station and the eat-in meal view own their own ESC (they have
+        -- world props + a camera to tear down first)
+        if NUIView ~= "none" and NUIView ~= "cooking" and NUIView ~= "dining" then
             wait = 0
             if IsControlJustReleased(0, 322) then -- ESC
                 CloseNUI()

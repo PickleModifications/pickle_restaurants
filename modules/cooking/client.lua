@@ -153,7 +153,42 @@ local BAGP = {
                        -- bag's full model height so aiming up its body (not just the
                        -- base) still targets it. Raise only if a hit BELOW the base needs room.
 }
+-- The TAKEOUT BOX: where every bag-KIND food (soup, salad — the non-stack
+-- miscellaneous foods) is created. Mechanically the pizza box's twin — a base +
+-- hinged-lid pair with the same seat/swing maths — but it accepts loose food like
+-- a serving tray (no crust gate) and its make button CREATES the matched food
+-- rather than boxing a meal. `base_model`/`lid_model` are SYNCED (BoxBaseModel /
+-- BoxLidModel) and resolved live in trayBaseModel/trayLidModel. TUNE IN-GAME.
+-- (a resource GLOBAL, not a local, only because of this file's 200-local ceiling —
+-- see the note by makePart; BOXP/TRAYP/BAGP above are its exact siblings.)
+TAKEP = {
+    food_dz   = 0.0,   -- how high contents seat above the surface the box sits on
+    rim_inset = 0.05,  -- shrink the droppable area vs the model bounds
+    pick_pad  = 0.03,  -- extra grab margin (m) around the box's footprint
+    pick_dz   = 0.4,   -- max height difference between the cursor's surface hit and the box
+    open_deg  = 100.0, -- how far the lid swings open (pitch; lidSwing negates it)
+    open_ms   = 350,   -- open/close swing duration
+    lid_fwd   = 0.1135, -- lid origin's forward offset from the base's origin (m)
+    lid_dz    = 0.035,  -- lid origin's HEIGHT above the base's origin (m): the takeout box
+                        -- is a deep tub, so its hinge rides up the wall instead of sitting
+                        -- level with the base. The pizza box has no entry and keeps
+                        -- boxLidSeat's -0.005 default.
+    -- (The food picture's rectangle inside the box is NOT here: it's `Config.BoxQuad`
+    -- in core/shared.lua, so the drawn quad, the DUI surface's aspect and the admin
+    -- panel's "Inside the box" cropper all read ONE embedded constant.)
+}
 local function isBagKind(kind) return kind == "bag" end
+-- NOTE: the next three are resource GLOBALS, not file-locals, purely because this
+-- file sits at Lua's 200-local ceiling for its main chunk (see the note by
+-- makePart). They are internal to the cooking client either way.
+function IsTakeoutKind(kind) return kind == "takeout" end
+-- Kinds whose vessel is a base + HINGED LID pair (pizza box, takeout box): they
+-- share the seat/swing maths, the click-to-toggle lid, and the close-before-make
+-- sequence. Returns the kind's lid config, or nil.
+function LidCfg(kind)
+    if kind == "box" then return BOXP end
+    if IsTakeoutKind(kind) then return TAKEP end
+end
 local PrepTrays = {}    -- [tid] = { x, y, z, kind, ents, open?, openT?, animSeq? }
                         -- kind "tray": ents = { trayEnt, paperEnt }; kind "box":
                         -- ents = { baseEnt, lidEnt } + lid open state/progress
@@ -485,9 +520,19 @@ local function stationHeadingZ(propId, prop)
     return (prop and prop.heading) or 0.0
 end
 
+-- EXTERNAL RENDER ANCHOR. The prep-table render machinery below (makePart /
+-- layoutParts / spawnTrayEnts) is written around "the station the cook has open":
+-- props spawn at the station's coords and face its heading. modules/dining reuses
+-- the exact same machinery to lay a MEAL out on a table in front of a seated
+-- customer — no station involved — so it sets this anchor for the duration of a
+-- spawn/layout call (see SpawnMealRender at the bottom of this file). Nothing else
+-- ever writes it, and it is always cleared again.
+local extAnchor = nil -- { x, y, z, yaw } while an external layout is running
+
 -- The open station's heading — the yaw every interactive object spawned from this
 -- UI (prep parts, serving trays, drag previews, toppings, finish tools) adopts.
 local function curYaw()
+    if extAnchor then return extAnchor.yaw end
     local p = currentCookProp
     return p and stationHeadingZ(p.id, p) or 0.0
 end
@@ -1726,12 +1771,36 @@ end)
 -- if topped, a melt slice seated on the visible face by placeMeltAt — one code
 -- path, so a patty in a burger looks identical to one on the grill. Every prop
 -- spawns at the prep prop and is positioned later by layoutParts.
+-- NOTE: the takeout box's render (seatTakeoutPart) and the tray base-lift
+-- correction (modelBaseLift) are defined with the tray helpers further down but
+-- called from orientPart just below, so both are resource GLOBALS rather than
+-- file-locals — this file is already at Lua's 200-local ceiling for its main
+-- chunk, and a forward-declared local pair would push it over.
 local function makePart(spec)
-    local base = currentCookProp; if not base then return nil end
+    local base = currentCookProp or extAnchor; if not base then return nil end
     prepPid = prepPid + 1
     local part = { pid = prepPid, item = spec.item, half = spec.half,
                    source = spec.source, sig = spec.sig,
                    top = spec.top, finishTool = spec.finishTool, ents = {} }
+
+    -- A MADE TAKEOUT BOX (a bag-kind food: soup, salad…). It has no build tower to
+    -- render — its components were consumed into one product — so it renders as the
+    -- box PAIR with the food's image lying inside it: base, hinged lid swung open on
+    -- its authored hinge (the exact seat/swing maths the placed box uses), and a
+    -- textured quad (modules/quad) drawn in the base's local space, so it follows the
+    -- box wherever it goes. The quad is dropped with the part in deleteParts.
+    if spec.takeout then
+        local baseModel = spec.model or BoxBaseModel
+        local e1 = SpawnProp(baseModel, base.x, base.y, base.z)
+        if not e1 then return nil end
+        local e2 = SpawnProp(spec.lidModel or BoxLidModel, base.x, base.y, base.z)
+        part.ents = e2 and { e1, e2 } or { e1 }
+        part.takeout = true
+        part.quad = spec.image
+        part.quadCrop = spec.imageCrop -- the exact source rect the admin cropped
+        part.height = modelHeight(baseModel)
+        return part
+    end
 
     if type(spec.stack) == "table" and #spec.stack > 1 then
         -- A product that carries a build stack (e.g. a cooked pizza) is ONE logical
@@ -1826,7 +1895,10 @@ end
 
 local function deleteParts(parts)
     for _, p in ipairs(parts or {}) do
-        for _, e in ipairs(p.ents or {}) do SafeDeleteEntity(e) end
+        for _, e in ipairs(p.ents or {}) do
+            if QuadDetach then QuadDetach(e) end -- drop any image quad riding this prop
+            SafeDeleteEntity(e)
+        end
     end
 end
 
@@ -1839,6 +1911,9 @@ end
 -- on the surface.
 local function orientPart(part, x, y, z, flip)
     local yaw = curYaw() -- parts face the prep station, not the world axes
+    -- a made takeout box seats as the box PAIR (base + open lid + image quad) —
+    -- defined with the tray/lid helpers further down, which own the hinge maths
+    if part.takeout then return SeatTakeoutPart(part, x, y, z, yaw) end
     if part.dual then
         orientPair(part.faces, x, y, z, false, yaw)
         placeMeltAt(part.meltEnt, x, y, z, yaw)
@@ -1975,7 +2050,8 @@ end
 -- -(mn.z + margin) rests the mesh exactly ON the surface, whatever its origin.
 local TRAY_PHYS_MARGIN = 0.04
 local trayLiftCache = {}
-local function modelBaseLift(model)
+-- (assigns the forward-declared local above — orientPart needs it)
+function modelBaseLift(model)
     local v = trayLiftCache[model]
     if v then return v end
     local mn = GetModelDimensions(EnsureModel(model))
@@ -2026,19 +2102,27 @@ end
 local function trayCfg(kind)
     if isBakeKind(kind) then return BAKEP end
     if isBagKind(kind) then return BAGP end
+    if IsTakeoutKind(kind) then return TAKEP end
     return kind == "box" and BOXP or TRAYP
 end
 local function trayBaseModel(kind)
     local be = bakeEntryFor(kind)
     if be then return be.tray_model end
     if isBagKind(kind) then return BagModel or "pickle_restaurant_bag_01" end
+    if IsTakeoutKind(kind) then return BoxBaseModel or "pickle_takeout_box_01" end
     return kind == "box" and BOXP.base_model or TRAYP.tray_model
+end
+-- The hinged LID model of a lid kind (nil for everything else).
+function TrayLidModel(kind)
+    if kind == "box" then return BOXP.lid_model end
+    if IsTakeoutKind(kind) then return BoxLidModel or "pickle_takeout_box_02" end
 end
 
 -- Food rests on the paper liner (tray) / the box bed / the bag: bed height + a hair
 -- so it doesn't z-fight the surface under it.
 local function trayFoodDz(kind)
-    if kind == "box" then return BOXP.food_dz end
+    local lc = LidCfg(kind)
+    if lc then return lc.food_dz end
     if isBagKind(kind) then return BAGP.food_dz end
     if isBakeKind(kind) then return BAKEP.food_dz end
     return TRAYP.paper_dz + 0.002
@@ -2055,24 +2139,48 @@ local function trayHalfExtents(kind)
            math.max((mx.y - mn.y) * 0.5 - inset, 0.05)
 end
 
--- Seat the pizza-box lid's ORIGIN (authored on its hinge edge): a fixed step
--- forward of the base's origin (BOXP.lid_fwd), along the BASE's yaw-only
--- forward — never the lid's own forward vector, which tips with its pitch
--- mid-swing and would drift the hinge. Position is set ONLY here, when the box
--- is placed/moved; opening and closing never touch it.
-local function boxLidSeat(baseEnt, ent)
+-- Seat a hinged lid's ORIGIN (authored on its hinge edge): a fixed step forward
+-- of the base's origin (cfg.lid_fwd) and cfg.lid_dz above it (the hinge sits on the
+-- base's RIM, not its floor), along the BASE's yaw-only forward — never
+-- the lid's own forward vector, which tips with its pitch mid-swing and would
+-- drift the hinge. Position is set ONLY here, when the box is placed/moved;
+-- opening and closing never touch it. Shared by the pizza box and the takeout box.
+local function boxLidSeat(cfg, baseEnt, ent)
+    cfg = cfg or BOXP
     if not (baseEnt and ent and DoesEntityExist(baseEnt) and DoesEntityExist(ent)) then return end
     local h = math.rad(GetEntityHeading(baseEnt))
-    local coords = GetEntityCoords(baseEnt) + vector3(-math.sin(h) * BOXP.lid_fwd, math.cos(h) * BOXP.lid_fwd, -0.005)
+    local dz = cfg.lid_dz or -0.005
+    local coords = GetEntityCoords(baseEnt) + vector3(-math.sin(h) * cfg.lid_fwd, math.cos(h) * cfg.lid_fwd, dz)
     SetEntityCoordsNoOffset(ent, coords.x, coords.y, coords.z, false, false, false)
 end
 
 -- The lid's swing is ROTATION ONLY: the box's heading plus the opening pitch
 -- (-open_deg * openT) about the lid's authored hinge origin.
-local function boxLidSwing(baseEnt, ent, openT)
+local function boxLidSwing(cfg, baseEnt, ent, openT)
+    cfg = cfg or BOXP
     if not (ent and DoesEntityExist(ent)) then return end
     local yaw = (baseEnt and DoesEntityExist(baseEnt)) and GetEntityHeading(baseEnt) or curYaw()
-    SetEntityRotation(ent, BOXP.open_deg * (openT or 0.0) * -1, 0.0, yaw, 2, true)
+    SetEntityRotation(ent, cfg.open_deg * (openT or 0.0) * -1, 0.0, yaw, 2, true)
+end
+
+-- Seat a MADE takeout box (a prep part, not a placed vessel): base resting on the
+-- surface, lid on its authored hinge held OPEN — the food image inside is the whole
+-- point of the render — and the image quad (modules/quad) re-asserted on the base,
+-- which follows it through every move, drag and tray layout. Attaching is
+-- idempotent per url, so calling this each layout is free.
+function SeatTakeoutPart(part, x, y, z, yaw)
+    local b, lid = part.ents[1], part.ents[2]
+    if b and DoesEntityExist(b) then
+        SetEntityCoordsNoOffset(b, x, y, z + modelBaseLift(trayBaseModel("takeout")), false, false, false)
+        SetEntityRotation(b, 0.0, 0.0, yaw or curYaw(), 2, true)
+    end
+    boxLidSeat(TAKEP, b, lid)
+    boxLidSwing(TAKEP, b, lid, 1.0)
+    if part.quad and b and QuadAttach then
+        local q = Config.BoxQuad or {}
+        QuadAttach(b, part.quad, { w = q.w or 0.295, h = q.h or 0.2, dz = q.dz or 0.012,
+                                   crop = part.quadCrop })
+    end
 end
 
 -- Seat a tray/box pair at surface point (x, y, z): the base's mesh bottom rests
@@ -2109,14 +2217,15 @@ local function layoutTrayAt(ents, x, y, z, kind, openT, storedOffs)
         end
         return
     end
-    if kind == "box" then
+    local lc = LidCfg(kind)
+    if lc then
         local base = ents and ents[1]
         if base and DoesEntityExist(base) then
-            SetEntityCoordsNoOffset(base, x, y, z + modelBaseLift(BOXP.base_model), false, false, false)
+            SetEntityCoordsNoOffset(base, x, y, z + modelBaseLift(trayBaseModel(kind)), false, false, false)
             SetEntityRotation(base, 0.0, 0.0, yaw, 2, true)
         end
-        boxLidSeat(base, ents and ents[2])
-        boxLidSwing(base, ents and ents[2], openT)
+        boxLidSeat(lc, base, ents and ents[2])
+        boxLidSwing(lc, base, ents and ents[2], openT)
         return
     end
     if isBagKind(kind) then
@@ -2149,7 +2258,7 @@ local function spawnTrayEnts(x, y, z, kind, openT)
         return ents
     end
     local m1, m2 = TRAYP.tray_model, TRAYP.paper_model
-    if kind == "box" then m1, m2 = BOXP.base_model, BOXP.lid_model end
+    if LidCfg(kind) then m1, m2 = trayBaseModel(kind), TrayLidModel(kind) end
     local t = SpawnProp(m1, x, y, z)
     local p = SpawnProp(m2, x, y, z)
     if not t or not p then SafeDeleteEntity(t); SafeDeleteEntity(p); return nil end
@@ -2259,11 +2368,11 @@ local function partHalfXY(part)
     return r
 end
 
--- A pile inside a CLOSED pizza box is out of reach — the lid has to swing open
--- before its contents can be hovered, grabbed, or stacked onto.
+-- A pile inside a CLOSED lidded box (pizza / takeout) is out of reach — the lid
+-- has to swing open before its contents can be hovered, grabbed, or stacked onto.
 local function stackSealed(stack)
     local t = stack.tid and PrepTrays[stack.tid]
-    return (t and t.kind == "box" and not t.open) and true or false
+    return (t and LidCfg(t.kind) and not t.open) and true or false
 end
 
 -- The placed part under the cursor, by screen proximity to each part's rendered
@@ -2338,13 +2447,15 @@ local function removePrepTray(tid)
     PrepTrays[tid] = nil
 end
 
--- Swing a placed pizza box's lid open/closed: eased hinge rotation over
--- BOXP.open_ms (never a pop). Re-toggling mid-swing bumps animSeq so the old
--- thread yields and the new swing picks up from the current angle; grabbing or
--- removing the box kills the thread via the PrepTrays identity check.
+-- Swing a placed lidded box's lid open/closed (pizza box / takeout box): eased
+-- hinge rotation over the kind's open_ms (never a pop). Re-toggling mid-swing bumps
+-- animSeq so the old thread yields and the new swing picks up from the current
+-- angle; grabbing or removing the box kills the thread via the PrepTrays identity
+-- check.
 local function setBoxOpen(tid, open)
     local t = PrepTrays[tid]
-    if not t or t.kind ~= "box" or t.open == open then return end
+    local cfg = t and LidCfg(t.kind)
+    if not cfg or t.open == open then return end
     t.open = open
     t.animSeq = (t.animSeq or 0) + 1
     local seq = t.animSeq
@@ -2353,10 +2464,10 @@ local function setBoxOpen(tid, open)
         local to = open and 1.0 or 0.0
         local t0 = GetGameTimer()
         while PrepTrays[tid] == t and t.animSeq == seq do
-            local k = math.min((GetGameTimer() - t0) / BOXP.open_ms, 1.0)
+            local k = math.min((GetGameTimer() - t0) / cfg.open_ms, 1.0)
             k = k * k * (3.0 - 2.0 * k) -- smoothstep ease in-out
             t.openT = from + (to - from) * k
-            boxLidSwing(t.ents and t.ents[1], t.ents and t.ents[2], t.openT)
+            boxLidSwing(cfg, t.ents and t.ents[1], t.ents and t.ents[2], t.openT)
             if k >= 1.0 then break end
             Wait(0)
         end
@@ -2461,7 +2572,7 @@ local function commitTrayGroup(x, y, z, ents, piles, kind, open, extra)
     prepTid = prepTid + 1
     local tid = prepTid
     kind = kind or "tray"
-    local isBox = kind == "box"
+    local isBox = LidCfg(kind) ~= nil -- a lidded vessel remembers its lid state
     PrepTrays[tid] = { x = x, y = y, z = z, kind = kind, ents = ents,
                        open = isBox and (open and true or false) or nil,
                        openT = isBox and (open and 1.0 or 0.0) or nil }
@@ -2510,12 +2621,14 @@ end
 -- consumes the reserved parts and records each layer's offset; a box flags the
 -- meal so it sets back down as its box). On success the tray and its stacks are
 -- torn down. Returns the server result, or nil for an empty tray.
--- The make callback for a piece of equipment: a Restaurant Bag consolidates its
--- contents into ONE restaurant_bag (craft-matched, server-side); a serving tray /
--- pizza box makes a meal. Both take the same { items } payload of reserved pile ids.
+-- The make callback for a piece of equipment: a TAKEOUT BOX creates the bag-kind
+-- food its contents match (server-side); a RESTAURANT BAG packs its contents into
+-- ONE takeaway bag; a serving tray / pizza box makes a meal. All take the same
+-- { items } payload of reserved pile ids.
 local function trayMakeCallback(kind)
-    return isBagKind(kind) and "pickle_restaurants:cooking:prepMakeBag"
-        or "pickle_restaurants:cooking:prepMakeMeal"
+    if IsTakeoutKind(kind) then return "pickle_restaurants:cooking:prepMakeBox" end
+    if isBagKind(kind) then return "pickle_restaurants:cooking:prepMakeBag" end
+    return "pickle_restaurants:cooking:prepMakeMeal"
 end
 
 local function makeMealFromTray(tid, silent)
@@ -2602,21 +2715,34 @@ local function runDragThread(drag)
                         setTrayOutline(tid, 80, 200, 120)
                         layoutParts(drag.parts, t.x, t.y, fz, false)
                     end
-                elseif tid and hit and coords and (PrepTrays[tid].kind == "tray" or PrepTrays[tid].kind == "bag") then
-                    -- over a SERVING tray or a RESTAURANT BAG: anchor to it where the
-                    -- cursor points, clamped inside the rim; release starts a new pile at
-                    -- that exact offset. (Baking trays never accept loose food — they
-                    -- fall through to plain table placement below.)
+                elseif tid and hit and coords and (PrepTrays[tid].kind == "tray" or PrepTrays[tid].kind == "bag"
+                                                   or IsTakeoutKind(PrepTrays[tid].kind)) then
+                    -- over a SERVING tray, a RESTAURANT BAG or a TAKEOUT BOX: anchor to
+                    -- it where the cursor points, clamped inside the rim; release starts
+                    -- a new pile at that exact offset. (Baking trays never accept loose
+                    -- food — they fall through to plain table placement below.) A takeout
+                    -- box only accepts food through an OPEN lid, like the pizza box.
                     local t = PrepTrays[tid]
-                    local hx, hy = trayHalfExtents(t.kind)
-                    local dx = math.min(math.max(coords.x - t.x, -hx), hx)
-                    local dy = math.min(math.max(coords.y - t.y, -hy), hy)
-                    local fz = t.z + trayFoodDz(t.kind)
-                    drag.hit, drag.targetSid, drag.targetTid = true, nil, tid
-                    drag.coords = { x = t.x + dx, y = t.y + dy, z = fz, dx = dx, dy = dy }
-                    setOutline(nil)
-                    setTrayOutline(tid, 80, 200, 120)
-                    layoutParts(drag.parts, drag.coords.x, drag.coords.y, fz, false)
+                    if IsTakeoutKind(t.kind) and not t.open then
+                        -- closed takeout box: nothing gets in — refuse (red) like the
+                        -- pizza box does, and drop on the table instead of into it
+                        drag.hit, drag.targetSid, drag.targetTid = true, nil, nil
+                        drag.coords = { x = coords.x, y = coords.y, z = coords.z }
+                        drag.boxBlock = _L("cook_open_box_first")
+                        setOutline(nil)
+                        setTrayOutline(tid, 230, 70, 70)
+                        layoutParts(drag.parts, coords.x, coords.y, coords.z, false)
+                    else
+                        local hx, hy = trayHalfExtents(t.kind)
+                        local dx = math.min(math.max(coords.x - t.x, -hx), hx)
+                        local dy = math.min(math.max(coords.y - t.y, -hy), hy)
+                        local fz = t.z + trayFoodDz(t.kind)
+                        drag.hit, drag.targetSid, drag.targetTid = true, nil, tid
+                        drag.coords = { x = t.x + dx, y = t.y + dy, z = fz, dx = dx, dy = dy }
+                        setOutline(nil)
+                        setTrayOutline(tid, 80, 200, 120)
+                        layoutParts(drag.parts, drag.coords.x, drag.coords.y, fz, false)
+                    end
                 elseif hit and coords then
                     drag.hit, drag.targetSid, drag.targetTid, drag.coords = true, nil, nil, { x = coords.x, y = coords.y, z = coords.z }
                     setOutline(nil)
@@ -2846,17 +2972,24 @@ function OpenCookingStation(prop)
                     local isBox = t.kind == "box"
                     local isBake = isBakeKind(t.kind)
                     local isBag = isBagKind(t.kind)
-                    prepHoverBox = isBox
+                    local isTake = IsTakeoutKind(t.kind)
+                    -- a click on ANY lidded vessel toggles its lid (the NUI decides
+                    -- click-vs-drag); the takeout box's tooltip owns its own make button
+                    prepHoverBox = isBox or isTake
                     local on, sx, sy = GetScreenCoordFromWorldCoord(t.x, t.y, t.z + trayFoodDz(t.kind) + 0.06)
-                    prepTip = { tray = true, box = isBox or nil, bag = isBag or nil,
-                                open = isBox and (t.open and true or false) or nil,
-                                boxing = (isBox and t.boxing) and true or nil,
+                    prepTip = { tray = true, box = isBox or nil, bag = isBag or nil, takeout = isTake or nil,
+                                open = (isBox or isTake) and (t.open and true or false) or nil,
+                                boxing = ((isBox or isTake) and t.boxing) and true or nil,
                                 -- a baking tray shows a rub/collect hint (never a Make Meal)
                                 bake = isBake or nil, filled = (isBake and t.filled) or nil,
                                 tid = prepHoverTid, onScreen = on, x = sx, y = sy, count = trayPileCount(prepHoverTid) }
-                    -- the bag lists its contents + a craft-match ranking right in the
-                    -- tooltip (no floating pills): what's in it, and which craft it forms
-                    if isBag then prepTip.contents, prepTip.provides = bagContents(prepHoverTid) end
+                    -- Both takeaway vessels list their contents in the tooltip (no
+                    -- floating pills). The takeout box additionally ranks the bag-kind
+                    -- FOODS its contents form, so "Create <food>" can appear the moment
+                    -- they match — the same guide a build stack gets for recipes.
+                    if isBag or isTake then
+                        prepTip.contents, prepTip.provides = bagContents(prepHoverTid)
+                    end
                 end
             end
             prepHovered = prepHoverPid
@@ -3255,6 +3388,9 @@ RegisterNUICallback("cooking:beginPrepPlace", function(d, cb)
                      dual = dual, sig = d.sig,
                      stack = stack, state = d.state, finishTool = d.finishTool,
                      label = d.label, image = d.image, -- carried for a model-less pill chip
+                     -- a made takeout box renders as the box pair + its food image quad
+                     takeout = (d.takeout == true or d.takeout == 1) or nil, lidModel = d.lidModel,
+                     imageCrop = d.imageCrop,
                      top = dual and d.top or nil, topModel = dual and d.topModel or nil }
     end
 
@@ -3286,11 +3422,13 @@ RegisterNUICallback("cooking:endPrepPlace", function(d, cb)
         ShowNotification(drag.boxBlock)
         return cb({ ok = false })
     end
-    -- a model-less pill part only belongs dropped INTO a Restaurant Bag (its own new
-    -- pile) — anywhere else it would be an invisible, meaningless drop, so refuse it.
+    -- a model-less pill part only belongs dropped INTO a takeaway vessel (the takeout
+    -- box it's a component of, or the bag) as its own new pile — anywhere else it
+    -- would be an invisible, meaningless drop, so refuse it.
     for _, p in ipairs(drag.parts) do
         if p.pill then
-            local ontoBag = drag.targetTid and PrepTrays[drag.targetTid] and PrepTrays[drag.targetTid].kind == "bag"
+            local tk = drag.targetTid and PrepTrays[drag.targetTid] and PrepTrays[drag.targetTid].kind
+            local ontoBag = tk == "bag" or IsTakeoutKind(tk)
             if not ontoBag then
                 deleteParts(drag.parts)
                 ShowNotification(_L("cook_pill_bag_only"))
@@ -3348,6 +3486,9 @@ local function partsFromDecomposeSpecs(specs)
                              dual = spec.dual, half = spec.half,
                              -- melt topping: specs ship top/topModel
                              top = spec.top, topModel = spec.topModel,
+                             -- a takeout box layer: the box pair + its food image quad
+                             takeout = spec.takeout, lidModel = spec.lidModel, image = spec.image,
+                             imageCrop = spec.imageCrop,
                              sig = spec.sig, stack = spec.stack, state = spec.state, finishTool = spec.finishTool })
         if p then p.id = spec.id; p.dx, p.dy = spec.dx, spec.dy; parts[#parts + 1] = p end
     end
@@ -3510,18 +3651,19 @@ RegisterNUICallback("cooking:prepDrop", function(d, cb)
                 deleteDrag(drag)
                 return cb({ ok = true })
             end
-            -- a pizza box closes before it's sent off: swing the carried lid shut
-            -- where it hovers, give it a beat to settle, then make the meal
+            -- a lidded box (pizza / takeout) closes before it's sent off: swing the
+            -- carried lid shut where it hovers, give it a beat to settle, then make
             -- (instant when it was carried closed)
-            if drag.trayKind == "box" and drag.open then
+            local dragLid = LidCfg(drag.trayKind)
+            if dragLid and drag.open then
                 local t0 = GetGameTimer()
-                while GetGameTimer() - t0 < BOXP.open_ms do
-                    local k = (GetGameTimer() - t0) / BOXP.open_ms
+                while GetGameTimer() - t0 < dragLid.open_ms do
+                    local k = (GetGameTimer() - t0) / dragLid.open_ms
                     k = k * k * (3.0 - 2.0 * k)
-                    boxLidSwing(drag.tray[1], drag.tray[2], 1.0 - k)
+                    boxLidSwing(dragLid, drag.tray[1], drag.tray[2], 1.0 - k)
                     Wait(0)
                 end
-                boxLidSwing(drag.tray[1], drag.tray[2], 0.0)
+                boxLidSwing(dragLid, drag.tray[1], drag.tray[2], 0.0)
                 drag.open, drag.openT = false, 0.0
                 Wait(1000)
             end
@@ -3678,6 +3820,7 @@ RegisterNUICallback("cooking:beginTrayPlace", function(d, cb)
     local kind = "tray"
     if d and d.kind == "box" then kind = "box"
     elseif d and d.kind == "bag" then kind = "bag"
+    elseif d and d.kind == "takeout" then kind = "takeout"
     elseif d and isBakeKind(d.kind) then kind = d.kind
     elseif d and d.kind then return cb({ ok = false }) end -- an unknown (e.g. unsynced bake) kind: refuse, never a stray serving tray
     local ents = spawnTrayEnts(base.x, base.y, base.z, kind, 0.0)
@@ -3705,7 +3848,7 @@ end)
 RegisterNUICallback("cooking:boxToggle", function(d, cb)
     local tid = tonumber(d and d.tid)
     local t = tid and PrepTrays[tid]
-    if not t or t.kind ~= "box" or t.boxing then return cb({ ok = false }) end
+    if not t or not LidCfg(t.kind) or t.boxing then return cb({ ok = false }) end
     setBoxOpen(tid, not t.open)
     cb({ ok = true })
 end)
@@ -3737,7 +3880,7 @@ RegisterNUICallback("cooking:trayGrab", function(d, cb)
     PrepTrays[tid] = nil
     -- a box carries its lid state along (settled, so a mid-swing grab can't
     -- freeze the lid half-open) and puts back down in that same state
-    local isBox = t.kind == "box"
+    local isBox = LidCfg(t.kind) ~= nil
     prepDrag = { tray = t.ents, trayKind = t.kind, open = isBox and (t.open and true or false) or nil,
                  openT = isBox and (t.open and 1.0 or 0.0) or nil, piles = piles, parts = parts,
                  home = { x = t.x, y = t.y, z = t.z }, hit = false,
@@ -3759,7 +3902,8 @@ RegisterNUICallback("cooking:prepMakeMeal", function(d, cb)
     local tid = tonumber(d and d.tid)
     local t = tid and PrepTrays[tid]
     if not t then return cb({ ok = false }) end
-    if t.kind == "box" then
+    local mkLid = LidCfg(t.kind)
+    if mkLid then
         if t.boxing then return cb({ ok = false }) end
         if trayPileCount(tid) == 0 then
             ShowNotification(_L("cook_box_empty"))
@@ -3768,14 +3912,14 @@ RegisterNUICallback("cooking:prepMakeMeal", function(d, cb)
         if t.open then
             t.boxing = true
             setBoxOpen(tid, false)
-            Wait(BOXP.open_ms + 1000)
+            Wait(mkLid.open_ms + 1000)
             if PrepTrays[tid] ~= t then return cb({ ok = false }) end -- grabbed/cleared mid-close
             t.boxing = nil
         end
     end
     local res = makeMealFromTray(tid, false)
     if not res then
-        ShowNotification(t.kind == "box" and _L("cook_box_empty") or _L("cook_tray_empty"))
+        ShowNotification(mkLid and _L("cook_box_empty") or _L("cook_tray_empty"))
         return cb({ ok = false })
     end
     if res.ok then RefreshTray(); RefreshBar() end
@@ -4544,3 +4688,70 @@ AddEventHandler("onResourceStop", function(res)
     cancelBakeMix()
     cancelCondiment()
 end)
+-- ─── external render: a meal laid out away from the kitchen (modules/dining) ──
+-- A meal in a customer's hands is the SAME arrangement a cook built: one pile per
+-- recorded layer group, each at its (dx, dy) offset on the tray (or in the box it
+-- was packed in). Rather than a second renderer that would drift from the kitchen's,
+-- modules/dining borrows this one through the two functions below — they set the
+-- external anchor (extAnchor) so every prop spawns at the table, facing the
+-- diner, instead of at a station.
+
+-- Lay `specs` (compSpec layers, each carrying its dx/dy) out at a world point.
+-- Returns a handle: the vessel entities, the piles (each with the parts it owns and
+-- the meta index the server addresses it by) and the anchor, for hover + teardown.
+function SpawnMealRender(specs, trayKind, x, y, z, yaw)
+    trayKind = trayKind or "tray"
+    extAnchor = { x = x, y = y, z = z, yaw = yaw or 0.0 }
+    local ents = spawnTrayEnts(x, y, z, trayKind, LidCfg(trayKind) and 1.0 or 0.0)
+    local parts = partsFromDecomposeSpecs(specs)
+    local piles = groupPiles(parts)
+    local fz = z + trayFoodDz(trayKind)
+    for _, pile in ipairs(piles) do
+        layoutParts(pile.parts, x + pile.dx, y + pile.dy, fz, #pile.parts == 1)
+    end
+    extAnchor = nil
+    return { ents = ents, piles = piles, kind = trayKind, x = x, y = y, z = z, yaw = yaw }
+end
+
+function DeleteMealRender(h)
+    if not h then return end
+    for _, pile in ipairs(h.piles or {}) do deleteParts(pile.parts) end
+    for _, e in ipairs(h.ents or {}) do SafeDeleteEntity(e) end
+    h.piles, h.ents = {}, {}
+end
+
+-- Where a rendered pile reads on screen (its top, so a tooltip clears the food) and
+-- what it is — everything the dining hover loop needs without touching internals.
+function MealRenderPileAnchor(h, i)
+    local pile = h and h.piles and h.piles[i]
+    if not pile then return nil end
+    local z = h.z + trayFoodDz(h.kind)
+    for _, p in ipairs(pile.parts) do z = z + (p.height or 0.0) end
+    return h.x + pile.dx, h.y + pile.dy, z
+end
+
+-- Outline one rendered pile (nil clears every pile) — the same amber hover the
+-- prep table uses, so hovering food reads identically wherever you are.
+function OutlineMealPile(h, idx)
+    for i, pile in ipairs((h and h.piles) or {}) do
+        for _, part in ipairs(pile.parts) do
+            for _, e in ipairs(part.ents or {}) do
+                if DoesEntityExist(e) then
+                    SetEntityDrawOutline(e, i == idx)
+                    if i == idx then SetEntityDrawOutlineColor(255, 180, 40, 255) end
+                end
+            end
+        end
+    end
+end
+
+-- The meta-layer indices one rendered pile is made of (partsFromDecomposeSpecs
+-- carries each spec's id through onto its part) — what the server removes when the
+-- diner eats that pile.
+function MealRenderPileIndices(h, i)
+    local pile = h and h.piles and h.piles[i]
+    if not pile then return nil end
+    local out = {}
+    for _, p in ipairs(pile.parts) do if p.id then out[#out + 1] = p.id end end
+    return out
+end

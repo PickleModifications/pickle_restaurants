@@ -40,6 +40,19 @@ Config.FrameworkSettings = {
 Config.AdminGroups   = { "admin", "superadmin", "god" }
 Config.InventoryLimit = false
 
+-- The food picture painted inside an open takeout box (modules/quad), in METRES of
+-- the box's own local space: `w` runs side to side, `h` front to back, `dz` is its
+-- height above the box's base (raise it if the art z-fights the bed).
+--
+-- EMBEDDED config, deliberately NOT a `pickle_restaurant_settings` row: it's a
+-- property of the shipped box model, tuned once against that mesh — not something a
+-- server operator should be adjusting per install. It lives here (shared) rather
+-- than in modules/cooking/client.lua so the ADMIN PANEL can read the same numbers
+-- read-only: the "Inside the box" cropper locks its frame to this aspect, so what an
+-- admin crops is exactly what lands in the box. Three readers, one constant — the
+-- drawn quad, the DUI surface's aspect, and that crop frame. TUNE IN-GAME.
+Config.BoxQuad = { w = 0.17, h = 0.17, dz = 0.012 }
+
 -- ─── Render targets (the ONE place every DUI-painted texture is defined) ──────
 -- Every runtime texture we paint onto a prop — food-packaging brands, the kiosk
 -- brand/order screen, the customer menu/orders boards, and the staff register POS —

@@ -10,8 +10,9 @@ import Management from "@/views/Management";
 import Register from "@/views/Register";
 import Order from "@/views/Order";
 import PayConfirm from "@/views/PayConfirm";
+import Dining from "@/views/Dining";
 
-type View = "none" | "cooking" | "admin" | "management" | "register" | "order" | "payconfirm";
+type View = "none" | "cooking" | "admin" | "management" | "register" | "order" | "payconfirm" | "dining";
 
 // Contains a render error in any single view (e.g. a malformed payload) so it
 // can't white-screen the whole NUI — the panel closes and control returns to the
@@ -72,7 +73,8 @@ export default function App() {
   // ESC closes panel views (cooking manages its own escape).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && view !== "none" && view !== "cooking") close();
+      // cooking and the eat-in meal view own their escape (world props + a camera)
+      if (e.key === "Escape" && view !== "none" && view !== "cooking" && view !== "dining") close();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -95,6 +97,7 @@ export default function App() {
           {view === "register" && <Register data={data} onClose={close} />}
           {view === "order" && <Order data={data} onClose={close} />}
           {view === "payconfirm" && <PayConfirm data={data} />}
+          {view === "dining" && <Dining />}
         </ViewErrorBoundary>
       )}
     </div>

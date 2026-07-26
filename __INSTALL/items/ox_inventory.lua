@@ -9,24 +9,38 @@
 -- never enter real inventory. See install/README.md.
 
     -- ── handout items (what leaves the kitchen) ──────────────────────────────
+    -- The BAG and the MEAL are VESSELS, not single foods: each carries the list of
+    -- things packed into it as slot metadata, and the player eats them one at a
+    -- time. So they must NOT stack (two bags are never the same bag) and ox must
+    -- NOT consume them itself — using one calls this resource, which opens the
+    -- bag's contents menu (or lays the meal out on the table you're sitting at)
+    -- and removes the vessel only once the last item inside it is eaten.
     ['restaurant_bag'] = {
         label  = 'Restaurant Bag',
         weight = 800,
-        stack  = true,
+        stack  = false,
         close  = true,
-        client = {
-            status = { hunger = 300000 },
-            anim   = { dict = 'mp_player_inteat@burger', clip = 'mp_player_int_eat_burger' }, usetime = 2500,
-        },
-        consume = 1,
+        consume = 0,
+        server = { export = 'pickle_restaurants.useItem' },
     },
     ['meal'] = {
         label  = 'Meal',
         weight = 800,
-        stack  = true,
+        stack  = false,
+        close  = true,
+        consume = 0,
+        server = { export = 'pickle_restaurants.useItem' },
+    },
+    -- Every "bag kind" food (soup, salad — anything made in the takeout box)
+    -- collects as this ONE item, with the food's identity in its metadata; its
+    -- label and image are stamped per instance from the food's display item.
+    ['takeout_box'] = {
+        label  = 'Takeout Box',
+        weight = 500,
+        stack  = false,
         close  = true,
         client = {
-            status = { hunger = 400000 },
+            status = { hunger = 250000 },
             anim   = { dict = 'mp_player_inteat@burger', clip = 'mp_player_int_eat_burger' }, usetime = 2500,
         },
         consume = 1,
@@ -42,7 +56,7 @@
         },
         consume = 1,
     },
-    ['receipt'] = {
+    ['restaurant_receipt'] = {
         label  = 'Receipt',
         weight = 10,
         stack  = true,

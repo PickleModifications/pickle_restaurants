@@ -45,7 +45,8 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
         {!restDetail && (
         <TabsList className="shrink-0">
           <TabsTrigger value="restaurants">{_L("admin.tab_restaurants")}</TabsTrigger>
-          <TabsTrigger value="recipes">{_L("admin.tab_recipes")}</TabsTrigger>
+          <TabsTrigger value="food">{_L("admin.tab_food")}</TabsTrigger>
+          <TabsTrigger value="ingredients">{_L("admin.tab_ingredients")}</TabsTrigger>
           <TabsTrigger value="settings">{_L("admin.tab_settings")}</TabsTrigger>
         </TabsList>
         )}
@@ -54,8 +55,16 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
           <Restaurants restaurants={restaurants} players={players} groups={groups} refresh={refresh} focus={focus} appTheme={appTheme} onDetailChange={setRestDetail} renderTargets={data?.renderTargets} />
         </TabsContent>
 
-        <TabsContent value="recipes" className="flex min-h-0 flex-1 flex-col">
-          <Menu foods={foods} tools={tools} ingredients={menuIngredients} defaults={data?.defaults} settings={settings} items={items} groups={groups} onSaved={refresh} />
+        {/* The unified menu is split across two tabs: FOODS (the sellable dishes &
+            drinks) and the INGREDIENTS that build them (raw components + the tools
+            that apply things — condiments, finishes). Both drive the same Menu
+            component, scoped to which kinds it shows/creates. */}
+        <TabsContent value="food" className="flex min-h-0 flex-1 flex-col">
+          <Menu scope="food" foods={foods} tools={tools} ingredients={menuIngredients} defaults={data?.defaults} settings={settings} boxQuad={data?.boxQuad} items={items} groups={groups} onSaved={refresh} />
+        </TabsContent>
+
+        <TabsContent value="ingredients" className="flex min-h-0 flex-1 flex-col">
+          <Menu scope="ingredients" foods={foods} tools={tools} ingredients={menuIngredients} defaults={data?.defaults} settings={settings} boxQuad={data?.boxQuad} items={items} groups={groups} onSaved={refresh} />
         </TabsContent>
 
         <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">

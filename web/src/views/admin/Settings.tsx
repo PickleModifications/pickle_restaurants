@@ -10,7 +10,7 @@ import { type ThemeConfig } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2, RotateCcw, Palette, PersonStanding,
+  Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2, RotateCcw, Palette, PersonStanding, Utensils,
 } from "lucide-react";
 
 const PERMISSIONS = [
@@ -38,15 +38,19 @@ type Props = {
 };
 
 // Drinks + Assembly editors moved to the Menu tab (foods live together there).
-const GROUPS = [
+// LAZY getter (memoized): `_L()` must resolve at render time, not at module import —
+// a module-scope `_L()` runs before loadLocale() and would freeze to the raw key.
+let _groups: { key: string; label: string; icon: any }[] | null = null;
+const GROUPS = () => (_groups ??= [
   { key: "general", label: _L("settings.group_general"), icon: Settings2 },
   { key: "appearance", label: _L("settings.group_appearance"), icon: Palette },
   { key: "economy", label: _L("settings.group_economy"), icon: Coins },
   { key: "pricing", label: _L("settings.group_pricing"), icon: DollarSign },
   { key: "roles", label: _L("settings.group_roles"), icon: Users },
+  { key: "eating", label: _L("settings.group_eating"), icon: Utensils },
   { key: "npc_customers", label: _L("settings.group_npc"), icon: PersonStanding },
   { key: "blip", label: _L("settings.group_blip"), icon: MapPin },
-];
+]);
 
 export default function Settings({ settings, items, groups, onSaved, appTheme, onAppTheme, phoneTheme, onPhoneTheme }: Props) {
   const [group, setGroup] = useState("general");
@@ -55,7 +59,7 @@ export default function Settings({ settings, items, groups, onSaved, appTheme, o
     <div className="flex min-h-0 flex-1 gap-4">
       {/* group nav */}
       <div className="w-44 shrink-0 space-y-1 overflow-y-auto pr-1 pb-4">
-        {GROUPS.map((g) => {
+        {GROUPS().map((g) => {
           const Icon = g.icon;
           return (
             <button
@@ -80,6 +84,7 @@ export default function Settings({ settings, items, groups, onSaved, appTheme, o
         {group === "economy" && <Economy settings={settings} onSaved={onSaved} />}
         {group === "pricing" && <Pricing settings={settings} items={items} onSaved={onSaved} />}
         {group === "roles" && <Roles settings={settings} onSaved={onSaved} />}
+        {group === "eating" && <Eating settings={settings} onSaved={onSaved} />}
         {group === "npc_customers" && <NpcCustomers settings={settings} onSaved={onSaved} />}
         {group === "blip" && <Blip settings={settings} onSaved={onSaved} />}
       </div>
@@ -398,6 +403,72 @@ function NpcCustomers({ settings, onSaved }: { settings: any; onSaved: () => voi
     </Section>
   );
 }
+
+// EATING. Two things live here: the fallback effect for a food that doesn't state
+// its own, and the catalogue of eat/drink ANIMATIONS every food picks from (Menu →
+// a food → "When eaten"). Clips are handed straight to the client, so an entry with
+// no dict/clip is dropped server-side.
+type AnimRow = { id: string; label: string; dict: string; clip: string; prop: string; ms: number };
+
+function Eating({ settings, onSaved }: { settings: any; onSaved: () => void }) {
+  const c = settings.consume ?? {};
+  const [hunger, setHunger] = useState(Number(c.hunger ?? 25));
+  const [thirst, setThirst] = useState(Number(c.thirst ?? 0));
+  const [anim, setAnim] = useState<string>(c.anim ?? "");
+  const [rows, setRows] = useState<AnimRow[]>(
+    (Array.isArray(settings.consume_anims) ? settings.consume_anims : []).map((a: any) => ({
+      id: a.id ?? "", label: a.label ?? "", dict: a.dict ?? "", clip: a.clip ?? "",
+      prop: a.prop ?? "", ms: Number(a.ms ?? 3000),
+    }))
+  );
+  const status = useAutoSave(
+    () => saveSettings({
+      consume: { hunger: clampPct(hunger), thirst: clampPct(thirst), anim },
+      consume_anims: rows.filter((r) => r.id && r.dict && r.clip),
+    }).then(onSaved),
+    [hunger, thirst, anim, rows]
+  );
+  const set = (i: number, patch: Partial<AnimRow>) =>
+    setRows(rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+
+  return (
+    <Section title={_L("settings.eating_title")} description={_L("settings.eating_desc")} status={status}>
+      <div className="grid grid-cols-3 gap-3">
+        <NumberField label={_L("settings.eat_hunger")} hint={_L("settings.eat_needs_hint")} value={hunger} min={0} onChange={(v) => setHunger(clampPct(v))} />
+        <NumberField label={_L("settings.eat_thirst")} value={thirst} min={0} onChange={(v) => setThirst(clampPct(v))} />
+        <Select label={_L("settings.eat_anim")} value={anim} onChange={setAnim}
+          options={[{ value: "", label: _L("settings.eat_anim_none") },
+                    ...rows.filter((r) => r.id).map((r) => ({ value: r.id, label: r.label || r.id }))]} />
+      </div>
+
+      <Field label={_L("settings.eat_anims")} hint={_L("settings.eat_anims_hint")} className="mt-4">
+        <div className="space-y-2">
+          {rows.map((r, i) => (
+            <div key={i} className="rounded-md border border-border/60 p-2">
+              <div className="flex items-end gap-2">
+                <TextField label={_L("settings.eat_anim_id")} className="w-32" value={r.id} onChange={(v) => set(i, { id: v })} />
+                <TextField label={_L("settings.eat_anim_label")} className="flex-1" value={r.label} onChange={(v) => set(i, { label: v })} />
+                <NumberField label={_L("settings.eat_anim_ms")} className="w-24" value={r.ms} min={500} onChange={(v) => set(i, { ms: v })} />
+                <Button size="icon" variant="ghost" onClick={() => setRows(rows.filter((_, idx) => idx !== i))}><Trash2 className="h-4 w-4" /></Button>
+              </div>
+              <div className="mt-2 flex items-end gap-2">
+                <TextField label={_L("settings.eat_anim_dict")} className="flex-1" value={r.dict} onChange={(v) => set(i, { dict: v })} />
+                <TextField label={_L("settings.eat_anim_clip")} className="flex-1" value={r.clip} onChange={(v) => set(i, { clip: v })} />
+                <TextField label={_L("settings.eat_anim_prop")} className="flex-1" value={r.prop} onChange={(v) => set(i, { prop: v })} />
+              </div>
+            </div>
+          ))}
+          <Button size="sm" variant="outline"
+            onClick={() => setRows([...rows, { id: "", label: "", dict: "", clip: "", prop: "", ms: 3000 }])}>
+            <Plus className="h-4 w-4" /> {_L("settings.eat_add_anim")}
+          </Button>
+        </div>
+      </Field>
+    </Section>
+  );
+}
+
+const clampPct = (v: number) => Math.max(0, Math.min(100, Math.floor(Number(v) || 0)));
 
 function Blip({ settings, onSaved }: { settings: any; onSaved: () => void }) {
   const b = settings.blip ?? {};

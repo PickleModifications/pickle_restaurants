@@ -6,6 +6,8 @@ import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Modal } from "@/components/ui/modal";
 import { Image as ImageIcon, RotateCcw, X, Pencil, Plus, Trash2, Palette, Check, Loader2, Store, TriangleAlert } from "lucide-react";
 
 // ─── identity (rename) ────────────────────────────────────────────────────────
@@ -266,24 +268,28 @@ export function ThemeEditor({
 // resolution/orientation the game actually renders at. `w`/`h` here are only a fallback
 // display aspect for when the sync hasn't arrived.
 type BrandTex = { key: string; label: string; w: number; h: number; hint: string };
-const BRAND_TEXTURE_META: Record<string, { label: string; hint: string; w: number; h: number }> = {
+// LAZY getter (memoized): `_L()` resolves at render, not at module import — a
+// module-scope `_L()` runs before loadLocale() and would freeze to the raw key.
+let _brandTextureMeta: Record<string, { label: string; hint: string; w: number; h: number }> | null = null;
+const BRAND_TEXTURE_META = () => (_brandTextureMeta ??= {
   pizza_box: { label: _L("branding.tex_pizza_box_label"), hint: _L("branding.tex_pizza_box_hint"), w: 1024, h: 1024 },
   cup: { label: _L("branding.tex_cup_label"), hint: _L("branding.tex_cup_hint"), w: 1024, h: 1792 },
   tray: { label: _L("branding.tex_tray_label"), hint: _L("branding.tex_tray_hint"), w: 1792, h: 1024 },
   side: { label: _L("branding.tex_side_label"), hint: _L("branding.tex_side_hint"), w: 2304, h: 1024 },
   bag: { label: _L("branding.tex_bag_label"), hint: _L("branding.tex_bag_hint"), w: 1024, h: 1024 },
   kiosk: { label: _L("branding.tex_kiosk_label"), hint: _L("branding.tex_kiosk_hint"), w: 1080, h: 1920 },
-};
+});
 
 // Build the editable brand-texture list. Prefers the synced render-target aspects
 // (display w/h from the server); falls back to the META defaults if the sync is absent.
 // Only keys we have UI copy for are shown (an unknown target has no label/hint).
 function brandTextures(rts?: { key: string; w: number; h: number }[]): BrandTex[] {
-  const src = rts && rts.length ? rts : Object.entries(BRAND_TEXTURE_META).map(([key, m]) => ({ key, w: m.w, h: m.h }));
+  const meta = BRAND_TEXTURE_META();
+  const src = rts && rts.length ? rts : Object.entries(meta).map(([key, m]) => ({ key, w: m.w, h: m.h }));
   return src
-    .filter((t) => BRAND_TEXTURE_META[t.key])
+    .filter((t) => meta[t.key])
     .map((t) => {
-      const m = BRAND_TEXTURE_META[t.key];
+      const m = meta[t.key];
       return { key: t.key, w: t.w, h: t.h, label: m.label, hint: m.hint };
     });
 }
@@ -579,6 +585,10 @@ export function CropThumb({ url, aspect, crop }: { url: string; aspect: Aspect; 
 // The "Set / Update Photo" dialog: enter the URL, then drag + zoom to position the
 // image inside a frame locked to the texture's aspect ratio, then Save. Nothing is
 // written until Save — Cancel discards.
+// Built on the shared Modal, so its scrim covers the PANEL CONTENT it was opened
+// from (portaled into the panel's content region via context) rather than the whole
+// screen. It used to be a hand-rolled `fixed inset-0` overlay, which dimmed the game
+// and the panel chrome along with it.
 function BrandPhotoModal({
   tex, initial, onClose, onSave,
 }: {
@@ -589,12 +599,6 @@ function BrandPhotoModal({
   const [crop, setCrop] = useState<Crop | null>(initial?.crop || null);
   const trimmed = url.trim();
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   // typing a different URL invalidates the current crop — the cropper reseeds to cover
   const onUrlChange = (v: string) => {
     setUrl(v);
@@ -602,53 +606,40 @@ function BrandPhotoModal({
   };
 
   return (
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
-      onPointerDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div className="w-full max-w-md rounded-xl border border-border bg-card p-4 shadow-2xl">
-        <div className="mb-3 flex items-center justify-between">
-          <div>
-            <h3 className="text-sm font-semibold">{_L("branding.photo_title", tex.label)}</h3>
-            <p className="text-[11px] text-muted-foreground">{_L("branding.photo_sub", tex.hint, tex.w, tex.h)}</p>
-          </div>
-          <button onClick={onClose} className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground"><X className="h-4 w-4" /></button>
-        </div>
-
-        <label className="text-[11px] font-medium text-muted-foreground">{_L("branding.photo_url")}</label>
-        <Input
-          autoFocus
-          value={url}
-          onChange={(e) => onUrlChange(e.target.value)}
-          placeholder="https://…/image.png"
-          className="mt-1 h-9"
-        />
-
-        <div className="mt-3">
-          {trimmed ? (
-            <BrandCropper url={trimmed} aspect={tex} crop={crop} onChange={setCrop} />
-          ) : (
-            <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-border text-[11px] text-muted-foreground">
-              {_L("branding.paste_url_prompt")}
-            </div>
-          )}
-        </div>
-
-        <div className="mt-4 flex items-center justify-end gap-2">
-          <button onClick={onClose} className="rounded-md px-3 py-1.5 text-xs font-semibold text-muted-foreground transition hover:bg-accent hover:text-foreground">{_L("branding.cancel")}</button>
-          <button
-            disabled={!trimmed}
-            onClick={() => onSave(trimmed ? { url: trimmed, crop } : null)}
-            className={
-              "rounded-md px-3 py-1.5 text-xs font-semibold transition " +
-              (trimmed ? "bg-primary text-primary-foreground hover:opacity-90" : "cursor-not-allowed bg-muted text-muted-foreground")
-            }
-          >
+    <Modal
+      open
+      onClose={onClose}
+      title={_L("branding.photo_title", tex.label)}
+      subtitle={_L("branding.photo_sub", tex.hint, tex.w, tex.h)}
+      icon={<ImageIcon className="h-4 w-4" />}
+      footer={
+        <>
+          <Button variant="ghost" size="sm" onClick={onClose}>{_L("branding.cancel")}</Button>
+          <Button size="sm" disabled={!trimmed} onClick={() => onSave(trimmed ? { url: trimmed, crop } : null)}>
             {_L("branding.apply_photo")}
-          </button>
-        </div>
+          </Button>
+        </>
+      }
+    >
+      <label className="text-[11px] font-medium text-muted-foreground">{_L("branding.photo_url")}</label>
+      <Input
+        autoFocus
+        value={url}
+        onChange={(e) => onUrlChange(e.target.value)}
+        placeholder="https://…/image.png"
+        className="mt-1 h-9"
+      />
+
+      <div className="mt-3">
+        {trimmed ? (
+          <BrandCropper url={trimmed} aspect={tex} crop={crop} onChange={setCrop} />
+        ) : (
+          <div className="flex h-40 items-center justify-center rounded-md border border-dashed border-border text-[11px] text-muted-foreground">
+            {_L("branding.paste_url_prompt")}
+          </div>
+        )}
       </div>
-    </div>
+    </Modal>
   );
 }
 

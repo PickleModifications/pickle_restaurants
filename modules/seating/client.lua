@@ -71,6 +71,8 @@ function StandUp()
     ClearPedTasks(ped) -- blends out of the sit, unlike ...Immediately
     EnableInteraction = true -- re-arm the interaction engine (sitting disabled it)
     TriggerServerEvent("pickle_restaurants:seating:stand", seat.id)
+    -- anything that only makes sense while seated (the eat-in meal view) closes
+    TriggerEvent("pickle_restaurants:seating:stood", seat.id)
 end
 
 -- Sit on a placed seat anchor. Reserves it server-side first (so two players can't
