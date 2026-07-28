@@ -19,7 +19,6 @@ SettingsCache   = {}    -- [key]           = decoded value
 ItemImageCache  = {}    -- [item]          = custom image url (admin-set override, from the `item_images` setting; consulted first by GetItemImage so tray-only products — burger, burnt patty — that have no inventory image can still show art everywhere)
 OrderCache      = {}    -- [restaurantId][orderId] = open POS ticket row (lines decoded)
 NextTicket      = {}    -- [restaurantId]  = next kitchen ticket number
-ComboCache      = {}    -- [restaurantId][comboId] = combo-meal row (slots/photo_crop decoded)
 OrdersDirty     = {}    -- [restaurantId]  = true when the pool changed → register needs a live SyncOrders (coalesced flusher in modules/sales)
 PendingRefunds  = {}    -- [rowId]         = unpaid refund owed to an OFFLINE customer (see RefundOrder / the settle thread)
 
@@ -73,7 +72,7 @@ local DEFAULT_SETTINGS = {
     -- (a burger, a burnt patty, a cooked pizza…) and so have no catalogue image. The
     -- url overrides GetItemImage for that item EVERYWHERE it's shown (POS, kitchen,
     -- boards, phone). Rendered as a plain cover image on live surfaces; the crop is
-    -- kept for the editor's WYSIWYG preview (mirrors how combo photos behave). Edited
+    -- kept for the editor's WYSIWYG preview (mirrors how brand images behave). Edited
     -- on the item thumbnails in the Food & Drinks / Ingredients admin tabs.
     item_images     = {},
     starting_balance = 0,
@@ -231,6 +230,20 @@ local DEFAULT_SETTINGS = {
         -- Ped models an NPC customer may spawn as (picked at random, server-authoritative).
         models = { "a_m_y_business_01", "a_f_y_business_02", "a_m_m_business_01",
                    "a_f_y_hipster_02", "a_m_y_hipster_01", "a_f_m_business_02" },
+    },
+    -- KITCHEN FIRES. Food left burning on a station eventually sets the station
+    -- alight: the station can't be worked until somebody puts it out, and what was
+    -- on it is destroyed when they do. Server-authoritative (modules/cookfx), so a
+    -- fire keeps burning while nobody is looking and every client sees the same one.
+    kitchen_fires = {
+        enabled           = true,
+        delay_seconds     = 90,   -- how long food sits BURNT before it catches
+        extinguish_ms     = 5000, -- how long putting one out takes
+        reach             = 4.0,  -- how close you must be to fight it (metres)
+        -- The item a player must be carrying to fight a fire. It is NOT consumed —
+        -- an extinguisher is equipment. Leave empty (or name an item that isn't
+        -- installed) and anyone can put a fire out bare-handed.
+        extinguisher_item = "fire_extinguisher",
     },
 }
 
@@ -578,10 +591,21 @@ local function CreateTables()
             -- twice. `paid_account` is which wallet was charged ('bank' for phone/card
             -- orders, 'cash' for register + kiosk) so a refund returns to it. `redeemed`
             -- marks a loyalty punch-card redemption burned on this order, handed back on
-            -- cancel. (modules/phone's EnsureColumn also guards paid_account — no-ops now.)
+            -- cancel.
             `refunded`            TINYINT UNSIGNED NOT NULL DEFAULT 0,
             `paid_account`        VARCHAR(8)   NOT NULL DEFAULT 'cash',
             `redeemed`            TINYINT UNSIGNED NOT NULL DEFAULT 0,
+            -- The phone app's columns (delivery/pickup/dine-in + order-ahead). All
+            -- nullable/defaulted, so the register + kiosk paths never set them.
+            `order_type`          VARCHAR(12)  NOT NULL DEFAULT 'pickup',
+            `scheduled_for`       VARCHAR(20)  DEFAULT NULL,
+            `address`             VARCHAR(160) DEFAULT NULL,
+            -- delivery DROP POINT, persisted so RehydrateDeliveryTargets() can restore
+            -- an in-flight delivery across a restart (and the phone can draw its pin)
+            `dest_x`              DOUBLE       DEFAULT NULL,
+            `dest_y`              DOUBLE       DEFAULT NULL,
+            `phone_number`        VARCHAR(24)  DEFAULT NULL,
+            `rated`               TINYINT UNSIGNED NOT NULL DEFAULT 0,
             PRIMARY KEY (`id`),
             KEY `idx_rest_status` (`restaurant_id`, `status`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -611,31 +635,6 @@ local function CreateTables()
             KEY `idx_ident_paid` (`identifier`, `paid_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
-
-
-    -- Combo meals: a per-restaurant, numbered, priced BUNDLE of existing sellable
-    -- items ("Burger + Fries + Cola = The Pickle Meal #3"), sold as one entry and
-    -- fulfilled from the pool as its individual component items. `slots` is the
-    -- ordered list of choose-slots (each a list of allowed sellable-catalog keys);
-    -- `photo_url`/`photo_crop` reuse the brand-image pipeline for the board card.
-    -- Identity is `id`; `number` is a plain sortable display field (NO unique key —
-    -- renumbering must never deadlock; the editor warns on duplicates instead).
-    MySQL.query.await([[
-        CREATE TABLE IF NOT EXISTS `pickle_restaurant_combos` (
-            `id`            INT UNSIGNED NOT NULL AUTO_INCREMENT,
-            `restaurant_id` INT UNSIGNED NOT NULL,
-            `number`        INT UNSIGNED NOT NULL DEFAULT 1,
-            `label`         VARCHAR(80)  NOT NULL,
-            `price`         INT          NOT NULL DEFAULT 0,
-            `enabled`       TINYINT(1)   NOT NULL DEFAULT 1,
-            `photo_url`     VARCHAR(512) DEFAULT NULL,
-            `photo_crop`    JSON         DEFAULT NULL,
-            `slots`         JSON         NOT NULL,
-            `created_at`    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (`id`),
-            KEY `idx_rest` (`restaurant_id`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-    ]])
 end
 
 -- Every table CreateTables is responsible for. The boot refuses to open the
@@ -647,7 +646,7 @@ local REQUIRED_TABLES = {
     "pickle_restaurants", "pickle_restaurant_employees", "pickle_restaurant_props",
     "pickle_restaurant_menu", "pickle_restaurant_stock", "pickle_restaurant_cooked_items",
     "pickle_restaurant_ledger", "pickle_restaurant_settings", "pickle_restaurant_orders",
-    "pickle_restaurant_pending_refunds", "pickle_restaurant_combos",
+    "pickle_restaurant_pending_refunds",
 }
 
 -- Returns the first required table that is still missing (nil = schema is whole).
@@ -696,28 +695,6 @@ local function LoadSettings()
         if SettingsCache[key] == nil then SetSetting(key, value) end
     end
 
-    -- One-time: the receipt handout item was renamed `receipt` → `restaurant_receipt`
-    -- (avoids clashing with other resources' generic "receipt"). Repoint only the
-    -- untouched old default — an admin who chose their own receipt_item keeps it.
-    if SettingsCache.receipt_item == "receipt" then
-        SetSetting("receipt_item", "restaurant_receipt")
-    end
-
-    -- Back-fill any newly-added npc_customers sub-key (a new tunable in a later
-    -- release) without clobbering an admin's edits. `models` is a list value inside
-    -- the map — this only adds it if the whole key is missing, which is correct (an
-    -- admin who edited the list keeps theirs).
-    do
-        local map = SettingsCache.npc_customers
-        if type(map) == "table" then
-            local changed = false
-            for k, v in pairs(DEFAULT_SETTINGS.npc_customers or {}) do
-                if map[k] == nil then map[k] = v; changed = true end
-            end
-            if changed then SetSetting("npc_customers", map) end
-        end
-    end
-
     -- One-time: seed default custom images for the tray-only products from the shipped
     -- nui/items art. Only files that EXIST are seeded (a server can drop art or not),
     -- and only keys the admin hasn't already set — an edit or a removal is preserved.
@@ -735,42 +712,6 @@ local function LoadSettings()
         SetSetting("item_images_seeded", true)
     end
 
-    -- One-time: bag-kind foods (soup, salad…) used to be made IN the Restaurant Bag
-    -- and collected as the bag item. They are now made in the TAKEOUT BOX and
-    -- collect as `box_item`, freeing the bag to be the multi-item takeaway carrier.
-    -- Re-key every held instance that carries a food id (`craft`) on its first meta
-    -- layer — that flag is exactly what made it a bag food. Player INVENTORY slots
-    -- can't be reached from here, so a legacy `restaurant_bag` with craft metadata
-    -- stays readable everywhere as a box (the read-shims in cooking/sales).
-    -- One-time: `consume` (what eating one serving does + which animation plays) was
-    -- added to the food schema after these foods shipped. merge() only ever adds
-    -- whole MISSING entries, so an existing config would keep the global fallback
-    -- for everything — copy each default's values onto the stored food of the same
-    -- id, but ONLY where the admin hasn't authored their own.
-    if not SettingsCache.food_consume_seeded then
-        local list = GetSetting("foods", nil)
-        if type(list) == "table" then
-            local byId = {}
-            for _, d in ipairs(DEFAULT_FOODS) do if d.id then byId[d.id] = d end end
-            local changed = false
-            for _, f in ipairs(list) do
-                local d = f.id and byId[f.id]
-                if d and d.consume and type(f.consume) ~= "table" then
-                    f.consume = dec(json.encode(d.consume), nil)
-                    changed = true
-                end
-            end
-            if changed then SetSetting("foods", list) end
-        end
-        SetSetting("food_consume_seeded", true)
-    end
-
-    if not SettingsCache.takeout_box_migrated then
-        MySQL.update.await(
-            "UPDATE pickle_restaurant_cooked_items SET item = ? WHERE item = ? AND metadata LIKE ?",
-            { BoxItemName(), BagItemName(), '%"craft"%' })
-        SetSetting("takeout_box_migrated", true)
-    end
 end
 
 
@@ -884,7 +825,7 @@ end
 
 -- A normalized crop rectangle (all fractions 0..1) or nil. Mirrors the brand-image
 -- crop sanitizer in modules/management (kept local there); item images reuse the
--- exact { url, crop } shape combos/brands use.
+-- exact { url, crop } shape brand images use.
 local function sanitizeImageCrop(c)
     if type(c) ~= "table" then return nil end
     local x, y, w, h = tonumber(c.x), tonumber(c.y), tonumber(c.w), tonumber(c.h)
@@ -911,7 +852,7 @@ function SanitizeItemImages(map)
     return out
 end
 
--- A FOOD's own picture — the same { url, crop } shape items/combos/brands use, but
+-- A FOOD's own picture — the same { url, crop } shape items/brands use, but
 -- authored on the food itself rather than borrowed from an inventory item. This is
 -- what a takeout-box food shows on its in-world quad, in the tray, on the POS and
 -- in the bag's contents menu; a food with no prop of its own has nothing else.
@@ -997,10 +938,9 @@ function SetItemImageOverride(item, url, crop)
 end
 
 -- A stable food id derived from its display label — the same slug the NUI shows,
--- computed SERVER-side. A bag-KIND food used to take its id from the inventory item
--- it borrowed its name from (`display_item`); foods author their own identity now,
--- so the label IS the identity. Without this a newly created food has no id, and an
--- id-less food is dropped on save — it would vanish the moment the tab was left.
+-- computed SERVER-side. A food authors its own identity, so the label IS the
+-- identity. Without this a newly created food has no id, and an id-less food is
+-- dropped on save — it would vanish the moment the tab was left.
 local function foodSlug(s)
     return (tostring(s or ""):lower():gsub("[^a-z0-9]+", "_"):gsub("^_+", ""):gsub("_+$", ""))
 end
@@ -1026,14 +966,9 @@ function SanitizeFoods(list)
                 consume = sanitizeConsume(f.consume),
             }
             if food.kind == "bag" then
-                food.components   = sanitizeComponents(f.components)
-                -- `display_item` is LEGACY (a bag food used to borrow an inventory
-                -- item's label + art). Kept only so an un-migrated config still
-                -- resolves a picture and an id; the editor no longer offers it.
-                food.display_item = trimStr(f.display_item)
-                -- identity: an explicit id, else the LEGACY display item, else the
-                -- label slug (what a food created today gets)
-                food.id = food.id or food.display_item or trimStr(foodSlug(food.label))
+                food.components = sanitizeComponents(f.components)
+                -- identity: an explicit id, else the label slug
+                food.id = food.id or trimStr(foodSlug(food.label))
             else
                 local steps, cooks, pours = {}, 0, 0
                 local prevOutput = nil
@@ -1266,8 +1201,7 @@ function RebuildDerived()
                     -- inside the box. Dropping `box_image` here silently fell every
                     -- box back to the card art (FoodBoxImageUrl's fallback).
                     image = food.image, box_image = food.box_image,
-                    consume = food.consume,
-                    display_item = food.display_item, food_id = food.id,
+                    consume = food.consume, food_id = food.id,
                 }
             end
         else
@@ -1431,20 +1365,6 @@ local function LoadOrders()
     end
 end
 
--- Combo meals into the module-global cache. `slots`/`photo_crop` are JSON columns —
--- decode them once here (like OrderCache's `lines`) so every read is a plain table.
-local function LoadCombos()
-    ComboCache = {}
-    local rows = MySQL.query.await("SELECT * FROM pickle_restaurant_combos") or {}
-    for _, row in ipairs(rows) do
-        row.slots      = dec(row.slots, {})
-        row.photo_crop = dec(row.photo_crop, nil)
-        row.enabled    = (row.enabled == 1 or row.enabled == true)
-        ComboCache[row.restaurant_id] = ComboCache[row.restaurant_id] or {}
-        ComboCache[row.restaurant_id][row.id] = row
-    end
-end
-
 local function LoadCookedItems()
     TrayCache = {}
     local rows = MySQL.query.await("SELECT * FROM pickle_restaurant_cooked_items") or {}
@@ -1539,8 +1459,19 @@ end
 -- and sell content whose group it carries. No group on the content = available
 -- to EVERY restaurant, so a fresh install behaves exactly as before.
 
+-- Group names are matched LOOSELY: trimmed and case-folded. They are free text
+-- typed (or picked) in one panel and typed again on a food in another, so "Bakery"
+-- vs "bakery" vs "Bakery " is a naming slip, not a deliberate distinction — and an
+-- exact-match comparison turns that slip into a restaurant that silently can't cook
+-- anything, which is indistinguishable from the feature being broken.
+function NormalizeGroup(g)
+    if type(g) ~= "string" then return "" end
+    return (g:gsub("^%s+", ""):gsub("%s+$", "")):lower()
+end
+
 function RestaurantHasAccess(restaurantId, group)
-    if group == nil or group == "" then return true end
+    local want = NormalizeGroup(group)
+    if want == "" then return true end
     local r = GetRestaurant(restaurantId)
     if not r then return false end
     -- No groups set on the restaurant = access to EVERYTHING. Groups are an
@@ -1548,10 +1479,34 @@ function RestaurantHasAccess(restaurantId, group)
     -- restaurant to only those categories.
     if type(r.groups) ~= "table" or #r.groups == 0 then return true end
     for _, g in ipairs(r.groups) do
-        if g == group then return true end
+        if NormalizeGroup(g) == want then return true end
     end
     return false
 end
+
+-- Why a restaurant can or can't reach each group in use. Admin diagnostic for
+-- "I gave it every group and it still only sees ungrouped content" — it prints the
+-- restaurant's stored list against every group any content actually declares, which
+-- is where a mismatch shows up immediately.
+RegisterCommand("pickle_groups", function(src, args)
+    if src ~= 0 and not IsPlayerAdmin(src) then return end
+    local id = tonumber(args[1])
+    local r = id and GetRestaurant(id)
+    if not r then
+        print("[pickle_groups] usage: pickle_groups <restaurantId>")
+        for rid, rest in pairs(RestaurantCache) do
+            print(("  #%s %s — groups: %s"):format(rid, rest.name or "?",
+                (type(rest.groups) == "table" and #rest.groups > 0) and table.concat(rest.groups, ", ") or "(none = full access)"))
+        end
+        return
+    end
+    print(("[pickle_groups] #%s %s"):format(id, r.name or "?"))
+    print(("  stored groups: %s"):format(
+        (type(r.groups) == "table" and #r.groups > 0) and table.concat(r.groups, ", ") or "(none = full access)"))
+    for _, g in ipairs(CollectGroups()) do
+        print(("  %-24s %s"):format(g, RestaurantHasAccess(id, g) and "ACCESS" or "blocked"))
+    end
+end, false)
 
 -- Every distinct group name in use across recipes + the grouped settings lists —
 -- the suggestion pool for the admin UIs (groups exist by being used, not managed).
@@ -1713,15 +1668,21 @@ function FoodForItem(item, meta)
 end
 
 -- The picture a food shows AS AN ITEM — the hotbar/tray card, the POS, the bag's
--- contents menu, the inventory slot. Authored on the food; falls back to the LEGACY
--- display item's art, then to the item's own, so an un-migrated config still shows
--- something.
+-- contents menu, the inventory slot. Authored on the food; falls back to the vessel
+-- item's own art so nothing is ever blank.
 function FoodImageUrl(food, item)
     local url = type(food) == "table" and type(food.image) == "table" and food.image.url or nil
     if url and url ~= "" then return url end
-    local legacy = type(food) == "table" and food.display_item or nil
-    if legacy and legacy ~= "" then return AbsItemImage(legacy) end
     return item and AbsItemImage(item) or nil
+end
+
+-- The CROP that belongs with FoodImageUrl's picture ({x,y,w,h}, 0..1) — nil when the
+-- food authored no image of its own (the item's catalogue art is already square) or
+-- cropped none. Surfaces that draw the card art at its own shape honour this; the
+-- inventory-style thumbnails deliberately don't.
+function FoodImageCrop(food)
+    local img = type(food) == "table" and type(food.image) == "table" and food.image or nil
+    return img and img.crop or nil
 end
 
 -- The picture painted on the quad INSIDE an open takeout box: its url AND the
@@ -1768,7 +1729,16 @@ function ConsumeSpecFor(item, meta)
         first = first or a
         if a.id == animId then anim = a break end
     end
-    return { hunger = pick("hunger", 25), thirst = pick("thirst", 0), anim = anim or first }
+    -- How many BITES (or SIPS) a serving takes. One portion is spread across them:
+    -- each mouthful restores its share, and the food only leaves the vessel on the
+    -- last one — so a burger eaten in three goes feeds exactly as much as a burger
+    -- swallowed whole. Authored per food, else the global `consume` fallback, else
+    -- the defaults below (drinks get one more, because sipping reads as slower).
+    local portions = tonumber(own.bites) or tonumber(fallback.bites)
+    if not portions then portions = isDrink and 4 or 3 end
+    portions = math.max(1, math.min(20, math.floor(portions)))
+    return { hunger = pick("hunger", 25), thirst = pick("thirst", 0),
+             anim = anim or first, bites = portions, drink = isDrink or nil }
 end
 function BoxBaseModel() return GetSetting("box_base_model", "pickle_takeout_box_01") end
 function BoxLidModel()  return GetSetting("box_lid_model", "pickle_takeout_box_02") end
@@ -2267,66 +2237,27 @@ CreateThread(function()
     end
 end)
 
--- A combo slot option whose key is `group:<Name>` references a whole ACCESS GROUP
--- (any sellable the restaurant can currently make in that group) rather than one
--- fixed item — resolved to its live members at BuildComboCatalog time. Everything
--- else is a plain sellable key. Returns the group name, or nil for a normal option.
-COMBO_GROUP_PREFIX = "group:"
-function ComboOptionGroup(key)
-    if type(key) == "string" and key:sub(1, #COMBO_GROUP_PREFIX) == COMBO_GROUP_PREFIX then
-        return key:sub(#COMBO_GROUP_PREFIX + 1)
-    end
-    return nil
-end
-
--- ─── combo meals (write-through cache) ────────────────────────────────────────
--- Insert or update one combo. `combo` carries { id?, number, label, price, enabled,
--- photo_url, photo_crop, slots } already sanitized by the caller (management). On
--- insert the DB assigns the id; the returned combo is what lands in ComboCache.
-function SaveCombo(restaurantId, combo)
-    combo.restaurant_id = restaurantId
-    local slotsJson = json.encode(combo.slots or {})
-    local cropJson  = combo.photo_crop and json.encode(combo.photo_crop) or nil
-    if combo.id then
-        MySQL.update.await([[
-            UPDATE `pickle_restaurant_combos`
-               SET `number` = ?, `label` = ?, `price` = ?, `enabled` = ?,
-                   `photo_url` = ?, `photo_crop` = ?, `slots` = ?
-             WHERE `id` = ? AND `restaurant_id` = ?
-        ]], { combo.number, combo.label, combo.price, combo.enabled and 1 or 0,
-              combo.photo_url, cropJson, slotsJson, combo.id, restaurantId })
-    else
-        combo.id = MySQL.insert.await([[
-            INSERT INTO `pickle_restaurant_combos`
-                (`restaurant_id`, `number`, `label`, `price`, `enabled`, `photo_url`, `photo_crop`, `slots`)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ]], { restaurantId, combo.number, combo.label, combo.price, combo.enabled and 1 or 0,
-              combo.photo_url, cropJson, slotsJson })
-    end
-    if not combo.id then return nil end
-    ComboCache[restaurantId] = ComboCache[restaurantId] or {}
-    ComboCache[restaurantId][combo.id] = combo
-    return combo
-end
-
-function DeleteCombo(restaurantId, comboId)
-    MySQL.update.await("DELETE FROM pickle_restaurant_combos WHERE id = ? AND restaurant_id = ?",
-        { comboId, restaurantId })
-    if ComboCache[restaurantId] then ComboCache[restaurantId][comboId] = nil end
-    return true
-end
-
--- Drop a restaurant's combos (restaurant deleted). Row cleanup is done by the
--- caller's DELETE alongside the other per-restaurant tables.
-function ClearCombos(restaurantId)
-    ComboCache[restaurantId] = nil
-end
-
 -- Open tickets for the register NUI, oldest first (kitchen works the queue in order).
 -- Only genuinely-open rows are surfaced: the callbacks hold their transient claim in
 -- o.busy (never o.status), so o.status is always "open" here — but the explicit
 -- filter is a hard guarantee that a row can never render as a phantom the register
 -- shows yet the action guard rejects (the wedged-ticket failure mode).
+-- How an open ticket REACHED the kitchen, as one word the ticket UIs badge it with.
+-- Delivery and dine-in are explicit on the row; the rest splits on whether the order
+-- came through the phone app (order-ahead, collected at the counter) or was rung up
+-- in person at a register/kiosk. Note `order_type` alone can't make that second call:
+-- the column DEFAULTS to 'pickup', so every walk-in reloaded from the DB after a
+-- restart would read as a phone pickup. A phone order is the one that paid by card,
+-- which is what `paid_account`/`phone_number` record.
+function OrderChannel(o)
+    if not o then return "walk_in" end
+    if o.order_type == "delivery" then return "delivery" end
+    if o.order_type == "dine_in" then return "dine_in" end
+    local viaPhone = (o.paid_account == "bank")
+        or (type(o.phone_number) == "string" and o.phone_number ~= "")
+    return viaPhone and "pickup" or "walk_in"
+end
+
 function GetOpenOrders(restaurantId)
     local list = {}
     for _, o in pairs(OrderCache[restaurantId] or {}) do
@@ -2353,6 +2284,11 @@ function GetOpenOrders(restaurantId)
                 orderType = o.order_type,
                 scheduled = o.scheduled_for,
                 address   = o.address,
+                -- How it got here (delivery / pickup / dine_in / walk_in). Resolved
+                -- server-side so every ticket surface badges it identically — and so
+                -- a cashier can tell a delivery (only its claimed driver may hand it
+                -- over, at the customer's door) from an order waiting at the counter.
+                channel   = OrderChannel(o),
                 -- The transient delivery claim (modules/sales' startDelivery). This is a
                 -- PROJECTION, not the cache row, so anything AnnotateOrders needs has to
                 -- be carried across explicitly — without these the driver lookup always
@@ -2744,10 +2680,6 @@ local function BuildClientRestaurant(r)
         -- board tracks menu edits (each menu change re-syncs). Guarded because the
         -- builder lives in the sales module (loaded after core).
         menu         = BuildMenuBoard and BuildMenuBoard(r.id) or nil,
-        -- Numbered combo-meal cards for the same board (kept SEPARATE from `menu` —
-        -- combo cards carry a number, photo+crop and a component list). Also drives
-        -- the POS combo section. Guarded like `menu` (builder lives in sales).
-        combos       = BuildComboBoard and BuildComboBoard(r.id) or nil,
     }
 end
 
@@ -2986,7 +2918,6 @@ CreateThread(function()
         LoadOrders()
         LoadPendingRefunds() -- refunds owed to customers who were offline at cancel time
         LoadCookedItems()
-        LoadCombos()
         RestaurantsReady = true
         debugPrint(("Booted: %d restaurants, %d props, %d recipes."):format(
             #BuildSyncPayload().restaurants, #BuildSyncPayload().props, #RecipeCache))

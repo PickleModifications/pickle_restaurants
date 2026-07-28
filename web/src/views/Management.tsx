@@ -9,76 +9,22 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Field, TextField, NumberField, Toggle } from "@/components/form";
 import { type Item } from "@/components/ItemPicker";
 import Branding, { ThemeEditor, NameEditor } from "@/components/Branding";
-import Combos from "@/components/ComboEditor";
-import { money, cn } from "@/lib/utils";
+import Thumb from "@/components/Thumb";
+import { money, cn, prettyItem } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { UserPlus, Trash2, Pencil, Plus, Minus, MapPin, Banknote, Armchair, Receipt, ImageOff, PackagePlus, ArrowDownToLine, ArrowUpFromLine, Sparkles, Users } from "lucide-react";
+import { UserPlus, Trash2, Pencil, Plus, Minus, MapPin, Banknote, Armchair, Receipt, PackagePlus, ArrowDownToLine, ArrowUpFromLine, Sparkles, Users, Play, Square, Monitor, UtensilsCrossed, TriangleAlert, ScrollText } from "lucide-react";
 
-// The station types placeable from the boss/admin panels, with display labels.
-// LAZY getter (memoized): `_L()` resolves at render, not at module import — a
-// module-scope `_L()` runs before loadLocale() and would freeze to the raw key.
-let _mgmtStations: { key: string; label: string; physicalOnly?: boolean }[] | null = null;
-const MGMT_STATIONS = () => (_mgmtStations ??= [
-  { key: "soda_machine", label: _L("admin.station_soda_machine") },
-  { key: "fryer", label: _L("admin.station_fryer") },
-  { key: "stovetop", label: _L("admin.station_stovetop") },
-  { key: "kitchen_prep", label: _L("admin.station_kitchen_prep") },
-  { key: "kiosk", label: _L("admin.station_kiosk"), physicalOnly: true },
-  { key: "kiosk_ground", label: _L("admin.station_kiosk_ground"), physicalOnly: true },
-  { key: "menu_screen", label: _L("admin.station_menu_screen"), physicalOnly: true },
-  { key: "orders_screen", label: _L("admin.station_orders_screen"), physicalOnly: true },
-]);
-
-// Human name for a placed prop (so a chip reads "Fryer #12", not "#12").
-function mgmtPropLabel(p: any): string {
-  if (p.prop_type === "counter") return _L("admin.counter");
-  if (p.prop_type === "virtual_register") return _L("admin.virtual_register");
-  if (p.prop_type === "seat") return _L("admin.seat_one");
-  const key = p.prop_type === "virtual_point" ? p.target : p.prop_type;
-  return MGMT_STATIONS().find((s) => s.key === key)?.label || key || _L("admin.prop_one");
-}
-
-// One placed prop in the boss panel: named chip with Edit (reposition) + Remove.
-// Hover beams the prop's world point (the panel is centred; the world shows around
-// it). Highlight is force-cleared on unmount so a closed panel leaves no beam.
-function MgmtPropChip({ id, p, section, virtual }: { id: number; p: any; section: string; virtual?: boolean }) {
-  const hi = (on: boolean) => { fetchNui("management:highlightProp", { propId: p.id, on }); setPeek(on); };
-  useEffect(() => () => { fetchNui("management:highlightProp", { propId: p.id, on: false }); setPeek(false); }, [p.id]);
-  return (
-    <Badge variant="outline" className="gap-1.5" onMouseEnter={() => hi(true)} onMouseLeave={() => hi(false)}>
-      {virtual && <Sparkles className="h-3 w-3 text-primary" />}
-      <span>{mgmtPropLabel(p)} <span className="opacity-45 tabular-nums">#{p.id}</span></span>
-      <button title={_L("admin.reposition")} onClick={() => { hi(false); fetchNui("management:editProp", { id, propId: p.id, section }); }}>
-        <Pencil className="h-3 w-3" />
-      </button>
-      <button title={_L("admin.remove")} onClick={() => { hi(false); fetchNui("management:removeProp", { id, propId: p.id }); }}>
-        <Trash2 className="h-3 w-3" />
-      </button>
-    </Badge>
-  );
-}
-
-// Inventory thumbnail from a direct nui:// url the server resolved.
-function Thumb({ src, className }: { src?: string; className?: string }) {
-  const [broken, setBroken] = useState(false);
-  if (!src || broken) {
-    return (
-      <div className={cn("flex items-center justify-center rounded bg-muted/60 text-muted-foreground", className)}>
-        <ImageOff className="h-1/2 w-1/2" />
-      </div>
-    );
-  }
-  return <img src={src} onError={() => setBroken(true)} className={cn("rounded object-contain", className)} />;
-}
+// NOTE: station / counter / seat PLACEMENT is deliberately not in this panel — it
+// is an admin-only job now (the admin panel's restaurant detail), and the placement
+// callbacks are gated on admin server-side. The boss panel keeps Branding, which is
+// what `manage_props` still means here.
 
 export default function Management({ data, onClose }: { data: any; onClose: () => void }) {
   const id = data?.restaurantId;
   const perms = data?.perms || {};
   const roles: any[] = data?.roles || [];
   const items: Item[] = data?.items || [];
-  const focus = data?.focus; // { section } — set after a placement reopen
-  // A placement reopen lands on the Stations tab (if allowed) instead of the default.
-  const initialTab = (focus?.section && perms.manage_props) ? "stations" : firstTab(perms);
+  const initialTab = firstTab(perms);
 
   // The panel header follows a live rename (the rename save deliberately does NOT
   // refresh the panel — that would remount the field mid-typing), so keep the
@@ -90,15 +36,19 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
     <Panel title={label || _L("mgmt.title")} subtitle={_L("mgmt.balance", money(data?.restaurant?.balance))} onClose={onClose} width="max-w-4xl">
       <Tabs defaultValue={initialTab} className="flex min-h-0 flex-1 flex-col">
         <TabsList className="shrink-0">
+          {/* Ungated: the dashboard is the shift clock + the state of the room, which
+              every employee working a register needs, not a management privilege. */}
+          <TabsTrigger value="dashboard">{_L("mgmt.tab_dashboard")}</TabsTrigger>
           {perms.manage_employees && <TabsTrigger value="employees">{_L("mgmt.tab_employees")}</TabsTrigger>}
           {perms.manage_menu && <TabsTrigger value="menu">{_L("mgmt.tab_menu")}</TabsTrigger>}
-          {perms.manage_menu && <TabsTrigger value="combos">{_L("mgmt.tab_combos")}</TabsTrigger>}
           {perms.manage_stock && <TabsTrigger value="supplies">{_L("mgmt.tab_supplies")}</TabsTrigger>}
           {perms.view_finances && <TabsTrigger value="finances">{_L("mgmt.tab_finances")}</TabsTrigger>}
-          {perms.manage_props && <TabsTrigger value="stations">{_L("mgmt.tab_stations")}</TabsTrigger>}
           {perms.manage_props && <TabsTrigger value="branding">{_L("mgmt.tab_branding")}</TabsTrigger>}
         </TabsList>
 
+        <TabsContent value="dashboard" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
+          <Dashboard id={id} dash={data?.dashboard} perms={perms} balance={data?.restaurant?.balance} />
+        </TabsContent>
         {perms.manage_employees && (
           <TabsContent value="employees" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
             <Employees id={id} roles={roles} employees={data?.employees || []} nearby={data?.nearby || []} />
@@ -109,18 +59,6 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
             <Menu id={id} priceList={data?.priceList || []} stale={data?.stale || []} />
           </TabsContent>
         )}
-        {perms.manage_menu && (
-          <TabsContent value="combos" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
-            {/* Option picker is over sellable KEYS: map the price list to the ItemPicker
-                shape (name = catalog key, so drink flavors are pickable too). */}
-            <Combos
-              id={id}
-              combos={data?.combos || []}
-              sellables={(data?.priceList || []).map((e: any) => ({ name: e.key, label: e.label, image: e.image }))}
-              groups={data?.comboGroups || []}
-            />
-          </TabsContent>
-        )}
         {perms.manage_stock && (
           <TabsContent value="supplies" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
             <Supplies id={id} supplies={data?.supplies || []} />
@@ -129,11 +67,6 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         {perms.view_finances && (
           <TabsContent value="finances" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
             <Finances id={id} balance={data?.restaurant?.balance} ledger={data?.ledger || []} canManage={!!perms.manage_balance} />
-          </TabsContent>
-        )}
-        {perms.manage_props && (
-          <TabsContent value="stations" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
-            <Stations id={id} props={data?.props || []} hasShell={data?.restaurant?.hasShell} hasNpcSpawn={data?.restaurant?.hasNpcSpawn} focusSection={focus?.section} />
           </TabsContent>
         )}
         {perms.manage_props && (
@@ -153,11 +86,196 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
   );
 }
 
-function firstTab(perms: any) {
-  if (perms.manage_employees) return "employees";
-  if (perms.manage_menu) return "menu";
-  if (perms.view_finances) return "finances";
-  return "stations";
+// The Dashboard is ungated, so it is always a valid landing tab.
+function firstTab(_perms: any) {
+  return "dashboard";
+}
+
+// ─── Dashboard ───────────────────────────────────────────────────────────────
+
+// h:mm:ss in the receipt voice (mono, tabular) — a shift is read at a glance, so
+// seconds matter more than a rounded "2h 14m".
+function fmtClock(seconds: number) {
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return `${h}:${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
+// One headline number.
+function Stat({ icon: Icon, label, value, sub, tone }: {
+  icon: any; label: string; value: string; sub?: string; tone?: "brand" | "warn";
+}) {
+  return (
+    <Card>
+      <CardContent className="flex items-start gap-2.5 p-3">
+        <Icon className={cn("mt-0.5 h-4 w-4 shrink-0",
+          tone === "warn" ? "text-destructive" : tone === "brand" ? "text-primary" : "text-muted-foreground")} />
+        <div className="min-w-0">
+          <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{label}</div>
+          <div className="font-mono text-lg font-bold tabular-nums leading-tight">{value}</div>
+          {sub && <div className="truncate text-[11px] text-muted-foreground">{sub}</div>}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// The register operator's home screen: the shift clock (the SAME shift the phone
+// app punches — one ShiftCache server-side, so clocking in here shows up there),
+// who else is on, and the state of the room. Polls while the panel sits open so the
+// ticket queue and the timer stay honest; any panel refresh replaces the block.
+function Dashboard({ id, dash, perms, balance }: any) {
+  const [d, setD] = useState<any>(dash);
+  const [tick, setTick] = useState(0);
+  const [busy, setBusy] = useState(false);
+  // A full panel refresh (any other action) brings a fresh dashboard block with it.
+  useEffect(() => { if (dash) setD(dash); }, [dash]);
+
+  const refresh = () =>
+    fetchNui("management:refresh", { id }).then((r: any) => { if (r?.ok && r.dashboard) setD(r.dashboard); });
+
+  useEffect(() => {
+    const s = setInterval(() => setTick((n) => n + 1), 1000);
+    const p = setInterval(refresh, 10000);
+    return () => { clearInterval(s); clearInterval(p); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  // Anchor the timer to the payload's own server clock the moment it arrives, then
+  // run it off the local clock — so it never jumps on a poll and never drifts if the
+  // player's machine disagrees with the server about the time of day.
+  const anchor = useRef({ base: 0, at: Date.now() });
+  useEffect(() => {
+    anchor.current = { base: d?.since ? Math.max(0, (d.now || 0) - d.since) : 0, at: Date.now() };
+  }, [d]);
+  const elapsed = tick >= 0 && d?.clockedIn
+    ? anchor.current.base + Math.floor((Date.now() - anchor.current.at) / 1000)
+    : 0;
+
+  const clock = async () => {
+    if (busy) return;
+    setBusy(true);
+    await fetchNui(d?.clockedIn ? "management:clockOut" : "management:clockIn", { id });
+    await refresh();
+    setBusy(false);
+  };
+
+  const roster: any[] = d?.roster || [];
+  const outOfStock: any[] = d?.outOfStock || [];
+
+  return (
+    <div className="space-y-3">
+      {/* the shift clock — the one thing on this tab you ACT on */}
+      <Card>
+        <CardContent className="flex flex-wrap items-center gap-4 p-4">
+          <div className="min-w-[9rem]">
+            <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              {d?.clockedIn ? _L("mgmt.dash_on_clock") : _L("mgmt.dash_off_duty")}
+            </div>
+            <div className="font-mono text-3xl font-extrabold tabular-nums leading-tight">
+              {d?.clockedIn ? fmtClock(elapsed) : "—"}
+            </div>
+          </div>
+          <div className="flex gap-4">
+            <div>
+              <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{_L("mgmt.dash_tips")}</div>
+              <div className="font-mono text-lg font-bold tabular-nums">{money(d?.tips || 0)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{_L("mgmt.dash_cooked")}</div>
+              <div className="font-mono text-lg font-bold tabular-nums">{d?.cooked || 0}</div>
+            </div>
+          </div>
+          <Button
+            onClick={clock}
+            disabled={busy}
+            variant={d?.clockedIn ? "destructive" : "default"}
+            className="ml-auto min-w-[10rem] gap-2"
+          >
+            {d?.clockedIn ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+            {d?.clockedIn ? _L("mgmt.dash_clock_out") : _L("mgmt.dash_clock_in")}
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* the state of the room */}
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+        <Stat icon={Receipt} tone={(d?.openOrders || 0) > 0 ? "brand" : undefined}
+          label={_L("mgmt.dash_open_tickets")} value={String(d?.openOrders ?? 0)}
+          sub={perms.view_finances && d?.openValue != null ? _L("mgmt.dash_worth", money(d.openValue)) : undefined} />
+        <Stat icon={Users} label={_L("mgmt.dash_on_shift")} value={String(roster.length)}
+          sub={_L("mgmt.dash_of_staff", d?.employees ?? 0)} />
+        {perms.view_finances ? (
+          <Stat icon={Banknote} label={_L("mgmt.dash_today")} value={money(d?.todaySales || 0)}
+            sub={_L("mgmt.dash_orders_n", d?.todayOrders ?? 0)} />
+        ) : (
+          <Stat icon={UtensilsCrossed} label={_L("mgmt.dash_menu")} value={String(d?.menuSize ?? 0)} />
+        )}
+        {perms.view_finances ? (
+          <Stat icon={ScrollText} label={_L("mgmt.dash_balance")} value={money(balance)} />
+        ) : (
+          <Stat icon={Monitor} label={_L("mgmt.dash_registers")} value={String(d?.registers ?? 0)}
+            sub={_L("mgmt.dash_kiosks_n", d?.kiosks ?? 0)} />
+        )}
+      </div>
+
+      {/* the points of sale this place actually has, so you know what else is live */}
+      {perms.view_finances && (
+        <div className="grid grid-cols-3 gap-2">
+          <Stat icon={Monitor} label={_L("mgmt.dash_registers")} value={String(d?.registers ?? 0)} />
+          <Stat icon={Sparkles} label={_L("mgmt.dash_kiosks")} value={String(d?.kiosks ?? 0)} />
+          <Stat icon={Armchair} label={_L("mgmt.dash_seats")} value={String(d?.seats ?? 0)} />
+        </div>
+      )}
+
+      {/* anything that will stop the kitchen mid-service */}
+      {perms.manage_stock && outOfStock.length > 0 && (
+        <Card>
+          <CardContent className="p-3">
+            <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-destructive">
+              <TriangleAlert className="h-4 w-4" /> {_L("mgmt.dash_out_of_stock", outOfStock.length)}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {outOfStock.map((s) => (
+                <Badge key={s.item} variant="outline" className="gap-1.5">
+                  <Thumb src={s.image} className="h-4 w-4" />
+                  {s.label || prettyItem(s.item)}
+                </Badge>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* who's on with you — the tip pool this shift splits into */}
+      <Card>
+        <CardContent className="p-3">
+          <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            {_L("mgmt.dash_tip_pool")}
+          </div>
+          {roster.length === 0 ? (
+            <div className="text-xs text-muted-foreground">{_L("mgmt.dash_nobody_on")}</div>
+          ) : (
+            <div className="space-y-1.5">
+              {roster.map((m, i) => (
+                <div key={i} className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-2.5 py-1.5">
+                  <span className="flex items-center gap-2 text-sm">
+                    <Users className="h-3.5 w-3.5 text-muted-foreground" />
+                    {m.name}
+                  </span>
+                  <span className="flex items-center gap-3 font-mono text-xs tabular-nums text-muted-foreground">
+                    <span>{fmtClock(Math.max(0, (d?.now || 0) - (m.since || 0)))}</span>
+                    <span className="text-foreground">{money(m.tips || 0)}</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
 }
 
 function Employees({ id, roles, employees, nearby }: any) {
@@ -245,8 +363,11 @@ function Menu({ id, priceList, stale }: { id: number; priceList: any[]; stale: a
         <div className="mt-4 rounded-lg border border-amber-500/40 p-3">
           <h3 className="mb-2 text-sm font-semibold">{_L("mgmt.price_stale")}</h3>
           {stale.map((s: any) => (
-            <div key={s.key} className="flex items-center justify-between py-1 text-sm">
-              <span className="text-muted-foreground">{s.label} · {money(s.price)}</span>
+            <div key={s.key} className="flex items-center gap-2 py-1 text-sm">
+              {/* a stale row is still a menu entry — it gets its picture like any other,
+                  so the owner can see WHAT they're about to delete off the menu */}
+              <Thumb src={s.image} alt={s.label} className="h-8 w-8 shrink-0" />
+              <span className="min-w-0 flex-1 truncate text-muted-foreground">{s.label} · {money(s.price)}</span>
               <Button size="sm" variant="destructive" onClick={() => fetchNui("management:deleteMenuItem", { id, key: s.key })}>
                 <Trash2 className="h-4 w-4" />
               </Button>
@@ -336,25 +457,26 @@ function SupplyRow({ id, supply }: { id: number; supply: any }) {
   };
   return (
     <Card>
-      <CardContent className="space-y-2.5 pt-4 text-sm">
-        <div className="flex items-center gap-3">
-          <Thumb src={supply.image} className="h-10 w-10 shrink-0" />
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="truncate font-medium">{supply.label}</span>
-              {!supply.installed && <Badge variant="destructive">{_L("mgmt.not_installed")}</Badge>}
-            </div>
-            <div className="text-[11px] text-muted-foreground">
-              {_L("mgmt.cost_each", money(supply.cost))} · {_L("mgmt.in_stock", stock)} · {_L("mgmt.you_hold", held)}
-            </div>
+      {/* ONE row: the identity column and the controls column are siblings on the
+          same line, so the card is as tall as its tallest control — not an info row
+          stacked over a button row (which left the thumb/label column half-height). */}
+      <CardContent className="flex flex-wrap items-center gap-x-3 gap-y-2 py-3 text-sm">
+        <Thumb src={supply.image} className="h-10 w-10 shrink-0" />
+        <div className="min-w-0 flex-1 basis-48">
+          <div className="flex items-center gap-2">
+            <span className="truncate font-medium">{supply.label}</span>
+            {!supply.installed && <Badge variant="destructive">{_L("mgmt.not_installed")}</Badge>}
           </div>
-          <div className="flex shrink-0 items-center">
-            <Button size="icon" variant="ghost" onClick={() => setQty((q) => Math.max(1, q - 1))}><Minus className="h-3.5 w-3.5" /></Button>
-            <Input type="number" min={1} value={qty} onChange={(e) => setQty(Math.max(1, Math.floor(Number(e.target.value) || 1)))} className="h-8 w-16 text-center" />
-            <Button size="icon" variant="ghost" onClick={() => setQty((q) => q + 1)}><Plus className="h-3.5 w-3.5" /></Button>
+          <div className="text-[11px] text-muted-foreground">
+            {_L("mgmt.cost_each", money(supply.cost))} · {_L("mgmt.in_stock", stock)} · {_L("mgmt.you_hold", held)}
           </div>
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
+        <div className="flex shrink-0 items-center">
+          <Button size="icon" variant="ghost" onClick={() => setQty((q) => Math.max(1, q - 1))}><Minus className="h-3.5 w-3.5" /></Button>
+          <Input type="number" min={1} value={qty} onChange={(e) => setQty(Math.max(1, Math.floor(Number(e.target.value) || 1)))} className="h-8 w-16 text-center" />
+          <Button size="icon" variant="ghost" onClick={() => setQty((q) => q + 1)}><Plus className="h-3.5 w-3.5" /></Button>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
           <Button size="sm" variant="outline" onClick={move("management:depositStock")} disabled={held < qty} title={_L("mgmt.deposit_stock_hint")}>
             <ArrowDownToLine className="h-4 w-4" /> {_L("mgmt.deposit_stock")}
           </Button>
@@ -403,157 +525,6 @@ function Finances({ id, balance, ledger, canManage }: any) {
         ))}
         {ledger.length === 0 && <div className="px-3 py-3 text-xs text-muted-foreground">{_L("mgmt.no_transactions")}</div>}
       </div>
-    </div>
-  );
-}
-
-function Stations({ id, props, hasShell, hasNpcSpawn, focusSection }: any) {
-  const STATIONS = MGMT_STATIONS();
-  const seats = (props as any[]).filter((p) => p.prop_type === "seat");
-  const counters = (props as any[]).filter((p) => p.prop_type === "counter");
-  const virtualRegisters = (props as any[]).filter((p) => p.prop_type === "virtual_register");
-  const [modes, setModes] = useState<Record<string, "physical" | "virtual">>({});
-  const setMode = (k: string, m: "physical" | "virtual") => setModes((prev) => ({ ...prev, [k]: m }));
-  const stationsRef = useRef<HTMLDivElement>(null);
-  const seatingRef = useRef<HTMLDivElement>(null);
-  const countersRef = useRef<HTMLDivElement>(null);
-
-  // Scroll the just-used section into view when reopened from a placement flow.
-  // Virtual placement lives in the stations card now, so "virtual" lands there.
-  useEffect(() => {
-    if (!focusSection) return;
-    const el = focusSection === "seating" ? seatingRef.current
-      : focusSection === "counters" ? countersRef.current
-      : stationsRef.current;
-    const t = setTimeout(() => el?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
-    return () => clearTimeout(t);
-  }, [focusSection]);
-
-  return (
-    <div className="space-y-3">
-      {/* stations — each type places either a physical world prop or a virtual
-          point (opens the station inside the kitchen shell, placed by an admin).
-          The per-row toggle picks the mode. */}
-      <Card ref={stationsRef}>
-        <CardContent className="pt-4">
-          <div className="mb-3 flex items-center justify-between gap-2">
-            <h3 className="text-sm font-semibold">{_L("mgmt.stations_heading")}</h3>
-            <div className="flex items-center gap-1.5">
-              <Button variant="outline" size="sm" onClick={() => fetchNui("management:placeNpcSpawn", { id })}>
-                <Users className="h-3.5 w-3.5" /> {hasNpcSpawn ? `${_L("mgmt.set_npc_spawn")} ✓` : _L("mgmt.set_npc_spawn")}
-              </Button>
-            </div>
-          </div>
-          <div className="space-y-3">
-            {STATIONS.map((s) => {
-              const physical = (props as any[]).filter((p) => p.prop_type === s.key);
-              const virtual = (props as any[]).filter((p) => p.prop_type === "virtual_point" && p.target === s.key);
-              const isVirtual = !s.physicalOnly && (modes[s.key] || "physical") === "virtual";
-              return (
-                <div key={s.key}>
-                  <div className="mb-1.5 flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 text-sm">
-                      {s.label}
-                      <Badge variant="secondary">{physical.length + virtual.length}</Badge>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      {!s.physicalOnly && (
-                      <div className="flex rounded-md border border-border p-0.5 text-[11px]">
-                        <button
-                          className={cn("rounded px-2 py-0.5 transition-colors", !isVirtual ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}
-                          onClick={() => setMode(s.key, "physical")}
-                        >{_L("mgmt.mode_physical")}</button>
-                        <button
-                          className={cn("rounded px-2 py-0.5 transition-colors", isVirtual ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground")}
-                          onClick={() => setMode(s.key, "virtual")}
-                        >{_L("mgmt.mode_virtual")}</button>
-                      </div>
-                      )}
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={isVirtual && !hasShell}
-                        onClick={() => isVirtual
-                          ? fetchNui("management:placeVirtualPoint", { id, target: s.key })
-                          : fetchNui("management:placeProp", { id, prop_type: s.key })}
-                      >
-                        {isVirtual ? <Sparkles className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />} {_L("mgmt.place")}
-                      </Button>
-                    </div>
-                  </div>
-                  {isVirtual && !hasShell && (
-                    <p className="mb-1 text-[11px] text-muted-foreground">{_L("mgmt.virtual_needs_shell")}</p>
-                  )}
-                  {(physical.length > 0 || virtual.length > 0) && (
-                    <div className="flex flex-wrap gap-1.5">
-                      {physical.map((p: any) => (
-                        <MgmtPropChip key={p.id} id={id} p={p} section="stations" />
-                      ))}
-                      {virtual.map((p: any) => (
-                        <MgmtPropChip key={p.id} id={id} p={p} section="stations" virtual />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          <p className="mt-3 text-[11px] text-muted-foreground">{_L("mgmt.virtual_hint")}</p>
-        </CardContent>
-      </Card>
-
-      {/* registers — a PHYSICAL counter spawns the register model and its screen is
-          the in-world POS DUI; a VIRTUAL register is an invisible anchor that opens
-          the fullscreen NUI register (no screen to paint). The first physical counter
-          also anchors the map blip, kitchen shell, and NPC queue. */}
-      <Card ref={countersRef}>
-        <CardContent className="pt-4">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <h3 className="flex items-center gap-2 text-sm font-semibold"><Receipt className="h-4 w-4" /> {_L("admin.counters")}</h3>
-            <div className="flex items-center gap-1.5">
-              <Button variant="outline" size="sm" onClick={() => fetchNui("management:setCounter", { id })}>
-                <Plus className="h-3.5 w-3.5" /> {_L("admin.place_physical")}
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => fetchNui("management:setVirtualRegister", { id })}>
-                <Sparkles className="h-3.5 w-3.5" /> {_L("admin.place_virtual")}
-              </Button>
-            </div>
-          </div>
-          {counters.length + virtualRegisters.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5">
-              {counters.map((p: any) => (
-                <MgmtPropChip key={p.id} id={id} p={p} section="counters" />
-              ))}
-              {virtualRegisters.map((p: any) => (
-                <MgmtPropChip key={p.id} id={id} p={p} section="counters" virtual />
-              ))}
-            </div>
-          ) : (
-            <div className="text-xs text-muted-foreground">{_L("admin.counters_hint")}</div>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card ref={seatingRef}>
-        <CardContent className="pt-4">
-          <div className="mb-2 flex items-center justify-between">
-            <h3 className="flex items-center gap-2 text-sm font-semibold"><Armchair className="h-4 w-4" /> {_L("mgmt.seating")}</h3>
-            <Button variant="outline" size="sm" onClick={() => fetchNui("management:placeSeat", { id })}>
-              <MapPin className="h-3.5 w-3.5" /> {_L("mgmt.place_seat")}
-            </Button>
-          </div>
-          {seats.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5">
-              {seats.map((p: any) => (
-                <MgmtPropChip key={p.id} id={id} p={p} section="seating" />
-              ))}
-            </div>
-          ) : (
-            <div className="text-xs text-muted-foreground">{_L("mgmt.no_seats")}</div>
-          )}
-          <p className="mt-2 text-[11px] text-muted-foreground">{_L("mgmt.seat_hint")}</p>
-        </CardContent>
-      </Card>
     </div>
   );
 }

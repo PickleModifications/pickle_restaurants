@@ -4,7 +4,7 @@ import { applyTheme } from "@/lib/theme";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { ShoppingCart, ClipboardList, X } from "lucide-react";
-import { OrderBuilder, arr, type Cat, type Combo, type Near, type Ticket } from "@/components/OrderBuilder";
+import { OrderBuilder, arr, type Cat, type Near, type Ticket } from "@/components/OrderBuilder";
 import { Tickets } from "@/components/RegisterTickets";
 
 // The staff POS register rendered as a DUI painted onto the counter's own in-world
@@ -145,7 +145,6 @@ export default function RegisterDui() {
             key={nonce}
             id={data.restaurantId}
             catalog={arr<Cat>(data.catalog)}
-            combos={arr<Combo>(data.combos)}
             nearby={arr<Near>(data.nearby)}
             mode="register"
             big

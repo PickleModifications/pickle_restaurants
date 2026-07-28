@@ -5,7 +5,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { ShoppingCart, ClipboardList } from "lucide-react";
-import { OrderBuilder, arr, type Cat, type Combo, type Near, type Ticket } from "@/components/OrderBuilder";
+import { OrderBuilder, arr, type Cat, type Near, type Ticket } from "@/components/OrderBuilder";
 import { Tickets } from "@/components/RegisterTickets";
 
 export default function Register({ data, onClose }: { data: any; onClose: () => void }) {
@@ -13,7 +13,6 @@ export default function Register({ data, onClose }: { data: any; onClose: () => 
   // Catalog + nearby come from the initial open payload (they don't churn while
   // the panel is up).
   const catalog: Cat[] = arr<Cat>(data?.catalog);
-  const combos: Combo[] = arr<Combo>(data?.combos);
   const nearby: Near[] = arr<Near>(data?.nearby);
 
   // The ticket list is LIVE: seeded from the open payload, then kept in sync by
@@ -43,7 +42,7 @@ export default function Register({ data, onClose }: { data: any; onClose: () => 
         {/* Both panes stay MOUNTED and toggle via CSS (not TabsContent, which unmounts
             the inactive tab) so the in-progress cart survives a hop to Tickets and back. */}
         <div className={cn("mt-3 min-h-0 flex-1 animate-fade-in", tab !== "new" && "hidden")}>
-          <OrderBuilder id={id} catalog={catalog} combos={combos} nearby={nearby} mode="register" />
+          <OrderBuilder id={id} catalog={catalog} nearby={nearby} mode="register" />
         </div>
 
         {/* not overflow-scrolled here — Tickets owns its own scroll so the meal

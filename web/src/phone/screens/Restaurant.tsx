@@ -173,69 +173,12 @@ function ItemSheet({
   );
 }
 
-// ─── combo sheet ──────────────────────────────────────────────────────────────
-function ComboSheet({ combo, onClose, onAdd }: { combo: any; onClose: () => void; onAdd: (picks: any[]) => void }) {
-  const { currency } = usePhone();
-  const [picks, setPicks] = useState<Record<number, string>>(() => {
-    const p: Record<number, string> = {};
-    combo.slots.forEach((s: any, i: number) => (p[i] = s.options[0]?.key));
-    return p;
-  });
-  return (
-    <>
-      <div className="pf-scrim" onClick={onClose} />
-      <div className="pf-sheet">
-        <div className="pf-grab" />
-        <div className="max-h-[70vh] overflow-y-auto px-4 pb-2 pt-1">
-          <div className="font-display text-lg font-extrabold">{combo.label}</div>
-          <div className="font-mono text-sm text-muted-foreground">{money(currency, combo.price)}</div>
-          {combo.slots.map((slot: any, i: number) => (
-            <div key={i} className="mt-4">
-              <div className="tape mb-1.5 text-muted-foreground">
-                {slot.label || _L("phone.combo.pick_n", i + 1)}
-              </div>
-              <div className="space-y-1.5">
-                {slot.options.map((o: any) => {
-                  const on = picks[i] === o.key;
-                  return (
-                    <button
-                      key={o.key}
-                      onClick={() => setPicks((p) => ({ ...p, [i]: o.key }))}
-                      className={cn(
-                        "flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left",
-                        on ? "border-brand bg-brand/10" : "border-border bg-card"
-                      )}
-                    >
-                      <ItemImg src={o.image} className="h-8 w-8 rounded-lg" />
-                      <span className="flex-1 text-sm font-medium">{o.label}</span>
-                      {on && <Star className="h-4 w-4 text-brand" fill="currentColor" />}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </div>
-        <div className="border-t border-border p-3">
-          <button
-            onClick={() => onAdd(combo.slots.map((_: any, i: number) => ({ key: picks[i] })))}
-            className="flex w-full items-center justify-between rounded-full bg-brand px-4 py-2.5 font-bold text-brand-ink"
-          >
-            <span>{_L("phone.combo.add")}</span>
-            <span className="font-mono">{money(currency, combo.price)}</span>
-          </button>
-        </div>
-      </div>
-    </>
-  );
-}
-
 // ─── storefront ───────────────────────────────────────────────────────────────
 export function Restaurant({ params }: { params: any }) {
   const { back, addToCart, currency, go, refreshHome } = usePhone();
   const rid = params.rid;
   const [data, setData] = useState<any>(null);
-  const [sheet, setSheet] = useState<{ item?: CatalogItem; combo?: any } | null>(null);
+  const [sheet, setSheet] = useState<{ item?: CatalogItem } | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -325,36 +268,6 @@ export function Restaurant({ params }: { params: any }) {
         </div>
       )}
 
-      {/* combos */}
-      {(data.combos?.length || 0) > 0 && (
-        <section className="mt-4">
-          <h2 className="mb-2 px-4 font-display text-base font-bold">{_L("phone.rest.combos")}</h2>
-          <div className="space-y-2 px-4">
-            {data.combos.map((cb: any) => (
-              <button
-                key={cb.comboId}
-                onClick={() => setSheet({ combo: cb })}
-                className="flex w-full items-center gap-3 rounded-2xl border border-border bg-card p-2.5 text-left active:scale-[0.99]"
-              >
-                <ItemImg src={cb.photo?.url} className="h-16 w-16 rounded-xl" />
-                <div className="min-w-0 flex-1">
-                  <div className="font-semibold leading-tight">
-                    #{cb.number} {cb.label}
-                  </div>
-                  <div className="text-[0.72rem] text-muted-foreground">
-                    {_L("phone.rest.combo_items", cb.slots.length)}
-                  </div>
-                  <div className="mt-1 font-mono text-sm font-bold text-primary">
-                    {money(currency, cb.price)}
-                  </div>
-                </div>
-                <ChevronRight className="h-5 w-5 text-muted-foreground" />
-              </button>
-            ))}
-          </div>
-        </section>
-      )}
-
       {/* menu sections */}
       {Object.entries(groups).map(([g, list]) => (
         <section key={g} className="mt-4">
@@ -392,25 +305,6 @@ export function Restaurant({ params }: { params: any }) {
           onClose={() => setSheet(null)}
           onAdd={(qty, st) => {
             addLine(sheet.item!, qty, st);
-            setSheet(null);
-          }}
-        />
-      )}
-      {sheet?.combo && (
-        <ComboSheet
-          combo={sheet.combo}
-          onClose={() => setSheet(null)}
-          onAdd={(picks) => {
-            addToCart(rid, data.label, {
-              key: "combo:" + sheet.combo.comboId,
-              label: `#${sheet.combo.number} ${sheet.combo.label}`,
-              image: sheet.combo.photo?.url,
-              price: sheet.combo.price,
-              qty: 1,
-              mods: [],
-              modLabels: [],
-              combo: { comboId: sheet.combo.comboId, slots: picks },
-            });
             setSheet(null);
           }}
         />
@@ -471,9 +365,7 @@ export function Checkout({ params }: { params: any }) {
 
   const place = async () => {
     setPlacing(true);
-    const serverCart = cart.lines.map((l) =>
-      l.combo ? { combo: l.combo.comboId, qty: l.qty, slots: l.combo.slots } : { key: l.key, qty: l.qty, mods: l.mods }
-    );
+    const serverCart = cart.lines.map((l) => ({ key: l.key, qty: l.qty, mods: l.mods }));
     const res = await fetchNui("phone:placeOrder", {
       id: cart.rid,
       cart: serverCart,
@@ -493,9 +385,7 @@ export function Checkout({ params }: { params: any }) {
   };
 
   const saveFav = async () => {
-    const serverCart = cart.lines.map((l) =>
-      l.combo ? { combo: l.combo.comboId, qty: l.qty, slots: l.combo.slots, key: l.key } : { key: l.key, qty: l.qty, mods: l.mods }
-    );
+    const serverCart = cart.lines.map((l) => ({ key: l.key, qty: l.qty, mods: l.mods }));
     const res = await fetchNui("phone:saveFavorite", { id: cart.rid, label: cart.label, cart: serverCart });
     if (res?.ok) {
       toast(_L("phone.checkout.saved_fav"));

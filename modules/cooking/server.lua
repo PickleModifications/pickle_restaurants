@@ -25,6 +25,12 @@ lib.callback.register("pickle_restaurants:cooking:openStation", function(src, d)
     local prop = propId and PropCache[propId]
     if not prop or prop.prop_type == "seat" then return { ok = false } end
     if not HasPerm(prop.restaurant_id, src, "cook") then return { ok = false, error = _L("no_work_here") } end
+    -- A burning station can't be worked at all — put it out first (modules/cookfx).
+    -- Gated HERE, at the one door into the station, so no cook/collect/place path
+    -- needs its own check and none can be missed.
+    if StationOnFire and StationOnFire(propId) then
+        return { ok = false, error = _L("cook_station_on_fire") }
+    end
     local holder = StationOccupancy[propId]
     if holder and holder ~= src then return { ok = false, error = _L("cook_station_busy") } end
     StationOccupancy[propId] = src
@@ -33,6 +39,14 @@ lib.callback.register("pickle_restaurants:cooking:openStation", function(src, d)
     -- mutate the cache without a full re-sync)
     return { ok = true, metadata = prop.metadata }
 end)
+
+-- Drop a station's exclusive claim from the server side. Used when the station is
+-- taken away from its occupant rather than released by them — it catching fire
+-- (modules/cookfx) ejects the cook, and their claim has to go with them or the
+-- station stays "busy" until they re-open it, which the fire now forbids.
+function ReleaseStationClaim(propId)
+    StationOccupancy[tonumber(propId) or -1] = nil
+end
 
 RegisterNetEvent("pickle_restaurants:cooking:closeStation", function(propId)
     propId = tonumber(propId)
@@ -403,6 +417,20 @@ local function sodaGiveLabel(it, give)
     return give and GetItemLabel(give) or nil
 end
 
+-- ...and its picture. A poured cup's `give` is the flavor KEY, not an installed item,
+-- so GetItemImage has nothing to look up — the flavor's art is the supplied
+-- `nui/items/<output>.png` that DrinkFlavorImage (modules/sales) resolves for every
+-- other drink surface. Resolve it the same way here so the fountain's hover chip
+-- shows the flavor instead of falling back to the plain cup item.
+local function sodaGiveImage(it, give)
+    if not give then return nil end
+    if give == it.output and DrinkFlavorImage then
+        local img = DrinkFlavorImage(give)
+        if img then return img end
+    end
+    return GetItemImage(give)
+end
+
 local function sodaProgress(it)
     local elapsed = 0
     if it.state == "filling" and it.phaseStart then elapsed = GetGameTimer() - it.phaseStart end
@@ -420,7 +448,7 @@ local function broadcastSoda(it)
     TriggerClientEvent("pickle_restaurants:cooking:progress", -1, {
         uid = it.uid, method = "soda", prog = sodaProgress(it),
         give = give, giveLabel = sodaGiveLabel(it, give),
-        giveImage = give and GetItemImage(give) or nil,
+        giveImage = sodaGiveImage(it, give),
     })
 end
 
@@ -441,7 +469,7 @@ local function activeEntry(it)
                  slot = it.slot, state = it.state, prog = sodaProgress(it),
                  stack = it.stack, ice = it.ice or nil,
                  give = give, giveLabel = sodaGiveLabel(it, give),
-                 giveImage = give and GetItemImage(give) or nil }
+                 giveImage = sodaGiveImage(it, give) }
     end
     if it.method == "oven" or it.method == "fry" then
         local give = cookGiveItem(it)
@@ -834,13 +862,10 @@ end
 
 -- ─── the two takeaway vessels ────────────────────────────────────────────────
 -- A TAKEOUT BOX instance is a bag-kind food (soup, salad…): its food id rides the
--- first meta layer (the `craft` field — the same flag TraySig appends `~` for, so
--- the POS variation grammar is byte-stable across the rename). Returns that id, or
--- nil. LEGACY SHIM: before the takeout box existed these foods were made in — and
--- collected as — the Restaurant Bag, so a bag instance carrying the flag is read as
--- a box too (player inventory slots can't be migrated server-side).
+-- first meta layer (the `craft` field — the same flag TraySig appends `~` for).
+-- Returns that id, or nil.
 local function boxFoodId(item, meta)
-    if item ~= BoxItemName() and item ~= BagItemName() then return nil end
+    if item ~= BoxItemName() then return nil end
     local id = type(meta) == "table" and meta[1] and meta[1].craft
     return (type(id) == "string" and id ~= "") and id or nil
 end
@@ -860,12 +885,14 @@ end
 -- an inventory item's identity. Returns its label, the ITEM picture (the hotbar/tray
 -- card, the POS, the inventory slot) and the BOX picture (painted on the quad inside
 -- the open box, falling back to the item picture). Both fall back further to the
--- legacy display item's art and then the box item's, so nothing is ever blank.
+-- box item's own art, so nothing is ever blank.
 local function boxFoodRender(cr)
-    if not cr then return nil, nil, nil, nil end
+    if not cr then return nil, nil, nil, nil, nil end
     local box = BoxItemName()
     local boxUrl, boxCrop = FoodBoxImageUrl(cr, box)
-    return cr.label, FoodImageUrl(cr, box), boxUrl, boxCrop
+    -- 5th return: the crop for the CARD art (the 2nd return), which is a different
+    -- picture from the in-box one and carries its own rectangle.
+    return cr.label, FoodImageUrl(cr, box), boxUrl, boxCrop, FoodImageCrop(cr)
 end
 
 -- ONE build-stack layer described for a CONSUMER: what a customer sees when they
@@ -880,7 +907,8 @@ function LayerDisplay(l)
     local food = FoodForItem(item, l.stack)
     local out = { item = item,
                   label = (food and food.label) or GetItemLabel(item),
-                  image = FoodImageUrl(food, item) }
+                  image = FoodImageUrl(food, item),
+                  imageCrop = FoodImageCrop(food) }
     if item == DrinkItem() then
         local dd = drinkFlavor(l.stack)
         if dd then
@@ -890,13 +918,19 @@ function LayerDisplay(l)
         else
             out.drink = true
         end
+        -- The CUP a drink is drunk from: the flavor's own capped-cup render (cup +
+        -- lid), so a customer holds the restaurant's branded cup instead of the
+        -- generic bottle the eat animation would otherwise put in their hand. Both
+        -- models, in stack order, for the client to attach.
+        out.props = drinkRender(dd or { model = itemModel(item) })
         return out
     end
     local fid = boxFoodId(item, l.stack)
     if fid then
-        local label, image = boxFoodRender(findCraft(fid))
+        local label, image, _, _, imageCrop = boxFoodRender(findCraft(fid))
         out.label = label or out.label
         out.image = image or out.image
+        out.imageCrop = imageCrop or out.imageCrop
         return out
     end
     return out
@@ -963,12 +997,15 @@ local function compSpec(c)
     -- re-rendered (a soup has no tower). The client's takeout branch owns the pair.
     local fid = boxFoodId(c.item, c.stack)
     if fid then
-        local label, _, boxImage, boxCrop = boxFoodRender(findCraft(fid))
+        local label, itemImage, boxImage, boxCrop = boxFoodRender(findCraft(fid))
         spec.takeout = true
         spec.model   = BoxBaseModel()
         spec.lidModel = BoxLidModel()
         spec.label   = label
         spec.image   = boxImage -- makePart paints this on the quad inside the box
+        -- the food's CARD art (not the in-box picture): what the hover tooltip shows
+        -- for a made box sitting on the prep table
+        spec.itemImage = itemImage
         spec.imageCrop = boxCrop
         spec.stack   = nil
         if c.stack then spec.sig = TraySig(c.stack) end
@@ -2112,9 +2149,8 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                         entry.flavor = dd.output -- flavor key → per-flavor NUI card art (items/<output>.png)
                     end
                 end
-                -- a made takeout box (or a legacy bag food): the food's label + the
-                -- box pair with its image on the quad inside. The bag proper is the
-                -- sealed carrier.
+                -- a made takeout box: the food's label + the box pair with its
+                -- image on the quad inside. The bag proper is the sealed carrier.
                 local invFid = boxFoodId(item, v.meta)
                 if invFid then
                     local label, image, boxImage, boxCrop = boxFoodRender(findCraft(invFid))
@@ -2262,7 +2298,12 @@ local buildInvMeta = BuildInvMeta
 -- laid out in its box rather than on a tray.
 lib.callback.register("pickle_restaurants:consume:mealSpecs", function(src, d)
     local item = d and d.item
-    if not item or item ~= MealItem() then return { ok = false } end
+    -- A TAKEOUT BOX lays out on a diner's table too (modules/dining), so it is a
+    -- valid subject here alongside the serving tray. It renders as ONE part — the
+    -- box pair with the food's picture inside — not as its component layers, which
+    -- is what compSpec's takeout branch already produces.
+    local isBoxVessel = item ~= nil and item == BoxItemName()
+    if not item or not (item == MealItem() or isBoxVessel) then return { ok = false } end
     if not (Inventory and Inventory.GetItemSlots) then return { ok = false } end
     local meta
     for _, s in ipairs(Inventory.GetItemSlots(src, item) or {}) do
@@ -2270,6 +2311,33 @@ lib.callback.register("pickle_restaurants:consume:mealSpecs", function(src, d)
     end
     local stack = (type(meta) == "table" and type(meta.stack) == "table") and meta.stack or nil
     if not stack or #stack == 0 then return { ok = false } end
+    -- The box is a single serving: one part, whose "pile" owns EVERY layer (the
+    -- eat callback consumes the whole box regardless, so the id just has to point
+    -- at a real layer).
+    -- Mouthfuls left on a serving, so the diner's tooltip can show the count and
+    -- offer "finish it". Progress lives on the layer (`eaten`), written by the eat
+    -- callback — this only reads it.
+    local function bitesLeftFor(it, st, tracker)
+        local cs = ConsumeSpecFor(it, st)
+        local total = cs.bites or 1
+        local eaten = math.max(0, math.floor(tonumber(tracker and tracker.eaten) or 0))
+        return math.max(1, total - eaten)
+    end
+
+    if isBoxVessel then
+        local spec = compSpec({ item = item, stack = stack })
+        spec.id = 1
+        local disp = LayerDisplay({ item = item, stack = stack })
+        spec.label = disp and disp.label or spec.label
+        spec.bitesLeft = bitesLeftFor(item, stack, stack[1])
+        -- The TOOLTIP shows the food's ICON, never the picture painted inside the
+        -- box: `spec.image` is the in-box art (drawn on the quad at the box's own
+        -- shape) and reads wrong shrunk into a card. Its crop rides along so the
+        -- thumbnail frames the same rectangle the admin chose.
+        spec.tipImage = disp and disp.image or nil
+        spec.tipCrop  = disp and disp.imageCrop or nil
+        return { ok = true, parts = { spec } }
+    end
     local parts = {}
     for i, l in ipairs(stack) do
         local spec = compSpec(l)
@@ -2277,8 +2345,15 @@ lib.callback.register("pickle_restaurants:consume:mealSpecs", function(src, d)
         spec.dx, spec.dy = l.dx, l.dy
         local disp = LayerDisplay(l)
         spec.label = disp and disp.label or spec.label
-        spec.image = disp and disp.image or spec.image
+        -- A TAKEOUT BOX's `image` is the picture painted on the quad INSIDE it, which
+        -- compSpec already resolved from the food's `box_image`. LayerDisplay returns
+        -- the food's CARD art instead, and overwriting with it put the little item
+        -- icon in the box on a diner's table. Everything else takes the display image.
+        if not spec.takeout then spec.image = disp and disp.image or spec.image end
         spec.drink = disp and disp.drink or nil
+        spec.bitesLeft = bitesLeftFor(l.item, l.stack, l)
+        spec.tipImage = disp and disp.image or spec.image
+        spec.tipCrop  = disp and disp.imageCrop or nil
         parts[#parts + 1] = spec
     end
     return { ok = true, box = (stack[1] and stack[1].box) and true or nil, parts = parts }
@@ -2717,6 +2792,32 @@ local function boxBaseLayer(l)
     return (asm and type(asm.components) == "table" and isBoxBase(asm.components[1])) and true or false
 end
 
+-- Hand a finished VESSEL — a serving-tray meal, a Restaurant Bag, a takeout box —
+-- straight to the cook as a real inventory item, with its contents on the slot's
+-- metadata. These three are the things a customer LEAVES WITH, so they belong in
+-- someone's hands the moment they're crafted rather than sitting as a row in our
+-- own cooked-items table waiting to be collected.
+--
+-- Falls back to the tray when the item can't be given: `meal_item` / `bag_item` /
+-- `box_item` are what this resource GENERATES and are deliberately never a
+-- requirement — a server that hasn't installed them yet must still be able to make
+-- one (the tray holding is ours and always works). A full inventory falls back the
+-- same way, so a made meal is never destroyed by having nowhere to put it.
+-- Returns "inv" or "tray" so the caller can say which happened.
+-- The success test is a COUNT COMPARISON, not the return value: no bridge's
+-- Inventory.AddItem returns anything, so trusting it would send every vessel to the
+-- tray and this would be dead code. Counting also catches the case that matters —
+-- an inventory too full to take it — which no return value would have told us.
+local function giveVessel(src, rid, id, item, meta)
+    if ItemExists(item) and Inventory.AddItem then
+        local before = Inventory.GetItemCount(src, item) or 0
+        Inventory.AddItem(src, item, 1, BuildInvMeta(meta, item))
+        if (Inventory.GetItemCount(src, item) or 0) > before then return "inv" end
+    end
+    AddTray(rid, id, item, 1, meta)
+    return "tray"
+end
+
 lib.callback.register("pickle_restaurants:cooking:prepMakeMeal", function(src, d)
     local b = PrepBuilds[src]; if not b then return { ok = false } end
     if not HasPerm(b.rid, src, "cook") then return { ok = false } end
@@ -2771,8 +2872,8 @@ lib.callback.register("pickle_restaurants:cooking:prepMakeMeal", function(src, d
     -- the box flag rides the FIRST layer (layer tables are dicts, so it's JSON-safe;
     -- TraySig appends ^box) — that's what makes it set back down as its box
     if boxed then meta[1].box = true end
-    AddTray(b.rid, id, mealItem, 1, meta)
-    return { ok = true, output = mealItem,
+    local where = giveVessel(src, b.rid, id, mealItem, meta)
+    return { ok = true, output = mealItem, held = (where == "inv") or nil,
              label = (boxed and "Boxed " or "") .. GetItemLabel(mealItem) }
 end)
 
@@ -2809,9 +2910,9 @@ lib.callback.register("pickle_restaurants:cooking:prepMakeBox", function(src, d)
         meta[#meta + 1] = { item = l.item, top = l.top, half = l.half, stack = l.stack }
     end
     meta[1].craft = cr.id
-    AddTray(b.rid, id, boxItem, 1, meta)
+    local where = giveVessel(src, b.rid, id, boxItem, meta)
     local label = boxFoodRender(cr)
-    return { ok = true, output = boxItem, craft = cr.id,
+    return { ok = true, output = boxItem, craft = cr.id, held = (where == "inv") or nil,
              label = label or GetItemLabel(boxItem),
              sig = TraySig(meta), spec = compSpec({ item = boxItem, stack = meta }) }
 end)
@@ -2852,8 +2953,8 @@ lib.callback.register("pickle_restaurants:cooking:prepMakeBag", function(src, d)
             end
         end
     end
-    AddTray(b.rid, id, bagItem, 1, meta)
-    return { ok = true, output = bagItem, count = #meta,
+    local where = giveVessel(src, b.rid, id, bagItem, meta)
+    return { ok = true, output = bagItem, count = #meta, held = (where == "inv") or nil,
              label = GetItemLabel(bagItem),
              sig = TraySig(meta), spec = compSpec({ item = bagItem, stack = meta }) }
 end)
@@ -3047,15 +3148,19 @@ lib.callback.register("pickle_restaurants:cooking:prepDecompose", function(src, 
 
     -- Products/meals are stored at cheese 0 — in the tray, or (source "inv") on an
     -- inventory slot whose metadata carries the exact build/layout.
+    -- NOTE the inv helpers take (src, item, sig) — NO cheese argument, unlike their
+    -- tray counterparts. Passing one shifted `sig` into the cheese slot, so the sig
+    -- arrived as a number, matched no variation, and every inventory-held product
+    -- (meals included) reported "none to take" when dragged onto the prep table.
     local meta
     if d.source == "inv" then
-        if invVariationCount(src, item, 0, sig) < 1 then return { ok = false, error = _L("cook_none_to_take") } end
-        meta = invVariationMeta(src, item, 0, sig)
+        if invVariationCount(src, item, sig) < 1 then return { ok = false, error = _L("cook_none_to_take") } end
+        meta = invVariationMeta(src, item, sig)
         if isMeal and not (type(meta) == "table" and #meta > 0) then
             return { ok = false, error = _L("cook_meal_empty") }
         end
         if isFinishedMeta(meta) then return { ok = false, error = _L("cook_cant_take_apart") } end
-        removeInvVariation(src, item, 0, sig, 1)
+        removeInvVariation(src, item, sig, 1)
     else
         if GetTrayCount(rid, id, item, sig) < 1 then return { ok = false, error = _L("cook_none_to_take") } end
         -- The exact stack this was built from (order/cheese/bun-half intact), else recipe.
@@ -3144,8 +3249,8 @@ lib.callback.register("pickle_restaurants:cooking:prepDecomposePeek", function(s
     local sig = (type(d.sig) == "string") and d.sig or nil
     local meta
     if d.source == "inv" then
-        if invVariationCount(src, item, 0, sig) < 1 then return { ok = false } end
-        meta = invVariationMeta(src, item, 0, sig)
+        if invVariationCount(src, item, sig) < 1 then return { ok = false } end
+        meta = invVariationMeta(src, item, sig)
     else
         if GetTrayCount(prop.restaurant_id, id, item, sig) < 1 then return { ok = false } end
         meta = TrayTopMeta(prop.restaurant_id, id, item, sig)
@@ -3212,3 +3317,37 @@ AddEventHandler("pickle_restaurants:shellMoved", function(rid, old, new)
         end
     end
 end)
+
+-- ─── kitchen fires: the cooking module's window for modules/cookfx ───────────
+-- The fire module owns the burn → ignite → extinguish state machine, but not the
+-- food. These two functions are all it needs, so `CookingItems` stays private and
+-- there is one owner of what a station is holding.
+
+-- Every item currently sitting BURNT on a station: { uid, prop_id, rid }. A
+-- dual-sided patty counts once EITHER face has burnt (that's the face making the
+-- smoke), which is exactly what combineDualState already decides for the hand-back.
+function BurntCookingItems()
+    local out = {}
+    for uid, it in pairs(CookingItems) do
+        local burnt = (it.sides and combineDualState(it.sides) == "burnt") or it.state == "burnt"
+        if burnt and it.prop_id then
+            out[#out + 1] = { uid = uid, prop_id = it.prop_id, rid = it.rid }
+        end
+    end
+    return out
+end
+
+-- Destroy everything a station is holding — a fire ruins the lot, so putting one
+-- out costs you the food that started it. Returns how many items went.
+function DestroyStationCookingItems(propId)
+    propId = tonumber(propId)
+    local n = 0
+    for uid, it in pairs(CookingItems) do
+        if it.prop_id == propId then
+            CookingItems[uid] = nil
+            TriggerClientEvent("pickle_restaurants:cooking:remove", -1, uid)
+            n = n + 1
+        end
+    end
+    return n
+end

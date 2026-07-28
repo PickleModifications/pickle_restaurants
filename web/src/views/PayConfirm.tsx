@@ -58,7 +58,7 @@ export default function PayConfirm({ data }: { data: any }) {
 
           <div className="receipt-rule my-3" />
 
-          {/* line items — mono, right-aligned prices; combos print as one grouped row */}
+          {/* line items — mono, right-aligned prices */}
           <div className="space-y-1 font-mono text-xs">
             {groupLines(lines).map((b, i) => {
               if (b.type === "item") {
@@ -75,20 +75,7 @@ export default function PayConfirm({ data }: { data: any }) {
                   </div>
                 );
               }
-              const price = b.comps.reduce((s, c) => s + (c.price || 0), 0);
-              return (
-                <div key={i}>
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="min-w-0">{b.qty}× #{b.number} {b.label}</span>
-                    <span className="shrink-0 tabular-nums">{money(price * b.qty)}</span>
-                  </div>
-                  {b.comps.map((c, j) => (
-                    <div key={j} className="pl-4 text-[10px] leading-snug text-muted-foreground">
-                      {c.label}{c.mods && c.mods.length > 0 ? "  " + modText(c.mods) : ""}
-                    </div>
-                  ))}
-                </div>
-              );
+              return null;
             })}
           </div>
 

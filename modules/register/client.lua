@@ -145,11 +145,11 @@ end
 
 -- ─── idle board state (the always-on display) ────────────────────────────────
 
--- The static-ish part of a restaurant's idle board (label/theme/catalog/combos), seeded
+-- The static-ish part of a restaurant's idle board (label/theme/catalog), seeded
 -- once from a PUBLIC callback — the same display-safe data the menu/orders boards show
 -- (no balance/commission, no nearby players; those are only in the perm-gated payload a
 -- cashier gets on interact).
-local IdleData   = {}   -- [rid] = { label, theme, catalog, combos }
+local IdleData   = {}   -- [rid] = { label, theme, catalog }
 local seededIdle = {}   -- [rid] = true once the one-shot seed has been requested
 local LiveTickets = {}  -- [rid] = the live open-ticket list (off the orders broadcast)
 
@@ -168,7 +168,7 @@ local function seedIdle(rid)
     CreateThread(function()
         local res = lib.callback.await("pickle_restaurants:register:getPublic", false, { id = rid })
         if not (res and res.ok) then seededIdle[rid] = nil; return end
-        IdleData[rid] = { label = res.label, theme = res.theme, catalog = res.catalog, combos = res.combos }
+        IdleData[rid] = { label = res.label, theme = res.theme, catalog = res.catalog }
         if LiveTickets[rid] == nil then LiveTickets[rid] = res.tickets or {} end
         if shownRid == rid then pushedRid = nil end -- have data now → (re)push this tick
     end)
@@ -181,7 +181,7 @@ local function idlePayload(rid)
     -- hides the staff-only chrome (balance, close button) — there's no cursor to drive
     -- them anyway until someone interacts.
     return { restaurantId = rid, label = d.label, theme = d.theme, idle = true,
-             catalog = d.catalog, combos = d.combos, tickets = LiveTickets[rid] or {} }
+             catalog = d.catalog, tickets = LiveTickets[rid] or {} }
 end
 
 -- Nearest restaurant that has a counter placed, by the prop's own world position — no
@@ -378,6 +378,13 @@ CreateThread(function()
     while true do
         if active then
             DisableAllControlActions(0)
+            -- ESC steps away from the register; it must never also reach the frontend.
+            -- DisableAllControlActions alone doesn't stop it — force the menu closed
+            -- (same pattern as the gizmo/placement loops).
+            if IsPauseMenuActive() then
+                SetFrontendActive(false)
+                ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
+            end
             HideHudAndRadarThisFrame()
             helpThisFrame()
 

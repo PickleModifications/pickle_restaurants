@@ -21,7 +21,10 @@ local PLACEABLE_MODELS = {
 lib.callback.register("pickle_restaurants:placement:saveProp", function(src, d)
     local id = tonumber(d.restaurant_id)
     if not GetRestaurant(id) then return { ok = false, error = _L("placement_no_restaurant") } end
-    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    -- ADMIN ONLY: placing/moving/removing world entities is a server-layout job, not
+    -- a restaurant manager's. The boss panel no longer offers it at all; this is the
+    -- gate that actually enforces it (the NUI is untrusted).
+    if not IsPlayerAdmin(src) then return { ok = false, error = _L("no_permission") } end
     if PLACEABLE_MODELS[d.prop_type] ~= d.model then return { ok = false, error = _L("placement_invalid_station") } end
 
     local propId = MySQL.insert.await(
@@ -38,23 +41,81 @@ lib.callback.register("pickle_restaurants:placement:saveProp", function(src, d)
     return { ok = true, id = propId }
 end)
 
+-- The submitted seat style, validated against the shared catalogue. The NUI (and
+-- the placement client) are untrusted, so an unknown id becomes the default rather
+-- than being written through to a row nothing can then sit on.
+local function SeatStyleId(v)
+    for _, s in ipairs(Config.SeatStyles) do
+        if s.id == v then return v end
+    end
+    return Config.DefaultSeatStyle
+end
+
+-- One optional point on a seat (its stand-up spot, its meal-tray spot). Coerced to
+-- plain numbers here so a malformed payload can't put a string (or a NaN) into a row
+-- that a client will later hand straight to SetEntityCoords. nil = not placed, and
+-- each consumer has its own fallback for that.
+local function SeatPoint(v)
+    if type(v) ~= "table" then return nil end
+    local x, y, z = tonumber(v.x), tonumber(v.y), tonumber(v.z)
+    if not (x and y and z) then return nil end
+    return { x = x + 0.0, y = y + 0.0, z = z + 0.0, heading = (tonumber(v.heading) or 0.0) + 0.0 }
+end
+
 -- A seat is an INVISIBLE sit anchor (prop_type "seat"): stored in the same props
 -- table as stations, but nothing spawns in the world — players sit on the
 -- restaurant's own furniture at this point/heading. No model is validated (there's
 -- no runtime prop); the placement preview is a ghost ped, position + heading only.
+--
+-- metadata.style names which Config.SeatStyles entry it is — the scenario the
+-- seating module plays, i.e. whether this anchor is a dining chair, a bar stool or
+-- a booth bench. A row without one sits as the default style.
 lib.callback.register("pickle_restaurants:placement:saveSeat", function(src, d)
     local id = tonumber(d.restaurant_id)
     if not GetRestaurant(id) then return { ok = false, error = _L("placement_no_restaurant") } end
-    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    -- ADMIN ONLY: placing/moving/removing world entities is a server-layout job, not
+    -- a restaurant manager's. The boss panel no longer offers it at all; this is the
+    -- gate that actually enforces it (the NUI is untrusted).
+    if not IsPlayerAdmin(src) then return { ok = false, error = _L("no_permission") } end
 
+    local metadata = { style = SeatStyleId(d.style), exit = SeatPoint(d.exit), tray = SeatPoint(d.tray) }
     local propId = MySQL.insert.await(
-        "INSERT INTO pickle_restaurant_props (restaurant_id, prop_type, model, x, y, z, heading) VALUES (?, 'seat', '', ?, ?, ?, ?)",
-        { id, d.x + 0.0, d.y + 0.0, d.z + 0.0, (d.heading or 0.0) + 0.0 })
+        "INSERT INTO pickle_restaurant_props (restaurant_id, prop_type, model, x, y, z, heading, metadata) VALUES (?, 'seat', '', ?, ?, ?, ?, ?)",
+        { id, d.x + 0.0, d.y + 0.0, d.z + 0.0, (d.heading or 0.0) + 0.0, json.encode(metadata) })
     if not propId then return { ok = false } end
 
     local prop = {
         id = propId, restaurant_id = id, prop_type = "seat", model = "",
-        x = d.x + 0.0, y = d.y + 0.0, z = d.z + 0.0, heading = (d.heading or 0.0) + 0.0, metadata = {},
+        x = d.x + 0.0, y = d.y + 0.0, z = d.z + 0.0, heading = (d.heading or 0.0) + 0.0,
+        metadata = metadata,
+    }
+    PropCache[propId] = prop
+    TriggerClientEvent("pickle_restaurants:propPlaced", -1, prop)
+    return { ok = true, id = propId }
+end)
+
+-- A DELIVERY DOOR is an invisible anchor (prop_type "delivery_door") stored like a
+-- seat: point + heading, no model, no runtime prop. It is where an NPC delivery
+-- order sends the driver — the doorstep they knock on — and the heading is the way
+-- the resident FACES when they open it, i.e. out of the doorway toward the street.
+-- NPC deliveries pick a random one of these; a restaurant with none falls back to
+-- the old random-bearing drop point, so this is additive.
+lib.callback.register("pickle_restaurants:placement:saveDeliveryDoor", function(src, d)
+    local id = tonumber(d.restaurant_id)
+    if not GetRestaurant(id) then return { ok = false, error = _L("placement_no_restaurant") } end
+    if not IsPlayerAdmin(src) then return { ok = false, error = _L("no_permission") } end
+    local x, y, z = tonumber(d.x), tonumber(d.y), tonumber(d.z)
+    if not (x and y and z) then return { ok = false } end
+
+    local propId = MySQL.insert.await(
+        "INSERT INTO pickle_restaurant_props (restaurant_id, prop_type, model, x, y, z, heading) VALUES (?, 'delivery_door', '', ?, ?, ?, ?)",
+        { id, x + 0.0, y + 0.0, z + 0.0, (tonumber(d.heading) or 0.0) + 0.0 })
+    if not propId then return { ok = false } end
+
+    local prop = {
+        id = propId, restaurant_id = id, prop_type = "delivery_door", model = "",
+        x = x + 0.0, y = y + 0.0, z = z + 0.0, heading = (tonumber(d.heading) or 0.0) + 0.0,
+        metadata = {},
     }
     PropCache[propId] = prop
     TriggerClientEvent("pickle_restaurants:propPlaced", -1, prop)
@@ -75,7 +136,10 @@ local VIRTUAL_TARGETS = {
 lib.callback.register("pickle_restaurants:placement:saveVirtualPoint", function(src, d)
     local id = tonumber(d.restaurant_id)
     if not GetRestaurant(id) then return { ok = false, error = _L("placement_no_restaurant") } end
-    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    -- ADMIN ONLY: placing/moving/removing world entities is a server-layout job, not
+    -- a restaurant manager's. The boss panel no longer offers it at all; this is the
+    -- gate that actually enforces it (the NUI is untrusted).
+    if not IsPlayerAdmin(src) then return { ok = false, error = _L("no_permission") } end
     if not VIRTUAL_TARGETS[d.target] then return { ok = false, error = _L("placement_invalid_station") } end
     local x, y, z = tonumber(d.x), tonumber(d.y), tonumber(d.z)
     if not (x and y and z) then return { ok = false } end
@@ -131,7 +195,10 @@ end)
 lib.callback.register("pickle_restaurants:placement:saveCounter", function(src, d)
     local id = tonumber(d.restaurant_id)
     if not GetRestaurant(id) then return { ok = false, error = _L("placement_no_restaurant") } end
-    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    -- ADMIN ONLY: placing/moving/removing world entities is a server-layout job, not
+    -- a restaurant manager's. The boss panel no longer offers it at all; this is the
+    -- gate that actually enforces it (the NUI is untrusted).
+    if not IsPlayerAdmin(src) then return { ok = false, error = _L("no_permission") } end
 
     local propId = MySQL.insert.await(
         "INSERT INTO pickle_restaurant_props (restaurant_id, prop_type, model, x, y, z, heading) VALUES (?, 'counter', '', ?, ?, ?, ?)",
@@ -155,7 +222,10 @@ end)
 lib.callback.register("pickle_restaurants:placement:saveVirtualRegister", function(src, d)
     local id = tonumber(d.restaurant_id)
     if not GetRestaurant(id) then return { ok = false, error = _L("placement_no_restaurant") } end
-    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    -- ADMIN ONLY: placing/moving/removing world entities is a server-layout job, not
+    -- a restaurant manager's. The boss panel no longer offers it at all; this is the
+    -- gate that actually enforces it (the NUI is untrusted).
+    if not IsPlayerAdmin(src) then return { ok = false, error = _L("no_permission") } end
     local x, y, z = tonumber(d.x), tonumber(d.y), tonumber(d.z)
     if not (x and y and z) then return { ok = false } end
 
@@ -181,13 +251,30 @@ lib.callback.register("pickle_restaurants:placement:updateProp", function(src, d
     local propId = tonumber(d.id)
     local prop = PropCache[propId]
     if not prop then return { ok = false } end
-    if not HasPerm(prop.restaurant_id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    -- ADMIN ONLY: placing/moving/removing world entities is a server-layout job, not
+    -- a restaurant manager's. The boss panel no longer offers it at all; this is the
+    -- gate that actually enforces it (the NUI is untrusted).
+    if not IsPlayerAdmin(src) then return { ok = false, error = _L("no_permission") } end
     local x, y, z = tonumber(d.x), tonumber(d.y), tonumber(d.z)
     if not (x and y and z) then return { ok = false } end
 
     prop.x, prop.y, prop.z, prop.heading = x + 0.0, y + 0.0, z + 0.0, (tonumber(d.heading) or 0.0) + 0.0
     MySQL.update.await("UPDATE pickle_restaurant_props SET x = ?, y = ?, z = ?, heading = ? WHERE id = ?",
         { prop.x, prop.y, prop.z, prop.heading, propId })
+    -- Repositioning a seat also re-picks its style (the admin chooses one to preview
+    -- the right ghost pose before dragging), so the same edit writes it back. Only
+    -- for seats, and only when one was submitted — every other prop_type ignores it.
+    if prop.prop_type == "seat" and d.style then
+        prop.metadata = prop.metadata or {}
+        prop.metadata.style = SeatStyleId(d.style)
+        -- Cancelling the exit gizmo CLEARS the exit point (nil), which is how you
+        -- take one back off a seat — the edit always re-asks, so "no answer" has to
+        -- mean "none" or a placed exit could never be removed.
+        prop.metadata.exit = SeatPoint(d.exit)
+        prop.metadata.tray = SeatPoint(d.tray)
+        MySQL.update.await("UPDATE pickle_restaurant_props SET metadata = ? WHERE id = ?",
+            { json.encode(prop.metadata), propId })
+    end
     if prop.prop_type == "counter" then RecomputeCounterAnchor(prop.restaurant_id) end
     SyncToClient(-1) -- respawn the prop at its new transform for everyone
     return { ok = true }
@@ -202,7 +289,10 @@ lib.callback.register("pickle_restaurants:placement:saveNpcSpawn", function(src,
     local id = tonumber(d.restaurant_id)
     local r = GetRestaurant(id)
     if not r then return { ok = false, error = _L("placement_no_restaurant") } end
-    if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    -- ADMIN ONLY (not `manage_props`): where AI customers spawn into the world is a
+    -- server-layout call — a spot that has to be clear and reachable — not something
+    -- a restaurant's own managers set. Same gate as the kitchen shell.
+    if not IsPlayerAdmin(src) then return { ok = false, error = _L("no_permission") } end
     local x, y, z = tonumber(d.x), tonumber(d.y), tonumber(d.z)
     if not (x and y and z) then return { ok = false } end
 
@@ -216,7 +306,10 @@ lib.callback.register("pickle_restaurants:placement:removeProp", function(src, d
     local propId = tonumber(d.id)
     local prop = PropCache[propId]
     if not prop then return { ok = false } end
-    if not HasPerm(prop.restaurant_id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
+    -- ADMIN ONLY: placing/moving/removing world entities is a server-layout job, not
+    -- a restaurant manager's. The boss panel no longer offers it at all; this is the
+    -- gate that actually enforces it (the NUI is untrusted).
+    if not IsPlayerAdmin(src) then return { ok = false, error = _L("no_permission") } end
     MySQL.update.await("DELETE FROM pickle_restaurant_props WHERE id = ?", { propId })
     PropCache[propId] = nil
     TriggerClientEvent("pickle_restaurants:propRemoved", -1, propId)

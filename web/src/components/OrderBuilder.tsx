@@ -6,7 +6,7 @@ import { money, cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { flavorModImageUrl, itemImageUrl } from "@/lib/localImages";
 import {
-  Plus, Minus, Trash2, User, Receipt, Check, X, Loader2, ImageOff, SlidersHorizontal, Ban, UtensilsCrossed, ShoppingBag,
+  Plus, Minus, Trash2, User, Receipt, Check, X, Loader2, ImageOff, SlidersHorizontal, Ban, ShoppingBag,
 } from "lucide-react";
 
 // Shared point-of-sale building blocks used by the staff register — both the
@@ -20,42 +20,14 @@ import {
 
 export type Mod = { id: string; label: string; item?: string; price?: number; default?: boolean; image?: string; group?: string; color?: string };
 export type Cat = { key: string; item: string; variant: string; label: string; kind: string; price: number; image?: string; modifiers?: Mod[] };
-// A combo option is just a sellable Cat entry surfaced inside a slot (carries its
-// own modifiers). A slot with >1 option is a "choose one"; ==1 is a fixed item.
-export type ComboOpt = { key: string; item: string; variant: string; label: string; image?: string; kind: string; modifiers?: Mod[] };
-export type ComboSlot = { label: string; options: ComboOpt[] };
-export type Combo = { comboId: number; number: number; label: string; price: number; slots: ComboSlot[]; photo?: { url: string; crop?: any } | null };
 export type LineMod = { id?: string; label: string; price?: number; added?: boolean; removed?: boolean; image?: string; color?: string };
-// A server-resolved ticket line. `combo` groups the component lines of one combo
-// bundle (all sharing the same id + inst, emitted contiguously by the server).
-export type LineCombo = { id: number; number: number; label: string; inst: number; seq: number; size: number };
-export type Line = { item: string; variant: string; label: string; price: number; qty: number; kind: string; image?: string; mods?: LineMod[]; combo?: LineCombo };
+export type Line = { item: string; variant: string; label: string; price: number; qty: number; kind: string; image?: string; mods?: LineMod[] };
 
-// Group a ticket's lines into render blocks: a lone item, or a combo (its number,
-// label, qty + component lines). Combo component lines are contiguous and share
-// combo.id + combo.inst, so a single pass collapses them.
-export type LineBlock =
-  | { type: "item"; line: Line }
-  | { type: "combo"; number: number; label: string; qty: number; comps: Line[] };
+// Group a ticket's lines into render blocks. Kept as a (now trivial) indirection so
+// the ticket renderers stay one shape regardless of how lines are grouped later.
+export type LineBlock = { type: "item"; line: Line };
 export function groupLines(lines: Line[]): LineBlock[] {
-  const out: LineBlock[] = [];
-  for (let i = 0; i < lines.length; ) {
-    const l = lines[i];
-    if (l.combo) {
-      const comps: Line[] = [];
-      let j = i;
-      while (j < lines.length && lines[j].combo
-        && lines[j].combo!.id === l.combo.id && lines[j].combo!.inst === l.combo.inst) {
-        comps.push(lines[j]); j++;
-      }
-      out.push({ type: "combo", number: l.combo.number, label: l.combo.label, qty: l.qty, comps });
-      i = j;
-    } else {
-      out.push({ type: "item", line: l });
-      i++;
-    }
-  }
-  return out;
+  return lines.map((line) => ({ type: "item" as const, line }));
 }
 // A selected option to render as an image chip (added extra, or a removed default).
 export type OptView = { label: string; image?: string; color?: string };
@@ -76,21 +48,16 @@ export type Fulfill = { ok: boolean; mealOptions?: MealOption[]; missing?: strin
 // `npc` flags an AI walk-in customer; those carry a patience countdown (`expiresIn`
 // seconds left at send time, ticked down locally) out of `patience` total seconds
 // (the radial's denominator). Player tickets have npc=false and no timer fields.
-export type Ticket = { orderId: number; ticket: number; customer: string; lines: Line[]; total: number; fulfill?: Fulfill; npc?: boolean; expiresIn?: number; patience?: number };
+// `channel` is how the order arrived (delivery / pickup / dine_in / walk_in), resolved
+// server-side by OrderChannel; `npc` is orthogonal (an AI customer can order delivery).
+// `address` / `driver` are the delivery's drop point and whoever claimed the run.
+export type Ticket = { orderId: number; ticket: number; customer: string; lines: Line[]; total: number; fulfill?: Fulfill; npc?: boolean; expiresIn?: number; patience?: number; channel?: string; orderType?: string; address?: string; scheduled?: string; driver?: { name?: string; server?: number } };
 export type Near = { id: number; name: string };
-// A cart entry: either a single catalog item (which item, how many, selected
-// modifier ids) or a combo bundle (which combo, how many, and per-slot chosen
-// key + that item's selected modifier ids).
-export type CartEntry =
-  | { type: "item"; catKey: string; qty: number; sel: string[] }
-  | { type: "combo"; comboId: number; qty: number; picks: { key: string; sel: string[] }[] };
+// A cart entry: one catalog item — which item, how many, selected modifier ids.
+export type CartEntry = { type: "item"; catKey: string; qty: number; sel: string[] };
 
-// A resolved cart row for rendering/pricing: a single item, or a combo with its
-// per-slot resolved components (chosen option + its added/removed mods).
-type ItemBlock = { ck: string; type: "item"; cat: Cat; qty: number; price: number; added: Mod[]; removed: Mod[] };
-type ComboComp = { opt: ComboOpt; added: Mod[]; removed: Mod[] };
-type ComboBlock = { ck: string; type: "combo"; combo: Combo; qty: number; price: number; comps: ComboComp[] };
-type CartBlock = ItemBlock | ComboBlock;
+// A resolved cart row for rendering/pricing: the item + its added/removed mods.
+type CartBlock = { ck: string; type: "item"; cat: Cat; qty: number; price: number; added: Mod[]; removed: Mod[] };
 
 // Coerce a server list to a real array. Lua/JSON encodes an EMPTY list as `{}`
 // (an object, not `[]`), so a plain `x || []` would keep that `{}` and any
@@ -132,24 +99,9 @@ function FlavorThumb({ src, fallbackSrc, color, className }: { src?: string; fal
   return <div className={cn("grid place-items-center rounded bg-muted/60 text-muted-foreground", className)}><ImageOff className="h-1/2 w-1/2" /></div>;
 }
 
-// Combo photo (owner-set url + crop). The precise crop is honoured on the menu
-// board; here a cover image is enough. Falls back to a utensil placeholder.
-export function ComboThumb({ photo, label, className }: { photo?: { url: string; crop?: any } | null; label?: string; className?: string }) {
-  const [broken, setBroken] = useState(false);
-  useEffect(() => setBroken(false), [photo?.url]);
-  if (!photo?.url || broken) {
-    return (
-      <div className={cn("flex items-center justify-center bg-muted/60 text-muted-foreground", className)}>
-        <UtensilsCrossed className="h-1/3 w-1/3" />
-      </div>
-    );
-  }
-  return <img src={photo.url} onError={() => setBroken(true)} className={cn("object-cover", className)} alt={label} />;
-}
-
 // The image a drink card/line/option shows. A drink's own image is the empty
 // generic drink item, so it borrows a real flavor's art instead of a placeholder:
-// the CHOSEN flavor when the selection is known (cart line, combo pick), else the
+// the CHOSEN flavor when the selection is known (a cart line), else the
 // FIRST flavor (catalog grid card, mirroring the dialog header). Returns undefined
 // for non-drinks (callers keep the item's own image); every caller still falls back
 // to items/<item>.png.
@@ -288,11 +240,10 @@ function CustomerChip({ active, onClick, children }: { active: boolean; onClick:
 // explicitly while keeping register SEMANTICS (the customer picker + "Charge" +
 // createOrder). The full-screen register NUI leaves it off for the dense POS layout.
 export function OrderBuilder({
-  id, catalog, combos, nearby, mode, big: bigProp, onOrdered,
+  id, catalog, nearby, mode, big: bigProp, onOrdered,
 }: {
   id: number;
   catalog: Cat[];
-  combos?: Combo[];
   nearby?: Near[];
   mode: "register" | "kiosk";
   big?: boolean;
@@ -305,31 +256,18 @@ export function OrderBuilder({
   const [modFor, setModFor] = useState<Cat | null>(null); // item being customised
   const [modSel, setModSel] = useState<string[]>([]);
   const [modQty, setModQty] = useState(1); // how many to add from the item dialog
-  const [comboFor, setComboFor] = useState<Combo | null>(null); // combo being built
-  const [comboPicks, setComboPicks] = useState<{ key: string; sel: string[] }[]>([]);
   const [reviewing, setReviewing] = useState(false); // kiosk: the cart-review sheet is open
 
-  const comboList = useMemo(() => arr<Combo>(combos), [combos]);
   const kinds = useMemo(() => Array.from(new Set(catalog.map((c) => c.kind))), [catalog]);
-  const shown = kind === "all" || kind === "combo" ? catalog : catalog.filter((c) => c.kind === kind);
-  const showCombos = comboList.length > 0 && (kind === "all" || kind === "combo");
-  const showItems = kind !== "combo";
+  const shown = kind === "all" ? catalog : catalog.filter((c) => c.kind === kind);
   const byKey = useMemo(() => Object.fromEntries(catalog.map((c) => [c.key, c])), [catalog]);
-  const comboById = useMemo(() => Object.fromEntries(comboList.map((c) => [c.comboId, c])), [comboList]);
 
   const itemCartKey = (catKey: string, sel: string[]) => "i#" + catKey + "#" + [...sel].sort().join(",");
-  const comboCartKey = (comboId: number, picks: { key: string; sel: string[] }[]) =>
-    "c#" + comboId + "#" + picks.map((p) => p.key + ":" + [...p.sel].sort().join("|")).join(",");
 
   const addItemEntry = (catKey: string, sel: string[], qty = 1) => setCart((c) => {
     const ck = itemCartKey(catKey, sel);
     const prev = c[ck];
     return { ...c, [ck]: { type: "item", catKey, sel, qty: Math.min(10, (prev?.qty || 0) + qty) } };
-  });
-  const addComboEntry = (comboId: number, picks: { key: string; sel: string[] }[]) => setCart((c) => {
-    const ck = comboCartKey(comboId, picks);
-    const prev = c[ck];
-    return { ...c, [ck]: { type: "combo", comboId, picks, qty: Math.min(10, (prev?.qty || 0) + 1) } };
   });
   const changeQty = (ck: string, delta: number) => setCart((c) => {
     const prev = c[ck]; if (!prev) return c;
@@ -356,15 +294,6 @@ export function OrderBuilder({
     setModSel(seedSel(c));
     setModQty(1);
   };
-  // Click a combo: open the builder seeded with each slot's first option + that
-  // option's default modifiers (and a drink slot's first flavor).
-  const clickCombo = (combo: Combo) => {
-    setComboFor(combo);
-    setComboPicks(combo.slots.map((slot) => {
-      const opt = slot.options[0];
-      return { key: opt?.key || "", sel: seedSel(opt) };
-    }));
-  };
   // Ungrouped modifiers toggle freely; a grouped modifier is single-choice —
   // picking one clears the rest of its group, clicking the picked one = none.
   const toggleModOn = (mods: Mod[], sel: string[], m: Mod): string[] => {
@@ -374,41 +303,19 @@ export function OrderBuilder({
     return sel.includes(m.id) ? without : [...without, m.id];
   };
   const toggleMod = (m: Mod) => setModSel((s) => toggleModOn(modFor?.modifiers || [], s, m));
-  // combo slot: pick a different option (resets that slot's modifiers to its defaults)
-  const pickComboOption = (si: number, opt: ComboOpt) => setComboPicks((ps) =>
-    ps.map((p, i) => (i === si ? { key: opt.key, sel: seedSel(opt) } : p)));
-  const toggleComboMod = (si: number, opt: ComboOpt, m: Mod) => setComboPicks((ps) =>
-    ps.map((p, i) => (i === si ? { ...p, sel: toggleModOn(opt.modifiers || [], p.sel, m) } : p)));
-
-  // Cart blocks — either a single item line or a grouped combo (its components).
+  // Cart blocks — one resolved row per cart entry.
   const blocks = Object.entries(cart).map(([ck, e]) => {
-    if (e.type === "item") {
-      const cat = byKey[e.catKey];
-      if (!cat) return null;
-      const { added, removed, extra } = resolveMods(cat, e.sel);
-      return { ck, type: "item" as const, cat, qty: e.qty, price: cat.price + extra, added, removed };
-    }
-    const combo = comboById[e.comboId];
-    if (!combo) return null;
-    let extra = 0;
-    const comps = combo.slots.map((slot, i) => {
-      const pick = e.picks[i];
-      const opt = slot.options.find((o) => o.key === pick?.key) || slot.options[0];
-      const r = resolveMods(opt as unknown as Cat, pick?.sel || []);
-      extra += r.extra;
-      return { opt, added: r.added, removed: r.removed };
-    });
-    return { ck, type: "combo" as const, combo, qty: e.qty, price: combo.price + extra, comps };
+    const cat = byKey[e.catKey];
+    if (!cat) return null;
+    const { added, removed, extra } = resolveMods(cat, e.sel);
+    return { ck, type: "item" as const, cat, qty: e.qty, price: cat.price + extra, added, removed };
   }).filter(Boolean) as CartBlock[];
   const total = blocks.reduce((s, b) => s + b.price * b.qty, 0);
   const count = blocks.reduce((s, b) => s + b.qty, 0);
 
   // The wire form of the cart: keys + counts + modifier ids, never labels or prices —
   // the server re-derives those from its own priced catalog.
-  const cartWire = () => Object.values(cart).map((e) =>
-    e.type === "combo"
-      ? { combo: e.comboId, qty: e.qty, slots: e.picks.map((p) => ({ key: p.key, mods: p.sel })) }
-      : { key: e.catKey, qty: e.qty, mods: e.sel });
+  const cartWire = () => Object.values(cart).map((e) => ({ key: e.catKey, qty: e.qty, mods: e.sel }));
 
   const submit = async () => {
     if (blocks.length === 0 || busy) return;
@@ -431,12 +338,6 @@ export function OrderBuilder({
   const selFlavorId = modFor?.modifiers?.find((m) => modSel.includes(m.id) && m.id.startsWith("flavor:"))?.id;
   const modHeaderSrc = flavorModImageUrl(selFlavorId) ?? modFor?.image;
   const modHeaderFallback = itemImageUrl(modFor?.item);
-  const comboExtra = comboFor
-    ? comboFor.slots.reduce((s, slot, i) => {
-        const opt = slot.options.find((o) => o.key === comboPicks[i]?.key) || slot.options[0];
-        return s + resolveMods(opt as unknown as Cat, comboPicks[i]?.sel || []).extra;
-      }, 0)
-    : 0;
   // Large in-world layout: the kiosk always, and the staff register DUI on request.
   // Drives every SIZE/LAYOUT decision below; `mode` still drives BEHAVIOUR (who-pays
   // picker, submit event + button copy), so the register DUI reads big but still
@@ -454,10 +355,9 @@ export function OrderBuilder({
     </div>
   );
 
-  // One cart row — a single item or a combo bundle with its component lines.
-  // Shared by the register receipt (`big=false`) and the kiosk review (`big=true`).
+  // One cart row. Shared by the register receipt (`big=false`) and the kiosk
+  // review sheet (`big=true`).
   const cartLine = (b: CartBlock, big = false) => {
-    if (b.type === "item") {
       return (
         <div key={b.ck} className={cn("flex items-center rounded-sm bg-muted/50", big ? "gap-4 p-4" : "gap-2 p-1.5")}>
           <Thumb src={drinkCardSrc(b.cat, b.added) ?? b.cat.image} fallbackSrc={itemImageUrl(b.cat.item)} className={cn("shrink-0", big ? "h-16 w-16" : "h-8 w-8")} />
@@ -469,37 +369,10 @@ export function OrderBuilder({
           {qtyCtrl(b, big)}
         </div>
       );
-    }
-    return (
-      <div key={b.ck} className={cn("rounded-sm bg-muted/50", big ? "p-4" : "p-1.5")}>
-        <div className={cn("flex items-center", big ? "gap-4" : "gap-2")}>
-          <span className={cn("grid shrink-0 place-items-center rounded bg-primary/15 font-mono font-bold text-primary tabular-nums", big ? "h-16 w-16 text-lg" : "h-8 w-8 text-xs")}>#{b.combo.number}</span>
-          <div className="min-w-0 flex-1">
-            <div className={cn("truncate font-semibold", big ? "text-lg" : "text-xs")}>{b.combo.label}</div>
-            <div className={cn("font-mono tabular-nums text-muted-foreground", big ? "text-base" : "text-[11px]")}>{money(b.price)}</div>
-          </div>
-          {qtyCtrl(b, big)}
-        </div>
-        <div className={cn("mt-1 space-y-0.5 border-l border-border/60", big ? "pl-3" : "pl-2")}>
-          {b.comps.map((comp, i) => (
-            <div key={i} className="flex items-center gap-1.5">
-              <Thumb src={drinkCardSrc(comp.opt, comp.added) ?? comp.opt.image} fallbackSrc={itemImageUrl(comp.opt.item)} className={cn("shrink-0", big ? "h-8 w-8" : "h-5 w-5")} />
-              <span className={cn("truncate", big ? "text-base" : "text-[11px]")}>{comp.opt.label}</span>
-              {(comp.added.length > 0 || comp.removed.length > 0) && (
-                <span className="flex items-center gap-0.5">
-                  {comp.added.map((o, j) => <OptChip key={"a" + j} o={o} />)}
-                  {comp.removed.map((o, j) => <OptChip key={"r" + j} o={o} removed />)}
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
-    );
   };
 
-  // The modifier + combo builder dialogs are absolute overlays shared by both
-  // layouts (register grid and kiosk column).
+  // The modifier dialog is an absolute overlay shared by both layouts (register
+  // grid and kiosk column).
   const dialogs = (
     <>
       {/* modifier dialog */}
@@ -556,69 +429,6 @@ export function OrderBuilder({
         </div>
       )}
 
-      {/* combo builder dialog — pick each slot's option + its toppings */}
-      {comboFor && (
-        <div className={cn(big ? "fixed" : "absolute", "inset-0 z-40 flex items-center justify-center bg-black/50", big ? "p-10" : "p-4")} onClick={() => setComboFor(null)}>
-          <div className={cn("flex max-h-full w-full flex-col rounded-2xl border border-border bg-card shadow-xl", big ? "max-w-2xl" : "max-w-md")} onClick={(e) => e.stopPropagation()}>
-            <div className={cn("flex items-center border-b border-border", big ? "gap-4 p-5" : "gap-2 p-3")}>
-              <span className={cn("grid shrink-0 place-items-center rounded-md bg-primary font-mono font-bold text-primary-foreground tabular-nums", big ? "h-12 w-12 text-lg" : "h-8 w-8 text-sm")}>{comboFor.number}</span>
-              <div className="min-w-0 flex-1">
-                <div className={cn("truncate font-semibold", big && "text-2xl")}>{comboFor.label}</div>
-                <div className={cn("text-muted-foreground", big ? "text-base" : "text-xs")}>{_L("combo.customize_title")}</div>
-              </div>
-              <button onClick={() => setComboFor(null)} className="text-muted-foreground hover:text-foreground"><X className={big ? "h-7 w-7" : "h-4 w-4"} /></button>
-            </div>
-            <div className={cn("min-h-0 flex-1 overflow-y-auto", big ? "space-y-4 p-5" : "space-y-3 p-3")}>
-              {comboFor.slots.map((slot, si) => {
-                const pick = comboPicks[si];
-                const opt = slot.options.find((o) => o.key === pick?.key) || slot.options[0];
-                const isChoice = slot.options.length > 1;
-                const mods = opt?.modifiers || [];
-                return (
-                  <div key={si} className={cn("rounded-lg border border-border/70", big ? "p-4" : "p-2.5")}>
-                    <div className={cn("flex items-center gap-2", big ? "mb-2.5" : "mb-1.5")}>
-                      <span className={cn("tape text-muted-foreground", big && "text-sm")}>{slot.label || opt?.label}</span>
-                      {isChoice && <Badge variant="secondary">{_L("combo.choose_one")}</Badge>}
-                    </div>
-                    {isChoice && (
-                      <div className={cn("grid grid-cols-2", big ? "mb-3 gap-2" : "mb-2 gap-1.5")}>
-                        {slot.options.map((o) => (
-                          <button key={o.key} onClick={() => pickComboOption(si, o)}
-                            className={cn("flex items-center rounded-md border text-left transition-colors",
-                              big ? "gap-2.5 p-2.5" : "gap-1.5 p-1.5",
-                              o.key === opt?.key ? "border-primary bg-primary/10 ring-1 ring-primary" : "border-border hover:border-primary/50 hover:bg-accent/50")}>
-                            <Thumb src={drinkCardSrc(o) ?? o.image} fallbackSrc={itemImageUrl(o.item)} className={cn("shrink-0", big ? "h-10 w-10" : "h-7 w-7")} />
-                            <span className={cn("truncate font-medium", big ? "text-base" : "text-xs")}>{o.label}</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    {!isChoice && (
-                      <div className={cn("flex items-center gap-2", big ? "mb-3" : "mb-2")}>
-                        <Thumb src={(opt && drinkCardSrc(opt)) ?? opt?.image} fallbackSrc={itemImageUrl(opt?.item)} className={cn("shrink-0", big ? "h-11 w-11" : "h-8 w-8")} />
-                        <span className={cn("truncate font-medium", big ? "text-lg" : "text-sm")}>{opt?.label}</span>
-                      </div>
-                    )}
-                    {mods.length > 0 && (
-                      <div className="grid grid-cols-3 gap-2">
-                        {mods.map((m) => (
-                          <ModTile key={m.id} m={m} big={big} on={(pick?.sel || []).includes(m.id)} onClick={() => toggleComboMod(si, opt, m)} />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-            <div className={cn("flex items-center justify-between border-t border-border", big ? "p-5" : "p-3")}>
-              <span className={cn("font-semibold", big ? "text-xl" : "text-sm")}>{money(comboFor.price + comboExtra)}</span>
-              <Button size={big ? "lg" : "sm"} className={cn(big && "h-14 gap-2.5 px-8 text-xl")} onClick={() => { addComboEntry(comboFor.comboId, comboPicks); setComboFor(null); }}>
-                <Plus className={big ? "h-6 w-6" : "h-4 w-4"} /> {_L("combo.add_combo", money(comboFor.price + comboExtra))}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
     </>
   );
 
@@ -632,37 +442,13 @@ export function OrderBuilder({
       <div className="relative flex h-full flex-col bg-background">
         <div className="flex shrink-0 flex-wrap gap-2 px-5 pb-3 pt-5">
           <FilterChip big active={kind === "all"} onClick={() => setKind("all")}>{_L("register.all_items")}</FilterChip>
-          {comboList.length > 0 && (
-            <FilterChip big active={kind === "combo"} onClick={() => setKind("combo")}>{_L("register.combos")}</FilterChip>
-          )}
           {kinds.map((k) => (
             <FilterChip big key={k} active={kind === k} onClick={() => setKind(k)}>{_L(KIND_LABEL[k] || "register.kind_recipe")}</FilterChip>
           ))}
         </div>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 pb-4">
-          {catalog.length === 0 && comboList.length === 0 && <div className="py-12 text-center text-base text-muted-foreground">{_L("register.no_catalog")}</div>}
-          {showCombos && (
-            <div className="grid grid-cols-3 gap-4">
-              {comboList.map((combo) => (
-                <button key={combo.comboId} onClick={() => clickCombo(combo)}
-                  className="group relative flex flex-col overflow-hidden rounded-2xl border border-border/80 bg-card text-left transition-colors hover:border-primary/60 hover:bg-accent/40 active:bg-accent">
-                  <span className="absolute left-3 top-3 z-10 grid h-9 min-w-9 place-items-center rounded-lg bg-primary px-2 font-mono text-lg font-bold text-primary-foreground tabular-nums shadow">
-                    {combo.number}
-                  </span>
-                  <ComboThumb photo={combo.photo} label={combo.label} className="h-36 w-full" />
-                  <span className="flex flex-1 flex-col gap-1 p-4">
-                    <span className="line-clamp-2 text-xl font-semibold leading-snug">{combo.label}</span>
-                    <span className="line-clamp-1 text-base text-muted-foreground">
-                      {combo.slots.map((s) => (s.options.length > 1 ? s.label : s.options[0]?.label)).filter(Boolean).join(" + ")}
-                    </span>
-                    <span className="font-mono text-lg font-bold tabular-nums text-primary">{money(combo.price)}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-          {showItems && (
+          {catalog.length === 0 && <div className="py-12 text-center text-base text-muted-foreground">{_L("register.no_catalog")}</div>}
             <div className="grid grid-cols-3 gap-4">
               {shown.map((c) => {
                 const customisable = !!(c.modifiers && c.modifiers.length);
@@ -679,7 +465,6 @@ export function OrderBuilder({
                 );
               })}
             </div>
-          )}
         </div>
 
         {/* fixed footer — bag count, total, and the single Checkout button */}
@@ -755,36 +540,12 @@ export function OrderBuilder({
       <div className="col-span-3 flex min-h-0 flex-col">
         <div className="mb-2 flex shrink-0 flex-wrap gap-1.5">
           <FilterChip active={kind === "all"} onClick={() => setKind("all")}>{_L("register.all_items")}</FilterChip>
-          {comboList.length > 0 && (
-            <FilterChip active={kind === "combo"} onClick={() => setKind("combo")}>{_L("register.combos")}</FilterChip>
-          )}
           {kinds.map((k) => (
             <FilterChip key={k} active={kind === k} onClick={() => setKind(k)}>{_L(KIND_LABEL[k] || "register.kind_recipe")}</FilterChip>
           ))}
         </div>
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 pb-4">
-          {catalog.length === 0 && comboList.length === 0 && <div className="py-8 text-center text-sm text-muted-foreground">{_L("register.no_catalog")}</div>}
-          {showCombos && (
-            <div className="grid grid-cols-2 gap-2">
-              {comboList.map((combo) => (
-                <button key={combo.comboId} onClick={() => clickCombo(combo)}
-                  className="group relative flex overflow-hidden rounded-lg border border-border/80 bg-card text-left transition-colors hover:border-primary/60 hover:bg-accent/40 active:bg-accent">
-                  <span className="absolute left-1.5 top-1.5 z-10 grid h-6 min-w-6 place-items-center rounded-md bg-primary px-1 font-mono text-xs font-bold text-primary-foreground tabular-nums shadow">
-                    {combo.number}
-                  </span>
-                  <ComboThumb photo={combo.photo} label={combo.label} className="h-20 w-24 shrink-0" />
-                  <span className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 p-2">
-                    <span className="line-clamp-2 text-xs font-semibold leading-tight">{combo.label}</span>
-                    <span className="truncate text-[10px] text-muted-foreground">
-                      {combo.slots.map((s) => (s.options.length > 1 ? s.label : s.options[0]?.label)).filter(Boolean).join(" + ")}
-                    </span>
-                    <span className="font-mono text-[11px] font-bold tabular-nums text-primary">{money(combo.price)}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-          {showItems && (
+          {catalog.length === 0 && <div className="py-8 text-center text-sm text-muted-foreground">{_L("register.no_catalog")}</div>}
             <div className="grid grid-cols-3 gap-2">
               {shown.map((c) => {
                 const customisable = !!(c.modifiers && c.modifiers.length);
@@ -801,7 +562,6 @@ export function OrderBuilder({
                 );
               })}
             </div>
-          )}
         </div>
       </div>
 

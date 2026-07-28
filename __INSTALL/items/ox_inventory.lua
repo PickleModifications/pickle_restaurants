@@ -34,16 +34,21 @@
     -- Every "bag kind" food (soup, salad — anything made in the takeout box)
     -- collects as this ONE item, with the food's identity in its metadata; its
     -- label and image are stamped per instance from the food's display item.
+    --
+    -- It is a VESSEL too, and must be declared like the bag and the meal above:
+    -- `consume = 0` + the export, with NO client status/anim. With `consume = 1`
+    -- and a client status block, ox eats the box ITSELF — applies its own hunger,
+    -- plays its own clip and destroys the item — so this resource never sees the
+    -- use, and a box could never be set down on a table to eat from. The hunger a
+    -- box restores is authored on the FOOD (its `consume` block), not here, which
+    -- is the whole reason ox must not apply a number of its own.
     ['takeout_box'] = {
         label  = 'Takeout Box',
         weight = 500,
         stack  = false,
         close  = true,
-        client = {
-            status = { hunger = 250000 },
-            anim   = { dict = 'mp_player_inteat@burger', clip = 'mp_player_int_eat_burger' }, usetime = 2500,
-        },
-        consume = 1,
+        consume = 0,
+        server = { export = 'pickle_restaurants.useItem' },
     },
     ['drink'] = {
         label  = 'Restaurant Drink',

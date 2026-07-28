@@ -134,9 +134,12 @@ end
 
 -- ─── data payloads ────────────────────────────────────────────────────────────
 
--- Accent colour for a board = the restaurant's theme primary, else a warm default.
-local function restaurantAccent(r)
-    return (r and r.theme and r.theme.primary) or "#ff7a00"
+-- The board wears the restaurant's OWN theme: the same { primary, mode, radius }
+-- seed every scoped NUI panel gets. screens.html derives the whole palette from it
+-- (a port of web/src/lib/theme.ts), so a menu/orders board and the restaurant's
+-- panels are the same design. nil → the page's shipped default seed.
+local function restaurantTheme(r)
+    return r and r.theme or nil
 end
 
 -- Project a restaurant's live open orders for the board: newest ticket first, only
@@ -147,7 +150,7 @@ local function projectOrders(orders)
     for _, o in ipairs(orders or {}) do
         local items = {}
         for _, l in ipairs(o.lines or {}) do
-            items[#items + 1] = { label = l.label or l.item, qty = l.qty or 1, image = l.image }
+            items[#items + 1] = { label = l.label or GetItemLabel(l.item), qty = l.qty or 1, image = l.image }
         end
         out[#out + 1] = { ticket = o.ticket, items = items,
                           ready = (o.fulfill and o.fulfill.ready) == true }
@@ -161,10 +164,10 @@ end
 local function payloadFor(t, r)
     if not r then return nil end
     if t.kind == "menu" then
-        return { action = "menu", title = r.label, accent = restaurantAccent(r),
-                 items = r.menu or {}, combos = r.combos or {} }
+        return { action = "menu", title = r.label, theme = restaurantTheme(r),
+                 items = r.menu or {} }
     else
-        return { action = "orders", title = r.label, accent = restaurantAccent(r),
+        return { action = "orders", title = r.label, theme = restaurantTheme(r),
                  orders = ScreenOrders[r.id] or {} }
     end
 end

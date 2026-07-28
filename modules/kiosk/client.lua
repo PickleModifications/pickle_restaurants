@@ -114,6 +114,11 @@ local lastDown              -- last button-down state pushed to the page
 -- (kiosk_large_brand's rot/flip). The order page must paint with the SAME transform
 -- to land upright on the prop, so we forward it to KioskDui AND apply it to the
 -- cursor→surface mapping below.
+--
+-- It is PER MODEL: the wall (`kiosk`) and floor (`kiosk_ground`) props embed the same
+-- texture but their UVs run it at different rotations, so each has its OWN registry
+-- entry and the order page has to paint at whichever one we're standing at — exactly
+-- like modules/rendertarget does for the idle brand image.
 local orient = { rot = 0, flipx = false, flipy = false }
 
 -- Map the virtual cursor (u,v — the UPRIGHT content the player sees, [0..1]) to a
@@ -149,6 +154,26 @@ local function removeOrderScreen()
     if not appliedModel then return end
     RemoveReplaceTexture(appliedModel, "kiosk_large_brand")
     appliedModel = nil
+end
+
+-- Borrow the orientation (and surface aspect) of the render target for the kiosk the
+-- player just walked up to. `prop_type` IS the registry key ("kiosk" / "kiosk_ground"),
+-- so no separate model→key map is needed. A rot that changes the SURFACE aspect (a
+-- 90/270 turn on only one of the two) means the DUI itself is the wrong shape —
+-- recreate it at the new size, since a DUI can't be resized in place.
+local function borrowOrient(propType)
+    local t = RenderTargetByKey(propType) or RenderTargetByKey("kiosk")
+    if not t then return end
+    orient.rot   = t.rot or 0
+    orient.flipx = t.flipx or false
+    orient.flipy = t.flipy or false
+    local sw, sh = RenderTargetSurface(t)
+    if sw ~= KIOSK.w or sh ~= KIOSK.h then
+        KIOSK.w, KIOSK.h = sw, sh
+        removeOrderScreen()
+        if dui then DestroyDui(dui); dui = nil end
+        ensureDui()
+    end
 end
 
 -- Re-bind once the page has actually painted a real frame, so the texture binds to
@@ -291,6 +316,9 @@ function OpenKioskScreen(prop, ent)
     -- Kick the DUI loading FIRST (usually already warm from the startup pre-warm) so the
     -- bundle keeps loading WHILE we fetch the kiosk data over the network.
     ensureDui()
+    -- ...at THIS model's texture orientation (the wall kiosk paints a half turn from the
+    -- floor one), so the order page and the cursor mapping land upright on the prop.
+    borrowOrient(prop.prop_type)
 
     local data = lib.callback.await("pickle_restaurants:sales:getKiosk", false, { id = rid })
     if not data or not data.ok then
@@ -349,6 +377,13 @@ CreateThread(function()
     while true do
         if active then
             DisableAllControlActions(0)
+            -- ESC steps away from the kiosk; it must never also reach the frontend.
+            -- DisableAllControlActions alone doesn't stop it — force the menu closed
+            -- (same pattern as the gizmo/placement loops).
+            if IsPauseMenuActive() then
+                SetFrontendActive(false)
+                ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
+            end
             HideHudAndRadarThisFrame()
             helpThisFrame()
 

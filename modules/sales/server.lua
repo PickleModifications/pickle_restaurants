@@ -33,7 +33,8 @@ local function VesselItems() return { MealItemName(), BagItemName() } end
 -- Preference order, mirroring web/src/lib/localImages.ts:
 --   1. supplied local art (web/public/items/<output>.png → nui/items/<output>.png),
 --      verified present on disk so we never override a good generic with a 404;
---   2. the legacy flavor item's inventory image, if that item is still installed;
+--   2. the output key's own inventory image, if an admin pointed the flavor at a
+--      real installed drink item;
 --   3. nil → the caller falls back to the generic drink item image.
 -- The on-disk check is static per resource load, so cache it (false = no file).
 local DRINK_ART_FILE = {}
@@ -92,17 +93,32 @@ function BuildSellableCatalog(rid)
         local key = item .. (variant ~= "" and ("::" .. variant) or "")
         if seen[key] then return end
         seen[key] = true
+        -- A tray-only PRODUCT has no inventory item to borrow a name/picture from, so
+        -- it reads from the FOOD that authors it ("Fries", not "Cooked Fries") — the
+        -- same identity rule the kitchen bar and the bag's contents menu follow. An
+        -- installed item keeps the catalogue's own label/art exactly as before.
+        local food = (not ItemExists(item)) and FoodForItem(item) or nil
         out[#out + 1] = { key = key, item = item, variant = variant,
-                          label = label or GetItemLabel(item), kind = kind,
-                          -- the sellable's ACCESS GROUP (Bakery/Pizza…) so a combo slot can
-                          -- reference "any <group>" and resolve to its live members
+                          label = label or (food and food.label) or GetItemLabel(item), kind = kind,
+                          -- the sellable's ACCESS GROUP (Bakery/Pizza…)
                           group = (type(group) == "string" and group ~= "") and group or nil,
                           -- a drink's card borrows its first flavor's art (it has no image of
                           -- its own — see DrinkFlavorImage) so the generic card is never blank
-                          image = imageOverride or GetItemImage(item), defaultPrice = MarkupPrice(cost or 0),
+                          image = imageOverride or GetItemImage(item) or (food and FoodImageUrl(food, item)),
+                          defaultPrice = MarkupPrice(cost or 0),
                           -- POS customisations the customer can pick (add cheese, no lettuce…)
                           modifiers = (type(modifiers) == "table" and #modifiers > 0) and modifiers or nil }
     end
+
+    -- A sellable's output does NOT have to be an installed inventory item. Cooked and
+    -- assembled foods live only in the restaurant-wide cooked-items pool and reach the
+    -- customer packed into a meal or a Restaurant Bag — that is the whole point of the
+    -- vessels, and why `RecipeMissingItems`/`IsProductItem` never require them to be
+    -- installed. Gating the MENU on ItemExists contradicted that: every default cooked
+    -- food (fries, doughnut, pizza…) silently vanished from the POS, the boards, the
+    -- kiosk and the phone, which reads exactly like the group filter being broken.
+    -- What products can't do is be handed over LOOSE — PlanFulfillment enforces that.
+    local function sellableOk(item) return ItemExists(item) or IsProductItem(item) end
 
     -- components of any assembly recipe are kitchen-internal (patties, buns…)
     local isComponent = {}
@@ -138,14 +154,14 @@ function BuildSellableCatalog(rid)
     for _, r in ipairs(RecipeCache) do
         local outItem = r.output_cooked_item
         if IsRecipeValid(r) and RestaurantHasAccess(rid, r.group)
-            and ItemExists(outItem) and not isComponent[outItem] then
+            and sellableOk(outItem) and not isComponent[outItem] then
             add(outItem, nil, nil, "recipe", ResolveItemCost(outItem), finishModsFor(outItem), r.group)
         end
     end
 
     for _, a in ipairs(GetAssembly()) do
         -- an assembly output that is some recipe's input is tray-only (raw_pizza)
-        if not RecipeByInput[a.output] and ItemExists(a.output)
+        if not RecipeByInput[a.output] and sellableOk(a.output)
             and RestaurantHasAccess(rid, a.group) then
             local ok = true
             for _, comp in ipairs(a.components or {}) do
@@ -217,9 +233,8 @@ function BuildSellableCatalog(rid)
             if ItemExists(d.input) and d.output and d.output ~= ""
                 and RestaurantHasAccess(rid, d.group) then
                 -- the flavor tile reads the drink's own metadata: the output key's
-                -- item image if one is installed (the grace-retained legacy flavor
-                -- items, or an admin-picked real drink), else its configured colour
-                -- swatch — so the picker is never a blank tile.
+                -- item image if one is installed (an admin-picked real drink), else
+                -- its configured colour swatch — so the picker is never a blank tile.
                 flavors[#flavors + 1] = { id = "flavor:" .. d.output, variant = d.output,
                                           label = d.label or GetItemLabel(d.output),
                                           group = _L("order_drink_flavor_group"),
@@ -228,7 +243,7 @@ function BuildSellableCatalog(rid)
                 local c = ResolveItemCost(d.input)
                 if not cost or c < cost then cost = c end
                 -- the sellable's access group is the flavors' common group (nil if they
-                -- differ), so a combo "any <group>" slot still resolves the drink
+                -- differ)
                 local g = (type(d.group) == "string" and d.group) or ""
                 if #flavors == 1 then grp = g elseif g ~= grp then mixed = true end
             end
@@ -244,7 +259,7 @@ function BuildSellableCatalog(rid)
     for _, f in ipairs(GetFinishes()) do
         if ItemExists(f.tool) and RestaurantHasAccess(rid, f.group) then
             for _, t in ipairs(f.targets or {}) do
-                if ItemExists(t.output) then
+                if sellableOk(t.output) then
                     add(t.output, nil, nil, "finish", ResolveItemCost(f.tool) + ResolveItemCost(t.item), nil, f.group)
                 end
             end
@@ -294,82 +309,8 @@ end
 function BuildMenuBoard(rid)
     local out = {}
     for _, e in ipairs((BuildPricedCatalog(rid, true))) do
-        out[#out + 1] = { label = e.label or e.item, price = e.price,
+        out[#out + 1] = { label = e.label or GetItemLabel(e.item), price = e.price,
                           image = e.image or GetItemImage(e.item), kind = e.kind }
-    end
-    return out
-end
-
--- ─── combo meals ─────────────────────────────────────────────────────────────
--- A combo is a per-restaurant, numbered, priced BUNDLE of existing sellables. Its
--- slots reference sellable-catalog KEYS only; the live label/image/kind/variant/
--- modifiers are resolved here from BuildSellableCatalog (the MAKEABLE set — a combo
--- may bundle an item that isn't sold à la carte), so a combo can never drift from
--- the current recipe/assembly config. Only ORDERABLE combos are returned (enabled,
--- price > 0, and no slot left with zero valid options). The management editor reads
--- ComboCache directly for editing + stale annotation.
-function BuildComboCatalog(rid)
-    local catalog = BuildSellableCatalog(rid)
-    local index = {}
-    for _, e in ipairs(catalog) do index[e.key] = e end
-    local function optView(e)
-        return { key = e.key, item = e.item, variant = e.variant,
-                 label = e.label, image = e.image, kind = e.kind, modifiers = e.modifiers }
-    end
-    local out = {}
-    for _, c in pairs(ComboCache[rid] or {}) do
-        local price = math.max(0, math.floor(tonumber(c.price) or 0))
-        if c.enabled ~= false and price > 0 then
-            local slots, ok = {}, true
-            for _, s in ipairs(c.slots or {}) do
-                -- expand each option: a `group:<Name>` option becomes every live sellable
-                -- in that access group; a plain key is looked up directly. Deduped per slot.
-                local options, taken = {}, {}
-                for _, o in ipairs(s.options or {}) do
-                    local g = ComboOptionGroup(o.key)
-                    if g then
-                        for _, e in ipairs(catalog) do
-                            if (e.group or "") == g and not taken[e.key] then
-                                taken[e.key] = true
-                                options[#options + 1] = optView(e)
-                            end
-                        end
-                    elseif o.key and index[o.key] and not taken[o.key] then
-                        taken[o.key] = true
-                        options[#options + 1] = optView(index[o.key])
-                    end
-                end
-                if #options == 0 then ok = false end -- a dead slot makes the whole combo unfulfillable
-                slots[#slots + 1] = { label = s.label or "", options = options }
-            end
-            if ok and #slots > 0 then
-                out[#out + 1] = {
-                    comboId = c.id, number = tonumber(c.number) or 1, label = c.label or "Combo",
-                    price = price, slots = slots,
-                    photo = (c.photo_url and c.photo_url ~= "") and { url = c.photo_url, crop = c.photo_crop } or nil,
-                }
-            end
-        end
-    end
-    table.sort(out, function(a, b) return (a.number or 0) < (b.number or 0) end)
-    return out
-end
-
--- Compact combo cards for the customer MENU SCREEN board: number, label, price,
--- photo (url+crop) and the component-slot labels (a choose-slot shows its label,
--- a fixed slot its item). Orderable combos only. Rides the restaurant sync payload
--- like BuildMenuBoard, so a board tracks combo edits live.
-function BuildComboBoard(rid)
-    local out = {}
-    for _, c in ipairs(BuildComboCatalog(rid)) do
-        local items = {}
-        for _, s in ipairs(c.slots) do
-            local first = s.options[1]
-            items[#items + 1] = (#s.options > 1 and s.label ~= "" and s.label)
-                or (first and first.label) or s.label or "?"
-        end
-        out[#out + 1] = { number = c.number, label = c.label, price = c.price,
-                          photo = c.photo, items = items, kind = "combo" }
     end
     return out
 end
@@ -401,8 +342,8 @@ end
 -- never a hard completion gate, so an honest mistake still fulfils the order.
 -- DRINKS are the one exception: a drink line pins the flavor the customer picked (the
 -- chosen flavor modifier is threaded into the line's `variant`), so a drink matches
--- only its flavor — a Cola order is never filled by a Sprite. At most ONE meal may be
--- used, covering the lines its layers' items match.
+-- only its flavor — a Cola order is never filled by a Sprite. As MANY packed vessels as
+-- the ticket needs are used, each covering the lines its layers' items match.
 
 -- The MODIFIER items an assembly output offers (cheese, lettuce…) → the parts that
 -- make a customised build differ from the plain one, keyed by item AND by modifier
@@ -460,9 +401,8 @@ local function variationKey(item, meta)
         return "d:" .. tostring(key)
     end
     -- A made takeout box (a bag-kind food) is identified by the food id on its first
-    -- meta layer. A LEGACY bag instance carries the same flag — it was the vessel
-    -- before the takeout box existed — so it still fills the same line.
-    if item == BoxItemName() or item == BagItemName() then
+    -- meta layer.
+    if item == BoxItemName() then
         local key = (type(meta) == "table" and meta[1] and meta[1].craft) or nil
         if key then return "c:" .. tostring(key) end
     end
@@ -596,24 +536,95 @@ local function mealCovers(meta, required, vesselItem)
     return uncovered
 end
 
--- Can the pool complete this order, optionally using ONE packed vessel — a serving
--- tray meal (`mealItem`, the default) or a Restaurant Bag? Both supply an order the
--- same way: their top-level layers cover required units and the rest come from the
--- pool as singles.
--- Returns { ok, singles = { {item, key, count}, … }, mealSig, mealItem, missing }.
-function PlanFulfillment(rid, order, mealSig, vesselItem)
-    local req = requiredUnits(order)
-    local usedMealSig = nil
-    local mealItem = VesselItem(vesselItem)
-    if type(mealSig) == "string" and mealSig ~= "" then
-        if PoolCount(rid, mealItem, mealSig) < 1 then
-            return { ok = false, missing = { _L("order_meal_gone") } }
+-- Every packed vessel the restaurant can hand over, one row per variation with its
+-- available count (the tray pool + what on-duty staff are carrying). Only vessels that
+-- are INSTALLED items are listed — a meal or bag can sit in the tray without being one,
+-- and handing over something that would vanish is never an option.
+-- `count` is decremented as a plan claims instances, so the caller works on a COPY.
+local function vesselPool(rid)
+    local out = {}
+    for _, vi in ipairs(VesselItems()) do
+        if ItemExists(vi) then
+            for _, v in ipairs(VesselVariations(rid, vi)) do
+                out[#out + 1] = { item = vi, sig = v.sig, meta = v.meta, count = v.count or 1 }
+            end
         end
-        req = mealCovers(PoolTopMeta(rid, mealItem, mealSig), req, mealItem)
-        usedMealSig = mealSig
+    end
+    return out
+end
+
+local function clonePool(pool)
+    local out = {}
+    for i, v in ipairs(pool) do
+        out[i] = { item = v.item, sig = v.sig, meta = v.meta, count = v.count }
+    end
+    return out
+end
+
+-- How many top-level things a vessel holds (its own nested vessel layers ignored, the
+-- same way mealCovers reads it) — used to prefer the TIGHTEST packing.
+local function vesselLayerCount(meta, vesselItem)
+    local n = 0
+    for _, l in ipairs(type(meta) == "table" and meta or {}) do
+        if l.item ~= vesselItem then n = n + 1 end
+    end
+    return n
+end
+
+-- Can the pool complete this order, and with WHAT? An order is filled from two stores:
+-- packed VESSELS (serving-tray meals and Restaurant Bags, whose top-level layers cover
+-- required units) and loose SINGLES straight out of the cooked-items pool.
+-- Returns { ok, singles = { {item, key, count}, … }, vessels = { {item, sig}, … }, missing }.
+--
+-- As MANY vessels as the ticket needs are used, not one: a big order is packed into two
+-- bags as naturally as one, and refusing the second would leave a ticket that is plainly
+-- ready sitting incomplete. `mealSig`/`vesselItem` are the cashier's explicit PIN — that
+-- exact vessel goes first (ignored if it covers nothing, so a stray pick can't give away
+-- an unrelated bag) — and the planner then fills what's left itself, preferring the
+-- vessel that covers the most units and, among equals, the one with the least left over
+-- inside it, so a 4-item bag is never spent on a 1-item ticket while a single-item bag
+-- sits next to it.
+--
+-- SINGLES ARE SPENT FIRST. A burger sitting loose in a cook's tray fills a burger line
+-- without opening a bag; vessels are only claimed for what the loose pool can't cover.
+--
+-- `looseOk` says the food does NOT have to enter an inventory: an NPC customer just
+-- takes what it's handed, so its ticket can be filled straight out of the pool. For a
+-- PLAYER every single is `Inventory.AddItem`ed, so a cooked product that isn't an
+-- installed item can only reach them inside a meal or a Restaurant Bag — those units
+-- are covered by a vessel or reported as a shortfall. Default is the strict rule.
+--
+-- `pool` is an optional pre-built vesselPool(rid) — AnnotateOrders plans a ticket once
+-- per available vessel, and rebuilding the pool (which reads every on-duty employee's
+-- inventory) for each of those would be the expensive part.
+function PlanFulfillment(rid, order, mealSig, vesselItem, looseOk, pool)
+    local req = requiredUnits(order)
+    local avail = clonePool(pool or vesselPool(rid))
+    local used = {}
+
+    local function claim(v)
+        local left = mealCovers(v.meta, req, v.item)
+        local covered = #req - #left
+        if covered <= 0 then return 0 end
+        req = left
+        v.count = v.count - 1
+        used[#used + 1] = { item = v.item, sig = v.sig }
+        return covered
     end
 
-    -- group the remaining units by (item, variation key) and check pool availability
+    -- 1. the cashier's explicit pick goes first — they chose that exact vessel
+    if type(mealSig) == "string" and mealSig ~= "" then
+        local want = VesselItem(vesselItem)
+        local pinned
+        for _, v in ipairs(avail) do
+            if v.item == want and (v.sig or "") == mealSig and v.count > 0 then pinned = v break end
+        end
+        if not pinned then return { ok = false, missing = { _L("order_meal_gone") } } end
+        claim(pinned) -- covering nothing = not spent (never hand over an unrelated bag)
+    end
+
+    -- 2. what the LOOSE pool can cover, per (item, variation key). An uninstalled
+    --    product can't be handed to a player at all, so it never counts here.
     local groups, gorder = {}, {}
     for _, u in ipairs(req) do
         local gk = u.item .. "|" .. u.key
@@ -623,21 +634,63 @@ function PlanFulfillment(rid, order, mealSig, vesselItem)
         end
         groups[gk].need = groups[gk].need + 1
     end
-
-    local singles, missing, ok = {}, {}, true
+    local singles, shortfall = {}, {}
     for _, gk in ipairs(gorder) do
         local g = groups[gk]
-        local have = PoolCountMatch(rid, g.item, variationMatcher(g.item, g.key))
-        if have >= g.need then
-            singles[#singles + 1] = { item = g.item, key = g.key, count = g.need }
-        else
-            ok = false
-            missing[#missing + 1] = _L("order_qty_line", g.need - have, g.label or GetItemLabel(g.item))
+        local have = (looseOk or ItemExists(g.item))
+            and PoolCountMatch(rid, g.item, variationMatcher(g.item, g.key)) or 0
+        local take = math.min(have, g.need)
+        if take > 0 then singles[#singles + 1] = { item = g.item, key = g.key, count = take } end
+        if take < g.need then shortfall[#shortfall + 1] = { g = g, need = g.need - take } end
+    end
+
+    -- 3. everything the loose pool couldn't cover has to come packed. Re-derive the
+    --    outstanding units and let the best-fitting vessels take them, one at a time.
+    req = {}
+    for _, s in ipairs(shortfall) do
+        for _ = 1, s.need do
+            req[#req + 1] = { item = s.g.item, key = s.g.key, label = s.g.label }
         end
     end
-    return { ok = ok, singles = singles, mealSig = usedMealSig,
-             mealItem = usedMealSig and mealItem or nil,
-             missing = (#missing > 0) and missing or nil }
+    while #req > 0 do
+        local best, bestCovered, bestSpare
+        for _, v in ipairs(avail) do
+            if v.count > 0 then
+                local covered = #req - #mealCovers(v.meta, req, v.item)
+                local spare = vesselLayerCount(v.meta, v.item) - covered
+                if covered > 0 and (not best or covered > bestCovered
+                    or (covered == bestCovered and spare < bestSpare)) then
+                    best, bestCovered, bestSpare = v, covered, spare
+                end
+            end
+        end
+        if not best then break end
+        claim(best)
+    end
+
+    -- 4. whatever is still uncovered is the shortfall the cook has to make good
+    local missing = {}
+    local left = {}
+    for _, u in ipairs(req) do
+        local gk = u.item .. "|" .. u.key
+        if not left[gk] then
+            left[gk] = { label = u.label or GetItemLabel(u.item), item = u.item, key = u.key, need = 0 }
+            missing[#missing + 1] = left[gk]
+        end
+        left[gk].need = left[gk].need + 1
+    end
+    local lines = {}
+    for _, m in ipairs(missing) do
+        -- a product that exists in the pool but can't be handed over loose isn't
+        -- "still cooking" — it's cooked and waiting to be packed, so say so
+        local cooked = (not looseOk) and not ItemExists(m.item)
+            and PoolCountMatch(rid, m.item, variationMatcher(m.item, m.key)) > 0
+        lines[#lines + 1] = _L(cooked and "order_needs_vessel" or "order_qty_line", m.need, m.label)
+    end
+
+    return { ok = (#lines == 0), singles = singles,
+             vessels = (#used > 0) and used or nil,
+             missing = (#lines > 0) and lines or nil }
 end
 
 -- Attach per-ticket fulfillment state:
@@ -656,39 +709,123 @@ end
 -- but the definition lives further down with the other order helpers.
 local findPlayerByIdentifier
 
-local function AnnotateOrders(rid, list)
-    local bagItem = BagItemName()
-    -- Only offer vessels the customer can actually be handed: single items come from
-    -- the sellable catalog (ItemExists-filtered), but a meal or bag can sit in the
-    -- tray without being an installed item — never hand over something that'd vanish.
-    -- Meals and bags are pooled together here: a ticket is completable from either.
-    local vessels = {}
-    for _, vi in ipairs(VesselItems()) do
-        if ItemExists(vi) then
-            for _, v in ipairs(PoolVariations(rid, vi)) do
-                vessels[#vessels + 1] = { item = vi, sig = v.sig, meta = v.meta }
+-- ─── the vessel pool ─────────────────────────────────────────────────────────
+-- A packed vessel (a meal, a Restaurant Bag, a takeout box) is handed to its maker
+-- as a real inventory ITEM the moment it's crafted, so unlike loose cooked products
+-- it does NOT sit in the tray. Fulfilment therefore has to look in two places, and
+-- the restaurant's STAFF are the second: the tray pool is already restaurant-wide
+-- (any cook's tray fills any cashier's ticket), so the vessels its employees are
+-- carrying are the same pool by a different storage. Without this, crafting a bag
+-- would quietly remove it from the POS.
+--
+-- Tray entries are still read too — `giveVessel` falls back to the tray whenever the
+-- item isn't installed or the maker's inventory is full.
+
+-- Every vessel of `item` held by an ON-DUTY employee of this restaurant, one entry
+-- per slot so a specific one can be taken later.
+local function vesselHolders(rid, item)
+    local out = {}
+    if not (Inventory and Inventory.GetItemSlots) then return out end
+    local emps = EmployeeCache[rid]
+    if not emps then return out end
+    for identifier in pairs(emps) do
+        local src = findPlayerByIdentifier(identifier)
+        if src then
+            for _, s in ipairs(Inventory.GetItemSlots(src, item) or {}) do
+                local m = type(s.metadata) == "table" and s.metadata or {}
+                local stack = type(m.stack) == "table" and m.stack or nil
+                out[#out + 1] = { src = src, slot = s.slot, count = s.count or 1,
+                                  sig = TraySig(stack), meta = stack }
             end
         end
     end
+    return out
+end
+
+-- Distinct variations of a vessel across BOTH stores, merged by signature.
+function VesselVariations(rid, item)
+    local out, idx = {}, {}
+    local function add(sig, meta, count)
+        local k = sig or ""
+        if idx[k] then
+            idx[k].count = idx[k].count + count
+        else
+            idx[k] = { sig = sig, meta = meta, count = count }
+            out[#out + 1] = idx[k]
+        end
+    end
+    for _, v in ipairs(PoolVariations(rid, item)) do add(v.sig, v.meta, v.count) end
+    for _, h in ipairs(vesselHolders(rid, item)) do add(h.sig, h.meta, h.count) end
+    return out
+end
+
+function VesselCount(rid, item, sig)
+    local n = PoolCount(rid, item, sig)
+    for _, h in ipairs(vesselHolders(rid, item)) do
+        if h.sig == sig then n = n + h.count end
+    end
+    return n
+end
+
+function VesselTopMeta(rid, item, sig)
+    local m = PoolTopMeta(rid, item, sig)
+    if m ~= nil then return m end
+    for _, h in ipairs(vesselHolders(rid, item)) do
+        if h.sig == sig then return h.meta end
+    end
+end
+
+-- Take ONE, returning its contents so the caller can re-stamp them onto whatever
+-- it hands the customer. The tray goes first: it only ever holds a vessel the
+-- inventory couldn't (uninstalled item, full pockets), so spending it first drains
+-- the fallback store instead of letting it accumulate.
+function VesselConsume(rid, item, sig)
+    if PoolCount(rid, item, sig) >= 1 then
+        local taken = PoolConsume(rid, item, sig, 1)
+        if taken and #taken >= 1 then return true, taken[1].meta end
+    end
+    for _, h in ipairs(vesselHolders(rid, item)) do
+        if h.sig == sig then
+            -- Same rule as giveVessel: the bridge's remove calls return nothing, so
+            -- the count is what says whether it actually went.
+            local before = Inventory.GetItemCount(h.src, item) or 0
+            if Inventory.RemoveItemSlot then Inventory.RemoveItemSlot(h.src, item, 1, h.slot)
+            else Inventory.RemoveItem(h.src, item, 1) end
+            if (Inventory.GetItemCount(h.src, item) or 0) < before then return true, h.meta end
+        end
+    end
+    return false
+end
+
+local function AnnotateOrders(rid, list)
+    local bagItem = BagItemName()
+    -- built ONCE for the whole list: it reads every on-duty employee's inventory, and
+    -- each ticket is planned once per available vessel below
+    local vessels = vesselPool(rid)
     for _, o in ipairs(list) do
-        local base = PlanFulfillment(rid, o)
-        local ready = base.ok
-        local bestMissing = base.ok and nil or base.missing
+        -- an NPC takes its food in hand — nothing has to fit in an inventory, so its
+        -- ticket fills straight from the pool (see PlanFulfillment's `looseOk`)
+        local loose = (IsNpcOrder and IsNpcOrder(o)) or false
+        -- The unpinned plan is the truth: it already claims as many vessels as the
+        -- ticket needs, so `ok` (one-tap Complete) and `ready` agree.
+        local base = PlanFulfillment(rid, o, nil, nil, loose, vessels)
         local opts = {}
         for _, m in ipairs(vessels) do
-            local plan = PlanFulfillment(rid, o, m.sig, m.item)
-            if plan.ok then
-                ready = true
+            -- Offer a vessel only if PINNING it still completes the order AND it
+            -- actually carries something the ticket asked for — the picker is for
+            -- choosing WHICH bag goes, never for handing over an unrelated one.
+            local plan = PlanFulfillment(rid, o, m.sig, m.item, loose, vessels)
+            local pinned = false
+            for _, v in ipairs(plan.vessels or {}) do
+                if v.item == m.item and (v.sig or "") == (m.sig or "") then pinned = true break end
+            end
+            if plan.ok and pinned then
                 opts[#opts + 1] = { sig = m.sig, item = m.item, bag = (m.item == bagItem) or nil,
                                     label = GetItemLabel(m.item),
                                     items = mealItemsDetail(m.meta, m.item) }
-            elseif not ready and plan.missing
-                and (not bestMissing or #plan.missing < #bestMissing) then
-                -- this vessel covers more than singles alone: report the smaller shortfall
-                bestMissing = plan.missing
             end
         end
-        local fulfill = { ok = base.ok, ready = ready, missing = (not ready) and bestMissing or nil }
+        local fulfill = { ok = base.ok, ready = base.ok, missing = (not base.ok) and base.missing or nil }
         if #opts > 0 then fulfill.mealOptions = opts end
         o.fulfill = fulfill
         -- Who (if anyone) has CLAIMED this delivery. This list is broadcast to every
@@ -705,6 +842,29 @@ local function AnnotateOrders(rid, list)
     return list
 end
 
+-- Why a ticket isn't offering a meal or a bag. A vessel that isn't an INSTALLED
+-- item is skipped silently by AnnotateOrders above (we must never offer to hand
+-- over something that would vanish), which looks identical to "bags don't work" —
+-- so print the pair, whether each exists, and what the pool actually holds.
+RegisterCommand("pickle_vessels", function(src, args)
+    if src ~= 0 and not IsPlayerAdmin(src) then return end
+    local rid = tonumber(args[1])
+    for _, vi in ipairs(VesselItems()) do
+        local exists = ItemExists(vi)
+        print(("[pickle_vessels] %-16s installed=%s%s"):format(vi, tostring(exists),
+            exists and "" or "  ^3<- never offered as a fulfilment option^7"))
+        if rid and exists then
+            local vars = VesselVariations(rid, vi)
+            if #vars == 0 then print("    pool: none in any cook's tray") end
+            for _, v in ipairs(vars) do
+                print(("    pool: x%d sig=%q layers=%d"):format(
+                    v.count, v.sig or "", #(type(v.meta) == "table" and v.meta or {})))
+            end
+        end
+    end
+    if not rid then print("[pickle_vessels] pass a restaurant id to also list the pool") end
+end, false)
+
 -- ─── register payload ────────────────────────────────────────────────────────
 
 local function buildRegister(src, id)
@@ -717,7 +877,6 @@ local function buildRegister(src, id)
         balance      = r.balance,
         commission   = emp and emp.commission_rate or 0,
         catalog      = (BuildPricedCatalog(id, true)),
-        combos       = BuildComboCatalog(id), -- orderable combo bundles (parallel to catalog)
         tickets      = AnnotateOrders(id, GetOpenOrders(id)), -- initial list; kept live thereafter by SyncOrders
         nearby       = NearbyPlayers(src, 6.0),
         receiptOk    = ItemExists(ReceiptItem()),
@@ -734,7 +893,7 @@ end)
 -- PUBLIC idle payload for the always-on register board (modules/register). The counter
 -- screen persistently shows the POS UI even when nobody's ringing anything up, so it
 -- needs a seed anyone can fetch — the SAME display-safe data the public menu + orders
--- boards already show (label/theme/catalog/combos + the open-ticket queue). It carries
+-- boards already show (label/theme/catalog + the open-ticket queue). It carries
 -- NO balance/commission and NO nearby-players list; those live only in the perm-gated
 -- buildRegister a cashier gets on interact.
 lib.callback.register("pickle_restaurants:register:getPublic", function(_, d)
@@ -747,7 +906,6 @@ lib.callback.register("pickle_restaurants:register:getPublic", function(_, d)
         label        = r.label,
         theme        = r.metadata and r.metadata.theme or nil,
         catalog      = BuildPricedCatalog(id, true),
-        combos       = BuildComboCatalog(id),
         tickets      = AnnotateOrders(id, GetOpenOrders(id)),
     }
 end)
@@ -818,34 +976,14 @@ local function modSummary(mods)
     return table.concat(parts, ", ")
 end
 
--- One readable "2× Burger (+Cheese), 1× #3 The Pickle Meal [Burger +Cheese / Fries /
--- Cola]" line for ledger rows & receipt metadata. A combo's component lines are
--- emitted contiguously (resolveComboEntry), sharing a combo.id + combo.inst, so they
--- collapse into one bracketed group here.
+-- One readable "2× Burger (+Cheese), 1× Fries" line for ledger rows & receipt metadata.
 local function orderSummary(lines)
-    local parts, i, n = {}, 1, #lines
-    while i <= n do
-        local l = lines[i]
-        if l.combo then
-            local comps, j = {}, i
-            while j <= n and lines[j].combo
-                and lines[j].combo.id == l.combo.id and lines[j].combo.inst == l.combo.inst do
-                local cs = lines[j].label
-                local m = modSummary(lines[j].mods)
-                if m ~= "" then cs = cs .. " " .. m end
-                comps[#comps + 1] = cs
-                j = j + 1
-            end
-            parts[#parts + 1] = _L("order_qty_combo_line",
-                l.qty, tostring(l.combo.number), l.combo.label, table.concat(comps, " / "))
-            i = j
-        else
-            local s = _L("order_qty_line", l.qty, l.label)
-            local m = modSummary(l.mods)
-            if m ~= "" then s = s .. " (" .. m .. ")" end
-            parts[#parts + 1] = s
-            i = i + 1
-        end
+    local parts = {}
+    for _, l in ipairs(lines) do
+        local s = _L("order_qty_line", l.qty, l.label)
+        local m = modSummary(l.mods)
+        if m ~= "" then s = s .. " (" .. m .. ")" end
+        parts[#parts + 1] = s
     end
     return table.concat(parts, ", ")
 end
@@ -861,7 +999,7 @@ end
 -- on → +price) and removals (a default that's off), enforcing group single-choice.
 -- Mods are ticket instructions + pricing; the kitchen match is item-only. Returns the
 -- recorded mod list + the price EXTRA the additions add on top of the base. Shared by
--- the à la carte path and every combo component so validation is identical.
+-- the à la carte path so validation is identical everywhere.
 -- The `variant` an order line carries: the flavor modifier the customer picked
 -- (`modVariant`), else the sellable's own variant. A drink MUST pin a flavor, so if
 -- the cart somehow sent none, default to the sellable's first flavor — a variant-less
@@ -919,77 +1057,24 @@ local function resolveLineModifiers(e, selMods)
     return mods, extra, variant
 end
 
--- Expand ONE combo cart entry { combo=id, qty, slots={ {key, mods}, ... } } into
--- component order lines. The chosen key for each slot must be one the combo offers
--- (a single-option slot defaults if the client omits it); per-item modifiers validate
--- against that option's own allowed set. The flat combo price rides the FIRST
--- component line and each component carries its own modifier extras, so the order
--- total is comboPrice + Σextras while the kitchen (which matches by item, ignoring
--- price) fulfils every component like a normal single. Returns lines, or nil + error.
-local function resolveComboEntry(c, combo, inst)
-    local qty = math.max(1, math.min(10, math.floor(tonumber(c.qty) or 1)))
-    local size = #combo.slots
-    local out = {}
-    for i, slot in ipairs(combo.slots) do
-        local pick = type(c.slots) == "table" and c.slots[i] or nil
-        local key = pick and pick.key or nil
-        local chosen
-        for _, o in ipairs(slot.options) do
-            if key and o.key == key then chosen = o break end
-        end
-        if not chosen and not key and #slot.options == 1 then chosen = slot.options[1] end
-        if not chosen then return nil, _L("order_combo_bad_option") end
-        local mods, extra, variant = resolveLineModifiers(chosen, pick and pick.mods or nil)
-        local base = (i == 1) and combo.price or 0
-        local lvar = DrinkLineVariant(chosen, variant)
-        out[#out + 1] = {
-            item = chosen.item, variant = lvar, label = chosen.label,
-            image = LineImage(chosen.kind, lvar, chosen.image, chosen.item),
-            price = base + extra, qty = qty, kind = chosen.kind,
-            mods = (#mods > 0) and mods or nil,
-            combo = { id = combo.comboId, number = combo.number, label = combo.label,
-                      inst = inst, seq = i, size = size },
-        }
-    end
-    return out, nil
-end
-
 local function resolveOrderLines(id, cart)
     -- Re-derive the priced catalog server-side; the cart is only keys + counts.
     local priced = select(1, BuildPricedCatalog(id, true))
     local byKey = {}
     for _, e in ipairs(priced) do byKey[e.key] = e end
-    -- Combos on a parallel track — indexed by combo id (the cart discriminator).
-    local comboById = {}
-    for _, cb in ipairs(BuildComboCatalog(id)) do comboById[cb.comboId] = cb end
-
-    local lines, total, comboInst = {}, 0, 0
+    local lines, total = {}, 0
     for _, c in ipairs(type(cart) == "table" and cart or {}) do
-        if type(c) == "table" and c.combo then
-            -- a combo bundle → expand into its component lines
-            local combo = comboById[tonumber(c.combo)]
-            if not combo then return nil, nil, _L("order_combo_unavailable") end
-            comboInst = comboInst + 1
-            local clines, cerr = resolveComboEntry(c, combo, comboInst)
-            if not clines then return nil, nil, cerr end
-            for _, l in ipairs(clines) do
-                lines[#lines + 1] = l
-                total = total + l.price * l.qty
-            end
-        else
-            -- a single à la carte item
-            local e = type(c) == "table" and byKey[c.key] or nil
-            if not e then return nil, nil, _L("order_not_priced") end
-            local qty = math.max(1, math.min(10, math.floor(tonumber(c.qty) or 1)))
-            local mods, extra, variant = resolveLineModifiers(e, c.mods)
-            local unit = e.price + extra
-            local lvar = DrinkLineVariant(e, variant)
-            lines[#lines + 1] = { item = e.item, variant = lvar, label = e.label,
-                                  image = LineImage(e.kind, lvar, e.image, e.item),
-                                  price = unit, qty = qty, kind = e.kind,
-                                  mods = (#mods > 0) and mods or nil }
-            total = total + unit * qty
-        end
+        local e = type(c) == "table" and byKey[c.key] or nil
+        if not e then return nil, nil, _L("order_not_priced") end
+        local qty = math.max(1, math.min(10, math.floor(tonumber(c.qty) or 1)))
+        local mods, extra, variant = resolveLineModifiers(e, c.mods)
+        local unit = e.price + extra
+        local lvar = DrinkLineVariant(e, variant)
+        lines[#lines + 1] = { item = e.item, variant = lvar, label = e.label,
+                              image = LineImage(e.kind, lvar, e.image, e.item),
+                              price = unit, qty = qty, kind = e.kind,
+                              mods = (#mods > 0) and mods or nil }
+        total = total + unit * qty
     end
     if #lines == 0 then return nil, nil, _L("order_nothing_selected") end
     return lines, RoundMoney(total)
@@ -1132,7 +1217,6 @@ lib.callback.register("pickle_restaurants:sales:getKiosk", function(src, d)
         restaurantId = id,
         label        = r.label,
         catalog      = (BuildPricedCatalog(id, true)),
-        combos       = BuildComboCatalog(id), -- orderable combo bundles (parallel to catalog)
         theme        = r.metadata and r.metadata.theme or nil,
         brand        = kioskBrandImage(r),    -- full-screen cover for the open/close slide
     }
@@ -1207,10 +1291,9 @@ end)
 -- phone columns and ride the GetOpenOrders projection into the KDS + tracking.
 DeliveryTargets = {} -- [orderId] = { x, y, z } customer drop, for the driver blip
 
--- The drop point is ALSO persisted on the order row (dest_x / dest_y, added by
--- modules/phone's EnsureColumn migration). This table is the hot read path; the
--- columns are what survives a restart. Called once at boot from modules/phone's
--- ready thread — the first place the columns are guaranteed to exist.
+-- The drop point is ALSO persisted on the order row (dest_x / dest_y). This table is
+-- the hot read path; the columns are what survives a restart. Called once at boot
+-- from modules/phone's ready thread.
 -- z is not persisted: nothing consumes it (SetNewWaypoint is 2D and the driver's
 -- "you've arrived" check is a vector2 distance), so a rehydrated target carries 0.0.
 function RehydrateDeliveryTargets()
@@ -1339,11 +1422,13 @@ lib.callback.register("pickle_restaurants:phone:placeOrder", function(src, d)
     return { ok = true, ticket = ticketNo, orderId = orderId, total = finalTotal, discount = discountPct, redeemed = didRedeem, orderType = orderType }
 end)
 
--- Whether a ticket can be fulfilled from the pool right now (for the tracking UI).
+-- Whether a ticket can be fulfilled right now (for the tracking UI). The unpinned plan
+-- already claims whatever packed vessels the order needs, so this is the same answer
+-- the register shows — a bagged order reads as ready, not as still cooking.
 function OrderReadyForPickup(rid, orderId)
     local o = OrderCache[rid] and OrderCache[rid][orderId]
     if not o then return false end
-    local plan = PlanFulfillment(rid, o, nil)
+    local plan = PlanFulfillment(rid, o, nil, nil, (IsNpcOrder and IsNpcOrder(o)) or false)
     return plan and plan.ok or false
 end
 
@@ -1665,23 +1750,22 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
             return fail(_L("order_customer_missing"))
         end
 
-        -- the one packed vessel (meal or Restaurant Bag) the cashier filled from
+        -- the packed vessel (meal or Restaurant Bag) the cashier PINNED, if any — the
+        -- plan claims any further ones the ticket needs by itself
         local mealSig = (type(d.mealSig) == "string" and d.mealSig ~= "") and d.mealSig or nil
         local mealItem = VesselItem(d.mealItem)
-        local plan = PlanFulfillment(id, o, mealSig, mealItem)
+        -- looseOk: the ped is handed the food directly, so nothing here has to be an
+        -- installed inventory item (no AddItem happens on this branch at all)
+        local plan = PlanFulfillment(id, o, mealSig, mealItem, true)
         if not plan.ok then
             return fail(_L("order_missing_items", table.concat(plan.missing or {}, ", ")))
-        end
-        if plan.mealSig and not ItemExists(mealItem) then
-            return fail(_L("cook_item_not_installed", mealItem))
         end
 
         -- Consume from the pool under one guard — no yield since PlanFulfillment, so it
         -- can only come up short if something throws.
         local consumed, cerr = pcall(function()
-            if plan.mealSig then
-                local taken = PoolConsume(id, mealItem, plan.mealSig, 1)
-                if not taken or #taken < 1 then error(GetItemLabel(mealItem), 0) end
+            for _, v in ipairs(plan.vessels or {}) do
+                if not VesselConsume(id, v.item, v.sig) then error(GetItemLabel(v.item), 0) end
             end
             for _, g in ipairs(plan.singles) do
                 local taken = PoolConsumeMatch(id, g.item, variationMatcher(g.item, g.key), g.count)
@@ -1739,20 +1823,25 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
 
     -- Fulfil from the restaurant-wide cooked-items pool (every cook's tray), not
     -- the cashier's inventory. Plan first so a shortfall never half-hands an order;
-    -- `d.mealSig` (optional) is the one packed VESSEL the cashier chose to fill from
-    -- — a serving-tray meal or a Restaurant Bag; `d.mealItem` says which (VesselItem
-    -- rejects anything else, so it always resolves to one of the two).
+    -- `d.mealSig` (optional) PINS one packed VESSEL the cashier chose to fill from — a
+    -- serving-tray meal or a Restaurant Bag; `d.mealItem` says which (VesselItem rejects
+    -- anything else, so it always resolves to one of the two). The plan claims any
+    -- further vessels the ticket needs on top of it, so a big order packed into two
+    -- bags hands over both.
     local mealSig = (type(d.mealSig) == "string" and d.mealSig ~= "") and d.mealSig or nil
     local mealItem = VesselItem(d.mealItem)
     local plan = PlanFulfillment(id, o, mealSig, mealItem)
     if not plan.ok then
         return fail(_L("order_missing_items", table.concat(plan.missing or {}, ", ")))
     end
-    if plan.mealSig and not ItemExists(mealItem) then
-        return fail(_L("cook_item_not_installed", mealItem))
-    end
-    if plan.mealSig and Inventory.CanCarryItem and not Inventory.CanCarryItem(customerSrc, mealItem, 1) then
-        return fail(_L("order_cant_carry", GetItemLabel(mealItem)))
+    -- Room for every vessel at once — two bags need two slots (vesselPool only ever
+    -- offers installed items, so there is nothing to re-check there).
+    local perVessel = {}
+    for _, v in ipairs(plan.vessels or {}) do perVessel[v.item] = (perVessel[v.item] or 0) + 1 end
+    for item, n in pairs(perVessel) do
+        if Inventory.CanCarryItem and not Inventory.CanCarryItem(customerSrc, item, n) then
+            return fail(_L("order_cant_carry", GetItemLabel(item)))
+        end
     end
     for _, g in ipairs(plan.singles) do
         if Inventory.CanCarryItem and not Inventory.CanCarryItem(customerSrc, g.item, g.count) then
@@ -1765,10 +1854,10 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
     -- pizza) + consume the receipt, under ONE guard. There is no yield between the
     -- plan and here, so PoolConsume can't come up short unless something throws.
     local moved, bad = pcall(function()
-        if plan.mealSig then
-            local taken = PoolConsume(id, mealItem, plan.mealSig, 1)
-            if not taken or #taken < 1 then error(GetItemLabel(mealItem), 0) end
-            Inventory.AddItem(customerSrc, mealItem, 1, BuildInvMeta(taken[1].meta, mealItem))
+        for _, v in ipairs(plan.vessels or {}) do
+            local got, vmeta = VesselConsume(id, v.item, v.sig)
+            if not got then error(GetItemLabel(v.item), 0) end
+            Inventory.AddItem(customerSrc, v.item, 1, BuildInvMeta(vmeta, v.item))
         end
         for _, g in ipairs(plan.singles) do
             local taken = PoolConsumeMatch(id, g.item, variationMatcher(g.item, g.key), g.count)

@@ -23,6 +23,8 @@ import {
   Info,
   MapPin,
   CalendarClock,
+  ChevronRight,
+  Footprints,
 } from "lucide-react";
 import { fetchNui, useNuiEvent, usePushFallback } from "../../lib/nui";
 import { ChatSheet, ChatButton, useChatUnreadSet } from "../DeliveryChat";
@@ -31,7 +33,22 @@ import { _L } from "../../lib/locale";
 import { usePhone, money } from "../store";
 import { Screen, TopBar, Empty, Spinner, ItemImg, Sheet } from "../ui";
 
-const TYPE_ICON: Record<string, any> = { delivery: Truck, pickup: ShoppingBag, dine_in: Utensils };
+// Icon + label for a ticket's CHANNEL. `npc` says the customer is an AI, NOT how the
+// order arrived — an NPC can place a delivery, so the bot icon only stands in for a
+// walk-in. (It used to override outright, which is why NPC deliveries read "Walk-in".)
+const TYPE_ICON: Record<string, any> = { delivery: Truck, pickup: ShoppingBag, dine_in: Utensils, walk_in: Footprints };
+const ticketChannel = (t: any): string => {
+  const c = t?.channel || t?.orderType;
+  return c === "delivery" || c === "dine_in" || c === "pickup" ? c : "walk_in";
+};
+const ticketIcon = (t: any) => {
+  const c = ticketChannel(t);
+  return (t?.npc && c === "walk_in") ? Bot : TYPE_ICON[c] || ShoppingBag;
+};
+const ticketTypeLabel = (t: any) => {
+  const c = ticketChannel(t);
+  return (t?.npc && c === "walk_in") ? _L("phone.work.walk_in") : _L("order.channel_" + c);
+};
 
 function useEmployment(paramRid?: number) {
   const { home } = usePhone();
@@ -46,14 +63,6 @@ function fmtDur(seconds: number) {
   const m = Math.floor((seconds % 3600) / 60);
   return h > 0 ? _L("phone.work.dur_hm", h, m) : _L("phone.work.dur_m", m);
 }
-
-// Resolved per render, never at module scope — the locale table arrives after import.
-const typeLabel = (t?: string) =>
-  t === "delivery"
-    ? _L("phone.order_type.delivery")
-    : t === "dine_in"
-    ? _L("phone.order_type.dine_in")
-    : _L("phone.order_type.pickup");
 
 function modText(mods?: any[]) {
   if (!mods || mods.length === 0) return "";
@@ -98,16 +107,16 @@ function TicketActions({
     compact ? "py-2.5" : "py-3"
   );
   const mine = isMyDelivery(t, me);
-  const claimedByOther = t.orderType === "delivery" && t.driver && !mine;
+  const claimedByOther = ticketChannel(t) === "delivery" && t.driver && !mine;
   // A delivery is served by ITS driver and nobody else — you have to hold the run to
   // hand it over. So Serve isn't merely disabled for a ticket that isn't yours, it's
   // absent: the only thing an unclaimed delivery offers is Accept. (The server rejects
   // it either way; this just stops the queue advertising an action that would fail.)
-  const canServe = t.orderType !== "delivery" || mine;
+  const canServe = ticketChannel(t) !== "delivery" || mine;
 
   return (
     <div className={cn("space-y-2", compact ? "mt-2.5" : "")}>
-      {t.orderType === "delivery" &&
+      {ticketChannel(t) === "delivery" &&
         (claimedByOther ? (
           <div className={cn(row, "bg-muted text-muted-foreground")}>
             <Truck className="h-4 w-4" />{" "}
@@ -204,8 +213,8 @@ function TicketSheet({
   me?: number;
 }) {
   const ready = t.fulfill?.ready;
-  const Icon = t.npc ? Bot : TYPE_ICON[t.orderType] || ShoppingBag;
-  const label = t.npc ? _L("phone.work.walk_in") : typeLabel(t.orderType);
+  const Icon = ticketIcon(t);
+  const label = ticketTypeLabel(t);
   return (
     <Sheet onClose={onClose}>
       <>
@@ -464,7 +473,7 @@ export function Kitchen({ params }: { params?: any }) {
       ) : (
         <div className="space-y-2 px-4">
           {tickets.map((t) => {
-            const Icon = t.npc ? Bot : TYPE_ICON[t.orderType] || ShoppingBag;
+            const Icon = ticketIcon(t);
             const ready = t.fulfill?.ready;
             return (
               <div
@@ -483,7 +492,7 @@ export function Kitchen({ params }: { params?: any }) {
                       </span>
                     </div>
                     <div className="text-[0.66rem] uppercase tracking-wide text-muted-foreground">
-                      {t.npc ? _L("phone.work.walk_in") : typeLabel(t.orderType)}
+                      {ticketTypeLabel(t)}
                     </div>
                   </div>
                   <span className="font-mono text-sm">{money(currency, t.total)}</span>
@@ -671,20 +680,28 @@ export function Staff({ params }: { params?: any }) {
 }
 
 // ─── MANAGE (owner hub) ───────────────────────────────────────────────────────
+// MOBILE-FIRST: this used to be a horizontal rail of pill tabs, which is exactly the
+// pattern a phone-width screen can't hold — with five sections the last ones scrolled
+// off the edge and were effectively unreachable. It's now a HUB → DETAIL flow (the
+// Settings-app shape): the landing screen is a full-width list of sections, each one
+// tappable at thumb size with a live summary line, and picking one pushes it as its
+// own screen with a back arrow to the hub. That scales to any number of sections
+// without ever putting a control out of reach, and every row is one tap deep.
 const MANAGE_TABS = [
-  { id: "sales", key: "phone.manage.tab_sales", icon: TrendingUp, perm: "view_finances" },
-  { id: "menu", key: "phone.manage.tab_menu", icon: Utensils, perm: "manage_menu" },
-  { id: "staff", key: "phone.manage.tab_staff", icon: Users, perm: "manage_employees" },
-  { id: "stock", key: "phone.manage.tab_stock", icon: Boxes, perm: "manage_stock" },
-  { id: "promos", key: "phone.manage.tab_promos", icon: Megaphone, perm: "manage_menu" },
+  { id: "sales", key: "phone.manage.tab_sales", hint: "phone.manage.hint_sales", icon: TrendingUp, perm: "view_finances" },
+  { id: "menu", key: "phone.manage.tab_menu", hint: "phone.manage.hint_menu", icon: Utensils, perm: "manage_menu" },
+  { id: "staff", key: "phone.manage.tab_staff", hint: "phone.manage.hint_staff", icon: Users, perm: "manage_employees" },
+  { id: "stock", key: "phone.manage.tab_stock", hint: "phone.manage.hint_stock", icon: Boxes, perm: "manage_stock" },
+  { id: "promos", key: "phone.manage.tab_promos", hint: "phone.manage.hint_promos", icon: Megaphone, perm: "manage_menu" },
 ];
 
 export function Manage({ params }: { params: any }) {
-  const { back, home } = usePhone();
+  const { back, home, currency } = usePhone();
   const rid = params.rid;
   const emp = (home?.employment || []).find((e: any) => e.id === rid);
   const allowed = MANAGE_TABS.filter((t) => emp?.isOwner || emp?.perms?.[t.perm]);
-  const [tab, setTab] = useState(allowed[0]?.id || "sales");
+  // null = the hub. A section is pushed over it, never squeezed alongside it.
+  const [section, setSection] = useState<string | null>(null);
   const [mgmt, setMgmt] = useState<any>(null);
 
   const loadMgmt = () => fetchNui("phone:mgmtData", { id: rid }).then((d) => d?.ok && setMgmt(d));
@@ -693,33 +710,70 @@ export function Manage({ params }: { params: any }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rid]);
 
+  // A one-line "what's in here" for each row, so the hub is worth looking at rather
+  // than a menu you tap through. Read off the management payload we already load.
+  const summary = (id: string): string | undefined => {
+    if (!mgmt) return undefined;
+    switch (id) {
+      case "sales": return _L("phone.manage.sum_sales", money(currency, mgmt.restaurant?.balance || 0));
+      case "menu": return _L("phone.manage.sum_menu", (mgmt.priceList || []).length);
+      case "staff": return _L("phone.manage.sum_staff", (mgmt.employees || []).length);
+      case "stock": {
+        const out = (mgmt.supplies || []).filter((s: any) => s.installed && s.stock <= 0).length;
+        return out > 0 ? _L("phone.manage.sum_stock_out", out) : _L("phone.manage.sum_stock_ok");
+      }
+      case "promos": return _L("phone.manage.sum_promos");
+    }
+  };
+
+  // ── a section, pushed over the hub ──
+  if (section) {
+    const t = allowed.find((x) => x.id === section);
+    return (
+      <Screen className="pb-8">
+        <TopBar title={t ? _L(t.key) : _L("phone.manage.title")} subtitle={emp?.label} onBack={() => setSection(null)} />
+        <div className="p-4">
+          {section === "sales" && <SalesTab rid={rid} onChange={loadMgmt} />}
+          {section === "menu" && <MenuTab rid={rid} mgmt={mgmt} reload={loadMgmt} />}
+          {section === "staff" && <StaffTab rid={rid} mgmt={mgmt} reload={loadMgmt} />}
+          {section === "stock" && <StockTab rid={rid} mgmt={mgmt} reload={loadMgmt} />}
+          {section === "promos" && <PromosTab rid={rid} />}
+        </div>
+      </Screen>
+    );
+  }
+
+  // ── the hub ──
   return (
     <Screen className="pb-8">
       <TopBar title={_L("phone.manage.title")} subtitle={emp?.label} onBack={back} />
-      <div className="pf-rail px-4 pb-2">
-        {allowed.map((t) => {
-          const Icon = t.icon;
-          return (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={cn(
-                "flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-semibold",
-                tab === t.id ? "border-brand bg-brand text-brand-ink" : "border-border bg-card"
-              )}
-            >
-              <Icon className="h-4 w-4" /> {_L(t.key)}
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="p-4 pt-1">
-        {tab === "sales" && <SalesTab rid={rid} onChange={loadMgmt} />}
-        {tab === "menu" && <MenuTab rid={rid} mgmt={mgmt} reload={loadMgmt} />}
-        {tab === "staff" && <StaffTab rid={rid} mgmt={mgmt} reload={loadMgmt} />}
-        {tab === "stock" && <StockTab rid={rid} mgmt={mgmt} reload={loadMgmt} />}
-        {tab === "promos" && <PromosTab rid={rid} />}
+      <div className="space-y-2 p-4">
+        {allowed.length === 0 ? (
+          <Empty title={_L("phone.manage.no_access")} hint={_L("phone.manage.no_access_hint")} />
+        ) : (
+          allowed.map((t) => {
+            const Icon = t.icon;
+            const sum = summary(t.id);
+            return (
+              <button
+                key={t.id}
+                onClick={() => setSection(t.id)}
+                className="pf-elev flex w-full items-center gap-3 rounded-2xl border border-border bg-card p-3.5 text-left active:scale-[0.99]"
+              >
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-brand/10 text-brand">
+                  <Icon className="h-5 w-5" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block font-display text-base font-bold leading-tight">{_L(t.key)}</span>
+                  <span className="mt-0.5 block truncate text-[0.72rem] text-muted-foreground">
+                    {sum || _L(t.hint)}
+                  </span>
+                </span>
+                <ChevronRight className="h-5 w-5 shrink-0 text-muted-foreground" />
+              </button>
+            );
+          })
+        )}
       </div>
     </Screen>
   );
@@ -863,6 +917,8 @@ function MenuTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () => 
       )}
       {items.map((it) => (
         <div key={it.key} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2">
+          {/* the sellable's own art — priceList has carried `image` all along */}
+          <ItemImg src={it.image} alt={it.label} className="h-9 w-9 shrink-0 rounded-lg bg-muted/40 object-contain" />
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-semibold">{it.label}</div>
             <button onClick={() => reprice(it)} className="font-mono text-[0.72rem] text-primary">
@@ -991,6 +1047,9 @@ function StockTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () =>
         const low = (s.stock || 0) < 10;
         return (
           <div key={s.item} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2">
+            {/* the supply's own inventory art — the payload has carried `image` all
+                along, this row just never drew it */}
+            <ItemImg src={s.image} alt={s.label} className="h-9 w-9 shrink-0 rounded-lg bg-muted/40 object-contain" />
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-semibold">{s.label}</div>
               <div className="text-[0.7rem]">

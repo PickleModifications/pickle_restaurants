@@ -318,6 +318,37 @@ local function deliveryPoint(coords, cfg)
     return coords.x + math.cos(ang) * dist, coords.y + math.sin(ang) * dist, dist
 end
 
+-- The admin-placed DELIVERY DOORS for a restaurant (prop_type "delivery_door").
+-- When a restaurant has any, an NPC delivery goes to a real doorstep instead of a
+-- bare coordinate in a field — which is what lets the driver knock and have someone
+-- answer (modules/doorstep). No doors placed = the random-bearing point above, so
+-- an install that never places one behaves exactly as it did before.
+local function deliveryDoors(rid)
+    local out = {}
+    for _, p in pairs(PropCache) do
+        if p.restaurant_id == rid and p.prop_type == "delivery_door" then out[#out + 1] = p end
+    end
+    return out
+end
+
+-- Pick a door, preferring one that isn't already the target of an open delivery so
+-- two drivers aren't sent to the same doorstep at once. Falls back to any door when
+-- they're all busy rather than refusing to generate the order.
+local function pickDeliveryDoor(rid)
+    local doors = deliveryDoors(rid)
+    if #doors == 0 then return nil end
+    local taken = {}
+    for orderId, t in pairs(DeliveryTargets or {}) do
+        if t.door then taken[t.door] = true end
+    end
+    local free = {}
+    for _, d in ipairs(doors) do
+        if not taken[d.id] then free[#free + 1] = d end
+    end
+    local pool = (#free > 0) and free or doors
+    return pool[math.random(#pool)]
+end
+
 local function spawnNpcDelivery(rid, r, cfg, coords)
     local catalog = BuildPricedCatalog(rid, true)
     if not catalog or #catalog == 0 then return end
@@ -342,13 +373,24 @@ local function spawnNpcDelivery(rid, r, cfg, coords)
     })
     if not order or not order.id then return end
 
-    local dx, dy, dist = deliveryPoint(coords, cfg)
+    local door = pickDeliveryDoor(rid)
+    local dx, dy, dz, dist, doorId, doorHeading
+    if door then
+        dx, dy, dz = door.x, door.y, door.z
+        doorId, doorHeading = door.id, door.heading or 0.0
+        dist = math.sqrt((dx - coords.x) ^ 2 + (dy - coords.y) ^ 2)
+    else
+        dx, dy, dist = deliveryPoint(coords, cfg)
+        dz = 0.0
+    end
     -- Carry the phone fields on the cache row so GetOpenOrders projects them (the same
     -- thing modules/sales' placeOrder does for a player's app order).
     order.order_type = "delivery"
     order.address    = _L("npc_delivery_address", math.floor(dist))
     order.dest_x, order.dest_y = dx, dy
-    DeliveryTargets[order.id] = { x = dx, y = dy, z = 0.0 }
+    -- `door` is what turns arrival into a doorstep hand-off rather than a button
+    -- press at a coordinate: modules/doorstep reads it off the delivery target.
+    DeliveryTargets[order.id] = { x = dx, y = dy, z = dz or 0.0, door = doorId, heading = doorHeading }
 
     -- Persisted so a restart mid-run doesn't resurrect the ticket as a pickup with no
     -- drop point (core reloads orders; RehydrateDeliveryTargets restores the target).

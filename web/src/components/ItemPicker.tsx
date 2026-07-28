@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { Truncate } from "@/components/ui/truncate";
+import Thumb from "@/components/Thumb";
 import { Check, ChevronsUpDown, Search, TriangleAlert } from "lucide-react";
 
 export type Item = { name: string; label: string; image?: string };
@@ -72,6 +73,9 @@ export default function ItemPicker({
       >
         <span className="flex min-w-0 items-center gap-1.5 truncate">
           {missing && <TriangleAlert className="h-3.5 w-3.5 shrink-0" />}
+          {/* the picked item's own picture, so a filled field is identifiable without
+              reading it — a codename and a label look alike, the art doesn't */}
+          {selected && <Thumb src={selected.image} alt={selected.label} className="h-5 w-5 shrink-0" />}
           {selected ? (
             <Truncate>{selected.label}</Truncate>
           ) : value ? (
@@ -105,6 +109,7 @@ export default function ItemPicker({
               <Option
                 label={_L("itempicker.none")}
                 sub=""
+                hasImage={false}
                 active={!value}
                 onClick={() => { onChange(""); setOpen(false); setQuery(""); }}
               />
@@ -114,6 +119,7 @@ export default function ItemPicker({
               <Option
                 label={_L("itempicker.free_use", query.trim())}
                 sub={_L("itempicker.kitchen_item")}
+                hasImage={false}
                 active={query.trim() === value}
                 onClick={() => { onChange(query.trim()); setOpen(false); setQuery(""); }}
               />
@@ -126,6 +132,7 @@ export default function ItemPicker({
                 key={i.name}
                 label={i.label}
                 sub={i.name}
+                image={i.image}
                 active={i.name === value}
                 onClick={() => { onChange(i.name); setOpen(false); setQuery(""); }}
               />
@@ -137,17 +144,23 @@ export default function ItemPicker({
   );
 }
 
-function Option({ label, sub, active, onClick }: { label: string; sub: string; active: boolean; onClick: () => void }) {
+// A catalogue row. `image` is absent for the synthetic rows (None / free-text
+// commit), which have no item behind them — those keep the plain text layout, with
+// the thumbnail's width reserved so the list stays aligned.
+function Option({ label, sub, image, hasImage, active, onClick }: {
+  label: string; sub: string; image?: string; hasImage?: boolean; active: boolean; onClick: () => void;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
       className={cn(
-        "flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm hover:bg-accent",
+        "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-accent",
         active && "bg-accent/60"
       )}
     >
-      <span className="flex min-w-0 flex-col">
+      {hasImage !== false && <Thumb src={image} alt={label} className="h-7 w-7 shrink-0" />}
+      <span className="flex min-w-0 flex-1 flex-col">
         <Truncate>{label}</Truncate>
         {sub && <Truncate className="font-mono text-[10px] text-muted-foreground">{sub}</Truncate>}
       </span>

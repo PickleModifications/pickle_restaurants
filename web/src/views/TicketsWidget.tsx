@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { ClipboardList, ChevronDown, Check, Clock, ImageOff, Ban } from "lucide-react";
 import TicketTimer from "@/components/TicketTimer";
+import { channelIcon, channelLabel, isDelivery } from "@/lib/orders";
 
 type LineMod = { label: string; image?: string; color?: string; added?: boolean; removed?: boolean };
 type Line = { label: string; qty: number; image?: string; mods?: LineMod[] };
@@ -13,7 +14,9 @@ type Fulfill = { ok: boolean; ready?: boolean; missing?: string[] };
 // `npc` walk-ins carry a patience countdown (`expiresIn` seconds left at send time,
 // ticked down locally; `patience` = the full window for the radial). Player tickets
 // have neither.
-type Ticket = { orderId: number; ticket: number; customer: string; lines: Line[]; fulfill?: Fulfill; npc?: boolean; expiresIn?: number; patience?: number };
+// `channel` is how the order arrived (delivery / pickup / dine_in / walk_in), resolved
+// server-side by OrderChannel — `npc` is orthogonal (an AI customer can order delivery).
+type Ticket = { orderId: number; ticket: number; customer: string; lines: Line[]; fulfill?: Fulfill; npc?: boolean; expiresIn?: number; patience?: number; channel?: string; orderType?: string; address?: string };
 
 // Coerce a server list to a real array (Lua encodes an empty list as `{}`).
 const arr = <T,>(x: unknown): T[] => (Array.isArray(x) ? (x as T[]) : []);
@@ -98,6 +101,22 @@ function StatusPill({ ok, missing }: { ok: boolean; missing: string[] }) {
   );
 }
 
+// How the order arrived, as a compact chip: a delivery has to be told apart from a
+// counter order at a glance (the kitchen packs it for a driver, not for someone
+// standing at the till). Highlighted for a delivery, muted otherwise.
+function ChannelChip({ t }: { t: Ticket }) {
+  const Icon = channelIcon(t);
+  return (
+    <span
+      title={isDelivery(t) && t.address ? _L("order.delivery_to", t.address) : undefined}
+      className={cn("flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase tracking-wider",
+        isDelivery(t) ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground")}
+    >
+      <Icon className="h-2.5 w-2.5" /> {channelLabel(t)}
+    </span>
+  );
+}
+
 // The full, un-truncated detail for the hovered ticket, shown to the RIGHT of the
 // board: every line with its image + exact name + qty, and each topping spelled out
 // (image + name, "No X" for a removed default). Read-only, so it ignores the cursor.
@@ -112,6 +131,7 @@ function TicketDetail({ t }: { t: Ticket }) {
             {_L("register.ticket_num", t.ticket)}
           </span>
           <span className="truncate text-xs font-semibold text-foreground">{t.customer}</span>
+          <ChannelChip t={t} />
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {t.npc && t.expiresIn != null && (
@@ -230,6 +250,7 @@ export default function TicketsWidget() {
                           {_L("register.ticket_num", t.ticket)}
                         </span>
                         <span className="truncate text-xs font-medium text-foreground">{t.customer}</span>
+                        <ChannelChip t={t} />
                       </div>
                       <div className="flex shrink-0 items-center gap-1.5">
                         {t.npc && t.expiresIn != null && (

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { Badge } from "@/components/ui/badge";
 import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave, CircleDot, Search, Trash2, ChevronUp, ChevronDown, Timer, Package, ShoppingBag } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, prettyItem } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { equipImageUrl, drinkImageUrl } from "@/lib/localImages";
 
@@ -80,6 +80,9 @@ type PrepTip = {
   // exactly the way a build stack ranks recipes. Hinged lid like the pizza box.
   takeout?: boolean;
   contents?: PrepContent[];
+  // A MADE takeout box standing on the prep table: one finished product, not a build,
+  // so there are no recipes to rank — it names itself instead.
+  product?: { label?: string; image?: string };
 };
 // One aggregated item sitting in a takeaway vessel (shown in its tooltip).
 type PrepContent = { item: string; label?: string; image?: string; qty: number };
@@ -105,7 +108,6 @@ type ItemMetaMap = Record<string, { label?: string; image?: string }>;
 // A normalised (0..1) source rectangle cropped in the admin panel; forwarded to the
 // world render untouched so what was cropped is what's painted.
 type Crop = { x: number; y: number; w: number; h: number };
-const prettyItem = (name: string) => name.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const metaLabel = (meta: ItemMetaMap | undefined, item: string) => meta?.[item]?.label || prettyItem(item);
 const metaImage = (meta: ItemMetaMap | undefined, item: string) => meta?.[item]?.image;
 const topMelted = (state: number | string) => state === 2 || state === "2" || state === "melted";
@@ -209,7 +211,7 @@ type BarTip = { x: number; y: number; tray?: TrayEntry; ing?: Ingredient; hint?:
 function BarTooltip({ tip, actions, onPin, meta }: { tip: BarTip; actions?: ReactNode; onPin: (pinned: boolean) => void; meta?: ItemMetaMap }) {
   const e = tip.tray;
   const ing = tip.ing;
-  const label = e ? e.label || e.item : ing?.label || "";
+  const label = e ? e.label || prettyItem(e.item) : ing?.label || "";
   const image = e ? e.image : ing?.image;
   const count = e ? e.count : ing?.count;
   // clamp the w-56 (224px) card inside the viewport; the caret keeps pointing at
@@ -581,13 +583,18 @@ function BakeTrayTooltip({ filled, onPin }: { filled: boolean; onPin: (pinned: b
 // offsets) becomes one meal item; a box's meal is flagged so it sets back down
 // as its box. A box also explains its click-to-toggle lid.
 function MealTooltip({
-  count, box, bag, open, boxing, onMake, onTakeOut, onPin,
+  count, box, bag, open, boxing, contents, onMake, onTakeOut, onPin,
 }: {
   count: number;
   box?: boolean;
   bag?: boolean;
   open?: boolean;
   boxing?: boolean;
+  // What's in the vessel right now. The RESTAURANT BAG lists it here for the same
+  // reason the takeout box does: a packed bag hides its contents in the world, and
+  // a food with no prop of its own (a soup) has nothing to show there even when
+  // it's open — so a count alone left the cook guessing what they'd packed.
+  contents?: PrepContent[];
   onMake: () => void;
   onTakeOut: () => void;
   onPin: (pinned: boolean) => void;
@@ -628,6 +635,18 @@ function MealTooltip({
               : _L("cook.items_other", count)}
         </span>
       </div>
+      {/* the packed list — every item by name and picture, whether or not it has a
+          world model. Shown for the bag; the tray's contents are visible on it. */}
+      {bag && (contents?.length ?? 0) > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {contents!.map((c) => (
+            <span key={c.item} className="flex items-center gap-1 rounded bg-secondary px-1.5 py-0.5 text-[11px]">
+              {c.image ? <ItemThumb src={c.image} alt={c.label || prettyItem(c.item)} className="h-4 w-4 object-contain" /> : null}
+              {c.label || prettyItem(c.item)}{c.qty > 1 ? ` ×${c.qty}` : ""}
+            </span>
+          ))}
+        </div>
+      )}
       <div className="mt-2 text-[11px] leading-snug text-muted-foreground">{hint}</div>
       <div className="mt-3 flex gap-1.5">
         <button
@@ -661,6 +680,40 @@ function MealTooltip({
   );
 }
 
+// Floating tooltip over a MADE product standing on the prep table — today that's a
+// finished takeout box (a soup, a salad). It satisfies no recipe, so the recipe guide
+// showed nothing at all and the box read as an unlabelled prop; this names it with the
+// food's own art and says what it's for.
+function ProductTooltip({ product, onPin }: {
+  product: { label?: string; image?: string };
+  onPin: (pinned: boolean) => void;
+}) {
+  return (
+    <div
+      onPointerEnter={() => onPin(true)}
+      onPointerLeave={() => onPin(false)}
+      className="w-56 rounded-xl border border-border bg-card p-3 shadow-2xl"
+    >
+      <div className="flex items-center gap-2.5">
+        {product.image ? (
+          <ItemThumb src={product.image} alt={product.label || ""} className="h-10 w-10 shrink-0 object-contain" />
+        ) : (
+          <Package className="h-10 w-10 shrink-0 p-2 text-muted-foreground" />
+        )}
+        <div className="min-w-0">
+          <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            {_L("cook.takeout_box")}
+          </div>
+          {/* the FOOD's name is the headline; the vessel is only the eyebrow above it.
+              Falling back to the vessel name here would print "Takeout Box" twice. */}
+          <div className="truncate text-sm font-semibold">{product.label || _L("cook.unknown_food")}</div>
+        </div>
+      </div>
+      <div className="mt-2 text-[11px] leading-snug text-muted-foreground">{_L("cook.product_hint")}</div>
+    </div>
+  );
+}
+
 // Floating tooltip over a hovered TAKEOUT BOX — the vessel every bag-kind food
 // (soup, salad…) is created in. Lists what's in the box and, like the burger build
 // guide, ranks the FOODS its contents most relate to — closest first, each showing
@@ -668,8 +721,12 @@ function MealTooltip({
 // always creates the best match; the ranking just makes the match (and any
 // shortfall) visible instead of a blind "nothing happens" on click. The box closes
 // itself before creating, so the button doubles as the lid's cue.
+//
+// The box's contents are HIDDEN in the world (a packed container, not an open tray),
+// so this tooltip is the ONLY place they're visible — and the only way they come back
+// out, via Take Out.
 function BagTooltip({
-  contents, ranked, selected, count, open, boxing, onSelect, onBag, onPin,
+  contents, ranked, selected, count, open, boxing, onSelect, onBag, onTakeOut, onPin,
 }: {
   contents: PrepContent[];
   ranked: Ranked[];
@@ -679,6 +736,7 @@ function BagTooltip({
   boxing?: boolean;
   onSelect: (output: string) => void;
   onBag: () => void;
+  onTakeOut: () => void;
   onPin: (pinned: boolean) => void;
 }) {
   const ready = !!selected?.ready && !boxing;
@@ -701,8 +759,8 @@ function BagTooltip({
         <div className="mt-2 flex flex-wrap gap-1.5">
           {contents.map((c) => (
             <span key={c.item} className="flex items-center gap-1 rounded bg-secondary px-1.5 py-0.5 text-[11px]">
-              {c.image ? <ItemThumb src={c.image} alt={c.label || c.item} className="h-4 w-4 object-contain" /> : null}
-              {c.label || c.item}{c.qty > 1 ? ` ×${c.qty}` : ""}
+              {c.image ? <ItemThumb src={c.image} alt={c.label || prettyItem(c.item)} className="h-4 w-4 object-contain" /> : null}
+              {c.label || prettyItem(c.item)}{c.qty > 1 ? ` ×${c.qty}` : ""}
             </span>
           ))}
         </div>
@@ -720,6 +778,8 @@ function BagTooltip({
           <div className="mb-1.5 mt-3 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
             {_L("cook.bag_makes")}
           </div>
+          {/* the FOOD each match makes, as its own item art + label — the box hides
+              its contents, so the picture of what comes out is the thing to show */}
           <div className="flex flex-wrap gap-1.5">
             {ranked.map((r) => {
               const active = selected?.rec.output === r.rec.output;
@@ -728,10 +788,13 @@ function BagTooltip({
                   key={r.rec.output}
                   onClick={() => onSelect(r.rec.output)}
                   className={cn(
-                    "flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition",
+                    "flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium transition",
                     active ? "border-primary ring-2 ring-primary/40" : "border-border hover:border-primary/60"
                   )}
                 >
+                  {r.rec.image ? (
+                    <ItemThumb src={r.rec.image} alt={r.rec.label} className="h-5 w-5 shrink-0 object-contain" />
+                  ) : null}
                   {r.rec.label}
                   {r.ready && <span className="text-emerald-400">✓</span>}
                 </button>
@@ -757,20 +820,53 @@ function BagTooltip({
         </>
       )}
 
-      <button
-        disabled={!ready}
-        onClick={onBag}
-        className={cn(
-          "mt-3 w-full rounded-md px-3 py-1.5 text-xs font-semibold transition",
-          ready ? "bg-primary text-primary-foreground hover:opacity-90" : "cursor-not-allowed bg-muted text-muted-foreground"
+      {/* what the box will BE once created: the food's own item art, big enough to
+          read — this is the "food item for the takeout box" the props no longer show */}
+      {selected && (
+        <div className="mt-3 flex items-center gap-2 rounded-lg border border-border bg-secondary/60 p-2">
+          {selected.rec.image ? (
+            <ItemThumb src={selected.rec.image} alt={selected.rec.label} className="h-9 w-9 shrink-0 object-contain" />
+          ) : (
+            <Package className="h-9 w-9 shrink-0 p-1.5 text-muted-foreground" />
+          )}
+          <div className="min-w-0">
+            <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              {_L("cook.takeout_makes")}
+            </div>
+            <div className="truncate text-xs font-semibold">{selected.rec.label}</div>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-3 flex gap-1.5">
+        <button
+          disabled={!ready}
+          onClick={onBag}
+          className={cn(
+            "flex-1 rounded-md px-3 py-1.5 text-xs font-semibold transition",
+            ready ? "bg-primary text-primary-foreground hover:opacity-90" : "cursor-not-allowed bg-muted text-muted-foreground"
+          )}
+        >
+          {boxing
+            ? _L("cook.box_closing")
+            : selected
+              ? _L("cook.takeout_create", selected.rec.label)
+              : _L("cook.takeout_create_generic")}
+        </button>
+        {/* the contents are invisible inside the box, so this is the only way back out */}
+        {count > 0 && (
+          <button
+            disabled={!!boxing}
+            onClick={onTakeOut}
+            className={cn(
+              "shrink-0 rounded-md px-2.5 py-1.5 text-xs font-semibold transition",
+              boxing ? "cursor-not-allowed bg-muted text-muted-foreground" : "bg-secondary text-foreground hover:bg-accent"
+            )}
+          >
+            {_L("cook.box_take_out")}
+          </button>
         )}
-      >
-        {boxing
-          ? _L("cook.box_closing")
-          : selected
-            ? _L("cook.takeout_create", selected.rec.label)
-            : _L("cook.takeout_create_generic")}
-      </button>
+      </div>
     </div>
   );
 }
@@ -957,13 +1053,13 @@ export default function Cooking({ data }: { data: any }) {
   const q = query.trim().toLowerCase();
   const trayMatches = (e: TrayEntry) =>
     !q ||
-    [e.label || e.item, e.flavorLabel, ...(e.comps || []).map((c) => c.label), ...(e.extras || []).map((c) => c.label)]
+    [e.label || prettyItem(e.item), e.flavorLabel, ...(e.comps || []).map((c) => c.label), ...(e.extras || []).map((c) => c.label)]
       .some((t) => !!t && t.toLowerCase().includes(q));
   const sortTray = (list: TrayEntry[]) =>
     [...list].sort(
       (a, b) =>
         Number(!!a.burnt) - Number(!!b.burnt) ||
-        (a.label || a.item).localeCompare(b.label || b.item) ||
+        (a.label || prettyItem(a.item)).localeCompare(b.label || prettyItem(b.item)) ||
         (a.sig || "").localeCompare(b.sig || "")
     );
   const trayListAll = tab === "uncooked" ? uncookedItems : cookedItems;
@@ -1047,7 +1143,11 @@ export default function Cooking({ data }: { data: any }) {
   // A fresh bag resets the pick to its top craft.
   useEffect(() => { setSelectedCraftId(null); }, [tip?.tid]);
 
-  const tipVisible = isPrep && tipShow && !!tip && !!tip.onScreen && !dragging && (tip.tray ? true : ranked.length > 0);
+  // A tray/box tooltip always shows; a build stack's only shows once it relates to a
+  // recipe (an unranked pile has nothing to say). A MADE product — a takeout box set
+  // back down — is neither: it ranks nothing, but it still has to identify itself.
+  const tipVisible = isPrep && tipShow && !!tip && !!tip.onScreen && !dragging
+    && (tip.tray || tip.product ? true : ranked.length > 0);
   const onTipPin = (pinned: boolean) => {
     tipPinnedRef.current = pinned;
     if (pinned) {
@@ -1074,7 +1174,9 @@ export default function Cooking({ data }: { data: any }) {
   };
   // the box tooltip's Take Out — the pizza slides back out onto the table
   const onBoxTakeOut = () => {
-    if (!tip?.box || !(tip.count || 0) || tip.boxing) return;
+    // both lidded vessels empty this way: the pizza box (one pile) and the takeout
+    // box (whose contents are hidden in-world, so this is their only way out)
+    if (!(tip?.box || tip?.takeout) || !(tip.count || 0) || tip.boxing) return;
     fetchNui("cooking:boxTakeOut", { tid: tip.tid });
     setTipShow(false);
     setTip(null);
@@ -1274,10 +1376,14 @@ export default function Cooking({ data }: { data: any }) {
         item: entry.item, model: entry.model,
         dual: entry.dual ? 1 : 0, top: entry.top, topModel: entry.topModel,
         sig, stack: entry.stack, state: entry.stackState, finishTool: entry.finishTool,
-        // a made takeout box: the box pair + the food image drawn inside it, at the
-        // exact source rect the admin cropped (the world quad honours it)
+        // A made takeout box: the box pair + the food image drawn inside it, at the
+        // exact source rect the admin cropped (the world quad honours it).
+        // The two pictures are NOT interchangeable — `quad` is what's painted inside
+        // the open box, `image` is the food's card art — and the box carries the
+        // FOOD's name, not the vessel's, so both ride along for the hover tooltip.
         takeout: entry.takeout ? 1 : 0, lidModel: entry.lidModel,
         image: entry.quad, imageCrop: entry.quadCrop,
+        label: entry.label, itemImage: entry.image,
       });
     } else {
       // A model-less component (no prop): still run the Lua drag so it can be dropped
@@ -1287,9 +1393,9 @@ export default function Cooking({ data }: { data: any }) {
       prepDragRef.current = { source, item: entry.item, model: null, pill: true, sig };
       fetchNui("cooking:beginPrepPlace", {
         item: entry.item, source, sig,
-        label: entry.label || entry.item, image: entry.image,
+        label: entry.label || prettyItem(entry.item), image: entry.image,
       });
-      setGhost({ x: e.clientX, y: e.clientY, label: entry.label || entry.item, image: entry.image });
+      setGhost({ x: e.clientX, y: e.clientY, label: entry.label || prettyItem(entry.item), image: entry.image });
     }
   };
 
@@ -1618,12 +1724,15 @@ export default function Cooking({ data }: { data: any }) {
         <div className="relative">
           {tip?.bake ? (
             <BakeTrayTooltip filled={!!tip.filled} onPin={onTipPin} />
+          ) : tip?.product ? (
+            <ProductTooltip product={tip.product} onPin={onTipPin} />
           ) : tip?.takeout ? (
             <BagTooltip contents={bagContentsResolved} ranked={bagRanked} selected={craftSelected}
               count={tip.count || 0} open={!!tip.open} boxing={!!tip.boxing}
-              onSelect={setSelectedCraftId} onBag={onMealMake} onPin={onTipPin} />
+              onSelect={setSelectedCraftId} onBag={onMealMake} onTakeOut={onBoxTakeOut} onPin={onTipPin} />
           ) : tip?.tray ? (
             <MealTooltip count={tip.count || 0} box={!!tip.box} bag={!!tip.bag} open={!!tip.open} boxing={!!tip.boxing}
+              contents={tip.contents}
               onMake={onMealMake} onTakeOut={onBoxTakeOut} onPin={onTipPin} />
           ) : (
             <BuildTooltip ranked={ranked} selected={selected} onSelect={setSelectedOutput} onMake={onTipMake} onPin={onTipPin} />
@@ -2001,11 +2110,11 @@ export default function Cooking({ data }: { data: any }) {
                       its own inventory image as before */}
                   <ItemThumb
                     src={e.flavor ? drinkImageUrl(e.flavor) : e.image}
-                    alt={e.label || e.item}
+                    alt={e.label || prettyItem(e.item)}
                     className="h-10 w-10 object-contain"
-                    fallback={e.flavor && e.image ? <ItemThumb src={e.image} alt={e.label || e.item} className="h-10 w-10 object-contain" /> : undefined}
+                    fallback={e.flavor && e.image ? <ItemThumb src={e.image} alt={e.label || prettyItem(e.item)} className="h-10 w-10 object-contain" /> : undefined}
                   />
-                  <span className="w-full truncate px-1.5 leading-tight">{e.label || e.item}</span>
+                  <span className="w-full truncate px-1.5 leading-tight">{e.label || prettyItem(e.item)}</span>
                   {/* flavor line for finished (frosted) products; toppings row for
                       everything else — fixed height so every card lines up */}
                   {e.flavorLabel ? (

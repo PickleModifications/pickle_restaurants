@@ -39,13 +39,6 @@ local function LoyaltyGoal()  return math.max(2, math.floor(tonumber(GetSetting(
 local function LoyaltyOn()    return GetSetting("loyalty_enabled", true) ~= false end
 
 -- ─── schema ────────────────────────────────────────────────────────────────────
-local function EnsureColumn(tbl, col, ddl)
-    local exists = MySQL.scalar.await(
-        "SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
-        { tbl, col })
-    if not exists then MySQL.query.await(("ALTER TABLE `%s` ADD COLUMN %s"):format(tbl, ddl)) end
-end
-
 local function CreatePhoneTables()
     MySQL.query.await([[
         CREATE TABLE IF NOT EXISTS `pickle_restaurant_reviews` (
@@ -164,25 +157,6 @@ local function CreatePhoneTables()
             KEY `idx_age` (`created_at`)
         )
     ]])
-
-    -- Additive order columns for delivery/pickup/dine-in + order-ahead. The base
-    -- pickle_restaurant_orders table predates the phone; these are nullable so the
-    -- register/kiosk paths (which never set them) keep working untouched.
-    EnsureColumn("pickle_restaurant_orders", "order_type",   "`order_type` VARCHAR(12) NOT NULL DEFAULT 'pickup'")
-    EnsureColumn("pickle_restaurant_orders", "scheduled_for","`scheduled_for` VARCHAR(20) DEFAULT NULL")
-    EnsureColumn("pickle_restaurant_orders", "address",      "`address` VARCHAR(160) DEFAULT NULL")
-    -- Delivery DROP POINT. This used to live ONLY in the in-memory DeliveryTargets
-    -- table in modules/sales, so a restart orphaned every in-flight delivery (no
-    -- waypoint for the driver, no destination for the in-app map). Persisted here so
-    -- RehydrateDeliveryTargets() can restore them on boot, and so the phone's order
-    -- payload can draw the drop pin for a ticket that predates this session.
-    EnsureColumn("pickle_restaurant_orders", "dest_x",       "`dest_x` DOUBLE DEFAULT NULL")
-    EnsureColumn("pickle_restaurant_orders", "dest_y",       "`dest_y` DOUBLE DEFAULT NULL")
-    EnsureColumn("pickle_restaurant_orders", "phone_number", "`phone_number` VARCHAR(24) DEFAULT NULL")
-    EnsureColumn("pickle_restaurant_orders", "rated",        "`rated` TINYINT UNSIGNED NOT NULL DEFAULT 0")
-    -- Which account paid for the ticket, so a cancel refunds what was charged.
-    -- Phone orders are card payments ('bank'); register/kiosk stay cash (the default).
-    EnsureColumn("pickle_restaurant_orders", "paid_account", "`paid_account` VARCHAR(8) NOT NULL DEFAULT 'cash'")
 
     if GetSetting("loyalty_goal", nil) == nil then SetSetting("loyalty_goal", 8) end
     if GetSetting("loyalty_enabled", nil) == nil then SetSetting("loyalty_enabled", true) end
@@ -581,8 +555,7 @@ local function OrderMap(o, r)
     local dest
     if otype == "delivery" then
         local dx, dy = tonumber(o.dest_x), tonumber(o.dest_y)
-        -- Fall back to the live in-memory target for a ticket placed before the
-        -- dest_x/dest_y migration landed (or by an older running session).
+        -- Fall back to the live in-memory target when the row has no drop point.
         if (not dx or not dy) and DeliveryTargets and DeliveryTargets[o.id] then
             dx, dy = tonumber(DeliveryTargets[o.id].x), tonumber(DeliveryTargets[o.id].y)
         end
@@ -650,7 +623,6 @@ lib.callback.register("pickle_restaurants:phone:menu", function(src, d)
     if not r then return { ok = false, error = _L("phone_restaurant_unavailable") } end
 
     local catalog = select(1, BuildPricedCatalog(id, true))
-    local combos  = BuildComboCatalog(id)
     local rev = ReviewCache[id]
     local reviews = {}
     if rev then
@@ -672,7 +644,6 @@ lib.callback.register("pickle_restaurants:phone:menu", function(src, d)
         theme     = r.metadata and r.metadata.theme or nil,
         brand     = r.metadata and (r.metadata.phone_image or r.metadata.brand_image) or nil,
         catalog   = catalog,
-        combos    = combos,
         promo     = ActivePromo(id),
         rating    = rev and rev.avg or 0,
         reviewCount = rev and rev.count or 0,

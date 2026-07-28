@@ -64,7 +64,6 @@ export type CartLine = {
   qty: number;
   mods: string[];
   modLabels: string[];
-  combo?: any;
 };
 export type Cart = { rid: number; label: string; lines: CartLine[] } | null;
 

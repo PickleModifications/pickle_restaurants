@@ -1,7 +1,22 @@
 {
   "permissions": {
     "allow": [
-      "WebSearch"
+      "WebSearch",
+      "Bash(luac5.4 -p modules/consume/server.lua core/server.lua)",
+      "Bash(luac5.4 -p modules/cooking/server.lua modules/dining/client.lua)",
+      "Bash(mysql -uroot -p'pG*eR5^rhiIporyw' FiveM -e \"SELECT id,name,\\\\`groups\\\\` FROM pickle_restaurants;\")",
+      "Bash(mysql -uroot -p'pG*eR5^rhiIporyw' FiveM -N -e \"SELECT value FROM pickle_restaurant_settings WHERE \\\\`key\\\\`='foods';\")",
+      "Bash(python3 -c ' *)",
+      "Bash(mysql -uroot -p'pG*eR5^rhiIporyw' FiveM -N -e \"SELECT \\\\`key\\\\` FROM pickle_restaurant_settings;\")",
+      "Bash(mysql -uroot -p'pG*eR5^rhiIporyw' FiveM -e \"DESCRIBE pickle_restaurant_settings;\")",
+      "Bash(mysql -uroot -p'pG*eR5^rhiIporyw' FiveM -N --raw -e \"SELECT setting_value FROM pickle_restaurant_settings WHERE setting_key='foods';\")",
+      "Bash(mysql -uroot -p'pG*eR5^rhiIporyw' FiveM -e \"SELECT * FROM pickle_restaurant_menu WHERE restaurant_id=1;\")",
+      "Bash(mysql -uroot -p'pG*eR5^rhiIporyw' FiveM -N --raw -e \"SELECT setting_value FROM pickle_restaurant_settings WHERE setting_key='ingredient_costs';\")",
+      "Bash(mysql -uroot -p'pG*eR5^rhiIporyw' FiveM -N --raw -e \"SELECT setting_value FROM pickle_restaurant_settings WHERE setting_key='profit_margin';\")",
+      "Bash(grep -oE \"[a-z_0-9]{3,}\")",
+      "Bash(grep -n \"^local function variationKey\\\\|^local function requiredUnits\\\\|^local function mealCovers\\\\|^end$\" modules/sales/server.lua)",
+      "Bash(awk -F: '$1>370 && $1<720')",
+      "Bash(SLICE=/tmp/claude-0/-root-FXServer-server-txData-server-data-resources--jobs--pickle-restaurants/ffaa6360-d5bb-49d0-a13a-bbf7d9d668ad/scratchpad/slice.lua lua5.4 /tmp/claude-0/-root-FXServer-server-txData-server-data-resources--jobs--pickle-restaurants/ffaa6360-d5bb-49d0-a13a-bbf7d9d668ad/scratchpad/plan_test.lua)"
     ]
   }
 }

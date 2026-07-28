@@ -14,16 +14,12 @@ import { Image as ImageIcon, RotateCcw, X, Pencil, Plus, Trash2, Palette, Check,
 // The restaurant's display name — what every customer-facing surface shows (map
 // blip, station prompts, menu/orders boards, receipts, the phone app). The
 // internal codename is DERIVED from it server-side (same slug the create form
-// uses), so there is one field here, not two. Auto-saves debounced like every
+// uses), so there is one field here, not two — and the codename itself is never
+// shown: it's an implementation detail, not something staff should read or type. Auto-saves debounced like every
 // other setting — this app has no save buttons.
 // `event` = "management:setName" | "admin:setName" (both hit SetRestaurantName).
 
 const MAX_LABEL_LEN = 100; // mirrors `pickle_restaurants`.label
-
-// Mirror of the server's slug, for previewing the derived internal key. Display
-// only — the server always re-derives it from the label it accepted.
-const previewSlug = (s: string) =>
-  s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 
 export function NameEditor({
   id, label, event, onChange,
@@ -74,9 +70,6 @@ export function NameEditor({
           placeholder={_L("identity.placeholder")}
           className="font-display text-base font-bold"
         />
-        <p className="mt-1.5 text-[11px] text-muted-foreground">
-          {_L("identity.key")} <span className="font-mono">{previewSlug(trimmed) || "—"}</span>
-        </p>
       </CardContent>
     </Card>
   );
@@ -297,7 +290,7 @@ function brandTextures(rts?: { key: string; w: number; h: number }[]): BrandTex[
 export type Crop = { x: number; y: number; w: number; h: number };
 type Aspect = { w: number; h: number };
 // A photo target: the crop frame's aspect + copy for the picker dialog. The brand
-// textures satisfy this structurally (they add a `key`); combos pass their own.
+// textures satisfy this structurally (they add a `key`); other callers pass their own.
 export type PhotoAspect = { label: string; w: number; h: number; hint: string };
 export type PhotoEntry = { url: string; crop?: Crop | null };
 const clampN = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
@@ -506,7 +499,7 @@ function BrandTextureCard({
 }
 
 // A reusable "Set / Update / Remove photo" card (URL + crop), shared by the brand
-// textures and the combo editor. `aspect` locks the crop frame + dialog copy; `entry`
+// textures and the food-image editors. `aspect` locks the crop frame + dialog copy; `entry`
 // is the current { url, crop }; `onChange(null)` clears it. `empty` overrides the
 // no-photo caption. Same WYSIWYG cropper as the packaging brands.
 export function PhotoField({

@@ -10,6 +10,7 @@ import {
 } from "@/components/OrderBuilder";
 import { drinkLineImageUrl } from "@/lib/localImages";
 import TicketTimer from "@/components/TicketTimer";
+import { channelIcon, channelLabel, isDelivery, orderChannel } from "@/lib/orders";
 
 // The staff-facing ticket list + fulfillment UI (complete / cancel / meal picker),
 // shared by BOTH the full-screen register panel (views/Register.tsx) and the in-world
@@ -74,6 +75,12 @@ function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?:
     big ? "px-4 py-2.5 text-sm" : "px-3 py-1.5 text-xs");
   const ic = big ? "h-4 w-4" : "h-3.5 w-3.5";
 
+  // How the order arrived. A DELIVERY is the one a cashier must not try to hand
+  // across the counter — only its claimed driver can complete it, at the customer's
+  // door — so it's called out on the slip rather than looking like every walk-in.
+  const delivery = isDelivery(t);
+  const ChannelIcon = channelIcon(t);
+
   return (
     <div className="drop-shadow-md">
       <div className={cn("receipt rounded-t-sm", big ? "px-4 pb-4 pt-4" : "px-3.5 pb-3 pt-3")}>
@@ -93,6 +100,21 @@ function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?:
             <span className={cn("font-mono font-bold tabular-nums", big ? "text-base" : "text-sm")}>{money(t.total)}</span>
           </div>
         </div>
+        {/* the channel strip: what kind of order this is, and for a delivery the
+            drop address + who (if anyone) has claimed the run */}
+        <div className={cn("mb-2 flex flex-wrap items-center gap-x-2 gap-y-1", big ? "text-[11px]" : "text-[10px]")}>
+          <span className={cn("tape flex items-center gap-1 rounded-sm px-1.5 py-0.5",
+            delivery ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground")}>
+            <ChannelIcon className={big ? "h-3.5 w-3.5" : "h-3 w-3"} /> {channelLabel(t)}
+          </span>
+          {t.scheduled && <span className="text-muted-foreground">{_L("phone.work.scheduled", t.scheduled)}</span>}
+          {delivery && t.address && <span className="truncate text-muted-foreground">{_L("order.delivery_to", t.address)}</span>}
+          {delivery && (
+            <span className={cn("truncate", t.driver?.name ? "text-muted-foreground" : "font-semibold text-destructive")}>
+              {t.driver?.name ? _L("order.delivery_driver", t.driver.name) : _L("order.delivery_unclaimed")}
+            </span>
+          )}
+        </div>
         <div className="receipt-rule mb-2" />
         <div className="mb-3 space-y-1">
           {groupLines(t.lines).map((b, bi) => {
@@ -110,27 +132,6 @@ function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?:
                 </div>
               );
             }
-            return (
-              <div key={bi} className="rounded-sm bg-muted/50 p-1.5">
-                <div className="flex items-center gap-2">
-                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded bg-primary/15 font-mono text-[10px] font-bold text-primary tabular-nums">#{b.number}</span>
-                  <div className="min-w-0 flex-1 truncate text-xs font-semibold">{b.label}</div>
-                  <span className="shrink-0 font-mono text-xs font-semibold tabular-nums text-muted-foreground">×{b.qty}</span>
-                </div>
-                <div className="mt-1 space-y-0.5 border-l border-border/60 pl-2">
-                  {b.comps.map((l, li) => {
-                    const mods = Array.isArray(l.mods) ? l.mods : [];
-                    return (
-                      <div key={li} className="flex items-center gap-1.5">
-                        <Thumb src={drinkLineImageUrl(l.kind, l.variant)} fallbackSrc={l.image} className="h-6 w-6 shrink-0" />
-                        <span className="truncate text-[11px]">{l.label}</span>
-                        <OptRow added={mods.filter((m) => !m.removed)} removed={mods.filter((m) => m.removed)} />
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            );
           })}
         </div>
         {/* nothing in the pool can complete this order yet (no singles, no meal) */}
@@ -154,10 +155,19 @@ function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?:
             </>
           ) : (
             <>
+              {/* A delivery is completed by its claimed driver at the customer's door
+                  (the server rejects a counter hand-off), so the POS offers no Complete
+                  for one — say why instead of showing a button that always fails. */}
+              {delivery && (
+                <span className={cn("mr-auto self-center text-muted-foreground", big ? "text-xs" : "text-[11px]")}>
+                  {_L("order.delivery_hand_off")}
+                </span>
+              )}
               <button disabled={busy} onClick={() => setConfirmCancel(true)}
                 className={cn("inline-flex items-center gap-1.5 rounded-md border border-border font-semibold text-foreground transition-colors hover:border-destructive hover:text-destructive disabled:opacity-50", big ? "px-4 py-2.5 text-sm" : "px-3 py-1.5 text-xs")}>
                 <Trash2 className={ic} /> {_L("register.cancel")}
               </button>
+              {!delivery && (<>
               {/* a packed vessel — a meal or a takeaway bag — (with any single items)
                   can complete this order: open the in-depth picker to review the
                   contents and hand one over */}
@@ -180,6 +190,7 @@ function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?:
                   <Ban className={ic} /> {_L("register.not_complete")}
                 </button>
               ) : null}
+              </>)}
             </>
           )}
         </div>

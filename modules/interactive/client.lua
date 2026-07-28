@@ -51,19 +51,40 @@ RegisterNUICallback("close", function(_, cb)
     cb({})
 end)
 
--- ESC closes whatever panel is open (cooking handles its own escape).
+-- ESC closes whatever panel is open. A view that owns world props / a camera and
+-- has to tear them down first (the cooking station, the eat-in meal view) registers
+-- its own closer here instead of polling for the key itself — one per-frame reader
+-- for everything, so nothing misses a keypress on a slow tick.
+EscapeHandlers = {} -- NUIView name -> function called instead of CloseNUI
+function SetEscapeHandler(view, fn) EscapeHandlers[view] = fn end
+
+-- NUI focus alone does NOT stop ESC from reaching the frontend: the game still
+-- processes the pause controls, so escaping a panel also opened the pause menu.
+-- They are DISABLED every frame a panel is up (and the menu shoved closed if one
+-- slipped through), and the key is read back with the Disabled* variants.
+-- BACKSPACE (194 / 202) is accepted as the alternate "step out" key.
 CreateThread(function()
     while true do
-        local wait = 500
-        -- the cooking station and the eat-in meal view own their own ESC (they have
-        -- world props + a camera to tear down first)
-        if NUIView ~= "none" and NUIView ~= "cooking" and NUIView ~= "dining" then
-            wait = 0
-            if IsControlJustReleased(0, 322) then -- ESC
-                CloseNUI()
+        if NUIView ~= "none" then
+            DisableControlAction(0, 199, true) -- INPUT_FRONTEND_PAUSE
+            DisableControlAction(0, 200, true) -- INPUT_FRONTEND_PAUSE_ALTERNATE
+            DisableControlAction(0, 322, true) -- ESC
+            -- Same working pattern as the gizmo/placement loops: force the frontend
+            -- back closed before the key is read, so a single tap can't paint a frame
+            -- of pause menu on its way to closing the panel.
+            if IsPauseMenuActive() then
+                SetFrontendActive(false)
+                ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
             end
+            if IsDisabledControlJustReleased(0, 322) or IsDisabledControlJustReleased(0, 200)
+                or IsDisabledControlJustReleased(0, 202) or IsDisabledControlJustReleased(0, 194) then
+                local handler = EscapeHandlers[NUIView]
+                if handler then handler() else CloseNUI() end
+            end
+            Wait(0)
+        else
+            Wait(250)
         end
-        Wait(wait)
     end
 end)
 

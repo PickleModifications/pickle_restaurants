@@ -7,6 +7,23 @@ if GetResourceState('qb-core') == 'started' then return end
 
 debugPrint("Loading standalone bridge (no ESX/QB detected).")
 
+-- USABLE ITEMS. Item-use has no standard: ox_inventory calls a per-item export,
+-- while every other inventory asks the FRAMEWORK's core for a usable-item
+-- callback. We must not depend on the export alone — plenty of inventories don't
+-- support one — so the core hook is wired wherever a core exists.
+--
+-- QBox is the case this exists for: it ships `qbx_core` and no `qb-core`, so the
+-- QB bridge's guard never matches and this standalone bridge is what loads. Left
+-- undefined, `RegisterUsableItem` would simply be nil and using a bag or a meal
+-- would silently do nothing on every non-ox inventory.
+function RegisterUsableItem(item, cb)
+    if GetResourceState('qbx_core') == 'started' then
+        exports.qbx_core:CreateUseableItem(item, cb)
+        return true
+    end
+    return false
+end
+
 local Accounts = {} -- identifier -> { cash = number, bank = number }
 
 local function IdentifierOf(source)

@@ -10,7 +10,7 @@ import { type ThemeConfig } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2, RotateCcw, Palette, PersonStanding, Utensils,
+  Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2, RotateCcw, Palette, PersonStanding, Utensils, Flame,
 } from "lucide-react";
 
 const PERMISSIONS = [
@@ -49,6 +49,7 @@ const GROUPS = () => (_groups ??= [
   { key: "roles", label: _L("settings.group_roles"), icon: Users },
   { key: "eating", label: _L("settings.group_eating"), icon: Utensils },
   { key: "npc_customers", label: _L("settings.group_npc"), icon: PersonStanding },
+  { key: "kitchen_fires", label: _L("settings.group_fires"), icon: Flame },
   { key: "blip", label: _L("settings.group_blip"), icon: MapPin },
 ]);
 
@@ -86,6 +87,7 @@ export default function Settings({ settings, items, groups, onSaved, appTheme, o
         {group === "roles" && <Roles settings={settings} onSaved={onSaved} />}
         {group === "eating" && <Eating settings={settings} onSaved={onSaved} />}
         {group === "npc_customers" && <NpcCustomers settings={settings} onSaved={onSaved} />}
+        {group === "kitchen_fires" && <KitchenFires settings={settings} items={items} onSaved={onSaved} />}
         {group === "blip" && <Blip settings={settings} onSaved={onSaved} />}
       </div>
     </div>
@@ -320,6 +322,45 @@ function Roles({ settings, onSaved }: { settings: any; onSaved: () => void }) {
  * ticket, and pay on serve. All values are clamped server-side (NpcConfig) too, so this
  * editor only needs light coercion. `models` is a plain list of GTA ped model names
  * (NOT inventory items), so it's edited as text rows, not an ItemPicker. */
+/** Kitchen fires: how long burnt food smoulders before the station catches, how
+ *  long putting one out takes, and (optionally) the item you must be carrying to
+ *  fight it. The extinguisher is never consumed — leave it unset for bare-handed. */
+function KitchenFires({ settings, items, onSaved }: { settings: any; items: Item[]; onSaved: () => void }) {
+  const c = settings.kitchen_fires && typeof settings.kitchen_fires === "object" ? settings.kitchen_fires : {};
+  const [enabled, setEnabled] = useState(c.enabled !== false);
+  const [delay, setDelay] = useState<number>(c.delay_seconds ?? 90);
+  const [extinguishMs, setExtinguishMs] = useState<number>(c.extinguish_ms ?? 5000);
+  const [reach, setReach] = useState<number>(c.reach ?? 4);
+  const [item, setItem] = useState<string>(c.extinguisher_item || "");
+
+  const status = useAutoSave(
+    () => saveSettings({
+      kitchen_fires: {
+        enabled,
+        delay_seconds: Math.max(5, Math.floor(delay || 0)),
+        extinguish_ms: Math.max(500, Math.floor(extinguishMs || 0)),
+        reach: Math.max(1, reach || 0),
+        extinguisher_item: item.trim(),
+      },
+    }).then(onSaved),
+    [enabled, delay, extinguishMs, reach, item]
+  );
+
+  return (
+    <Section title={_L("settings.fires_title")} description={_L("settings.fires_desc")} status={status}>
+      <Toggle checked={enabled} onChange={setEnabled} label={_L("settings.fires_enabled")} />
+      <div className="grid grid-cols-2 gap-3">
+        <NumberField label={_L("settings.fires_delay")} hint={_L("settings.fires_delay_hint")} value={delay} min={5} onChange={setDelay} />
+        <NumberField label={_L("settings.fires_extinguish_ms")} value={extinguishMs} min={500} step={250} onChange={setExtinguishMs} />
+        <NumberField label={_L("settings.fires_reach")} value={reach} min={1} step={0.5} onChange={setReach} />
+      </div>
+      <Field label={_L("settings.fires_item")} hint={_L("settings.fires_item_hint")}>
+        <ItemPicker items={items} value={item} onChange={setItem} />
+      </Field>
+    </Section>
+  );
+}
+
 function NpcCustomers({ settings, onSaved }: { settings: any; onSaved: () => void }) {
   const c = settings.npc_customers && typeof settings.npc_customers === "object" ? settings.npc_customers : {};
   const [enabled, setEnabled] = useState(c.enabled !== false);

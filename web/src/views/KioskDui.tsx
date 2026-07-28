@@ -4,7 +4,7 @@ import { applyTheme } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
 import { _L } from "@/lib/locale";
 import { Check, ShoppingBag } from "lucide-react";
-import { OrderBuilder, arr, type Cat, type Combo } from "@/components/OrderBuilder";
+import { OrderBuilder, arr, type Cat } from "@/components/OrderBuilder";
 
 // The restaurant brand the idle kiosk screen shows: a url + optional normalised
 // source-crop rectangle (the same { url, crop } the render-target driver paints —
@@ -194,7 +194,6 @@ export default function KioskDui() {
             key={nonce}
             id={data.restaurantId}
             catalog={arr<Cat>(data.catalog)}
-            combos={arr<Combo>(data.combos)}
             mode="kiosk"
             onOrdered={(t) => setPlaced(t ?? 0)}
           />

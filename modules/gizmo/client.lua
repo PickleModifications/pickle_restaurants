@@ -126,7 +126,16 @@ function StartMovement(prop, data)
             return nil
         end
         if isFrozen then
-            local forwardVector --[[ vector3 ]], rightVector --[[ vector3 ]], upVector --[[ vector3 ]], position --[[ vector3 ]] = GetEntityMatrix(prop)
+            -- Nudging is CAMERA-relative: "up" on the mouse pushes the prop away from
+            -- the viewer and "right" pushes it to the right OF THE SCREEN, whichever
+            -- way the prop itself happens to be turned. Taking the prop's own matrix
+            -- (what this used to do) meant the axes rotated with the prop, so after
+            -- turning it the nudge keys sent it sideways relative to what you saw.
+            -- Yaw only, flattened to the ground plane — pitch must not shrink the
+            -- step or leak height into a horizontal nudge (Z has its own key).
+            local camYaw = math.rad(GetGameplayCamRot(2).z)
+            local forwardVector = vector3(-math.sin(camYaw), math.cos(camYaw), 0.0)
+            local rightVector   = vector3(math.cos(camYaw), math.sin(camYaw), 0.0)
             if not data.keepRotation then
                 if IsControlPressed(1, 15) then
                     heading = heading + (1.0 * speedMode)

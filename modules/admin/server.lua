@@ -145,12 +145,10 @@ lib.callback.register("pickle_restaurants:admin:delete", function(src, d)
     MySQL.update.await("DELETE FROM pickle_restaurant_stock WHERE restaurant_id = ?", { id })
     MySQL.update.await("DELETE FROM pickle_restaurant_ledger WHERE restaurant_id = ?", { id })
     MySQL.update.await("DELETE FROM pickle_restaurant_orders WHERE restaurant_id = ?", { id })
-    MySQL.update.await("DELETE FROM pickle_restaurant_combos WHERE restaurant_id = ?", { id })
     RestaurantCache[id] = nil
     EmployeeCache[id] = nil
     StockCache[id] = nil
     ClearOrders(id) -- drops OrderCache/NextTicket + bumps the rev so a stale register can't re-apply
-    ClearCombos(id) -- drops the combo cache for the deleted restaurant
     for _, pid in ipairs(propIds) do
         PropCache[pid] = nil
         TriggerClientEvent("pickle_restaurants:propRemoved", -1, pid)
@@ -191,6 +189,12 @@ lib.callback.register("pickle_restaurants:admin:setGroups", function(src, d)
     MySQL.update.await("UPDATE pickle_restaurants SET `groups` = ? WHERE id = ?",
         { #groups > 0 and json.encode(groups) or nil, id })
     RestaurantCache[id].groups = #groups > 0 and groups or nil
+    -- Groups decide what this restaurant may cook and sell, so the world is now
+    -- stale: the synced payload is filtered per restaurant by group, and without
+    -- this the menu boards, kiosk, register catalogue and cooking bar all keep
+    -- offering the old set until something else happens to trigger a sync.
+    SyncToClient(-1)
+    ShowNotification(src, _L("admin_settings_saved"))
     return { ok = true, groups = groups }
 end)
 

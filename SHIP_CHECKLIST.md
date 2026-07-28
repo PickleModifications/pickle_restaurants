@@ -54,13 +54,13 @@ These were fixed or confirmed in code this pass — listed so you don't re-check
 
 ## A. Install & boot
 
-- [ ] Start the server against an **empty database**. Expect: boots with no errors; console
+- [x] Start the server against an **empty database**. Expect: boots with no errors; console
   prints `Booted: N restaurants, N props, N recipes.` On a clean DB that's `0, 0, N`.
-- [ ] Install the items from the **`install/`** folder for your inventory (`ox_inventory.lua`
+- [x] Install the items from the **`install/`** folder for your inventory (`ox_inventory.lua`
   / `esx_items.sql` / `qbcore_items.lua`). Confirm the handout items (bag / meal / drink /
   receipt) and raw inputs (buns, patties, cups, mix, sauces…) exist; cooked foods
   (burger, fries, cooked patty…) are deliberately **not** installed — they stay tray-only.
-- [ ] Confirm the resource boots on your **framework** (ESX / QBCore / standalone) — only the
+- [x] Confirm the resource boots on your **framework** (ESX / QBCore / standalone) — only the
   matching bridge should load; no bridge errors in console.
 
 ## B. Admin setup (`/restaurants`)

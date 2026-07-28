@@ -32,6 +32,11 @@ local function vesselKind(item)
     if not item or item == "" then return nil end
     if item == BagItemName() then return "bag" end
     if item == GetSetting("meal_item", "meal") then return "meal" end
+    -- A TAKEOUT BOX is takeaway like a bag, but it holds exactly ONE food, so it
+    -- has no contents list to choose from. Seated it lays out on the table like a
+    -- meal (modules/dining) and is eaten by clicking it; on your feet it is eaten
+    -- where you stand. Both go through the same eat callback.
+    if item == BoxItemName() then return "box" end
     return nil
 end
 
@@ -67,12 +72,20 @@ local function describeContents(stack)
     local out = {}
     for i, l in ipairs(stack) do
         local d = LayerDisplay and LayerDisplay(l) or nil
+        -- How much of THIS serving is left, so a menu can offer "take a sip" or
+        -- "finish it" and say how many are to go. Read from the layer's recorded
+        -- progress, never from anything the client remembers.
+        local spec = ConsumeSpecFor(l.item, l.stack)
+        local total = spec.bites or 1
+        local eaten = math.max(0, math.floor(tonumber(l.eaten) or 0))
         out[#out + 1] = {
             index = i,
             item  = l.item,
-            label = (d and d.label) or (l.item and GetItemLabel(l.item)) or l.item,
+            label = (d and d.label) or GetItemLabel(l.item),
             image = d and d.image or nil,
             drink = d and d.drink or nil,
+            bitesTotal = total,
+            bitesLeft  = math.max(1, total - eaten),
         }
     end
     return out
@@ -113,9 +126,22 @@ local function useVessel(src, item, slot)
         -- metadata, or an item spawned by hand): nothing to choose from
         return ShowNotification(src, _L("consume_empty"))
     end
-    TriggerClientEvent("pickle_restaurants:consume:open", src, {
-        kind = kind, item = item, slot = s, contents = describeContents(stack),
-    })
+    local payload = { kind = kind, item = item, slot = s, contents = describeContents(stack) }
+    -- A BOX has no contents list to choose from (one food, however many component
+    -- layers describe it), so it carries its own identity + progress instead —
+    -- that's what its bite/finish menu is built from.
+    if kind == "box" then
+        local disp  = LayerDisplay and LayerDisplay({ item = item, stack = stack }) or nil
+        local spec  = ConsumeSpecFor(item, stack)
+        local eaten = math.max(0, math.floor(tonumber(stack[1] and stack[1].eaten) or 0))
+        payload.food = {
+            label = (disp and disp.label) or GetItemLabel(item),
+            image = disp and disp.image or nil,
+            drink = disp and disp.drink or nil,
+            bitesLeft = math.max(1, (spec.bites or 1) - eaten),
+        }
+    end
+    TriggerClientEvent("pickle_restaurants:consume:open", src, payload)
 end
 
 -- Consume ONE thing out of a vessel. Everything is re-validated here: the slot
@@ -124,7 +150,8 @@ end
 -- animation and name it.
 lib.callback.register("pickle_restaurants:consume:eat", function(src, d)
     local item = d and d.item
-    if not vesselKind(item) then return { ok = false } end
+    local kind = vesselKind(item)
+    if not kind then return { ok = false } end
     local slot, meta = findSlot(src, item, tonumber(d and d.slot))
     if not slot then return { ok = false } end
     local stack = slotStack(meta)
@@ -132,7 +159,12 @@ lib.callback.register("pickle_restaurants:consume:eat", function(src, d)
     -- were arranged together (a burger's bun/patty). Both arrive as indices into the
     -- recorded stack, removed high-to-low so earlier removals can't shift later ones.
     local idxs = {}
-    if type(d.indices) == "table" then
+    -- A TAKEOUT BOX is one food, however many component layers were recorded to
+    -- describe it: eating it eats the whole box, so the client's indices are
+    -- irrelevant and eating "part of a soup" is not a thing.
+    if kind == "box" then
+        for i = 1, #stack do idxs[i] = i end
+    elseif type(d.indices) == "table" then
         for _, v in ipairs(d.indices) do
             local n = tonumber(v)
             if n and stack[n] then idxs[#idxs + 1] = n end
@@ -144,51 +176,123 @@ lib.callback.register("pickle_restaurants:consume:eat", function(src, d)
     if #idxs == 0 then return { ok = false, error = _L("consume_gone") } end
     table.sort(idxs, function(a, b) return a > b end)
     local layer = stack[idxs[#idxs]] -- the lowest index names the mouthful
-    local disp = LayerDisplay and LayerDisplay(layer) or nil
+    -- A box is named and nourishes as its FOOD, resolved from the box + its whole
+    -- stack — never as whichever component layer happens to sit at the bottom.
+    local subject = (kind == "box") and { item = item, stack = stack } or layer
+    local disp = LayerDisplay and LayerDisplay(subject) or nil
     -- What THIS food does when eaten + which clip it's eaten with, authored on the
     -- food itself and filled in from the global `consume` fallback. Resolved BEFORE
     -- the layer is dropped, since it reads that layer's metadata.
-    local spec = ConsumeSpecFor(layer.item, layer.stack)
+    local spec = ConsumeSpecFor(subject.item, subject.stack)
 
-    for _, n in ipairs(idxs) do table.remove(stack, n) end
-    local _, emptied = writeBack(src, item, slot, stack)
-    Nourish(src, spec.hunger, spec.thirst)
+    -- ── bites / sips ─────────────────────────────────────────────────────────
+    -- A serving is eaten over `spec.bites` mouthfuls unless the player asked to
+    -- finish it (`whole`). Progress is recorded ON THE LAYER (`eaten`) and written
+    -- back to the slot, so it is server state that survives closing the menu, the
+    -- meal going back in a pocket, and a reconnect — a half-eaten burger stays
+    -- half-eaten. The BOX tracks on its first layer, since it is consumed whole.
+    local total = spec.bites or 1
+    local track = (kind == "box") and stack[1] or layer
+    local done  = math.max(0, math.floor(tonumber(track and track.eaten) or 0))
+    local whole = (d and d.whole) and true or false
+    local take  = whole and (total - done) or 1
+    if take < 1 then take = 1 end
+    local left  = total - done - take
+
+    -- Each mouthful restores its SHARE, and the remainder is settled on the last
+    -- one, so N bites always add up to exactly one serving however it's divided.
+    local function share(v)
+        if left > 0 then return math.floor((tonumber(v) or 0) / total * take) end
+        return math.max(0, (tonumber(v) or 0) - math.floor((tonumber(v) or 0) / total) * done)
+    end
+    local gainH, gainT = share(spec.hunger), share(spec.thirst)
+
+    local emptied = false
+    if left > 0 then
+        -- still something on the plate: record the progress, keep the food
+        track.eaten = done + take
+        local _, gone = writeBack(src, item, slot, stack)
+        emptied = gone
+    else
+        for _, n in ipairs(idxs) do table.remove(stack, n) end
+        local _, gone = writeBack(src, item, slot, stack)
+        emptied = gone
+    end
+    Nourish(src, gainH, gainT)
 
     return { ok = true, emptied = emptied,
-             label = (disp and disp.label) or GetItemLabel(layer.item),
+             -- what's left of THIS serving, for the "2 bites left" read-out and so
+             -- a client knows whether the pile stays on the table
+             bites = { total = total, taken = done + take, left = math.max(0, left),
+                       drink = spec.drink },
+             finished = (left <= 0) or nil,
+             label = (disp and disp.label) or GetItemLabel(subject.item),
              drink = disp and disp.drink or nil,
              -- the full clip spec (dict/clip/prop/ms), so the client needs no
              -- catalogue of its own and an admin's retune applies immediately
              anim = spec.anim,
+             -- What goes IN THE HAND. For a drink this is the restaurant's own
+             -- capped cup (cup + lid) rather than the generic bottle the animation
+             -- catalogue would otherwise hold — the cup's texture is a brand render
+             -- target, so it arrives branded without anything extra here.
+             props = disp and disp.props or nil,
              -- what's left, so an open menu can refresh itself without a round trip
              contents = describeContents(stack) }
 end)
 
 -- ─── registration ────────────────────────────────────────────────────────────
 
--- Hand one item name to the framework's usable-item hook (ESX/QB). Harmless when
--- ox_inventory is in use — ox bypasses those hooks and calls our export instead.
+-- Hand one item name to the framework's usable-item hook (ESX / QB / QBox). This is
+-- the PRIMARY path and must always be wired: the ox-style per-item export below is
+-- specific to ox_inventory, and most other inventories have no equivalent — they
+-- route item use through the framework core instead. Registering both costs nothing
+-- (ox bypasses the core hook, the core hook fires on everything else) and means the
+-- vessel is usable whichever the server runs.
 local function register(item)
     if not item or item == "" or Registered[item] then return end
     Registered[item] = true
     if RegisterUsableItem then
         RegisterUsableItem(item, function(source) useVessel(source, item, nil) end)
+    else
+        -- No core hook AND no ox export means using the item does nothing at all,
+        -- which is invisible from in-game — say so once, at boot, by name.
+        print(("[pickle_restaurants] ^3no usable-item hook for '%s': this framework "
+            .. "exposes none, so it can only be used through ox_inventory's item export.^7"):format(item))
     end
 end
 
 function RegisterConsumables()
     register(BagItemName())
     register(GetSetting("meal_item", "meal"))
+    register(BoxItemName())
 end
 
 -- ox_inventory's per-item server export. ox calls it twice around a use
 -- ("usingItem" before, "usedItem" after); we act on the FIRST and cancel ox's own
 -- consumption by returning false, because the vessel is only emptied once the
 -- player actually picks something out of it.
+-- ox hands us the INVENTORY, which across versions is either the player's server id
+-- or the inventory table itself ({ id, owner, … }). Passing that table on as `source`
+-- made every bridge lookup miss and the use silently do nothing — the item's export
+-- was wired up correctly and still "didn't work". Same story for `slot`, which may
+-- arrive as the slot number or as the whole slot table.
+local function useSource(inventory)
+    if type(inventory) == "table" then
+        return tonumber(inventory.id) or tonumber(inventory.owner) or tonumber(inventory.source)
+    end
+    return tonumber(inventory) or inventory
+end
+
+local function useSlot(slot)
+    if type(slot) == "table" then return tonumber(slot.slot) end
+    return tonumber(slot)
+end
+
 exports("useItem", function(event, item, inventory, slot)
     if event ~= "usingItem" then return end
-    local src = tonumber(inventory) or inventory
-    useVessel(src, item and item.name or item, tonumber(slot))
+    local src = useSource(inventory)
+    if not src then return false end
+    useVessel(src, (type(item) == "table" and item.name) or item, useSlot(slot))
     return false -- never let ox eat the vessel itself
 end)
 
@@ -200,5 +304,5 @@ end)
 -- An admin renaming bag_item / meal_item re-registers the new names (the old ones
 -- stay registered and harmlessly inert).
 AddEventHandler("pickle_restaurants:settingChanged", function(key)
-    if RestaurantsReady and (key == "bag_item" or key == "meal_item") then RegisterConsumables() end
+    if RestaurantsReady and (key == "bag_item" or key == "meal_item" or key == "box_item") then RegisterConsumables() end
 end)

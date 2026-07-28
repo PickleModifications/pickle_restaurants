@@ -77,8 +77,8 @@ composites it as an opaque black rectangle on transparent NUI pages.
 ## Runtime architecture
 
 **Database is the source of truth.** `core/server.lua` is the spine: on `MySQL.ready` it
-runs `CreateTables()` (all `CREATE TABLE IF NOT EXISTS` + in-place `ALTER`/backfill
-migrations), seeds default settings and recipes, then loads everything into module-global
+runs `CreateTables()` (all `CREATE TABLE IF NOT EXISTS`), seeds default settings and
+recipes, then loads everything into module-global
 caches and sets `RestaurantsReady`. Tables are prefixed `pickle_restaurant*`.
 
 **Caches (server, module-global, defined at the top of `core/server.lua`):**
@@ -94,11 +94,14 @@ world** — a recipe/drink/assembly referencing an item missing from the invento
 catalogue is filtered out of the payload (but still shown, flagged, in the admin panel so
 it can be fixed). After any config change, server code calls `SyncToClient(-1)`.
 
-**Migrations pattern:** schema changes are additive `SHOW COLUMNS` / `ALTER TABLE` guards
-in `CreateTables()`, plus one-time data backfills gated behind a `pickle_restaurant_settings`
-flag (e.g. `dual_sided_seeded`, `method_seeded`, `pizza_pepperoni_optional`). Default
-settings/recipes are merged in idempotently on boot (missing keys only — never clobbering
-admin customisations). Follow this pattern for new columns/defaults.
+**No migrations. The schema is DECLARED.** Every column a module needs is in that
+table's one `CREATE TABLE IF NOT EXISTS` in `CreateTables()` — including the columns the
+phone app owns on `pickle_restaurant_orders`. There are deliberately NO `ALTER TABLE` /
+`SHOW COLUMNS` guards and no one-time data backfills gated behind a
+`pickle_restaurant_settings` flag: those were stripped for the v1 release, so a new column
+goes in the CREATE and nowhere else. Default settings/recipes are still merged in
+idempotently on boot (missing keys only — never clobbering admin customisations), and the
+shipped product art is seeded once into `item_images` — those are SEEDS, not migrations.
 
 ### Framework & inventory bridge
 
@@ -126,13 +129,61 @@ Each module is a self-contained feature loaded by the `modules/**` glob. Key one
 - `placement` / `gizmo` — placing & positioning station props (`PLACEABLE_MODELS` maps
   `prop_type` → model). Also places **seats**: `prop_type = "seat"` rows in the same
   `pickle_restaurant_props` table, but INVISIBLE — no model/runtime prop, only a
-  point + heading (placed with a ghost-ped gizmo preview, `saveSeat`).
+  point + heading + STYLE (placed with a ghost-ped gizmo preview, `saveSeat`; the
+  style is asked for BEFORE the gizmo opens, since it decides the ghost's pose).
+  A seat is placed in THREE gizmo passes: the seated ghost, a standing ghost for
+  `metadata.exit` (where the player is put down when they stand), and the real
+  serving-tray prop for `metadata.tray` (where a meal is laid out — read by
+  `modules/dining`, which otherwise probes for a surface and can only find whatever
+  geometry happens to be under the diner's reach). Both extra points are OPTIONAL:
+  cancelling a pass means "not placed" and each consumer falls back. Because editing
+  a seat always re-asks, a cancelled edit CLEARS that point — the only way to take
+  one back off.
 - `seating` — players sit on the placed seat anchors. `main`'s `SpawnProp` gives a
-  `seat` prop a "Sit" interaction (no world prop) → `SitOnSeat` plays a seated
-  scenario at the anchor; `E` stands up (`EnableInteraction` is toggled off while
-  seated). Server tracks per-anchor occupancy so two players can't share one seat.
-  Player-only for now; NPCs sitting to be served would be a larger phase-2. Tunables:
-  `SIT_SCENARIO` / `SIT_OFFSET_Z` in `modules/seating/client.lua` (TUNE IN-GAME).
+  `seat` prop a "Sit" interaction (no world prop) → `SitOnSeat`; `E` stands up
+  (`EnableInteraction` is toggled off while seated). Server tracks per-anchor
+  occupancy so two players can't share one seat.
+  **A player sits EXACTLY on the anchor — nothing else gets a vote.** We
+  `SetEntityCoords` + `FreezeEntityPosition` and play a looping clip. The freeze is
+  the point, not a workaround: a frozen ped is skipped by the collision
+  depenetration pass, which is what shoves a warped ped up out of an MLO chair's
+  mesh. **SCENARIOS WERE TRIED AND REVERTED** — do not go back:
+  `TaskStartScenarioAtPosition` decides for itself where to put the ped (players
+  ended up through the floor), and the natives that report whether a ped is in a
+  scenario are unreliable enough that a repair tick re-tasked forever, i.e. an
+  endless sit-down loop. Movement CONTROLS are disabled while seated (the freeze
+  holds position; this stops a held key walking them off on standing), the pose
+  repair is rate-limited to 1s and gated on a `settled` flag — re-tasking per frame
+  IS the loop bug — and `StandUp` uses `ClearPedTasks`, never `...Immediately`.
+  Posture is per-seat: `Config.SeatStyles` (`core/shared.lua`) is the catalogue
+  (`id`, locale-key `label`, `anim`, height trim `dz`), an anchor records its choice
+  in `metadata.style`, and `GetSeatStyle(id)` never returns nil. The placement ghost
+  and the real sit play the SAME clip at the SAME point (`SeatPreviewAnim` /
+  `SeatSitOffsetZ`) — that identity is what makes placement WYSIWYG, so never let
+  the two diverge. `saveSeat`/`updateProp` re-validate the submitted id.
+  `StandUp` puts the player down on the seat's `metadata.exit` when it has one — a
+  seat anchor sits ON the furniture, so standing up where you sat lands a booth or
+  bar diner on the table. No exit point = stand in place (an open-floor chair).
+  **The admin hover-highlight for a seat is DRAWN (`DrawMarker`), never a spawned
+  ghost ped** — a ped preview crashed the client, because hovering a list of seat
+  chips creates and deletes a ped per mouse-over and peds don't survive that churn
+  (`ANCHOR_HL` in `modules/main/client.lua`; the spawn path is objects-only now).
+  Player-only for now; NPCs sitting to be served would be a larger phase-2.
+  TUNE IN-GAME: `Config.SeatStyles`.
+- `doorstep` — the NPC-delivery HAND-OFF. A `delivery_door` prop (an invisible
+  admin-placed anchor: point + heading facing OUT of the doorway, placed from the
+  admin panel's Delivery doors card) is where `npc_customers` sends a delivery when
+  the restaurant has any placed — otherwise it falls back to the old random-bearing
+  point, so this is additive. Arriving doesn't complete the ticket: the phone's
+  "delivered" action is NOT a plain relay (`modules/phone/client.lua`) — it runs
+  `RunDoorstepHandoff` first (knock → step back → a LOCAL resident ped walks out of
+  the doorway → the `mp_common givetake1_a/_b` exchange pair) and only then calls
+  `sales:completeOrder`. Return contract: nil = no door, complete normally; false =
+  there was one and the scene didn't happen (too far / interrupted), leave it open;
+  true = go. The resident is client-local on purpose — no ped netcode, and nothing
+  is left standing in the street for other players if the driver crashes mid-scene.
+  `doorstep:point` grants nothing; it only answers where the door is, for the
+  assigned driver of that open delivery.
 - `management` / `admin` — the boss/owner and admin panels (employees, roles, finances,
   settings, recipes).
 - `sales` / `npc_customers` — selling to players and NPC customers.
@@ -229,6 +280,32 @@ changes the surface); bake the tuned numbers back into `Config.RenderTargets`.
   sheet): that was tried and removed — it washes the design out and still can't make a
   lit surface glow. A screen that reads as dim wants an **emissive shader on the model's
   screen material**, which is an asset-side fix.
+- `cookfx` — the kitchen's PARTICLES and KITCHEN FIRES. The client half keeps no
+  cooking state: each tick it asks `CookFxItems()` (bottom of `modules/cooking/
+  client.lua`) what is on a station right now and reconciles live PTFX handles
+  against it — steam on anything actively cooking (a grill face down, a basket
+  lowered, a door shut), smoke on anything burnt. Every effect names its OWN
+  `asset` in ONE `FX` table (TUNE IN-GAME), streamed per-effect on first use.
+  The server half owns fires: it POLLS `BurntCookingItems()` (burnt food arrives
+  and leaves through too many paths to hook each one), and food left burnt for
+  `kitchen_fires.delay_seconds` sets its station alight.
+  **The flame is a real `StartScriptFire`, not particles.** A ptfx casts no light,
+  throws no heat and damages nobody, so a station "burning" as particles alone
+  reads as a smoke machine — which is what it looked like before. Each client
+  starts its OWN local script fire off the server's authoritative list (no fire
+  netcode), re-lit every `FIRE.reignite_ms` because script fires burn themselves
+  out, and removed on douse, on leaving range, and on `onResourceStop` — a fire
+  left behind by a restart would keep burning with nothing able to put it out. The
+  `FX.fire`/`FX.fireSmoke` particles layer on top of it.
+  A burning station can't be USED, in both directions: `cooking:openStation`
+  refuses it (the ONE door in, so no place/collect path needs its own check), and
+  a station that ignites while someone is inside EJECTS them (`CookingStationId()`
+  + `ForceStopCooking()` client-side, `ReleaseStationClaim()` server-side so the
+  claim doesn't outlive them). Putting it out (G, `cookfx:extinguish`; requires the
+  configured extinguisher item if it's installed, never consumed) destroys
+  everything the station held. Settings live in `kitchen_fires` (Settings →
+  Kitchen fires); `/pickle_fire` (admin) lights/douses the nearest station through
+  the real `ignite()` so you don't have to burn food and wait to test one.
 - `itemgen` — `/restaurants_items` admin command exports ready-to-install item
   definitions (ox_inventory / ESX SQL / QBCore) into `generated_items/` from the **live**
   in-game config.
@@ -246,6 +323,17 @@ and `TriggerClientEvent` → `SendNUIMessage({ type/action = ..., ... })`. On th
 and `useNuiEvent(name, handler)` (matches on `action` **or** `type`). `App.tsx` switches a
 single `setView` message between views: `cooking`, `admin`, `management`, `order`,
 `register`, plus the always-on `InteractText` overlay.
+
+**Recipe groups match LOOSELY.** `RestaurantHasAccess` compares through
+`NormalizeGroup` (trim + case-fold): group names are free text typed in one panel
+and typed again on a food in another, so "Bakery" / "bakery" / "Bakery " is a
+naming slip, not a distinction — and an exact match turns that slip into a
+restaurant that silently can't cook anything. `/pickle_groups <id>` (admin) prints
+a restaurant's stored groups against every group in use, marked ACCESS/blocked.
+Empty group list on a restaurant = access to everything (groups are an opt-in
+restriction). `admin:setGroups` must `SyncToClient(-1)` — the synced payload is
+group-filtered per restaurant, so without it the boards/kiosk/register/cooking bar
+keep offering the old set.
 
 ### Permissions
 
@@ -351,8 +439,7 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   visual-only, never an item. NOTE: `pickle_cake_01..04` are the four flavored WHOLE
   cakes (strawberry/chocolate/vanilla/pickle), NOT cook states — the batter sheet
   bakes as `pickle_cake_mix_pour_02/03/04` (raw/cooked/burnt; best-guess mapping,
-  correctable in the recipe editor; a one-time `cake_models_seeded` backfill repoints
-  old DB rows that still hold the wrong defaults).
+  correctable in the recipe editor).
 - **Soda machine (drinks).** The fountain has SEVEN taps: the middle one dispenses
   ice, the other six map to the first six `drinks` settings entries by RAW config
   position (tap N = entry N — STABLE even when some flavors are invalid; a missing
@@ -362,11 +449,10 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   `meal_item`) with the flavor riding as build-stack metadata
   (`{ { item = <output key> } }`, TraySig'd so each flavor is its own variation);
   `drinkFlavor`/`drinkRender` resolve the label + capped cup+lid render everywhere
-  (getTray both paths, compSpec for drink layers in meals). itemgen exports the
-  generic item and grace-retains the legacy flavor items one release. BuildSyncPayload stamps each synced drink with its
-  `tap` index so the client mirrors the server's `flavorForSlot` exactly; the model's
-  printed flavor strip matches the default order, and a one-time
-  `soda_tap_order_seeded` backfill reorders legacy DBs to it). Cups are slot items
+  (getTray both paths, compSpec for drink layers in meals). BuildSyncPayload stamps
+  each synced drink with its `tap` index so the client mirrors the server's
+  `flavorForSlot` exactly; the model's printed flavor strip matches the default
+  order). Cups are slot items
   (`method = "soda"`, like fryer baskets): drag the cup item (`drinks[].input`) under
   a tap — the preview always LOCKS to the nearest free tap (`nearestOpenSlot`'s
   `anyDistance`), never trailing the cursor — click the tap to pour
@@ -386,7 +472,7 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   no-op), a drink pours a colored liquid STREAM — a column of sphere `DrawMarker`
   droplets recycling down the nozzle→cup gap with fake gravity (`startSodaPour`/
   `POUR`), tinted by the drink's `drinks[].color` (synced; a `POUR_COLORS` fallback
-  by output covers pre-`color` configs; one-time `soda_colors_seeded` backfill) —
+  by output covers a config with no colour set) —
   markers not ptfx, so the color is ours and it never fizzles early. There is NO
   on-screen tap label: the fountain model prints each flavor, and a click on the
   printed nozzle is resolved world-side by `hoveredTapSlot` in `cooking:worldClick`
@@ -453,31 +539,84 @@ ride as build-stack metadata:
   renderer against an external anchor (`extAnchor`) instead of a station — so a meal
   on a diner's table is identical to the one the cook built. TUNE IN-GAME: `DINE` in
   `modules/dining/client.lua`.
+  Eating one pile hands the view back to the GAMEPLAY camera for the mouthful
+  (`stopCam()` before `ConsumeAnim`, re-framed by `RefreshMealView` after) — the
+  tray camera looks down at the table, so eating under it frames food with the
+  diner out of shot. `OpenMealView` also calls `RefreshBrands()`: packaging and
+  cups are painted for the restaurant you are NEAREST, so a meal carried across
+  town is eaten out of the local restaurant's branding, correct on the first frame.
+  A DRINK is drunk from the restaurant's own capped cup, not the animation
+  catalogue's generic bottle: `LayerDisplay` returns the flavor's `drinkRender`
+  (cup + lid) as `props`, and `ConsumeAnim`'s `attachHeldStack` puts the cup in the
+  hand and the lid ON THE CUP ENTITY (never at a bigger bone offset — the hand
+  frame is rotated, so a bone-space lid drifts off as the wrist turns). Branding
+  needs no code: the cup's texture is a render target.
+- **Takeout box → `box_item` when EATEN.** A third vessel kind (`vesselKind`
+  returns `"box"`). SEATED it lays out on the table through `modules/dining` exactly
+  like a meal; standing it's eaten where you are, with no contents menu — a box
+  holds ONE food, so `consume:eat` consumes EVERY layer whatever indices arrive, and
+  names/nourishes from the box + its whole stack (never the bottom component layer).
+  `consume:mealSpecs` returns it as ONE part — the box pair with the food's picture
+  inside, compSpec's takeout branch — not as its components.
 - **Restaurant Bag → `bag_item` (TAKEAWAY).** The tray's sibling at prep: drop
   finished foods/drinks in, "Bag It Up", and `prepMakeBag` records one meta layer per
   pile. Usable anywhere: `modules/consume` opens an **ox_lib context menu** of the
   contents, eating one removes that layer, and the bag itself disappears when the last
   one goes.
 
-**A bag SUPPLIES an order exactly like a meal.** Both are "packed vessels" in the POS:
-`VesselItem`/`VesselItems` in `modules/sales/server.lua` name the pair, `PlanFulfillment
-(rid, order, sig, vesselItem)` lets one of them cover required units (`mealCovers`, exact
-variation match) with the rest coming from the pool as singles, and `AnnotateOrders`
-offers meals AND bags in one `mealOptions` list — each option carrying `item` (which one
-to consume) and `bag`. The wire field is still `mealSig`, now paired with `mealItem`;
-`VesselItem` rejects anything that isn't the meal or bag item, so a forged payload can
-never hand over an arbitrary item.
+**The three VESSELS are handed over as real items the moment they're crafted.** A
+meal, a Restaurant Bag and a takeout box are what a customer leaves with, so
+`giveVessel` (`modules/cooking/server.lua`) puts them straight into the maker's
+inventory with their contents on the slot metadata, instead of the DB-backed tray.
+It falls back to `AddTray` when the item isn't installed (these three are what the
+resource GENERATES — never a requirement) or the inventory is full, so a made meal
+is never destroyed for want of somewhere to put it. Success is tested by COMPARING
+THE ITEM COUNT before/after: no bridge's `Inventory.AddItem` returns anything, so
+trusting a return value would send every vessel to the tray.
+Because of that, POS fulfilment reads TWO stores: `VesselCount`/`VesselTopMeta`/
+`VesselVariations`/`VesselConsume` in `modules/sales/server.lua` union the tray pool
+with the vessels ON-DUTY EMPLOYEES are carrying (`vesselHolders`). That is the same
+restaurant-wide pool by a different storage — the tray pool already spans every
+cook's tray — and without it, crafting a bag would quietly remove it from the POS.
+
+**A SELLABLE need not be an installed item; a LOOSE hand-over must be.** Cooked and
+assembled foods live only in the restaurant-wide cooked-items pool and reach a customer
+packed into a meal or a Restaurant Bag — which is why `RecipeMissingItems` /
+`IsProductItem` never require them to be installed, and why `__INSTALL/items/` ships
+none of them. `BuildSellableCatalog` therefore admits `ItemExists(x) or
+IsProductItem(x)` (`sellableOk`) — gating the MENU on `ItemExists` instead hid every
+cooked food from the POS, the boards, the kiosk and the phone, which reads exactly like
+the group filter being broken. A tray-only sellable takes its label/art from the FOOD
+that authors it (`FoodForItem` → `FoodImageUrl`), since there's no inventory row to
+borrow from. The mirror-image rule lives in `PlanFulfillment`: a unit whose item isn't
+installed can never be a `single` (completion `Inventory.AddItem`s those), so it is
+reported as a shortfall until a vessel covers it. Its `looseOk` argument is the one
+exception — an NPC is handed its food directly and nothing enters an inventory, so an
+NPC ticket still fills straight from the pool.
+
+**A bag SUPPLIES an order exactly like a meal, and a ticket may take SEVERAL.** Both are
+"packed vessels" in the POS: `VesselItem`/`VesselItems` in `modules/sales/server.lua`
+name the pair, and `PlanFulfillment(rid, order, mealSig, vesselItem, looseOk, pool)`
+fills a ticket from two stores — vessels whose top-level layers cover required units
+(`mealCovers`, exact variation match) and loose singles from the cooked-items pool.
+SINGLES ARE SPENT FIRST (a loose burger fills a burger line without opening a bag), then
+as many vessels as the rest needs are claimed, best-fit: most units covered, ties broken
+by least left over inside, so a 4-item bag isn't spent on a 1-item ticket. `mealSig`/
+`mealItem` are now a PIN, not the whole answer — that exact vessel goes first, is ignored
+if it covers nothing (a stray pick can't give away an unrelated bag), and the planner
+fills the remainder itself; the plan returns `vessels = {{item, sig}, …}` and completion
+hands over every one. `AnnotateOrders` offers meals AND bags in one `mealOptions` list
+(an option must both complete the order and actually carry something it asked for), so
+`ok` and `ready` now agree and one-tap Complete works. `VesselItem` rejects anything that
+isn't the meal or bag item, so a forged payload can never hand over an arbitrary item.
 - **Takeout box → `box_item` (`pickle_takeout_box_01` + `_02`).** Where every
   `kind = "bag"` FOOD (soup, salad — the non-stack miscellaneous foods) is now
   created; the bag used to be that vessel. Mechanically the pizza box's twin (`TAKEP`
   ≡ `BOXP`: `LidCfg(kind)` returns either, and the seat/swing/close-before-make maths
   are shared) but it accepts loose food like a tray. `prepMakeBox` matches the
   contents against the food catalogue (`bestCraftForLayers`) and trays ONE `box_item`
-  with the food id on its first meta layer — the SAME `craft` flag, so `TraySig`'s
-  `~id` grammar and the POS `c:` variant key are byte-stable across the rename.
-  A one-time `takeout_box_migrated` backfill re-keys held bag instances; a legacy
-  `restaurant_bag` carrying a `craft` flag still READS as a box everywhere
-  (`boxFoodId`), since player inventory slots can't be migrated.
+  with the food id on its first meta layer — the `craft` flag `TraySig` writes as
+  `~id` and the POS reads as its `c:` variant key (`boxFoodId`).
 
 A made takeout box renders as base + open lid + the food's **image on a textured
 quad** (`modules/quad`): a DUI (`html/quad.html`) per distinct image + shape, pooled
@@ -510,9 +649,7 @@ TUNE IN-GAME: `DRAW_DIST`/`MAX_TEXTURES` in `modules/quad/client.lua`.
 Two fields on every authored food (both optional, edited in the Menu tab):
 - `image` = `{ url, crop }`, the food's OWN picture AS AN ITEM — the kitchen bar card,
   the POS, a bag's contents menu, the inventory slot, the admin row thumbnail.
-  `FoodImageUrl(food, item)` resolves it, falling back to the LEGACY `display_item`'s
-  art (the field the bag-food editor used to offer; still read, no longer written) and
-  then to the item's own.
+  `FoodImageUrl(food, item)` resolves it, falling back to the vessel item's own art.
 - `box_image` = the picture painted on the quad INSIDE an open takeout box, for when
   the card art doesn't work lying in a box. `FoodBoxImageUrl` falls back to `image`.
   Bag-kind foods only. `boxFoodRender(cr)` returns `label, itemImage, boxImage` — keep
@@ -524,13 +661,24 @@ not by item name: a generic vessel item is only told apart by what it holds, so 
 takeout box counts and reads as its FOOD (`craft:<id>`, the food's label + art) and a
 drink as its flavor. Grouping by item name would collapse a soup and a salad into two
 indistinguishable "Takeout Box" rows.
-- `consume` = `{ hunger, thirst, anim }` — what eating ONE serving restores (0-100
+**A serving is eaten in BITES (a drink, in SIPS).** `ConsumeSpecFor` resolves
+`bites` (per food → global `consume` fallback → 3, or 4 for a drink), and
+`consume:eat` takes ONE unless the caller passes `whole = true`. Progress is
+recorded ON THE LAYER (`eaten`) and written back to the slot, so it is server state
+that survives closing the menu, pocketing the meal and reconnecting — a half-eaten
+burger stays half-eaten. Each mouthful restores its share and the LAST one settles
+the remainder, so N bites always total exactly one serving however it's divided.
+Both surfaces offer both: seated, a click on a pile is one bite and the hover
+tooltip carries the "eat all of it" button (per the tooltip-not-cards rule; the
+tooltip is the only `pointer-events-auto` element over the click-through world);
+standing, each bag row opens a two-option sub-menu and a takeout box gets the same
+pair built from the `food` block `consume:open` carries for it.
+
+- `consume` = `{ hunger, thirst, anim, bites }` — what eating ONE serving restores (0-100
   percentages of the framework's bars) and which `consume_anims` entry plays.
   `ConsumeSpecFor(item, meta)` resolves it, filling gaps from the global `consume`
   setting; an un-authored DRINK is special-cased to thirst + a drinking clip so an
-  upgraded config doesn't feed the wrong bar. A one-time `food_consume_seeded` backfill
-  copies the shipped values onto matching stored foods (merge() only adds whole missing
-  entries, never fields).
+  upgraded config doesn't feed the wrong bar.
 
 `consume_anims` (settings, seeded internally, edited in Settings → Eating) is the
 animation catalogue: `{ id, label, dict, clip, prop, ms }`. The server resolves a
@@ -539,9 +687,9 @@ holds no catalogue and an admin's retune applies immediately.
 
 **A food's identity is its LABEL.** `SanitizeFoods` derives `id` from an explicit id →
 the final step's output/flavor → the label slug (`foodSlug`), and an id-less food is
-dropped on save. That last fallback is what a bag-kind food relies on now that it no
-longer borrows an inventory item's name (`display_item`), and what lets a half-built
-recipe survive being saved before its outputs are typed.
+dropped on save. That last fallback is what a bag-kind food relies on (it borrows no
+inventory item's name), and what lets a half-built recipe survive being saved before
+its outputs are typed.
 
 **Nothing is made from nothing.** Every food has to CONSUME something — components to
 combine, an input to cook, a cup to pour. `RebuildDerived` refuses to derive a
@@ -574,8 +722,7 @@ finish meta), all drinks are the `drink_item` item (flavor meta), all meals the
 `box_item` (food id meta) and every takeaway the `bag_item` (contents meta).
 Assembled-but-uncooked
 INTERMEDIATES (an assembly output that is some recipe's input, e.g. `raw_pizza`)
-are tray-only — never exported by itemgen (grace-retained one release in `RETAIN`),
-never required by sync/annotate validation (`assemblyMissing`/BuildSyncPayload skip
+are tray-only — never real inventory items, never required by sync/annotate validation (`assemblyMissing`/BuildSyncPayload skip
 the output). An assembled input placed to cook with no readable recorded stack gets
 its BASE recipe meta SYNTHESIZED at `place` so the cooked product never comes out
 stackless (getTray/compSpec also fall back to the base stack for legacy stackless

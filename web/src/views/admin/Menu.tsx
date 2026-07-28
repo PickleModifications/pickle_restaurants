@@ -22,8 +22,7 @@ type DefaultMenu = { foods?: Food[]; tools?: Tool[]; ingredients?: IngredientDef
 
 // Which kinds a Menu instance shows/creates. "food" = the sellable dishes & drinks;
 // "ingredients" = the components they're built from (raw ingredients) plus the tools
-// that apply things to them (condiments, finishes). Combos stay per-restaurant (boss
-// panel), so they're intentionally NOT here.
+// that apply things to them (condiments, finishes).
 type Scope = "food" | "ingredients";
 
 type Props = {

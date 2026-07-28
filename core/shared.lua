@@ -53,6 +53,61 @@ Config.InventoryLimit = false
 -- drawn quad, the DUI surface's aspect, and that crop frame. TUNE IN-GAME.
 Config.BoxQuad = { w = 0.17, h = 0.17, dz = 0.012 }
 
+-- ─── Seat styles (how a placed seat anchor sits a player) ────────────────────
+-- A seat anchor (prop_type "seat") stores which of these it is in
+-- `metadata.style`. It only decides the POSTURE — a bar stool, a booth bench and a
+-- dining chair are different heights and different shapes of sit. The furniture
+-- itself is the server's own; a seat anchor is just a point, a facing and one of
+-- these.
+--
+-- Fields:
+--   id     stable key stored in the prop row (never rename one in place)
+--   label  locale KEY, resolved with _L() at use time (never at load — the locale
+--          table isn't populated when this file runs)
+--   anim   the looping clip. The placement ghost and the real sit play the SAME
+--          clip at the SAME point, which is the entire reason placement is
+--          WYSIWYG: what the admin positions is exactly what a player gets.
+--   dz     fine height trim in metres. Applied to the ghost AND the sit, so it
+--          never desyncs the two. Normally 0 — only reach for it if a style sits
+--          consistently high or low on your furniture.
+--
+-- DELIBERATELY NOT SCENARIOS. `TaskStartScenarioAtPosition` was tried and reverted:
+-- a scenario decides for itself where to put the ped, which planted people through
+-- the floor, and the natives that report whether a ped is in one are unreliable
+-- enough that a repair tick re-tasked forever (an endless sit-down loop). A clip we
+-- play at coordinates we set is exact, and exactness is what a placed anchor is for.
+--
+-- Shared (not client-only) because the placement callback validates the submitted
+-- id against this list — the NUI is untrusted. TUNE IN-GAME.
+Config.SeatStyles = {
+    { id = "chair",    label = "seat.style_chair",    dz = 0.0,
+      anim = { dict = "timetable@ron@ig_5_p3",    clip = "ig_5_p3_base" } },
+    { id = "bar",      label = "seat.style_bar",      dz = 0.0,
+      anim = { dict = "timetable@ron@ig_5_p3",    clip = "ig_5_p3_base" } },
+    { id = "bench",    label = "seat.style_bench",    dz = 0.0,
+      anim = { dict = "timetable@reunited@ig_10", clip = "base_amanda"  } },
+    { id = "armchair", label = "seat.style_armchair", dz = 0.0,
+      anim = { dict = "timetable@ron@ig_3_couch", clip = "base"         } },
+    { id = "couch",    label = "seat.style_couch",    dz = 0.0,
+      anim = { dict = "timetable@maid@couch@",    clip = "base"         } },
+}
+
+-- The style a seat with no recorded style uses (every seat placed before styles
+-- existed, and the default selection in the placement picker).
+Config.DefaultSeatStyle = "chair"
+
+-- Look a style up by id. Returns the DEFAULT style for an unknown/absent id rather
+-- than nil, so no call site has to defend against a seat row naming a style that a
+-- later version renamed away.
+function GetSeatStyle(id)
+    local fallback
+    for _, s in ipairs(Config.SeatStyles) do
+        if s.id == id then return s end
+        if s.id == Config.DefaultSeatStyle then fallback = s end
+    end
+    return fallback or Config.SeatStyles[1]
+end
+
 -- ─── Render targets (the ONE place every DUI-painted texture is defined) ──────
 -- Every runtime texture we paint onto a prop — food-packaging brands, the kiosk
 -- brand/order screen, the customer menu/orders boards, and the staff register POS —
@@ -93,7 +148,10 @@ Config.RenderTargets = {
     -- the self-order kiosk's brand SCREEN (rendered as a brand by rendertarget; the
     -- kiosk ORDER DUI, modules/kiosk, reuses the same aspect). Both kiosk models embed
     -- `kiosk_large_brand`; the floor kiosk borrows the wall one's brand config.
-    { key = "kiosk",        group = "kiosk", txd = "pickle_kiosk_large_01", txn = "kiosk_large_brand", w = 1080, h = 1920, rot = 0, debugGap = 3.5, blackDefault = true },
+    -- The wall model's UV runs `kiosk_large_brand` a HALF TURN from the floor model's,
+    -- so the two can't share one painted surface — each carries its own `rot` and they
+    -- share the brand CONFIG via `configKey`.
+    { key = "kiosk",        group = "kiosk", txd = "pickle_kiosk_large_01", txn = "kiosk_large_brand", w = 1080, h = 1920, rot = 180, debugGap = 3.5, blackDefault = true },
     { key = "kiosk_ground", group = "kiosk", txd = "pickle_kiosk_large_02", txn = "kiosk_large_brand", w = 1080, h = 1920, rot = 0, debugGap = 3.5, blackDefault = true, configKey = "kiosk" },
     -- customer-facing info boards (modules/screens)
     { key = "menu",   group = "screen", kind = "menu",   prop_type = "menu_screen",   txd = "pickle_screen_menu_01",   txn = "s_m_brand", w = 1920, h = 1080, rot = 90, gap = 3.5 },

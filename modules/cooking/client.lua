@@ -1779,8 +1779,11 @@ end)
 local function makePart(spec)
     local base = currentCookProp or extAnchor; if not base then return nil end
     prepPid = prepPid + 1
+    -- The spec is KEPT on the part: a pile dropped into a takeout box has its props
+    -- DELETED (ApplyStackConceal — the contents of a packed box aren't rendered at
+    -- all), and taking it back out rebuilds the part from this exact spec.
     local part = { pid = prepPid, item = spec.item, half = spec.half,
-                   source = spec.source, sig = spec.sig,
+                   source = spec.source, sig = spec.sig, spec = spec,
                    top = spec.top, finishTool = spec.finishTool, ents = {} }
 
     -- A MADE TAKEOUT BOX (a bag-kind food: soup, salad…). It has no build tower to
@@ -1798,6 +1801,10 @@ local function makePart(spec)
         part.takeout = true
         part.quad = spec.image
         part.quadCrop = spec.imageCrop -- the exact source rect the admin cropped
+        -- what the box IS, for the hover tooltip: a made box is one opaque product
+        -- (a soup, a salad), so there's no build tower to read it off
+        part.label     = spec.label
+        part.itemImage = spec.itemImage or spec.image
         part.height = modelHeight(baseModel)
         return part
     end
@@ -1958,7 +1965,51 @@ local function layoutParts(parts, x, y, z0, lone)
         z = z + (part.height or 0.0)
     end
 end
+-- A pile released INSIDE a TAKEOUT BOX is CONCEALED. The takeout box is a packed
+-- container of loose food (a soup, a salad), not an open tray you arrange things on:
+-- once components are in, they read from the box's tooltip contents list, never as
+-- props sitting in the open box.
+--
+-- The props are DELETED, not merely made invisible. An invisible entity still draws
+-- its hover/selection OUTLINE, so hiding left a glowing ghost of the food floating in
+-- the box. Deleting is also the honest model: a packed box has no contents to render.
+-- The PARTS survive — still reserved server-side, still counted, still what the box's
+-- food is made from — and each one kept the spec it was built from, so taking the box
+-- apart rebuilds them exactly (same pid, same reservation id, same props).
+-- pickPart skips a concealed stack, so there is nothing invisible to hover or grab;
+-- the tooltip's Take Out is how the contents come back out. A serving tray / pizza box
+-- is unaffected: arranging food on those IS the point.
+-- A resource GLOBAL, not a file-local: this chunk sits at Lua's 200-local ceiling.
+function ApplyStackConceal(stack)
+    local t = stack.tid and PrepTrays[stack.tid]
+    local hide = (t and IsTakeoutKind(t.kind)) and true or false
+    stack.concealed = hide or nil
+    -- per PART, not per stack: a stack can gain parts while already concealed, and a
+    -- rebuild has to be driven off what each part is actually holding right now
+    for i, p in ipairs(stack.parts or {}) do
+        if hide and not p.concealed then
+            for _, e in ipairs(p.ents or {}) do
+                if QuadDetach then QuadDetach(e) end -- drop any image quad riding this prop
+                SafeDeleteEntity(e)
+            end
+            p.ents, p.faces, p.meltEnt = {}, nil, nil
+            p.concealed = true
+        elseif (not hide) and p.concealed then
+            -- rebuild from the spec, carrying over the identity the NUI and the server
+            -- know this part by (its puid and its reservation id)
+            local fresh = p.spec and makePart(p.spec)
+            if fresh then
+                fresh.pid, fresh.id = p.pid, p.id
+                stack.parts[i] = fresh
+            else
+                p.concealed = nil -- nothing to rebuild from; leave it prop-less
+            end
+        end
+    end
+end
+
 local function relayout(stack)
+    ApplyStackConceal(stack)
     layoutParts(stack.parts, stack.x, stack.y, stack.z0, #stack.parts == 1)
 end
 
@@ -2386,7 +2437,9 @@ local function pickPart(exceptSid)
     local cny = (sh > 0) and (cy / sh) or 0.0
     local bsid, bidx, bpart, bd
     for sid, stack in pairs(PrepStacks) do
-        if sid ~= exceptSid and not stackSealed(stack) then
+        -- concealed = inside a takeout box, so its props aren't drawn: never let the
+        -- cursor pick something the player can't see (the box itself picks instead)
+        if sid ~= exceptSid and not stackSealed(stack) and not stack.concealed then
             local z = stack.z0
             for i, part in ipairs(stack.parts) do
                 local mz = z + (part.height or 0.0) * 0.5
@@ -2816,6 +2869,23 @@ end
 
 -- for other modules (virtual points force-close when their point/shell changes)
 function ForceStopCooking() if cookingOpen then StopCooking() end end
+
+-- Which station is open right now (nil = none). Lets another module close THIS
+-- station without closing whatever the player happens to be at — modules/cookfx
+-- throws the cook out when the station they're standing at catches fire.
+function CookingStationId()
+    return (cookingOpen and currentCookProp) and currentCookProp.id or nil
+end
+
+-- ESC/Backspace out of the station. Read by the shared per-frame reader in
+-- modules/interactive (which also keeps the key away from the pause menu), so the
+-- station's own slower hover tick can't swallow the press. Registered a frame late:
+-- the module glob loads `cooking` before `interactive`, so the setter doesn't exist
+-- yet at chunk time.
+CreateThread(function()
+    Wait(0)
+    SetEscapeHandler("cooking", function() if cookingOpen then StopCooking() end end)
+end)
 function IsCookingOpen() return cookingOpen end
 
 function OpenCookingStation(prop)
@@ -2960,6 +3030,14 @@ function OpenCookingStation(prop)
                 if stack and not onTrayTid then
                     local on, sx, sy = GetScreenCoordFromWorldCoord(stack.x, stack.y, stackTopZ(stack))
                     prepTip = { sid = sid, onScreen = on, x = sx, y = sy, provides = stackProvides(stack) }
+                    -- A MADE takeout box set back down on the prep table is one opaque
+                    -- PRODUCT, not a build: it satisfies no recipe, so the recipe guide
+                    -- had nothing to rank and the tooltip never appeared at all. Name it
+                    -- instead — the food it holds, with its own art — so a box on the
+                    -- table can still be identified before it's picked up.
+                    if part and part.takeout then
+                        prepTip.product = { label = part.label, image = part.itemImage }
+                    end
                 end
                 -- The serving tray's "Make Meal" / pizza box's "Box It Up" tooltip:
                 -- shown when the cursor is over the tray/box itself OR over any pile
@@ -3024,7 +3102,6 @@ function OpenCookingStation(prop)
                 end
             end
 
-            if IsControlJustReleased(0, 322) then StopCooking() end -- ESC fallback
             Wait(50)
         end
     end)
@@ -3388,9 +3465,12 @@ RegisterNUICallback("cooking:beginPrepPlace", function(d, cb)
                      dual = dual, sig = d.sig,
                      stack = stack, state = d.state, finishTool = d.finishTool,
                      label = d.label, image = d.image, -- carried for a model-less pill chip
-                     -- a made takeout box renders as the box pair + its food image quad
+                     -- a made takeout box renders as the box pair + its food image quad;
+                     -- `label`/`itemImage` are the FOOD's name and card art (distinct from
+                     -- `image`, which is the picture painted inside the box), for the
+                     -- hover tooltip that identifies a box standing on the table
                      takeout = (d.takeout == true or d.takeout == 1) or nil, lidModel = d.lidModel,
-                     imageCrop = d.imageCrop,
+                     imageCrop = d.imageCrop, itemImage = d.itemImage,
                      top = dual and d.top or nil, topModel = dual and d.topModel or nil }
     end
 
@@ -3480,16 +3560,15 @@ end)
 local function partsFromDecomposeSpecs(specs)
     local parts = {}
     for _, spec in ipairs(specs or {}) do
-        local model = spec.model
-        if spec.half then model = halfModel(spec.item, spec.half) or model end
-        local p = makePart({ item = spec.item, model = model, source = spec.source,
-                             dual = spec.dual, half = spec.half,
-                             -- melt topping: specs ship top/topModel
-                             top = spec.top, topModel = spec.topModel,
-                             -- a takeout box layer: the box pair + its food image quad
-                             takeout = spec.takeout, lidModel = spec.lidModel, image = spec.image,
-                             imageCrop = spec.imageCrop,
-                             sig = spec.sig, stack = spec.stack, state = spec.state, finishTool = spec.finishTool })
+        -- Pass the spec through WHOLE (a shallow copy, plus the halves model override)
+        -- instead of re-listing the fields makePart wants. This used to be a hand-kept
+        -- whitelist, and anything the server added to a spec afterwards was silently
+        -- dropped on the floor here — which is how a made takeout box lost its `label`
+        -- and rendered as an anonymous "Takeout Box" while its picture came through.
+        local s = {}
+        for k, v in pairs(spec) do s[k] = v end
+        if spec.half then s.model = halfModel(spec.item, spec.half) or spec.model end
+        local p = makePart(s)
         if p then p.id = spec.id; p.dx, p.dy = spec.dx, spec.dy; parts[#parts + 1] = p end
     end
     return parts
@@ -3926,41 +4005,65 @@ RegisterNUICallback("cooking:prepMakeMeal", function(d, cb)
     cb(res or { ok = false })
 end)
 
--- The box tooltip's Take Out: lift the pizza back OUT of the box — the pile
--- slides from the box bed onto the table beside it (animated, never a pop) and
--- becomes a free, grabbable stack again. A closed lid swings open first.
+-- The lidded box tooltip's Take Out: empty the box back onto the table — each pile
+-- slides from the box bed to a spot beside it (animated, never a pop) and becomes a
+-- free, grabbable stack again. A closed lid swings open first.
+--
+-- The PIZZA box holds exactly one pile, so this is just "the pizza comes out". The
+-- TAKEOUT box holds several, and its contents are CONCEALED while inside (see
+-- ApplyStackConceal) — so this is the ONLY way they come back out, and every pile has
+-- to move: they're laid out in a row along the box's local right, each one clear of
+-- the last. Clearing `tid` un-conceals them (relayout at the end of the slide).
 RegisterNUICallback("cooking:boxTakeOut", function(d, cb)
     local tid = tonumber(d and d.tid)
     local t = tid and PrepTrays[tid]
-    if not t or t.kind ~= "box" or t.boxing then return cb({ ok = false }) end
-    local sid, stack
+    if not t or not LidCfg(t.kind) or t.boxing then return cb({ ok = false }) end
+    local piles = {}
     for id2, s in pairs(PrepStacks) do
-        if s.tid == tid then sid, stack = id2, s break end
+        if s.tid == tid and #s.parts > 0 then piles[#piles + 1] = { sid = id2, stack = s } end
     end
-    if not stack then return cb({ ok = false }) end
+    if #piles == 0 then return cb({ ok = false }) end
+    -- deterministic order so the row reads the same as the arrangement inside
+    table.sort(piles, function(a, b)
+        if math.abs((a.stack.dx or 0.0) - (b.stack.dx or 0.0)) > 0.0005 then
+            return (a.stack.dx or 0.0) < (b.stack.dx or 0.0)
+        end
+        return (a.stack.dy or 0.0) < (b.stack.dy or 0.0)
+    end)
     local wasClosed = not t.open
     if wasClosed then setBoxOpen(tid, true) end -- can't reach through the lid
-    -- land one box-width to the box's local right, resting on the table surface
-    local mn, mx = GetModelDimensions(EnsureModel(BOXP.base_model))
-    local w = (mn and mx) and math.max((mx.x - mn.x) - TRAY_PHYS_MARGIN * 2, 0.2) or 0.4
-    local off = w * 0.5 + (partHalfXY(stack.parts[1]) or 0.15) + 0.05
+    local cfg = LidCfg(t.kind)
+    -- start clear of the box's own footprint, then step out by each pile's size
+    -- (trayHalfExtents resolves the SYNCED base model for either box kind)
+    local hx = trayHalfExtents(t.kind)
     local hr = math.rad(curYaw())
-    local fx, fy, fz = stack.x, stack.y, stack.z0
-    local tx, ty, tz = t.x + math.cos(hr) * off, t.y + math.sin(hr) * off, t.z
-    stack.tid, stack.dx, stack.dy = nil, nil, nil
-    stack.x, stack.y, stack.z0 = tx, ty, tz
-    CreateThread(function()
-        if wasClosed then Wait(BOXP.open_ms) end -- let the lid clear the opening
-        local t0, dur = GetGameTimer(), 250
-        while true do
-            local k = math.min((GetGameTimer() - t0) / dur, 1.0)
-            k = k * k * (3.0 - 2.0 * k) -- eased slide out
-            if PrepStacks[sid] ~= stack then return end -- re-grabbed/consumed mid-slide
-            layoutParts(stack.parts, fx + (tx - fx) * k, fy + (ty - fy) * k, fz + (tz - fz) * k, #stack.parts == 1)
-            if k >= 1.0 then break end
-            Wait(0)
-        end
-    end)
+    local off = hx + TRAY_PHYS_MARGIN
+    for _, p in ipairs(piles) do
+        local stack, sid = p.stack, p.sid
+        -- Un-conceal FIRST: a takeout box's contents have no props at all while
+        -- packed, so they have to be rebuilt before anything can be measured off
+        -- them — and before the slide, so it's actually seen.
+        stack.tid, stack.dx, stack.dy = nil, nil, nil
+        ApplyStackConceal(stack)
+        local r = partHalfXY(stack.parts[1]) or 0.15
+        off = off + r + 0.05
+        local fx, fy, fz = stack.x, stack.y, stack.z0
+        local tx, ty, tz = t.x + math.cos(hr) * off, t.y + math.sin(hr) * off, t.z
+        off = off + r
+        stack.x, stack.y, stack.z0 = tx, ty, tz
+        CreateThread(function()
+            if wasClosed then Wait(cfg.open_ms) end -- let the lid clear the opening
+            local t0, dur = GetGameTimer(), 250
+            while true do
+                local k = math.min((GetGameTimer() - t0) / dur, 1.0)
+                k = k * k * (3.0 - 2.0 * k) -- eased slide out
+                if PrepStacks[sid] ~= stack then return end -- re-grabbed/consumed mid-slide
+                layoutParts(stack.parts, fx + (tx - fx) * k, fy + (ty - fy) * k, fz + (tz - fz) * k, #stack.parts == 1)
+                if k >= 1.0 then break end
+                Wait(0)
+            end
+        end)
+    end
     cb({ ok = true })
 end)
 
@@ -4753,5 +4856,46 @@ function MealRenderPileIndices(h, i)
     if not pile then return nil end
     local out = {}
     for _, p in ipairs(pile.parts) do if p.id then out[#out + 1] = p.id end end
+    return out
+end
+
+-- ─── cooking FX hooks (modules/cookfx) ───────────────────────────────────────
+-- The particle layer keeps NO cooking state of its own: it asks here what is on a
+-- station right now, so there is exactly one bookkeeping of cooking items (and no
+-- second copy of the spawn/remove/bulk event plumbing to drift out of sync).
+--
+-- One entry per rendered item: { uid, ent, propId, method, state, active } where
+--   `method` — "grill" (dual-sided, on the stovetop plate) | "oven" | "fry" | "soda"
+--   `state`  — "raw" | "cooked" | "burnt" (a burnt item smokes instead of sizzling)
+--   `active` — is it TRANSFORMING this instant: a face on the plate, a basket
+--              lowered, a door shut. That, not merely "present", is what sizzles.
+function CookFxItems()
+    local out, seen = {}, {}
+    local function add(uid, ent)
+        if seen[uid] then return end
+        seen[uid] = true
+        if not (ent and DoesEntityExist(ent)) then return end
+        local dual, slot, prog = CookDual[uid], CookSlot[uid], CookProg[uid]
+        local pg = prog and prog.prog or nil
+        local state, active, method
+        if dual then
+            -- A patty on the plate is always cooking one face; burnt wins for the
+            -- look (that's the face making the smoke), matching the hand-back rule.
+            local s = dual.sides or {}
+            state  = (s[1] == "burnt" or s[2] == "burnt") and "burnt"
+                  or (s[1] == "raw" or s[2] == "raw") and "raw" or "cooked"
+            active = true
+            method = "grill"
+        else
+            method = slot and slot.method or nil
+            state  = (pg and pg.state) or CookState[uid]
+            -- oven/fryer only advance while their gate is shut/lowered
+            active = pg and pg.gate and true or false
+        end
+        out[#out + 1] = { uid = uid, ent = ent, propId = CookPropId[uid],
+                          method = method, state = state, active = active }
+    end
+    for uid, ent in pairs(CookObjects) do add(uid, ent) end
+    for uid, d in pairs(CookDual) do add(uid, d.ent and (d.ent[1] or d.ent[2])) end
     return out
 end

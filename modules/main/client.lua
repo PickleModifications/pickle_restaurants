@@ -53,6 +53,18 @@ local virtualStations = {} -- [propId] = entity while a virtual session is open
 function RegisterVirtualStation(propId, ent) virtualStations[propId] = ent end
 function GetClientProp(propId) return propsById[propId] end
 
+-- The world entity a placed prop is currently rendered as — the virtual station
+-- inside an open shell session if there is one, else the physical world prop.
+-- Used by modules/cookfx to hang a fire on the station that's actually on screen.
+function GetClientPropEntity(propId)
+    propId = tonumber(propId) or propId
+    local ent = virtualStations[propId]
+    if ent and DoesEntityExist(ent) then return ent end
+    ent = spawnedProps[propId]
+    if ent and DoesEntityExist(ent) then return ent end
+    return nil
+end
+
 -- ─── world cleanup ───────────────────────────────────────────────────────────
 
 -- Props are spawned as local, non-mission objects (CreateObject(..., false,
@@ -149,18 +161,33 @@ local function CreatePropEntity(prop, model)
     return ent
 end
 
+-- How far ABOVE a seat anchor its "Sit" target zone sits. The anchor itself is
+-- bottom-based (the seated ped's root), so the zone has to be lifted to where a
+-- player is actually looking — otherwise it hides under the chair. TUNE IN-GAME.
+local SEAT_TARGET_Z = 1.0
+
 local function SpawnProp(prop)
     -- A seat is an INVISIBLE sit anchor: no world model spawns — just a "Sit"
     -- interaction at the point. Players sit on the restaurant's own furniture here
     -- (the seating module plays the pose). Cleaned up via propInteractions like any
     -- other placed prop (ClearWorld / propRemoved).
+    -- A DELIVERY DOOR is a pure data point: no model, no interaction, nothing in the
+    -- world at all. It exists only as a destination for NPC delivery orders
+    -- (modules/doorstep runs the knock + hand-off when a driver arrives at one).
+    if prop.prop_type == "delivery_door" then return end
+
     if prop.prop_type == "seat" then
         -- Generous reach: the anchor sits at the seated pose (often up on a chair),
         -- so a tight radius reads as "too far" even standing right at it. These are
         -- forgiving enough to sit from beside the chair in both target and
         -- keypress interaction modes.
         propInteractions[prop.id] = CreateInteraction({
-            coords         = vector3(prop.x, prop.y, prop.z),
+            -- Raised off the anchor: a seat's stored point is BOTTOM-based (the
+            -- ped's root, on the floor / seat pan), so a target zone centred on it
+            -- sits under the chair where a player is aiming at the seat back or the
+            -- table. SEAT_TARGET_Z lifts it to roughly torso height, where the eye
+            -- (and the target ray) actually goes.
+            coords         = vector3(prop.x, prop.y, prop.z + SEAT_TARGET_Z),
             label          = _L("main_sit"),
             icon           = "fa-solid fa-chair",
             radius         = 1.2,
@@ -521,11 +548,42 @@ local ANCHOR_HL = {
     counter          = { model = "prop_till_01" },
     virtual_register = { model = "prop_till_01" },  -- invisible register anchor
     virtual_point    = { model = "prop_tennis_ball" },  -- the virtual-point gizmo preview
-    seat             = { model = "a_m_y_business_01", ped = true }, -- the seat ghost ped
+    -- A SEAT IS DRAWN, NOT SPAWNED. It used to preview as a ghost PED here, which
+    -- crashed the game: hovering a list of seat chips creates and deletes a ped per
+    -- mouse-over (the panel fires on-enter, on-leave AND an unmount cleanup), and
+    -- churning peds that fast — spawning one, then DeleteEntity-ing it a few frames
+    -- later, repeatedly — takes the client down. Markers cost nothing, load no model
+    -- and create no entity, so a seat highlight cannot crash and cannot leak.
+    seat             = { marker = true },
+    delivery_door    = { marker = true },  -- the NPC-delivery doorstep, same reasoning
 }
-local hlReal = nil -- a real world entity whose outline we turned on
-local hlTemp = nil -- a temp body we spawned for an invisible anchor
-local hlGen  = 0   -- bumped each toggle so a late async spawn can bail
+local HL_MARKER = { 255, 180, 40, 170 } -- same amber as the outline, translucent
+local hlReal   = nil -- a real world entity whose outline we turned on
+local hlTemp   = nil -- a temp body we spawned for an invisible anchor
+local hlMarker = nil -- { x, y, z, h } drawn each frame for an anchor with no body
+local hlGen    = 0   -- bumped each toggle so a late async spawn can bail
+
+-- The seat marker: a puck on the anchor plus a small ball a step along its heading,
+-- so an admin sees WHERE the seat is and WHICH WAY it faces. One thread for the
+-- lifetime of the resource — it idles cheaply when nothing is highlighted.
+CreateThread(function()
+    while true do
+        local m = hlMarker
+        if m then
+            DrawMarker(1, m.x, m.y, m.z - 0.95, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.45, 0.45, 0.15, HL_MARKER[1], HL_MARKER[2], HL_MARKER[3], HL_MARKER[4],
+                       false, false, 2, false, nil, nil, false)
+            local rad = math.rad(m.h)
+            DrawMarker(28, m.x - math.sin(rad) * 0.45, m.y + math.cos(rad) * 0.45, m.z - 0.75,
+                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.10, 0.10, 0.10,
+                       HL_MARKER[1], HL_MARKER[2], HL_MARKER[3], HL_MARKER[4],
+                       false, false, 2, false, nil, nil, false)
+            Wait(0)
+        else
+            Wait(250)
+        end
+    end
+end)
 
 function ClearPropHighlight()
     hlGen = hlGen + 1
@@ -536,6 +594,7 @@ function ClearPropHighlight()
         DeleteEntity(hlTemp)
     end
     hlTemp = nil
+    hlMarker = nil
 end
 
 function SetPropHighlight(propId, on)
@@ -558,20 +617,26 @@ function SetPropHighlight(propId, on)
     local spec = ANCHOR_HL[prop.prop_type]
     if not spec then return end
     local gen, x, y, z, h = hlGen, prop.x + 0.0, prop.y + 0.0, prop.z + 0.0, (prop.heading or 0.0) + 0.0
+
+    -- Drawn, not spawned (seats). No model, no entity, nothing to clean up but a
+    -- table reference — so no amount of hover churn can leak or crash.
+    if spec.marker then
+        hlMarker = { x = x, y = y, z = z, h = h }
+        return
+    end
+
     CreateThread(function()
         local hash = GetHashKey(spec.model)
         RequestModel(hash)
         local t = GetGameTimer()
         while not HasModelLoaded(hash) and GetGameTimer() - t < 1000 do Wait(0) end
         if not HasModelLoaded(hash) or gen ~= hlGen then SetModelAsNoLongerNeeded(hash); return end
+        -- OBJECTS ONLY. Do not add a ped preview back here (see ANCHOR_HL): a hover
+        -- highlight spawns and deletes its body on every mouse-over, and peds do not
+        -- survive that churn — it crashes the client. Anything ped-shaped belongs in
+        -- the `marker` path.
         local e
-        if spec.ped then
-            e = CreatePed(4, hash, x, y, z - 1.0, h, false, false)
-            if e and DoesEntityExist(e) then
-                SetEntityInvincible(e, true)
-                SetBlockingOfNonTemporaryEvents(e, true)
-            end
-        else
+        do
             e = CreateObject(hash, x, y, z, false, false, false)
             if e and DoesEntityExist(e) then
                 SetEntityHeading(e, h)

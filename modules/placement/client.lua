@@ -76,34 +76,164 @@ end
 -- (and which way) a player will be seated. Reuses one of the NPC-customer models.
 local SEAT_PREVIEW_PED = "a_m_y_business_01"
 
--- Place an invisible seat anchor: the gizmo shows a ghost person; we persist only
--- the point + facing. No model/prop is spawned at runtime — players sit on the
--- restaurant's existing furniture here.
+-- Which KIND of seat this anchor is (Config.SeatStyles) — asked BEFORE the gizmo
+-- opens, because the answer changes the ghost's pose and height, and the whole point
+-- of the ghost is that you position what you'll actually get. Returns nil if the
+-- admin cancels the dialog, which cancels the placement.
+local function PickSeatStyle(current)
+    local options = {}
+    for i, s in ipairs(Config.SeatStyles) do
+        options[i] = { value = s.id, label = _L(s.label) }
+    end
+    local input = lib.inputDialog(_L("place_seat_style_title"), {
+        {
+            type        = "select",
+            label       = _L("place_seat_style_label"),
+            description = _L("place_seat_style_hint"),
+            options     = options,
+            default     = current or Config.DefaultSeatStyle,
+            required    = true,
+        },
+    })
+    return input and input[1] or nil
+end
+
+-- Where a player is put down when they STAND UP from this seat — a second anchor,
+-- placed right after the seat itself with a STANDING ghost. Without one a diner
+-- stands up exactly where they were sitting, which on a booth or a bar means
+-- popping out on top of the table.
+--
+-- Optional by design: cancelling this gizmo saves the seat with no exit point and
+-- the old stand-in-place behaviour, so a plain chair in open floor doesn't have to
+-- have one. Seeded a step in FRONT of the seat (its heading), which is the right
+-- answer often enough to just accept.
+local SEAT_EXIT_STEP = 0.8 -- metres in front of the seat the exit ghost starts at
+
+-- `at` is where the ghost STARTS, already resolved by the caller — an existing exit
+-- point re-opens exactly on itself (so re-confirming an edit can't creep it forward
+-- 0.8m every time), a new one starts a step in front of the seat.
+local function PickSeatExit(at, heading)
+    ShowNotification(_L("place_seat_exit_hint"))
+    Wait(250)
+    local result = StartGizmoEditor({
+        isPed        = true,
+        model        = SEAT_PREVIEW_PED,
+        coords       = at,
+        rotation     = vector3(0.0, 0.0, heading or 0.0),
+        enableCancel = true,
+        deleteEntity = true,
+    })
+    if not result or not result.position then return nil end
+    return {
+        x = result.position.x, y = result.position.y, z = result.position.z,
+        heading = (result.rotation and result.rotation.z) or 0.0,
+    }
+end
+
+-- A step in front of a seat facing `heading` — the default place to stand up.
+local function SeatExitSeed(x, y, z, heading)
+    local rad = math.rad(heading or 0.0)
+    return vector3(x - math.sin(rad) * SEAT_EXIT_STEP, y + math.cos(rad) * SEAT_EXIT_STEP, z)
+end
+
+-- Where this seat's MEAL TRAY is laid out — the patch of table in front of the
+-- diner. Optional, like the exit point: without one, dining probes downward for a
+-- surface in front of the ped, which is right for a plain table and wrong wherever
+-- the geometry lies (a booth's fixed table, a bar top, a bench with no table at
+-- all). The ghost is the real serving tray, so the admin positions the actual
+-- object and sees exactly where the food will sit.
+local SEAT_TRAY_MODEL = "pickle_tray_01"
+local SEAT_TRAY_FWD   = 0.55 -- metres in front of the seat the tray ghost starts at
+local SEAT_TRAY_UP    = 0.70 -- and how far above it (a typical table height)
+
+local function PickSeatTray(at, heading)
+    ShowNotification(_L("place_seat_tray_hint"))
+    Wait(250)
+    local result = StartGizmoEditor({
+        model        = GetHashKey(SEAT_TRAY_MODEL),
+        coords       = at,
+        rotation     = vector3(0.0, 0.0, heading or 0.0),
+        enableCancel = true,
+        deleteEntity = true,
+    })
+    if not result or not result.position then return nil end
+    return {
+        x = result.position.x, y = result.position.y, z = result.position.z,
+        heading = (result.rotation and result.rotation.z) or 0.0,
+    }
+end
+
+local function SeatTraySeed(x, y, z, heading)
+    local rad = math.rad(heading or 0.0)
+    return vector3(x - math.sin(rad) * SEAT_TRAY_FWD,
+                   y + math.cos(rad) * SEAT_TRAY_FWD, z + SEAT_TRAY_UP)
+end
+
+-- Place an invisible seat anchor: the gizmo shows a ghost person; we persist the
+-- point + facing + style, then a second point for where they stand up. No
+-- model/prop is spawned at runtime — players sit on the restaurant's existing
+-- furniture here.
 function StartSeatPlacement(restaurantId)
     Wait(250)
-    -- Preview the ghost ped in the SEATED pose at exactly where they'll sit: the
-    -- gizmo plays the same looping sit animation the real sit uses and drops the ped
-    -- by the sit z-offset, while the SAVED anchor stays the ground point the seating
-    -- code expects (result.position adds the offset back). WYSIWYG placement.
-    local sitDict, sitAnim = SeatPreviewAnim()
+    local style = PickSeatStyle()
+    if not style then return end
+    -- Preview the ghost ped in the CHOSEN style's seated pose at exactly where they'll
+    -- sit: the gizmo plays that style's looping clip and drops the ped by its height
+    -- trim, while the SAVED anchor stays the point the seating code expects
+    -- (result.position adds the offset back). WYSIWYG placement.
+    local sitDict, sitAnim = SeatPreviewAnim(style)
     local result = StartGizmoEditor({
         isPed        = true,
         model        = SEAT_PREVIEW_PED,
         anim         = { dict = sitDict, name = sitAnim },
-        coordsOffset = vector3(0.0, 0.0, -SeatSitOffsetZ()),
+        coordsOffset = vector3(0.0, 0.0, -SeatSitOffsetZ(style)),
         enableCancel = true,
         deleteEntity = true,
     })
     if not result or not result.position then return end
+    local heading = (result.rotation and result.rotation.z) or 0.0
+    local exit = PickSeatExit(
+        SeatExitSeed(result.position.x, result.position.y, result.position.z, heading), heading)
+    local tray = PickSeatTray(
+        SeatTraySeed(result.position.x, result.position.y, result.position.z, heading), heading)
     local res = lib.callback.await("pickle_restaurants:placement:saveSeat", false, {
         restaurant_id = restaurantId,
+        style         = style,
+        exit          = exit,
+        tray          = tray,
         x = result.position.x, y = result.position.y, z = result.position.z,
-        heading = (result.rotation and result.rotation.z) or 0.0,
+        heading = heading,
     })
     if res and res.ok then
         ShowNotification(_L("place_seat_placed"))
     else
         ShowNotification((res and res.error) or _L("place_seat_fail"))
+    end
+end
+
+-- Place a DELIVERY DOOR: the doorstep an NPC delivery order sends a driver to. The
+-- ghost stands where the resident will when they answer, FACING OUT of the doorway
+-- — that facing is what the knock/hand-off sequence uses to know which way "out of
+-- the house" is, so aim it down the path, not at the door.
+function StartDeliveryDoorPlacement(restaurantId)
+    Wait(250)
+    ShowNotification(_L("place_door_hint"))
+    local result = StartGizmoEditor({
+        isPed        = true,
+        model        = SEAT_PREVIEW_PED,
+        enableCancel = true,
+        deleteEntity = true,
+    })
+    if not result or not result.position then return end
+    local res = lib.callback.await("pickle_restaurants:placement:saveDeliveryDoor", false, {
+        restaurant_id = restaurantId,
+        x = result.position.x, y = result.position.y, z = result.position.z,
+        heading = (result.rotation and result.rotation.z) or 0.0,
+    })
+    if res and res.ok then
+        ShowNotification(_L("place_door_placed"))
+    else
+        ShowNotification((res and res.error) or _L("place_door_fail"))
     end
 end
 
@@ -339,13 +469,18 @@ function StartPropReposition(propId)
         deleteEntity = true,
     }
     local ptype = prop.prop_type
+    local seatStyle -- carried to updateProp below (seats only)
     if ptype == "seat" then
-        local sitDict, sitAnim = SeatPreviewAnim()
+        -- Re-picking the style is part of editing a seat: it's the one property of an
+        -- anchor you can't see, and it decides the ghost you're about to drag.
+        seatStyle = PickSeatStyle(prop.metadata and prop.metadata.style)
+        if not seatStyle then restoreLive(); return end
+        local sitDict, sitAnim = SeatPreviewAnim(seatStyle)
         seed.isPed        = true
         seed.model        = SEAT_PREVIEW_PED
         seed.anim         = { dict = sitDict, name = sitAnim }
-        seed.coordsOffset = vector3(0.0, 0.0, -SeatSitOffsetZ())
-        seed.coords       = vector3(prop.x + 0.0, prop.y + 0.0, prop.z - SeatSitOffsetZ())
+        seed.coordsOffset = vector3(0.0, 0.0, -SeatSitOffsetZ(seatStyle))
+        seed.coords       = vector3(prop.x + 0.0, prop.y + 0.0, prop.z - SeatSitOffsetZ(seatStyle))
     elseif ptype == "counter" then
         seed.model = GetHashKey(CounterModel())
     elseif ptype == "virtual_point" or ptype == "virtual_register" then
@@ -363,10 +498,30 @@ function StartPropReposition(propId)
 
     local result = StartGizmoEditor(seed)
     if not result or not result.position then restoreLive(); return end -- cancelled: put it back
+    local heading = (result.rotation and result.rotation.z) or 0.0
+    -- Re-place the stand-up point with the seat. Its ghost starts on the seat's
+    -- CURRENT exit if it has one, so an edit that only nudged the seat can be
+    -- confirmed straight through without re-aiming it.
+    local seatExit, seatTray
+    if ptype == "seat" then
+        local cur = prop.metadata and prop.metadata.exit
+        seatExit = PickSeatExit(
+            cur and vector3(cur.x + 0.0, cur.y + 0.0, cur.z + 0.0)
+                 or SeatExitSeed(result.position.x, result.position.y, result.position.z, heading),
+            (cur and cur.heading) or heading)
+        local curT = prop.metadata and prop.metadata.tray
+        seatTray = PickSeatTray(
+            curT and vector3(curT.x + 0.0, curT.y + 0.0, curT.z + 0.0)
+                  or SeatTraySeed(result.position.x, result.position.y, result.position.z, heading),
+            (curT and curT.heading) or heading)
+    end
     local res = lib.callback.await("pickle_restaurants:placement:updateProp", false, {
         id = propId,
+        style = seatStyle, -- nil for everything that isn't a seat; ignored server-side
+        exit  = seatExit,
+        tray  = seatTray,
         x = result.position.x, y = result.position.y, z = result.position.z,
-        heading = (result.rotation and result.rotation.z) or 0.0,
+        heading = heading,
     })
     if res and res.ok then
         ShowNotification(_L("place_prop_moved"))

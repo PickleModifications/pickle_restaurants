@@ -10,7 +10,7 @@ import { applyTheme, type ThemeConfig } from "@/lib/theme";
 import { money } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Plus, Trash2, Pencil, MapPin, ChevronRight, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X, Building2, Sparkles, Monitor, Users,
+  Plus, Trash2, Pencil, MapPin, ChevronRight, ChevronDown, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X, Building2, Sparkles, Monitor, Users, DoorOpen,
 } from "lucide-react";
 
 // LAZY getter (memoized): `_L()` resolves at render, not at module import — a
@@ -37,6 +37,7 @@ function propLabel(p: any): string {
   if (p.prop_type === "counter") return _L("admin.counter");
   if (p.prop_type === "virtual_register") return _L("admin.virtual_register");
   if (p.prop_type === "seat") return _L("admin.seat_one");
+  if (p.prop_type === "delivery_door") return _L("admin.door_one");
   const key = p.prop_type === "virtual_point" ? p.target : p.prop_type;
   return STATIONS().find((s) => s.key === key)?.label || key || _L("admin.prop_one");
 }
@@ -220,8 +221,9 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
           <div>
             <div className="flex items-center gap-2">
               <h3 className="font-display text-base font-bold tracking-tight">{r.label}</h3>
+              {/* the row id identifies a restaurant here — its internal `name` slug is
+                  a codename and is never printed in the UI */}
               <Badge variant="secondary">#{r.id}</Badge>
-              <span className="font-mono text-xs text-muted-foreground">{r.name}</span>
             </div>
             <p className="text-xs text-muted-foreground">{_L("admin.balance", money(r.balance))}</p>
           </div>
@@ -417,6 +419,32 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
           )}
         </div>
 
+        {/* delivery doors — where NPC delivery orders send a driver. The driver
+            knocks and a resident comes out to take the bag; with none placed, NPC
+            deliveries fall back to a random point near the restaurant. */}
+        <div className="rounded-lg border border-border p-3">
+          <div className="mb-1.5 flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <DoorOpen className="h-4 w-4 text-muted-foreground" /> {_L("admin.doors")}
+              <Badge variant="secondary">{byType("delivery_door").length}</Badge>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => fetchNui("admin:placeDeliveryDoor", { id: r.id })}>
+              <Plus className="h-3.5 w-3.5" /> {_L("admin.place")}
+            </Button>
+          </div>
+          {byType("delivery_door").length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {byType("delivery_door").map((p) => (
+                <PropChip key={p.id} p={p} act={act} restaurantId={r.id} section="seating" />
+              ))}
+            </div>
+          ) : (
+            <p className="text-[11px] text-muted-foreground">
+              {_L("admin.doors_hint")}
+            </p>
+          )}
+        </div>
+
         </TabsContent>
 
         {/* per-restaurant settings — branding (per-texture packaging photos, same
@@ -459,21 +487,46 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
 }
 
 /**
- * The restaurant's access-group chips: remove with the chip's ×, add via the
- * creatable input (suggestions = every group already in use). Each add/remove
- * saves immediately — a chip edit is a discrete action, no debounce needed.
+ * The restaurant's access-group chips: remove with the chip's ×, add from a real
+ * DROPDOWN of every group already in use — with the typed text offered as a "create
+ * new" row so a brand-new group is still one action away. This deliberately does NOT
+ * use `<input list>` + `<datalist>`: FiveM's CEF never renders the datalist popup, so
+ * that control read as a plain text box with no visible choices at all.
+ * Each add/remove saves immediately — a chip edit is a discrete action, no debounce.
  */
 function GroupsEditor({ r, groups, act }: { r: any; groups: string[]; act: (e: string, p: any) => void }) {
   const [draft, setDraft] = useState("");
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
   const current: string[] = r.groups || [];
   const save = (next: string[]) => act("admin:setGroups", { id: r.id, groups: next });
-  const add = () => {
-    const g = draft.trim();
-    if (!g || current.includes(g)) { setDraft(""); return; }
-    save([...current, g]);
+  const add = (g: string) => {
+    const name = g.trim();
+    if (!name || current.includes(name)) { setDraft(""); setOpen(false); return; }
+    save([...current, name]);
     setDraft("");
+    setOpen(false);
   };
-  const suggestions = groups.filter((g) => !current.includes(g));
+
+  // Click-away closes the menu (there's no portal/overlay layer in this panel).
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const q = draft.trim().toLowerCase();
+  const suggestions = groups
+    .filter((g) => !current.includes(g))
+    .filter((g) => !q || g.toLowerCase().includes(q));
+  // Offer to create what was typed only when it isn't already an exact option.
+  const canCreate = !!draft.trim()
+    && !current.some((g) => g.toLowerCase() === q)
+    && !groups.some((g) => g.toLowerCase() === q);
+
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-1.5">
@@ -485,21 +538,44 @@ function GroupsEditor({ r, groups, act }: { r: any; groups: string[]; act: (e: s
           </Badge>
         ))}
       </div>
-      <div className="flex items-center gap-2">
-        <Input
-          className="h-8 max-w-56"
-          list={`groups-${r.id}`}
-          placeholder={_L("admin.groups_placeholder")}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") add(); }}
-        />
-        <datalist id={`groups-${r.id}`}>
-          {suggestions.map((g) => <option key={g} value={g} />)}
-        </datalist>
-        <Button size="sm" variant="outline" onClick={add} disabled={!draft.trim()}>
-          <Plus className="h-3.5 w-3.5" /> {_L("admin.groups_add")}
-        </Button>
+      <div ref={box} className="relative max-w-72">
+        <div className="flex items-center gap-2">
+          <Input
+            className="h-8 flex-1"
+            placeholder={_L("admin.groups_placeholder")}
+            value={draft}
+            onFocus={() => setOpen(true)}
+            onChange={(e) => { setDraft(e.target.value); setOpen(true); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") add(draft);
+              else if (e.key === "Escape") setOpen(false);
+            }}
+          />
+          <Button size="sm" variant="outline" className="shrink-0 px-2" onClick={() => setOpen((v) => !v)}>
+            <ChevronDown className="h-3.5 w-3.5" />
+          </Button>
+          <Button size="sm" variant="outline" className="shrink-0" onClick={() => add(draft)} disabled={!draft.trim()}>
+            <Plus className="h-3.5 w-3.5" /> {_L("admin.groups_add")}
+          </Button>
+        </div>
+        {open && (suggestions.length > 0 || canCreate) && (
+          <div className="absolute left-0 right-0 z-20 mt-1 max-h-52 overflow-y-auto rounded-md border border-border bg-popover shadow-md">
+            {suggestions.map((g) => (
+              <button key={g} className="block w-full px-3 py-2 text-left text-sm hover:bg-accent" onClick={() => add(g)}>
+                {g}
+              </button>
+            ))}
+            {canCreate && (
+              <>
+                {suggestions.length > 0 && <div className="my-1 border-t border-border" />}
+                <button className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-sm hover:bg-accent"
+                  onClick={() => add(draft)}>
+                  <Plus className="h-3.5 w-3.5 text-muted-foreground" /> {_L("admin.groups_create", draft.trim())}
+                </button>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

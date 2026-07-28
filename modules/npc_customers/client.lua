@@ -79,6 +79,13 @@ local function walkToSlot(rid, orderId, ped, target, headingFace)
     -- counter" bug). So we watch for real movement and, if it hasn't budged ~1s after
     -- tasking, fall back to a straight-line walk (the admin-placed spawn point is a
     -- clear spot near the register, so a straight line reaches the slot fine).
+    -- Ask the streamer for the navmesh around BOTH ends of the walk first. Without
+    -- this the tile is usually still missing on a fresh spawn, the task no-ops, and
+    -- the customer stands still until the stall check below re-tasks it — the visible
+    -- "spawns, pauses, then starts moving" beat.
+    local from = GetEntityCoords(ped)
+    AddNavmeshRequiredRegion(from.x, from.y)
+    AddNavmeshRequiredRegion(target.x, target.y)
     TaskFollowNavMeshToCoord(ped, target.x, target.y, target.z, 1.0, 20000, 0.35, false, 0.0)
     CreateThread(function()
         local waited = 0
@@ -86,12 +93,14 @@ local function walkToSlot(rid, orderId, ped, target, headingFace)
         local usedFallback = false
         while DoesEntityExist(ped) and OrderNPCs[rid] and OrderNPCs[rid][orderId]
             and OrderNPCs[rid][orderId].isWalking do
-            Wait(250)
-            waited = waited + 250
+            Wait(100)
+            waited = waited + 100
             local pos = GetEntityCoords(ped)
             -- Still glued to the spawn a beat after tasking: NavMesh never found a path.
             -- Re-issue as a straight-line walk so the customer actually approaches.
-            if not usedFallback and waited >= 1000 and #(pos - startPos) < 0.25 then
+            -- Checked at 300ms (a walking ped clears 0.15m well inside that), so the
+            -- fallback is indistinguishable from having walked off immediately.
+            if not usedFallback and waited >= 300 and #(pos - startPos) < 0.15 then
                 usedFallback = true
                 ClearPedTasks(ped)
                 TaskGoStraightToCoord(ped, target.x, target.y, target.z, 1.0, 20000, headingFace, 0.35)

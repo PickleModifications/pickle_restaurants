@@ -110,9 +110,6 @@ export type Food = {
   group?: string | null;
   steps?: Step[];
   components?: string[];
-  /** LEGACY: a bag food used to borrow an inventory item's label + picture. Foods
-   *  author their own `image` now; this is only still read as a fallback. */
-  display_item?: string;
   /** The food's OWN picture as an ITEM — the kitchen bar card, the POS, a bag's
    *  contents menu, the inventory slot. */
   image?: PhotoEntry | null;
@@ -197,9 +194,10 @@ export function foodImageUrl(food: Food): string | undefined {
 }
 
 // The item whose catalogue image best represents a food in the row list, for a food
-// with no picture of its own (a legacy bag food falls back to its display item).
+// with no picture of its own. A bag-kind food has no such item — it authors its
+// own `image`, so there's nothing to borrow.
 export function foodImageItem(food: Food): string {
-  if (food.kind === "bag") return food.display_item || "";
+  if (food.kind === "bag") return "";
   const steps = food.steps ?? [];
   for (let i = steps.length - 1; i >= 0; i--) {
     const s = steps[i];
@@ -296,7 +294,7 @@ function ItemField({
 }
 
 // The custom-image editor dialog for one item: a square-cropped photo (reusing the
-// same PhotoField URL+crop picker as combos/brand textures). Clearing it (Remove)
+// same PhotoField URL+crop picker as the brand textures). Clearing it (Remove)
 // falls the item back to its catalogue image / icon.
 function ItemImageModal({ item, items, entry, onChange, onClose }: {
   item: string; items: Item[]; entry: PhotoEntry | null; onChange: (e: PhotoEntry | null) => void; onClose: () => void;

@@ -3,7 +3,7 @@ import Panel from "@/components/Panel";
 import { Button } from "@/components/ui/button";
 import { _L } from "@/lib/locale";
 import { Check } from "lucide-react";
-import { OrderBuilder, arr, type Cat, type Combo } from "@/components/OrderBuilder";
+import { OrderBuilder, arr, type Cat } from "@/components/OrderBuilder";
 
 // The self-service kiosk order screen. Reuses the register's OrderBuilder (catalog
 // + modifier picker + cart) in "kiosk" mode — no customer picker, the customer pays
@@ -12,7 +12,6 @@ import { OrderBuilder, arr, type Cat, type Combo } from "@/components/OrderBuild
 export default function Order({ data, onClose }: { data: any; onClose: () => void }) {
   const id = data?.restaurantId;
   const catalog: Cat[] = arr<Cat>(data?.catalog);
-  const combos: Combo[] = arr<Combo>(data?.combos);
   const [placed, setPlaced] = useState<number | null>(null);
 
   return (
@@ -37,7 +36,7 @@ export default function Order({ data, onClose }: { data: any; onClose: () => voi
           </div>
         </div>
       ) : (
-        <OrderBuilder id={id} catalog={catalog} combos={combos} mode="kiosk" onOrdered={(t) => setPlaced(t ?? 0)} />
+        <OrderBuilder id={id} catalog={catalog} mode="kiosk" onOrdered={(t) => setPlaced(t ?? 0)} />
       )}
     </Panel>
   );

@@ -112,7 +112,21 @@ RegisterNUICallback("phone:setWaypoint", function(data, cb)
 end)
 
 -- KDS complete/cancel reuse the existing sales callbacks (server perm-gated).
-RegisterNUICallback("phone:completeOrder", relay("pickle_restaurants:sales:completeOrder"))
+--
+-- Completing is NOT a plain relay for one case: a delivery whose drop point is an
+-- admin-placed door hands over in person first — the driver knocks, someone comes
+-- out and takes the bag (modules/doorstep). The scene runs BEFORE the server call
+-- and a scene that didn't happen (too far from the door, interrupted) leaves the
+-- ticket open, so "delivered" can't be tapped from down the street.
+RegisterNUICallback("phone:completeOrder", function(data, cb)
+    if RunDoorstepHandoff then
+        local handed = RunDoorstepHandoff(tonumber(data and data.id), tonumber(data and data.orderId))
+        -- nil = no door on this order, complete as normal. false = there was one and
+        -- the hand-off didn't happen; doorstep already said why.
+        if handed == false then return cb({ ok = false }) end
+    end
+    cb(lib.callback.await("pickle_restaurants:sales:completeOrder", false, data) or {})
+end)
 RegisterNUICallback("phone:cancelOrder",   relay("pickle_restaurants:sales:cancelOrder"))
 -- KDS ticket seed (public, display-safe + fulfil flags) — live updates ride the
 -- sales:orders push forwarded to the app above.
