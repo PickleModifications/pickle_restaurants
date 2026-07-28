@@ -54,6 +54,11 @@ function StartMovement(prop, data)
     local rerenderTimer = 300
     local coordsOffset = data.coordsOffset or vector3(0.0, 0.0, 0.0)
     local rotationOffset = data.rotationOffset or vector3(0.0, 0.0, 0.0)
+    -- facePlacer: the preview looks BACK at you instead of away. While unfrozen the
+    -- heading is re-derived from the camera every frame, so seeding a rotation on
+    -- spawn is overwritten on the first frame the ray hits something — the flip has
+    -- to live in the loop. Manual rotation (frozen) still works from there.
+    local faceFlip = data.facePlacer and 180.0 or 0.0
     while true do
         local speedMode = 1
         -- keep a seated-preview ped in its pose if moving it dropped the animation.
@@ -69,7 +74,7 @@ function StartMovement(prop, data)
         if hit and hitCoords then 
             if not isFrozen then
                 coords = vector3(hitCoords.x, hitCoords.y, hitCoords.z + coordsOffset.z)
-                heading = GetGameplayCamRot(2).z
+                heading = (GetGameplayCamRot(2).z + faceFlip) % 360.0
                 -- Wall-mounted props: nudge the prop back off the surface it's aimed
                 -- at (toward the camera/placer) by data.wallOffset so it doesn't bury
                 -- into the wall. Horizontal only, so a slightly-angled aim can't

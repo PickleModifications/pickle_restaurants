@@ -290,11 +290,22 @@ CreateThread(function()
         Inventory.RemoveItem(source, name, count, metadata)
     end
 
+    -- EVERY slot holding this item, not just the first. GetItemByName returns ONE
+    -- slot, and anything shipped `stack = false` (the meal / bag / takeout box) sits
+    -- one per slot — reading a single slot's amount reports 1 however many the player
+    -- is carrying, which reads as "the add did nothing" to callers that compare
+    -- counts before and after (see giveVessel).
     Inventory.GetItemCount = function(source, name)
         local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
         if not xPlayer then return 0 end
+        local items = xPlayer.Functions.GetItemsByName and xPlayer.Functions.GetItemsByName(name)
+        if type(items) == "table" then
+            local n = 0
+            for _, it in pairs(items) do n = n + (it.amount or it.count or 0) end
+            return n
+        end
         local item = xPlayer.Functions.GetItemByName(name)
-        return item and item.amount or 0
+        return item and (item.amount or item.count) or 0
     end
 
     Inventory.HasWeapon = function(source, name, count)

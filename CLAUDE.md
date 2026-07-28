@@ -183,7 +183,10 @@ Each module is a self-contained feature loaded by the `modules/**` glob. Key one
   true = go. The resident is client-local on purpose — no ped netcode, and nothing
   is left standing in the street for other players if the driver crashes mid-scene.
   `doorstep:point` grants nothing; it only answers where the door is, for the
-  assigned driver of that open delivery.
+  assigned driver of that open delivery. `/pickle_doorstep` (admin) plays the whole
+  scene with NO order, ticket or item behind it — at the delivery door you're
+  standing at, else a rehearsed doorway 1.5m in front of you — so the `DOOR`
+  timings are tuned in one command instead of by driving a delivery (TUNE IN-GAME).
 - `management` / `admin` — the boss/owner and admin panels (employees, roles, finances,
   settings, recipes).
 - `sales` / `npc_customers` — selling to players and NPC customers.

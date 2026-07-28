@@ -215,12 +215,18 @@ end
 -- ghost stands where the resident will when they answer, FACING OUT of the doorway
 -- — that facing is what the knock/hand-off sequence uses to know which way "out of
 -- the house" is, so aim it down the path, not at the door.
+--
+-- `facePlacer`: the ghost looks BACK at you the whole time you're aiming, not away
+-- (the gizmo re-derives its heading from the camera every frame). You place one of
+-- these standing where the driver stands — on the path, looking at the house — so
+-- facing you IS facing out of the doorway, and no door needs the 180° spin any more.
 function StartDeliveryDoorPlacement(restaurantId)
     Wait(250)
     ShowNotification(_L("place_door_hint"))
     local result = StartGizmoEditor({
         isPed        = true,
         model        = SEAT_PREVIEW_PED,
+        facePlacer   = true,
         enableCancel = true,
         deleteEntity = true,
     })

@@ -30,6 +30,11 @@ end)
 -- Push a message into the app iframe. Phones forward the WHOLE table into the page as
 -- a window `message`, so we flatten `action` into the payload — useNuiEvent matches on
 -- `.action` and the React handlers read the sibling fields (d.rid, d.orders …).
+-- fwd: retire the current delivery run's threads (the destination marker + the
+-- position pings). Defined with the delivery section further down; called from the
+-- completeOrder relay above it.
+local EndDriveGen
+
 local function ToApp(action, payload)
     if not PhoneApp then return end
     payload = payload or {}
@@ -125,7 +130,14 @@ RegisterNUICallback("phone:completeOrder", function(data, cb)
         -- the hand-off didn't happen; doorstep already said why.
         if handed == false then return cb({ ok = false }) end
     end
-    cb(lib.callback.await("pickle_restaurants:sales:completeOrder", false, data) or {})
+    local res = lib.callback.await("pickle_restaurants:sales:completeOrder", false, data) or {}
+    -- The run is over: retire this delivery's threads (the destination marker and the
+    -- position pings). Completing is the ONE ending the server doesn't announce back
+    -- to the driver — cancelling gets `phone:endDriving`, and accepting another run
+    -- supersedes by generation — so without this the arrow would hang over a doorstep
+    -- that has already been served.
+    if res.ok then EndDriveGen() end
+    cb(res)
 end)
 RegisterNUICallback("phone:cancelOrder",   relay("pickle_restaurants:sales:cancelOrder"))
 -- KDS ticket seed (public, display-safe + fulfil flags) — live updates ride the
@@ -224,6 +236,69 @@ local ARRIVE_ARM = 40.0
 -- One generation per accepted delivery: a newly accepted run supersedes the previous
 -- thread instead of leaving both pinging (the old loop just falls out on its next tick).
 local DriveGen = 0
+EndDriveGen = function() DriveGen = DriveGen + 1 end
+
+-- ─── the on-screen destination marker ────────────────────────────────────────
+-- A waypoint on the minimap gets a driver to the STREET; it doesn't get them to the
+-- door, and "which of these six houses is it" is where deliveries actually get lost.
+-- So once the drop-off is within NAV.dist, draw it in the world: a pointer floating
+-- over the exact point with the label and the live distance under it.
+--
+-- Drawn only while it's ON SCREEN — GetScreenCoordFromWorldCoord clamps its output
+-- for a point behind you, so drawing regardless would stick the arrow to a screen
+-- edge and point at nothing.
+-- TUNE IN-GAME.
+local NAV = {
+    dist       = 100.0, -- metres: start drawing the destination this close to it
+    up         = 1.0,   -- metres above the drop point the marker floats
+    far_wait   = 500,   -- ms between range checks while out of range (no per-frame cost)
+    dict       = "basejumping",
+    sprite     = "arrow_pointer",
+    icon_w     = 0.015, icon_h = 0.025, icon_dy = 0.015, icon_scale = 1.0,
+    text_scale = 0.25,
+}
+local navDict = false -- the sprite dict is requested once, not every frame
+
+local function DrawDestination(coords, label, meters)
+    local onScreen, sx, sy = GetScreenCoordFromWorldCoord(coords.x, coords.y, coords.z)
+    if not onScreen then return end
+    if not navDict then
+        RequestStreamedTextureDict(NAV.dict, false)
+        navDict = HasStreamedTextureDictLoaded(NAV.dict)
+        if not navDict then return end
+    end
+    DrawSprite(NAV.dict, NAV.sprite, sx, sy - NAV.icon_dy,
+               NAV.icon_w * NAV.icon_scale, NAV.icon_h * NAV.icon_scale, 180.0, 255, 255, 0, 255)
+    SetTextCentre(true)
+    SetTextScale(0.0, NAV.text_scale)
+    SetTextEntry("STRING")
+    AddTextComponentString(label .. "\n" .. meters .. "m")
+    DrawText(sx, sy)
+end
+
+-- Follow one delivery's drop-off until its run ends (`gen` stops matching DriveGen).
+-- `z` is resolved lazily and once: the persisted target carries no height (dest_x/
+-- dest_y only), so a door delivery takes the door prop's own z — exact, and the
+-- marker lands on the doorstep rather than at map level — and everything else
+-- probes the ground the first time we're near enough for it to be loaded.
+local function NavigateTo(gen, x, y, z, label)
+    CreateThread(function()
+        while gen == DriveGen do
+            local c = GetEntityCoords(PlayerPedId())
+            local away = #(vector2(c.x, c.y) - vector2(x, y))
+            if away <= NAV.dist then
+                if not z then
+                    local found, gz = GetGroundZFor_3dCoord(x + 0.0, y + 0.0, c.z + 50.0, false)
+                    if found then z = gz end
+                end
+                DrawDestination(vector3(x, y, (z or c.z) + NAV.up), label, math.ceil(away))
+                Wait(0)
+            else
+                Wait(NAV.far_wait)
+            end
+        end
+    end)
+end
 
 -- Driver side: begin pinging our position to the waiting customer's in-app map.
 RegisterNetEvent("pickle_restaurants:phone:beginDriving", function(d)
@@ -243,6 +318,18 @@ RegisterNetEvent("pickle_restaurants:phone:beginDriving", function(d)
     end
     DriveGen = DriveGen + 1
     local myGen = DriveGen
+    -- The in-world destination marker for this run. A door delivery answers with the
+    -- door prop's real height (the same point the hand-off scene plays at), so the
+    -- pointer sits on the doorstep; anything else resolves its height off the ground.
+    if hasTarget then
+        local dz = tonumber(target.z)
+        if not dz or dz == 0.0 then
+            local door = lib.callback.await("pickle_restaurants:doorstep:point", false,
+                                            { rid = rid, orderId = d.orderId })
+            dz = (door and door.z) and (door.z + 0.0) or nil
+        end
+        NavigateTo(myGen, target.x + 0.0, target.y + 0.0, dz, _L("delivery_nav_label"))
+    end
     CreateThread(function()
         local since = GetGameTimer()
         -- The arrival check below ENDS this loop, so it must not be armed while the

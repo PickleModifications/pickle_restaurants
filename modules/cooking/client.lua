@@ -96,6 +96,40 @@ local prepPid = 0        -- monotonic part id (stable handle for NUI hover/grab)
 local prepHovered = nil  -- pid under the cursor (for grabbing)
 local prepDrag = nil     -- { parts = {…}, fromSid?, hit, coords, targetSid, targetTid, tray?, piles? } while placing/moving
 
+-- ── drag lifecycle serialization ─────────────────────────────────────────────
+-- A begin* handler YIELDS before it publishes its drag: EnsureModel waits up to a
+-- second for a prop model to stream, and a decompose preview waits on a server
+-- callback. The NUI's release is a separate message, so a quick flick used to land
+-- its end* handler FIRST — the end found no drag and returned, then the begin
+-- published one that nothing would ever release. That's the "drag won't let go"
+-- bug: a prop stuck to the cursor until the next drag deleted it (and, for a
+-- decompose, the product it previewed was never consumed).
+--
+-- So every begin/end of a drag runs inside this gate: only one at a time, and an
+-- end that arrives mid-begin WAITS for the drag to exist instead of missing it.
+-- `busy` holds the START TIME of the handler that owns the gate (nil = free), so a
+-- handler that errors out without releasing it only stalls the next one until
+-- `ms` — never forever. (One table, not four locals: this file is close to Lua's
+-- 200-local limit for a chunk.)
+local DragGate = { ms = 2000, busy = nil }
+function DragGate.wait()
+    local t0 = GetGameTimer()
+    while DragGate.busy and GetGameTimer() - DragGate.busy < DragGate.ms
+        and GetGameTimer() - t0 < DragGate.ms do Wait(0) end
+    DragGate.busy = GetGameTimer()
+end
+-- Register an NUI callback that takes part in a drag's lifecycle (any begin*/end*
+-- that spawns, publishes or releases a carried prop). Identical to
+-- RegisterNUICallback except its handlers can never overlap each other.
+function DragGate.callback(name, fn)
+    RegisterNUICallback(name, function(d, cb)
+        DragGate.wait()
+        local res = fn(d, cb)
+        DragGate.busy = nil
+        return res
+    end)
+end
+
 -- The SERVING TRAY: a tray + paper liner placed on the prep table. Food dropped
 -- over it anchors WHERE you drop it on the paper (a free 2D arrangement inside
 -- the rim — piles still stack), and the whole arrangement becomes ONE meal item
@@ -3112,7 +3146,7 @@ end
 -- drag a bar item out: spawn the real prop right away and have it follow the
 -- cursor in the world. Collision is off so the cursor ray passes through it
 -- (otherwise it would track its own surface).
-RegisterNUICallback("cooking:beginPlace", function(d, cb)
+DragGate.callback("cooking:beginPlace", function(d, cb)
     if not currentCookProp then return cb({ ok = false }) end
     cancelPlace()
     local base = currentCookProp
@@ -3275,7 +3309,7 @@ end)
 -- release: drop the local preview and ask the server to spawn the real, synced
 -- (cooking) prop at the final spot — unless cancelled (released over the bar) or
 -- never over a valid surface.
-RegisterNUICallback("cooking:endPlace", function(d, cb)
+DragGate.callback("cooking:endPlace", function(d, cb)
     local p = placing; placing = nil
     if not p then return cb({ ok = false }) end
     if (d and d.cancel) or not p.hit or (not p.slotmode and not p.coords) then
@@ -3305,7 +3339,7 @@ end)
 
 -- chip grabbed: drag the *real* placed prop live under the cursor, the same way
 -- a fresh ingredient places. Collision is off so the ray passes through it.
-RegisterNUICallback("cooking:beginMove", function(d, cb)
+DragGate.callback("cooking:beginMove", function(d, cb)
     local uid = d and d.uid
     if not uid or not CookObjects[uid] then return cb({ ok = false }) end
     cancelPlace()
@@ -3363,7 +3397,7 @@ end)
 
 -- release a dragged prop in the world -> commit the final spot to the server
 -- (it validates perms + syncs everyone). With no valid surface, snap it back.
-RegisterNUICallback("cooking:endMove", function(d, cb)
+DragGate.callback("cooking:endMove", function(d, cb)
     local m = moving; moving = nil
     if not m then return cb({ ok = false }) end
     -- Slot item: dropped onto another open rack -> move it there (cook progress carries
@@ -3441,7 +3475,7 @@ end)
 -- Drag from the bar. A halves ingredient spawns as a bottom+top PAIR; everything
 -- else is one part. The carried parts follow the cursor and stack onto the pile
 -- under it, or start a new pile on empty table (runDragThread).
-RegisterNUICallback("cooking:beginPrepPlace", function(d, cb)
+DragGate.callback("cooking:beginPrepPlace", function(d, cb)
     cancelPlace(); cancelMove()
     if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
     if not currentCookProp then return cb({ ok = false }) end
@@ -3487,7 +3521,7 @@ end)
 
 -- Release new parts: reserve each server-side, then commit into a stack (append
 -- to the targeted pile, or start a new one). Cancel / over-bar discards.
-RegisterNUICallback("cooking:endPrepPlace", function(d, cb)
+DragGate.callback("cooking:endPrepPlace", function(d, cb)
     local drag = prepDrag; prepDrag = nil
     setOutline(nil); setTrayOutline(nil)
     if not drag then return cb({ ok = false }) end
@@ -3574,10 +3608,11 @@ local function partsFromDecomposeSpecs(specs)
     return parts
 end
 
+
 -- Begin a decompose drag: preview the WHOLE component stack (peeked read-only, so
 -- nothing is consumed yet) following the cursor — not just the product's single prop.
 -- A MEAL previews as its full tray: tray + paper + every pile at its exact offset.
-RegisterNUICallback("cooking:beginPrepDecompose", function(d, cb)
+DragGate.callback("cooking:beginPrepDecompose", function(d, cb)
     cancelPlace(); cancelMove()
     if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
     if not currentCookProp then return cb({ ok = false }) end
@@ -3603,42 +3638,81 @@ RegisterNUICallback("cooking:beginPrepDecompose", function(d, cb)
     cb({ ok = true })
 end)
 
--- Release a decompose drag: the previewed stack is dropped, the server un-makes the
--- product (consume + refund + reserve), and we spawn the committed stack in place.
-RegisterNUICallback("cooking:endPrepDecompose", function(d, cb)
+-- Release a decompose drag: the server un-makes the product (consume + refund +
+-- reserve) and the previewed stack — the props already under the cursor — is what
+-- sets down, adopted rather than rebuilt.
+DragGate.callback("cooking:endPrepDecompose", function(d, cb)
+    -- Adopt the committed result onto the props ALREADY BEING CARRIED. The preview
+    -- (peek) and the commit are the same component list read off the same instance,
+    -- so the parts under the cursor are exactly what the server just reserved — all
+    -- they're missing is the reservation ids. Stamping them beats deleting the
+    -- preview and spawning an identical set: the food never blinks. False = the two
+    -- lists don't line up (a config changed mid-drag) and the caller rebuilds.
+    local function adopt(parts, specs)
+        specs = specs or {}
+        if #parts == 0 or #parts ~= #specs then return false end
+        for i, p in ipairs(parts) do
+            if p.item ~= specs[i].item or p.half ~= specs[i].half then return false end
+        end
+        for i, p in ipairs(parts) do
+            p.id = specs[i].id
+            p.dx, p.dy = specs[i].dx, specs[i].dy
+            if p.spec then p.spec.id = specs[i].id end
+        end
+        return true
+    end
     local drag = prepDrag; prepDrag = nil
     setOutline(nil); setTrayOutline(nil)
     if not drag then return cb({ ok = false }) end
-    -- capture the drop target, then drop the (non-reserved) preview stack
+    -- capture the drop target; the carried preview STAYS in the world (see below)
     local targetSid, targetTid, coords, hit, boxBlock = drag.targetSid, drag.targetTid, drag.coords, drag.hit, drag.boxBlock
-    deleteDrag(drag)
-    if (d and d.cancel) or not hit then return cb({ ok = false }) end
+    if (d and d.cancel) or not hit then deleteDrag(drag); return cb({ ok = false }) end
     -- refused by a pizza box (closed / occupied / not a pizza): nothing consumed
-    if boxBlock then ShowNotification(boxBlock); return cb({ ok = false }) end
+    if boxBlock then deleteDrag(drag); ShowNotification(boxBlock); return cb({ ok = false }) end
 
     local res = lib.callback.await("pickle_restaurants:cooking:prepDecompose", false, {
         prop_id = currentCookProp and currentCookProp.id, item = d and d.item, sig = d and d.sig, source = d and d.source,
     })
     if not (res and res.ok) then
+        deleteDrag(drag)
         if res and res.error then ShowNotification(res.error) end
         return cb(res or { ok = false })
     end
 
-    local parts = partsFromDecomposeSpecs(res.parts)
-    if #parts == 0 then RefreshTray(); RefreshBar(); return cb({ ok = false }) end
+    -- The props the cursor is already carrying ARE the result — adopt them (stamp
+    -- the reservation ids on) instead of deleting the preview and spawning an
+    -- identical set, so nothing pops out of and back into existence on release.
+    -- A mismatch (config changed mid-drag) falls back to a rebuild.
+    local parts = drag.parts
+    local trayEnts = drag.tray
+    if not adopt(parts, res.parts) then
+        deleteParts(parts)
+        parts = partsFromDecomposeSpecs(res.parts)
+    end
+    if #parts == 0 then
+        for _, e in ipairs(trayEnts or {}) do SafeDeleteEntity(e) end
+        RefreshTray(); RefreshBar(); return cb({ ok = false })
+    end
 
     -- A meal sets down as its whole tray (or its pizza box, lid open): the pair
-    -- recreated at the drop point, one editable pile per recorded offset —
-    -- exactly the arrangement it was made as.
+    -- it was carried as, put down at the drop point, one editable pile per
+    -- recorded offset — exactly the arrangement it was made as.
     if res.meal then
         local kind = res.box and "box" or "tray"
-        local ents = spawnTrayEnts(coords.x, coords.y, coords.z, kind, res.box and 1.0 or nil)
+        local ents = (drag.trayKind == kind) and trayEnts or nil
+        if not ents then
+            for _, e in ipairs(trayEnts or {}) do SafeDeleteEntity(e) end
+            ents = spawnTrayEnts(coords.x, coords.y, coords.z, kind, res.box and 1.0 or nil)
+        end
         if ents then
             commitTrayGroup(coords.x, coords.y, coords.z, ents, groupPiles(parts), kind, res.box and true or false)
             RefreshTray(); RefreshBar()
             return cb(res)
         end
         -- tray prop failed to spawn: fall through and keep the parts as a plain stack
+    else
+        -- not a meal after all: the carried tray (if any) has nothing to hold
+        for _, e in ipairs(trayEnts or {}) do SafeDeleteEntity(e) end
     end
 
     local stack = targetSid and PrepStacks[targetSid]
@@ -3660,7 +3734,7 @@ end)
 -- Grab a placed part: lift it and everything above it off its stack (grab the top
 -- → one part; grab a lower member → that part and the rest above it). Reuses the
 -- same drag loop as placing.
-RegisterNUICallback("cooking:prepGrab", function(d, cb)
+DragGate.callback("cooking:prepGrab", function(d, cb)
     cancelPlace(); cancelMove()
     if prepDrag then return cb({ ok = false }) end
     local sid, idx = findPart(d and d.puid)
@@ -3681,7 +3755,7 @@ end)
 
 -- Release moved parts: over the bar removes them (un-reserves); on a pile/table
 -- re-homes them; nowhere valid snaps them back to their source.
-RegisterNUICallback("cooking:prepDrop", function(d, cb)
+DragGate.callback("cooking:prepDrop", function(d, cb)
     local drag = prepDrag; prepDrag = nil
     setOutline(nil); setTrayOutline(nil)
     if not drag then return cb({ ok = false }) end
@@ -3890,7 +3964,7 @@ end)
 -- Drag a fresh serving tray (or pizza box, kind "box") out of the bar: the prop
 -- pair previews under the cursor; drop on the table places it, ready to arrange
 -- food on (a box places closed — click the lid to swing it open).
-RegisterNUICallback("cooking:beginTrayPlace", function(d, cb)
+DragGate.callback("cooking:beginTrayPlace", function(d, cb)
     cancelPlace(); cancelMove()
     if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
     setOutline(nil); setTrayOutline(nil)
@@ -3910,7 +3984,7 @@ RegisterNUICallback("cooking:beginTrayPlace", function(d, cb)
     cb({ ok = true })
 end)
 
-RegisterNUICallback("cooking:endTrayPlace", function(d, cb)
+DragGate.callback("cooking:endTrayPlace", function(d, cb)
     local drag = prepDrag; prepDrag = nil
     setOutline(nil); setTrayOutline(nil)
     if not drag then return cb({ ok = false }) end
@@ -3935,7 +4009,7 @@ end)
 -- Grab a placed tray: lift it AND everything arranged on it as one carried group.
 -- Released via cooking:prepDrop — back on the table it moves; on the bar the whole
 -- arrangement becomes a meal.
-RegisterNUICallback("cooking:trayGrab", function(d, cb)
+DragGate.callback("cooking:trayGrab", function(d, cb)
     cancelPlace(); cancelMove()
     if prepDrag then return cb({ ok = false }) end
     local tid = tonumber(d and d.tid)
@@ -4128,7 +4202,7 @@ end
 -- cursor in 3D (no 2D pill), exactly like placing a dual item. TARGETING an item
 -- snaps the slice onto its visible face right away (previews seated, not only on
 -- release), matching the soda lid. Release over the snapped item applies it.
-RegisterNUICallback("cooking:beginTopping", function(d, cb)
+DragGate.callback("cooking:beginTopping", function(d, cb)
     cancelPlace()
     cancelMove()
     local model, base = d.model, currentCookProp
@@ -4166,7 +4240,7 @@ end)
 -- release a topping drag: drop the preview slice and, if it was snapped onto a dual
 -- item (or the NUI reports one hovered), apply it — the server spawns the stuck-on
 -- slice. The client's snapped item wins so the apply matches exactly what previewed.
-RegisterNUICallback("cooking:endTopping", function(d, cb)
+DragGate.callback("cooking:endTopping", function(d, cb)
     local p = placing; placing = nil
     deletePreview(p)
     local uid = (p and p.snapUid) or (d and d.uid)
@@ -4206,7 +4280,7 @@ end
 -- begin dragging a lid: the real lid prop follows the cursor in 3D (exactly like
 -- a cheese slice) — but TARGETING the cup snaps it onto the rim right away, so
 -- it previews attached, not only on release. Releasing while snapped presses it on.
-RegisterNUICallback("cooking:beginLid", function(d, cb)
+DragGate.callback("cooking:beginLid", function(d, cb)
     cancelPlace()
     cancelMove()
     local model, base = d.model, currentCookProp
@@ -4248,7 +4322,7 @@ end)
 -- release a lid drag: drop the preview and, if snapped onto (or released over) a
 -- soda cup, press it on (the server validates + consumes the lid and re-renders
 -- the capped cup for everyone).
-RegisterNUICallback("cooking:endLid", function(d, cb)
+DragGate.callback("cooking:endLid", function(d, cb)
     local p = placing; placing = nil
     deletePreview(p)
     local uid = (d and d.uid) or (p and p.snapUid)
@@ -4370,7 +4444,7 @@ end
 
 -- begin dragging a finish tool: spawn the real tube prop following the cursor;
 -- coverage/ghost state lives per hovered part for the drag's lifetime.
-RegisterNUICallback("cooking:beginFinish", function(d, cb)
+DragGate.callback("cooking:beginFinish", function(d, cb)
     cancelPlace(); cancelMove(); cancelFinish(); cancelCondiment()
     if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
     local base = currentCookProp
@@ -4450,7 +4524,7 @@ RegisterNUICallback("cooking:beginFinish", function(d, cb)
 end)
 
 -- release a finish drag before full coverage: everything resets, nothing consumed
-RegisterNUICallback("cooking:endFinish", function(_, cb)
+DragGate.callback("cooking:endFinish", function(_, cb)
     cancelFinish()
     cb({ ok = true })
 end)
@@ -4503,7 +4577,7 @@ end
 
 -- begin dragging a condiment bottle: spawn the real container prop following the cursor;
 -- it rides upright over the table and flips over a valid stack to squeeze.
-RegisterNUICallback("cooking:beginCondiment", function(d, cb)
+DragGate.callback("cooking:beginCondiment", function(d, cb)
     cancelPlace(); cancelMove(); cancelFinish(); cancelBakeMix(); cancelCondiment()
     if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
     local base = currentCookProp
@@ -4591,7 +4665,7 @@ end)
 
 -- release a condiment drag before the squeeze completes: everything resets, nothing
 -- reserved or consumed
-RegisterNUICallback("cooking:endCondiment", function(_, cb)
+DragGate.callback("cooking:endCondiment", function(_, cb)
     cancelCondiment()
     cb({ ok = true })
 end)
@@ -4645,7 +4719,7 @@ end
 -- placed EMPTY baking tray; the raw sheet/dough fades in with travel, and at full
 -- coverage the tray fills (server consumes 1 mix). Mirrors the finish-tool loop but
 -- targets a tray, not a stacked part.
-RegisterNUICallback("cooking:beginBakeMix", function(d, cb)
+DragGate.callback("cooking:beginBakeMix", function(d, cb)
     cancelPlace(); cancelMove(); cancelFinish(); cancelBakeMix(); cancelCondiment()
     if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
     local base = currentCookProp
@@ -4731,7 +4805,7 @@ RegisterNUICallback("cooking:beginBakeMix", function(d, cb)
 end)
 
 -- release a baking-mix drag before full coverage: everything resets, nothing consumed
-RegisterNUICallback("cooking:endBakeMix", function(_, cb)
+DragGate.callback("cooking:endBakeMix", function(_, cb)
     cancelBakeMix()
     cb({ ok = true })
 end)

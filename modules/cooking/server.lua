@@ -2808,11 +2808,21 @@ end
 -- Inventory.AddItem returns anything, so trusting it would send every vessel to the
 -- tray and this would be dead code. Counting also catches the case that matters —
 -- an inventory too full to take it — which no return value would have told us.
+-- The count test is a FALLBACK, not the first answer: a bridge whose count reader
+-- is per-SLOT rather than per-item (these vessels ship `stack = false`, so every
+-- one lands in its own slot) reports no change after a perfectly good add — and
+-- the tray fallback would then hand the cook a SECOND copy of a meal that is
+-- already in their pockets. So ask CanCarryItem first where the inventory
+-- implements it: a yes means the add landed and we never touch the tray.
 local function giveVessel(src, rid, id, item, meta)
     if ItemExists(item) and Inventory.AddItem then
-        local before = Inventory.GetItemCount(src, item) or 0
-        Inventory.AddItem(src, item, 1, BuildInvMeta(meta, item))
-        if (Inventory.GetItemCount(src, item) or 0) > before then return "inv" end
+        local can = Inventory.CanCarryItem and Inventory.CanCarryItem(src, item, 1)
+        if can ~= false then
+            local before = Inventory.GetItemCount and (Inventory.GetItemCount(src, item) or 0) or nil
+            Inventory.AddItem(src, item, 1, BuildInvMeta(meta, item))
+            if can == true then return "inv" end
+            if before and (Inventory.GetItemCount(src, item) or 0) > before then return "inv" end
+        end
     end
     AddTray(rid, id, item, 1, meta)
     return "tray"

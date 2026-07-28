@@ -16,7 +16,20 @@
       "Bash(grep -oE \"[a-z_0-9]{3,}\")",
       "Bash(grep -n \"^local function variationKey\\\\|^local function requiredUnits\\\\|^local function mealCovers\\\\|^end$\" modules/sales/server.lua)",
       "Bash(awk -F: '$1>370 && $1<720')",
-      "Bash(SLICE=/tmp/claude-0/-root-FXServer-server-txData-server-data-resources--jobs--pickle-restaurants/ffaa6360-d5bb-49d0-a13a-bbf7d9d668ad/scratchpad/slice.lua lua5.4 /tmp/claude-0/-root-FXServer-server-txData-server-data-resources--jobs--pickle-restaurants/ffaa6360-d5bb-49d0-a13a-bbf7d9d668ad/scratchpad/plan_test.lua)"
+      "Bash(SLICE=/tmp/claude-0/-root-FXServer-server-txData-server-data-resources--jobs--pickle-restaurants/ffaa6360-d5bb-49d0-a13a-bbf7d9d668ad/scratchpad/slice.lua lua5.4 /tmp/claude-0/-root-FXServer-server-txData-server-data-resources--jobs--pickle-restaurants/ffaa6360-d5bb-49d0-a13a-bbf7d9d668ad/scratchpad/plan_test.lua)",
+      "Bash(luac5.4 -p modules/cooking/client.lua modules/cooking/server.lua modules/quad/client.lua bridge/qb/server.lua)",
+      "Bash(perl -0pi -e 's/RegisterDragCallback\\\\\\(/DragGate.callback\\(/g' modules/cooking/client.lua)",
+      "Bash(perl -0pi -e 's/if not adoptDecomposeSpecs\\\\\\(parts, res\\\\.parts\\\\\\) then/if not adopt\\(parts, res.parts\\) then/' modules/cooking/client.lua)",
+      "Bash(luac5.4 -p modules/cooking/client.lua modules/quad/client.lua modules/cooking/server.lua)",
+      "Bash(luac5.4 -p modules/doorstep/server.lua modules/doorstep/client.lua)",
+      "Bash(luac5.4 -p modules/placement/client.lua locales/translations/en.lua)",
+      "Bash(luac5.4 -p modules/doorstep/server.lua modules/doorstep/client.lua locales/translations/en.lua modules/phone/client.lua)",
+      "Bash(luac5.4 -p locales/translations/en.lua modules/phone/client.lua modules/doorstep/client.lua modules/doorstep/server.lua)",
+      "Bash(perl -0pi -e 's/    return runDoorstepScene\\\\\\(door\\\\\\)\\\\n/    return runDoorstepScene\\(door, rid\\)\\\\n/; s/    runDoorstepScene\\\\\\(door\\\\\\)\\\\n/    runDoorstepScene\\(door, door.rid\\)\\\\n/' modules/doorstep/client.lua)",
+      "Bash(perl -0pi -e 's/-- step back → resident → exchange can be watched and tuned on its own\\\\. The point/-- resident → exchange can be watched and tuned on its own. The point/' modules/doorstep/client.lua)",
+      "Bash(luac5.4 -p modules/doorstep/client.lua modules/rendertarget/client.lua)",
+      "Bash(luac5.4 -p modules/doorstep/server.lua modules/doorstep/client.lua modules/rendertarget/client.lua)",
+      "Bash(luac5.4 -p modules/doorstep/client.lua)"
     ]
   }
 }

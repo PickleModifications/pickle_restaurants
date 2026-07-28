@@ -32,6 +32,8 @@ local DUI_RES      = 256   -- DUI surface: the LONG edge (the short one follows 
 local Textures = {}   -- [key]  = { dui, txd, tex, refs, seq }   key = url|aspect
 local Attached = {}   -- [ent]  = { key, url, w, h, dz }
 local texSeq   = 0    -- monotonic id: unique txd/texture names + LRU ordering
+local drawing  = false -- is the per-frame draw thread alive?
+local ensureDrawThread -- fwd (defined with the draw loop at the bottom)
 
 -- Tear one pooled texture down (its last attachment went away, or it lost the LRU
 -- race). SetDuiUrl'ing a live DUI would be cheaper, but a shared texture may still
@@ -118,9 +120,18 @@ function QuadAttach(ent, url, opts)
     local txd, _, key = acquireTexture(url, w / h, cropQ)
     if not txd then return false end
     Attached[ent] = { key = key, url = url, w = w, h = h, cropQ = cropQ, dz = tonumber(opts.dz) or 0.01 }
+    -- Start drawing on the NEXT frame. The loop used to be one long-lived thread
+    -- that idled at Wait(500) while nothing was attached, so a box that spawned
+    -- just after an idle tick showed its food up to half a second late — which is
+    -- the entire visible delay, the DUI itself paints in a frame or two.
+    ensureDrawThread()
     return true
 end
 
+-- Detaching drops the reference but KEEPS the texture warm: a DUI that has already
+-- loaded its page and painted is instantly reusable, so the next box showing the
+-- same food is correct on its first frame instead of loading again. Idle entries
+-- are what acquireTexture evicts when the pool fills, oldest first.
 function QuadDetach(ent)
     local a = ent and Attached[ent]
     if not a then return end
@@ -128,7 +139,6 @@ function QuadDetach(ent)
     local t = Textures[a.key]
     if not t then return end
     t.refs = t.refs - 1
-    if t.refs <= 0 then freeTexture(a.key) end
 end
 
 -- Is anything attached to this entity? (Lets a caller skip re-resolving an image.)
@@ -155,14 +165,17 @@ local function drawQuad(ent, txd, tex, w, h, dz)
         255, 255, 255, 255, txd, tex, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0)
 end
 
--- The per-frame draw loop. Idle (a long Wait) whenever nothing is attached, so a
--- player who never opens a kitchen pays nothing for this file. Entities that were
--- deleted without a QuadDetach (a prop torn down by the cooking teardown) are
--- reaped here, so a stale handle can never hold a DUI hostage.
-CreateThread(function()
-    while true do
-        local any = next(Attached) ~= nil
-        if any then
+-- The per-frame draw loop. It only EXISTS while something is attached (QuadAttach
+-- starts it, and it retires itself once the last quad goes away), so a player who
+-- never opens a kitchen pays nothing for this file and the first quad is drawn on
+-- the very next frame rather than after an idle tick. Entities that were deleted
+-- without a QuadDetach (a prop torn down by the cooking teardown) are reaped here,
+-- so a stale handle can never hold a DUI hostage.
+ensureDrawThread = function()
+    if drawing then return end
+    drawing = true
+    CreateThread(function()
+        while next(Attached) ~= nil do
             local cam = GetGameplayCamCoord()
             for ent, a in pairs(Attached) do
                 if not DoesEntityExist(ent) then
@@ -175,10 +188,11 @@ CreateThread(function()
                     end
                 end
             end
+            Wait(0)
         end
-        Wait(any and 0 or 500)
-    end
-end)
+        drawing = false
+    end)
+end
 
 AddEventHandler("onResourceStop", function(res)
     if res ~= GetCurrentResourceName() then return end

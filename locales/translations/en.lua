@@ -193,7 +193,7 @@ Language["en"] = {
     ["place_npc_spawn_set"] = "NPC customer spawn point set.",
     ["place_seat_fail"] = "Failed to place seat.",
     ["place_seat_placed"] = "Seat placed.",
-    ["place_door_hint"] = "Place the delivery doorstep. Face the ghost OUT of the doorway.",
+    ["place_door_hint"] = "Place the delivery doorstep.",
     ["place_door_placed"] = "Delivery door placed.",
     ["place_door_fail"] = "Failed to place delivery door.",
     ["door_too_far"] = "Get to the door before handing the order over.",
@@ -1022,6 +1022,8 @@ Language["en"] = {
     ["cook_nothing_to_place"] = "Nothing to place.",
     ["delivery_waypoint_set"] = "Waypoint set to the drop-off for ticket #%s.",
     ["delivery_accepted"] = "Delivery accepted. Route set to the customer.",
+    -- the on-screen destination pointer over the drop-off (within 100m)
+    ["delivery_nav_label"] = "Delivery",
     ["delivery_arrived"] = "You've reached the customer. Hand the order over at the register.",
     ["delivery_out_for_delivery"] = "Your order is out for delivery. Track the driver on your map.",
     ["delivery_blip"] = "Your delivery",

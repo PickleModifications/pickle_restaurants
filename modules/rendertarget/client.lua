@@ -266,12 +266,26 @@ local function applyBrand(r)
     end
 end
 
--- One pass of the production driver: force the debug spec on everything, or apply
--- the nearest branded restaurant (nil = none in range → restore original textures).
+-- A restaurant PINNED as the brand source regardless of where the player is
+-- standing (nil = the normal nearest-restaurant rule). AddReplaceTexture is global
+-- per txd+txn, so packaging always wears whichever branded restaurant you're
+-- closest to — which is wrong the moment you carry a bag AWAY from the kitchen it
+-- came out of. The doorstep hand-off pins the restaurant the delivery is FROM for
+-- the length of the scene, so the customer is handed the right bag on their step
+-- across town from a rival's counter.
+local pinnedRid = nil
+
+-- One pass of the production driver: force the debug spec on everything, else the
+-- pinned restaurant, else the nearest branded one (nil = none in range → restore
+-- the original textures).
 local function driveOnce()
     if debugForce then
         for _, t in ipairs(TARGETS) do setTargetBrand(t, debugForce) end
         return
+    end
+    if pinnedRid then
+        local r = Restaurants and Restaurants[pinnedRid]
+        if r then return applyBrand(r) end
     end
     local here = GetEntityCoords(PlayerPedId())
     local best, bestDist
@@ -295,6 +309,21 @@ CreateThread(function()
         driveOnce()
     end
 end)
+
+-- Pin / unpin the brand source (see pinnedRid). Applies immediately rather than on
+-- the next tick, so a prop spawned in the same frame is already wearing it.
+function PinBrandRestaurant(rid)
+    rid = tonumber(rid)
+    if not rid or pinnedRid == rid then return end
+    pinnedRid = rid
+    driveOnce()
+end
+
+function UnpinBrandRestaurant()
+    if not pinnedRid then return end
+    pinnedRid = nil
+    driveOnce()
+end
 
 -- Re-assert every replacement from scratch, forcing the image to re-push and — via
 -- setTargetBrand → rebindAfterPaint — the txd to re-bind once brand.html has PAINTED
