@@ -435,7 +435,7 @@ function Supplies({ id, supplies }: { id: number; supplies: any[] }) {
     <div className="space-y-3">
       <p className="text-[11px] text-muted-foreground">{_L("mgmt.supplies_hint")}</p>
       {supplies.length === 0 && <div className="py-4 text-center text-sm text-muted-foreground">{_L("mgmt.no_supplies")}</div>}
-      {supplies.map((s) => <SupplyRow key={s.item} id={id} supply={s} />)}
+      {supplies.map((s) => <SupplyRow key={s.key || s.item} id={id} supply={s} />)}
     </div>
   );
 }
@@ -444,15 +444,20 @@ function SupplyRow({ id, supply }: { id: number; supply: any }) {
   const [qty, setQty] = useState(5);
   const [stock, setStock] = useState<number>(supply.stock || 0);
   const [held, setHeld] = useState<number>(supply.held || 0);
+  // Everything addresses the STOCK KEY, which for a multi-faced ingredient names
+  // the face (`restaurant_toy:lardboy`) rather than the item — that is what the
+  // larder counts and prices. `item` is still sent so an older server that only
+  // understands item names keeps working.
+  const key = supply.key || supply.item;
   const buy = async () => {
-    const res = await fetchNui<any>("management:buyStock", { id, item: supply.item, qty });
+    const res = await fetchNui<any>("management:buyStock", { id, key, item: supply.item, qty });
     if (res && res.ok) setStock(res.stock);
   };
   // Deposit moves the manager's own items INTO the shared pool; withdraw pulls
   // pool stock back OUT into their pockets. Both echo the fresh stock + held
   // counts so the row stays live without re-fetching the whole panel.
   const move = (event: "management:depositStock" | "management:withdrawStock") => async () => {
-    const res = await fetchNui<any>(event, { id, item: supply.item, qty });
+    const res = await fetchNui<any>(event, { id, key, item: supply.item, qty });
     if (res && res.ok) { setStock(res.stock); setHeld(res.held); }
   };
   return (
@@ -468,7 +473,10 @@ function SupplyRow({ id, supply }: { id: number; supply: any }) {
             {!supply.installed && <Badge variant="destructive">{_L("mgmt.not_installed")}</Badge>}
           </div>
           <div className="text-[11px] text-muted-foreground">
-            {_L("mgmt.cost_each", money(supply.cost))} · {_L("mgmt.in_stock", stock)} · {_L("mgmt.you_hold", held)}
+            {_L("mgmt.cost_each", money(supply.cost))} · {_L("mgmt.in_stock", stock)}
+            {/* A face isn't movable between pocket and larder (the inventory item is
+                generic), so "you hold N" would always read 0 and mean nothing. */}
+            {supply.movable && <> · {_L("mgmt.you_hold", held)}</>}
           </div>
         </div>
         <div className="flex shrink-0 items-center">
@@ -477,12 +485,16 @@ function SupplyRow({ id, supply }: { id: number; supply: any }) {
           <Button size="icon" variant="ghost" onClick={() => setQty((q) => q + 1)}><Plus className="h-3.5 w-3.5" /></Button>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Button size="sm" variant="outline" onClick={move("management:depositStock")} disabled={held < qty} title={_L("mgmt.deposit_stock_hint")}>
-            <ArrowDownToLine className="h-4 w-4" /> {_L("mgmt.deposit_stock")}
-          </Button>
-          <Button size="sm" variant="outline" onClick={move("management:withdrawStock")} disabled={stock < qty} title={_L("mgmt.withdraw_stock_hint")}>
-            <ArrowUpFromLine className="h-4 w-4" /> {_L("mgmt.withdraw_stock")}
-          </Button>
+          {supply.movable && (
+            <>
+              <Button size="sm" variant="outline" onClick={move("management:depositStock")} disabled={held < qty} title={_L("mgmt.deposit_stock_hint")}>
+                <ArrowDownToLine className="h-4 w-4" /> {_L("mgmt.deposit_stock")}
+              </Button>
+              <Button size="sm" variant="outline" onClick={move("management:withdrawStock")} disabled={stock < qty} title={_L("mgmt.withdraw_stock_hint")}>
+                <ArrowUpFromLine className="h-4 w-4" /> {_L("mgmt.withdraw_stock")}
+              </Button>
+            </>
+          )}
           <Button size="sm" onClick={buy}><PackagePlus className="h-4 w-4" /> {_L("mgmt.buy")} · {money(supply.cost * qty)}</Button>
         </div>
       </CardContent>

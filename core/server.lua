@@ -266,9 +266,26 @@ local DEFAULT_SETTINGS = {
 --     item and melts applied_model → melted_model; `box_base` = a build whose
 --     bottom layer is (or derives from) this ingredient fits the pizza box.
 -- Seeded once and merged idempotently by id/item — admin edits are never
--- clobbered; deleting a default re-seeds on restart (matching legacy behavior).
+-- clobbered; deleting a default re-seeds on restart.
 
 DEFAULT_INGREDIENTS = {
+    -- RAW STATION INPUTS. These are bought into the larder and dragged onto their
+    -- station (grill / fryer / oven / fountain), never onto a prep build — the
+    -- `GetPrepModels()` door in cooking's getIngredients skips anything a recipe or
+    -- a tap consumes, so listing them here does NOT put a raw patty on the prep
+    -- components bar. They are here because an ingredient entry is what gives an
+    -- item an ADMIN-VISIBLE row (Menu → Ingredients, priceable next to its own
+    -- picture) and a prep PROP; without one they existed only as a price key in
+    -- Settings → Ingredient Costs, which is why they read as unobtainable.
+    -- The models are the single-serving RAW props (the `_01` of each family) — the
+    -- cook-state models on the recipe are the in-basket/on-griddle piles instead.
+    { item = "raw_beef_patty",    model = "pickle_patty_beef_01" },
+    { item = "raw_chicken_patty", model = "pickle_patty_friedchicken_01" },
+    { item = "raw_drumstick",     model = "pickle_chicken_drumstick_01" },
+    { item = "raw_fries",         model = "pickle_side_fries_01" },
+    { item = "raw_nuggets",       model = "pickle_side_nuggets_01" },
+    { item = "raw_doughnut",      model = "pickle_dough_unapplied_01" },
+    { item = "empty_cup",         model = "pickle_drink_container_01" },
     { item = "bun", model = "pickle_bread_bun_01",
       halves = { top_model = "pickle_bread_bun_01", bottom_model = "pickle_bread_bun_02" } },
     { item = "cheese", model = "pickle_cheese_applied_01",
@@ -301,6 +318,17 @@ DEFAULT_TOOLS = {
             { id = "vanilla",    label = "Vanilla",    model = "pickle_doughnut_topping_04", color = "#f3e5ab" },
             { id = "pickle",     label = "Pickle",     model = "pickle_doughnut_topping_05", color = "#65a30d" },
           } },
+        -- Cookies take the same tube as the cake and the doughnut. The asset pack
+        -- ships the iced-cookie props in the CAKE's flavor order (01..04 =
+        -- strawberry / chocolate / vanilla / pickle), one short of the doughnut's,
+        -- which has a glazed state cookies have no prop for.
+        { item = "cooked_cookie", output = "cooked_cookie", mode = "overlay",
+          flavors = {
+            { id = "strawberry", label = "Strawberry", model = "pickle_cookie_frosting_01", color = "#f472b6" },
+            { id = "chocolate",  label = "Chocolate",  model = "pickle_cookie_frosting_02", color = "#8b5a2b" },
+            { id = "vanilla",    label = "Vanilla",    model = "pickle_cookie_frosting_03", color = "#f3e5ab" },
+            { id = "pickle",     label = "Pickle",     model = "pickle_cookie_frosting_04", color = "#65a30d" },
+          } },
       } },
     { id = "sprinkles", item = "sprinkles", tool_model = "pickle_sprinkles_tube_01",
       mode = "decorate", rub_dist = 1.2, group = "Bakery",
@@ -310,6 +338,16 @@ DEFAULT_TOOLS = {
           flavors = {
             { id = "vanilla",   label = "Vanilla",   model = "pickle_doughnut_sprinkles_01", color = "#f3e5ab" },
             { id = "chocolate", label = "Chocolate", model = "pickle_doughnut_sprinkles_02", color = "#8b5a2b" },
+          } },
+        -- No `requires_finish` on the cookie target, unlike the doughnut's: sprinkles
+        -- and chips are pressed into cookie dough rather than stuck to icing, and the
+        -- pack ships the chip prop as a plain cookie (no frosted variant of it), so
+        -- gating it on frosting would make that model unreachable.
+        { item = "cooked_cookie", output = "cooked_cookie", mode = "overlay",
+          flavors = {
+            { id = "vanilla",   label = "Vanilla",         model = "pickle_cookie_sprinkles_01", color = "#f3e5ab" },
+            { id = "chocolate", label = "Chocolate",       model = "pickle_cookie_sprinkles_02", color = "#8b5a2b" },
+            { id = "chips",     label = "Chocolate Chips", model = "pickle_cookie_chips_01",     color = "#5b3a21" },
           } },
       } },
     { id = "ketchup", item = "ketchup", mode = "layer",
@@ -729,10 +767,74 @@ end
 -- ─── unified menu: authored config accessors ─────────────────────────────────
 -- The three authored settings arrays (the ONLY authoring surface). Everything the
 -- runtime consumes is DERIVED from these by RebuildDerived() below.
+--
+-- ...plus whatever the installed DLC PACKS contribute (modules/dlc). These three
+-- getters are the ONE place the runtime reads the menu from, which is exactly why
+-- the overlay lives here and nowhere else: a pack's ingredients and foods flow into
+-- the recipe cache, the cooking bar, the POS catalogue, sync validation and the
+-- admin annotations without a single one of those knowing DLC exists.
+--
+-- The AUTHORED array always wins. A pack entry whose id/item an admin has also
+-- authored is dropped rather than appended — appending would double the entry
+-- (two identical assembly rows) and, worse, let a pack silently take over a
+-- DerivedPrepModels / DerivedFoodById key that the server's own config owns.
+-- DLC content is never stored: it is re-read from the pack on every boot, and
+-- carries a `dlc` mark that the sanitizers refuse to persist.
 
-function GetFoods()          return GetSetting("foods", {}) end
-function GetTools()          return GetSetting("tools", {}) end
-function GetIngredientsCfg() return GetSetting("ingredients", {}) end
+-- MEMOIZED, because these getters are not called once per page load: the cooking
+-- engine reaches for IngredientDef / MeltingToppingFor / ToppingMeltMs inside its
+-- own polling, and ResolveItemCost walks the cost map per sellable while building a
+-- catalogue. With no pack installed the authored array is handed straight back
+-- (zero cost — the overwhelmingly common case); with one, the merge is rebuilt only
+-- when the authored table is REPLACED (SetSetting writes a fresh table, so identity
+-- is a sound dirty check) or when the pack registry changes (`DlcRev`, bumped by
+-- modules/dlc). Never a per-call allocation in a loop.
+DlcRev = DlcRev or 0
+local mergeCache = {}
+
+local function withDlc(key, authored, dlc, idField)
+    if type(authored) ~= "table" then authored = {} end
+    if not dlc or #dlc == 0 then return authored end
+    local c = mergeCache[key]
+    if c and c.src == authored and c.rev == DlcRev then return c.out end
+    local out, seen = {}, {}
+    for _, e in ipairs(authored) do
+        out[#out + 1] = e
+        if type(e) == "table" and e[idField] then seen[e[idField]] = true end
+    end
+    for _, e in ipairs(dlc) do
+        if e[idField] and not seen[e[idField]] then
+            seen[e[idField]] = true
+            out[#out + 1] = e
+        end
+    end
+    mergeCache[key] = { src = authored, rev = DlcRev, out = out }
+    return out
+end
+
+function GetFoods()          return withDlc("foods",       GetSetting("foods", {}),       DlcFoods and DlcFoods() or nil,            "id")   end
+function GetTools()          return withDlc("tools",       GetSetting("tools", {}),       DlcTools and DlcTools() or nil,            "id")   end
+function GetIngredientsCfg() return withDlc("ingredients", GetSetting("ingredients", {}), DlcIngredients and DlcIngredients() or nil, "item") end
+
+-- The buy-in price map behind the Supplies tab and every default menu price. A DLC
+-- ships defaults for its OWN items so a freshly installed pack is immediately
+-- buyable; the `ingredient_costs` setting is layered on top, so pricing a pack's
+-- item in the panel works exactly like pricing anything else and the admin's number
+-- always wins.
+function IngredientCosts()
+    local authored = GetSetting("ingredient_costs", {}) or {}
+    if not (DlcIngredientCosts and AnyDlcInstalled and AnyDlcInstalled()) then return authored end
+    -- Same memo discipline as the three menu getters: ResolveItemCost walks this
+    -- per sellable while a catalogue is built, so it must not rebuild each time.
+    -- NOTE the copy — the pack's own table must never be written into.
+    local c = mergeCache.__costs
+    if c and c.src == authored and c.rev == DlcRev then return c.out end
+    local out = {}
+    for item, cost in pairs(DlcIngredientCosts()) do out[item] = cost end
+    for item, cost in pairs(authored) do out[item] = cost end
+    mergeCache.__costs = { src = authored, rev = DlcRev, out = out }
+    return out
+end
 
 -- The ingredient entry for `item` (nil when unconfigured). Linear scan — the
 -- list is tiny and authored, like findAssembly.
@@ -742,6 +844,84 @@ function IngredientDef(item)
         if ing.item == item then return ing end
     end
     return nil
+end
+
+-- `variants` property: ONE item with several interchangeable faces (the five
+-- kids-meal toys under one `restaurant_toy`). Which one an instance is rides as
+-- build-stack metadata exactly like a poured drink's flavor — a nested one-layer
+-- stack `{ { item = <variant id> } }` — so `TraySig` tells two variants apart for
+-- free and every store that already threads `stack` (reservations, tray rows, meal
+-- and bag metadata, decompose) carries it with no changes.
+--
+-- Returns nil for an ordinary single-faced ingredient, so nothing pays for this.
+function IngredientVariants(item)
+    local d = IngredientDef(item)
+    return d and type(d.variants) == "table" and #d.variants > 0 and d.variants or nil
+end
+
+function IngredientVariantById(item, id)
+    if not id then return nil end
+    for _, v in ipairs(IngredientVariants(item) or {}) do
+        if v.id == id then return v end
+    end
+    return nil
+end
+
+-- The variant a HELD instance is, read off its metadata. Mirrors drinkFlavor: the
+-- variant id sits on the first nested layer's `item`. Returns nil for a plain
+-- instance (a row stored without one, or a framework that stripped slot metadata) — every
+-- caller falls back to the ingredient's own model/label, so an un-tagged toy is
+-- generic rather than broken.
+function IngredientVariantOf(item, meta)
+    local l = type(meta) == "table" and meta[1]
+    if type(l) ~= "table" or not l.item then return nil end
+    return IngredientVariantById(item, l.item)
+end
+
+-- The metadata that MAKES an instance a given variant — the one place the shape is
+-- written, so the reservation, the render and the reader can't drift apart.
+function IngredientVariantMeta(id)
+    return id and { { item = id } } or nil
+end
+
+-- ─── stock keys ──────────────────────────────────────────────────────────────
+-- What the shared larder counts a thing UNDER. For everything else that is just
+-- the item; for a variants ingredient it is per VARIANT, because the pool has to
+-- be able to tell a $12 Lardboy from a $10 Kitty Kat. Buying five Kitty Kats and
+-- handing out five Lardboys is exactly what a single generic "toy" line would
+-- allow, and it is why per-toy pricing is only meaningful with per-toy stock.
+--
+-- This is a key in OUR OWN table (`pickle_restaurant_stock.item` is a plain
+-- varchar, never a foreign key into the framework's inventory), so a composite key
+-- costs no schema change. It must never be handed to the inventory as an item
+-- name: `ItemExists` is false for one, which is what keeps the deposit/withdraw
+-- paths — the only stock code that touches real inventory — refusing them.
+function StockKey(item, variant)
+    if not item or not variant or variant == "" then return item end
+    return item .. ":" .. variant
+end
+
+-- Split a stock key back into (item, variantId). The variant is only reported when
+-- the ingredient really declares it, so an item whose own name contains a colon
+-- can never be mistaken for a variant key.
+function SplitStockKey(key)
+    if type(key) ~= "string" then return key, nil end
+    local item, vid = key:match("^(.-):([^:]+)$")
+    if item and IngredientVariantById(item, vid) then return item, vid end
+    return key, nil
+end
+
+-- How one stock key reads and looks in the Supplies tab / the ledger.
+function StockKeyLabel(key)
+    local item, vid = SplitStockKey(key)
+    local v = vid and IngredientVariantById(item, vid)
+    return (v and v.label) or GetItemLabel(item)
+end
+
+function StockKeyImage(key)
+    local item, vid = SplitStockKey(key)
+    local v = vid and IngredientVariantById(item, vid)
+    return (v and v.image) or GetItemImage(item)
 end
 
 -- `halves` property: the ingredient renders/splits as two half props (top +
@@ -873,26 +1053,44 @@ local function sanitizeConsume(v)
         if not n then return nil end
         return math.max(0, math.min(100, math.floor(n)))
     end
-    local out = { hunger = pct(v.hunger), thirst = pct(v.thirst), anim = trimStr(v.anim) }
-    if out.hunger == nil and out.thirst == nil and not out.anim then return nil end
+    -- `stress` is RELIEF, not a need: the other two fill a bar, this one drains one.
+    -- Kept in the same block (and the same 0-100 units) because it is the same
+    -- question — "what does using one of these do to the player" — and a food may
+    -- well answer it in more than one way. The bridge decides what "stress" means on
+    -- the framework in play, and a server with no stress system simply has nothing
+    -- to drain (see Relax).
+    local out = { hunger = pct(v.hunger), thirst = pct(v.thirst), stress = pct(v.stress),
+                  anim = trimStr(v.anim) }
+    -- `bites` is authored on foods through the same block; keep it so an entry can
+    -- say "this is used in ONE go" (a toy) instead of inheriting the 3-bite default.
+    local bites = tonumber(v.bites)
+    if bites then out.bites = math.max(1, math.min(20, math.floor(bites))) end
+    if out.hunger == nil and out.thirst == nil and out.stress == nil
+        and not out.anim and not out.bites then return nil end
     return out
 end
 
 -- The admin-editable eat/drink animation catalogue (`consume_anims`), sanitized on
 -- read so a bad NUI write can never hand the client a malformed clip. Entries with
 -- no id/dict/clip are dropped.
+-- A DLC pack ships the clips its own content needs (a toy is squeezed, not eaten),
+-- appended AFTER the authored catalogue so an admin can retune a packaged clip by
+-- authoring an entry with the same id — theirs is found first by ConsumeSpecFor's
+-- linear scan, and the pack's is skipped here as a duplicate id.
 function ConsumeAnims()
-    local out = {}
-    for _, a in ipairs(GetSetting("consume_anims", {}) or {}) do
-        if type(a) == "table" then
-            local id, dict, clip = trimStr(a.id), trimStr(a.dict), trimStr(a.clip)
-            if id and dict and clip then
-                out[#out + 1] = { id = id, label = trimStr(a.label) or id, dict = dict, clip = clip,
-                                  prop = trimStr(a.prop),
-                                  ms = math.max(500, math.min(20000, math.floor(tonumber(a.ms) or 3000))) }
-            end
+    local out, seen = {}, {}
+    local function add(a)
+        if type(a) ~= "table" then return end
+        local id, dict, clip = trimStr(a.id), trimStr(a.dict), trimStr(a.clip)
+        if id and dict and clip and not seen[id] then
+            seen[id] = true
+            out[#out + 1] = { id = id, label = trimStr(a.label) or id, dict = dict, clip = clip,
+                              prop = trimStr(a.prop),
+                              ms = math.max(500, math.min(20000, math.floor(tonumber(a.ms) or 3000))) }
         end
     end
+    for _, a in ipairs(GetSetting("consume_anims", {}) or {}) do add(a) end
+    for _, a in ipairs(DlcConsumeAnims and DlcConsumeAnims() or {}) do add(a) end
     return out
 end
 
@@ -916,6 +1114,11 @@ end
 -- Called from RebuildDerived (boot + every menu/settings save).
 function RebuildItemImages()
     ItemImageCache = {}
+    -- A DLC pack's own art goes down FIRST so the admin's `item_images` overrides
+    -- (written next) win — a pack ships a picture, it doesn't claim one.
+    for item, url in pairs(DlcItemImages and DlcItemImages() or {}) do
+        ItemImageCache[item] = url
+    end
     for item, v in pairs(GetSetting("item_images", {}) or {}) do
         if type(v) == "table" and type(v.url) == "string" and v.url ~= "" then
             ItemImageCache[item] = v.url
@@ -945,10 +1148,18 @@ local function foodSlug(s)
     return (tostring(s or ""):lower():gsub("[^a-z0-9]+", "_"):gsub("^_+", ""):gsub("_+$", ""))
 end
 
+-- DLC content is never PERSISTED. It is contributed by an installed pack at
+-- runtime (modules/dlc) and merged into the three getters, so it reaches the admin
+-- panel's lists like everything else — and the panel saves its lists whole. Marked
+-- entries are therefore dropped on the way IN, which is the one place that can't be
+-- got around: even a hand-crafted NUI post can't strand a pack's food in the
+-- settings table where it would outlive the pack that defines it.
+local function isDlcEntry(e) return type(e) == "table" and trimStr(e.dlc) ~= nil end
+
 function SanitizeFoods(list)
     local out, seen = {}, {}
     for _, f in ipairs(type(list) == "table" and list or {}) do
-        if type(f) == "table" then
+        if type(f) == "table" and not isDlcEntry(f) then
             local food = {
                 id    = trimStr(f.id),
                 label = trimStr(f.label),
@@ -1047,7 +1258,7 @@ end
 function SanitizeTools(list)
     local out, seen = {}, {}
     for _, t in ipairs(type(list) == "table" and list or {}) do
-        if type(t) == "table" and (trimStr(t.item) or trimStr(t.id)) then
+        if type(t) == "table" and not isDlcEntry(t) and (trimStr(t.item) or trimStr(t.id)) then
             local mode = (t.mode == "layer" or t.mode == "decorate" or t.mode == "fill") and t.mode or "layer"
             local tool = {
                 id = trimStr(t.id) or trimStr(t.item),
@@ -1114,7 +1325,7 @@ end
 function SanitizeIngredients(list)
     local out, seen = {}, {}
     for _, ing in ipairs(type(list) == "table" and list or {}) do
-        if type(ing) == "table" and trimStr(ing.item) and not seen[ing.item] then
+        if type(ing) == "table" and not isDlcEntry(ing) and trimStr(ing.item) and not seen[ing.item] then
             seen[ing.item] = true
             local e = {
                 item = ing.item,
@@ -1122,7 +1333,35 @@ function SanitizeIngredients(list)
                 group = trimStr(ing.group),
                 box_base = ing.box_base == true or nil,
                 label = trimStr(ing.label),
+                -- What USING one does, for an ingredient that is a thing in its own
+                -- right rather than a component — a DLC toy dropped in a bag or on a
+                -- meal tray is picked out and played with, not eaten. Same block a
+                -- food authors (`hunger`/`thirst`/`stress`/`anim`/`bites`), read by
+                -- ConsumeSpecFor when no FOOD claims the item. nil for a plain
+                -- component (a lettuce leaf is never used on its own).
+                consume = sanitizeConsume(ing.consume),
             }
+            -- VARIANTS: one item, many faces. Per the one-item consolidation rule,
+            -- a family of interchangeable things (the five kids-meal toys) is ONE
+            -- installed item whose variation rides in build-stack metadata — never
+            -- five items. Each variant carries its own prop, name, picture and
+            -- (optionally) its own effect layered over the ingredient's; the bar
+            -- shows one card per variant, all spending the same stock.
+            if type(ing.variants) == "table" then
+                local vs, vseen = {}, {}
+                for _, v in ipairs(ing.variants) do
+                    if type(v) == "table" then
+                        local vid = trimStr(v.id) or (trimStr(v.label) and foodSlug(v.label))
+                        if vid and vid ~= "" and not vseen[vid] then
+                            vseen[vid] = true
+                            vs[#vs + 1] = { id = vid, label = trimStr(v.label) or PrettyItemName(vid),
+                                            model = trimStr(v.model), image = trimStr(v.image),
+                                            consume = sanitizeConsume(v.consume) }
+                        end
+                    end
+                end
+                if #vs > 0 then e.variants = vs end
+            end
             if type(ing.halves) == "table" and (trimStr(ing.halves.top_model) or trimStr(ing.halves.bottom_model)) then
                 e.halves = { top_model = trimStr(ing.halves.top_model),
                              bottom_model = trimStr(ing.halves.bottom_model) }
@@ -1139,7 +1378,7 @@ function SanitizeIngredients(list)
 end
 
 -- ─── unified menu: derivation layer ──────────────────────────────────────────
--- Rebuilds the exact legacy runtime shapes the 5k-line cooking engine / sales /
+-- Rebuilds the exact runtime shapes the 5k-line cooking engine / sales /
 -- sync consume — RecipeCache rows, assembly/drinks/crafts/finishes/
 -- condiments lists, the baking config (now a LIST, one per fill tool) and the
 -- item->prep-prop map — from the three authored arrays. Run at boot and after
@@ -1176,7 +1415,15 @@ function RebuildDerived()
     DerivedFoodById, DerivedFoodByOutput = {}, {}
 
     for _, ing in ipairs(GetIngredientsCfg()) do
-        if ing.item and ing.model then DerivedPrepModels[ing.item] = ing.model end
+        -- A variants-only ingredient (the toy family) authors no prop of its own —
+        -- each variant has one. Map the item to the FIRST variant's prop so an
+        -- instance whose metadata was stripped still renders as something rather
+        -- than falling through to a model-less 2D pill.
+        local model = ing.model
+        if not model and type(ing.variants) == "table" then
+            model = (ing.variants[1] or {}).model
+        end
+        if ing.item and model then DerivedPrepModels[ing.item] = model end
     end
 
     for _, food in ipairs(GetFoods()) do
@@ -1297,7 +1544,7 @@ end
 -- Idempotent default merge for the three authored arrays: create a missing key
 -- outright, else append shipped entries whose id/item isn't present. An admin's
 -- customised entry (same id) is never touched; a deleted default re-seeds on
--- restart, matching how the legacy kinds always behaved.
+-- restart.
 local function SeedUnifiedMenu()
     local function merge(key, defaults, idField)
         local list = GetSetting(key, nil)
@@ -1484,30 +1731,6 @@ function RestaurantHasAccess(restaurantId, group)
     return false
 end
 
--- Why a restaurant can or can't reach each group in use. Admin diagnostic for
--- "I gave it every group and it still only sees ungrouped content" — it prints the
--- restaurant's stored list against every group any content actually declares, which
--- is where a mismatch shows up immediately.
-RegisterCommand("pickle_groups", function(src, args)
-    if src ~= 0 and not IsPlayerAdmin(src) then return end
-    local id = tonumber(args[1])
-    local r = id and GetRestaurant(id)
-    if not r then
-        print("[pickle_groups] usage: pickle_groups <restaurantId>")
-        for rid, rest in pairs(RestaurantCache) do
-            print(("  #%s %s — groups: %s"):format(rid, rest.name or "?",
-                (type(rest.groups) == "table" and #rest.groups > 0) and table.concat(rest.groups, ", ") or "(none = full access)"))
-        end
-        return
-    end
-    print(("[pickle_groups] #%s %s"):format(id, r.name or "?"))
-    print(("  stored groups: %s"):format(
-        (type(r.groups) == "table" and #r.groups > 0) and table.concat(r.groups, ", ") or "(none = full access)"))
-    for _, g in ipairs(CollectGroups()) do
-        print(("  %-24s %s"):format(g, RestaurantHasAccess(id, g) and "ACCESS" or "blocked"))
-    end
-end, false)
-
 -- Every distinct group name in use across recipes + the grouped settings lists —
 -- the suggestion pool for the admin UIs (groups exist by being used, not managed).
 function CollectGroups()
@@ -1533,8 +1756,21 @@ end
 -- output costs the sum of its components. Recursive, cycle-guarded.
 function ResolveItemCost(item, seen)
     if not item then return 0 end
-    local costs = GetSetting("ingredient_costs", {})
+    local costs = IngredientCosts()
     if costs[item] ~= nil then return tonumber(costs[item]) or 0 end
+    -- A VARIANTS ingredient is priced per variant (per stock key), so the bare item
+    -- has no entry of its own. Cost it at its cheapest face — this only feeds
+    -- default menu pricing, where the honest floor is what the restaurant could
+    -- have paid, and it stops such an item reading as free.
+    local vs = IngredientVariants(item)
+    if vs then
+        local best
+        for _, v in ipairs(vs) do
+            local c = tonumber(costs[StockKey(item, v.id)])
+            if c and (not best or c < best) then best = c end
+        end
+        if best then return best end
+    end
     seen = seen or {}
     if seen[item] then return 0 end
     seen[item] = true
@@ -1639,7 +1875,7 @@ end
 function IsRecipeValid(r) return #RecipeMissingItems(r) == 0 end
 
 -- How a recipe is cooked: "grill" (cooktop surface), "oven" (inside a door), or
--- "fry" (fryer basket). Defaults to grill for legacy/untagged rows.
+-- "fry" (fryer basket). Defaults to grill for an untagged row.
 function RecipeMethod(r) return (r and r.method) or "grill" end
 
 -- The item every bag-KIND food (soup, salad…) becomes when it is created in the
@@ -1699,12 +1935,37 @@ function FoodBoxImageUrl(food, item)
     return FoodImageUrl(food, item), nil
 end
 
--- What eating ONE serving of a held thing does: { hunger, thirst, anim }, resolved
--- from the food that authored it and filled in from the global `consume` setting.
--- `anim` is the full clip spec (dict/clip/prop/ms) so the client needs no catalogue.
+-- What using ONE serving of a held thing does: { hunger, thirst, stress, anim },
+-- resolved from the food that authored it and filled in from the global `consume`
+-- setting. `anim` is the full clip spec (dict/clip/prop/ms) so the client needs no
+-- catalogue.
+--
+-- An INGREDIENT may author the block too, and is consulted when no FOOD claims the
+-- item. That is what makes a thing-in-its-own-right possible without inventing a
+-- fourth authoring kind: a DLC toy is an ingredient (it has a prop, it's bought
+-- into the larder, it drops into a bag or onto a meal tray like any component) that
+-- happens to also say what using one does. A component that authors nothing —
+-- lettuce — resolves to the global fallback exactly as before, and is never offered
+-- on its own anyway.
 function ConsumeSpecFor(item, meta)
     local fallback = GetSetting("consume", {}) or {}
-    local own = (FoodForItem(item, meta) or {}).consume or {}
+    local own = (FoodForItem(item, meta) or {}).consume
+    if not own then
+        -- No food claims it: fall through to the ingredient, then to THIS INSTANCE's
+        -- variant layered over it. That layering is what lets one `restaurant_toy`
+        -- item hold five toys that share an animation and a bite count but relieve
+        -- different amounts of stress — the variant states only what differs.
+        local ing = IngredientDef(item)
+        own = ing and ing.consume or nil
+        local v = ing and IngredientVariantOf(item, meta)
+        if v and v.consume then
+            local merged = {}
+            for k, val in pairs(own or {}) do merged[k] = val end
+            for k, val in pairs(v.consume) do merged[k] = val end
+            own = merged
+        end
+        own = own or {}
+    end
     -- A DRINK whose food states no effect of its own quenches thirst rather than
     -- hunger, and is drunk rather than eaten. Without this an upgraded server (whose
     -- stored foods predate `consume`) would have every drink feed the wrong bar
@@ -1737,8 +1998,19 @@ function ConsumeSpecFor(item, meta)
     local portions = tonumber(own.bites) or tonumber(fallback.bites)
     if not portions then portions = isDrink and 4 or 3 end
     portions = math.max(1, math.min(20, math.floor(portions)))
-    return { hunger = pick("hunger", 25), thirst = pick("thirst", 0),
-             anim = anim or first, bites = portions, drink = isDrink or nil }
+    local hunger, thirst = pick("hunger", 25), pick("thirst", 0)
+    -- `stress` never inherits the global fallback: that setting is the FOOD default
+    -- ("what a serving with no opinion feeds"), and quietly relaxing everyone who
+    -- eats a burger is not what an admin typing a number there is asking for. Stress
+    -- relief is only ever what an entry explicitly says it is.
+    local stress = math.max(0, math.min(100, math.floor(tonumber(own.stress) or 0)))
+    -- Something that relieves stress and feeds NOTHING isn't eaten — it's used (a
+    -- toy). One flag, derived rather than authored, decides the verb the player is
+    -- offered, the notification they get and the icon on the row; nothing else about
+    -- the consume path changes.
+    local play = (stress > 0 and hunger == 0 and thirst == 0) or nil
+    return { hunger = hunger, thirst = thirst, stress = stress,
+             anim = anim or first, bites = portions, drink = isDrink or nil, play = play }
 end
 function BoxBaseModel() return GetSetting("box_base_model", "pickle_takeout_box_01") end
 function BoxLidModel()  return GetSetting("box_lid_model", "pickle_takeout_box_02") end
@@ -1759,7 +2031,7 @@ end
 
 -- ─── unified menu: annotation (admin panel payloads) ─────────────────────────
 -- Shallow-copied so annotations never leak back into the stored config (the NUI
--- strips them before save regardless). Validity is per the legacy rules:
+-- strips them before save regardless). Validity rules:
 --   • a raw consumed item (cook input, component, cup, tool bottle) must be an
 --     installed inventory item — UNLESS it's itself a kitchen product (an
 --     intermediate like raw_pizza / a cooked patty), which is tray-only;
@@ -1866,11 +2138,34 @@ function AnnotateTools()
 end
 
 function AnnotateIngredients()
+    local costs = IngredientCosts()
     local out = {}
     for _, ing in ipairs(GetIngredientsCfg()) do
         local copy = {}; for k, v in pairs(ing) do copy[k] = v end
         local missing = {}
         if not ItemExists(ing.item) then missing[#missing + 1] = ing.item end
+        -- What it costs to buy and what it would therefore sell for. Both were
+        -- missing here, so an ingredient row could show neither — and a DLC row,
+        -- whose cost is the ONE thing the panel may change, had nothing to show at
+        -- all. `costKey` is what a cost edit writes: the stock key, so a multi-faced
+        -- ingredient is priced per face.
+        copy.costKey = ing.item
+        copy.cost = tonumber(costs[ing.item]) or 0
+        copy.defaultPrice = MarkupPrice(ResolveItemCost(ing.item))
+        -- Variants are COPIED before annotating: the originals belong to the pack
+        -- that registered them, and stamping prices onto those tables would write
+        -- into content we don't own (and leak between restaurants).
+        if type(ing.variants) == "table" then
+            local vs = {}
+            for _, v in ipairs(ing.variants) do
+                local vc = {}; for k, val in pairs(v) do vc[k] = val end
+                vc.costKey = StockKey(ing.item, v.id)
+                vc.cost = tonumber(costs[vc.costKey]) or 0
+                vc.defaultPrice = MarkupPrice(ResolveItemCost(vc.costKey))
+                vs[#vs + 1] = vc
+            end
+            copy.variants = vs
+        end
         copy.valid, copy.missing = #missing == 0, missing
         out[#out + 1] = copy
     end
@@ -2130,7 +2425,7 @@ function RefundOrder(restaurantId, order, reason)
     -- The amount actually CHARGED is what the row stores: resolveOrderLines
     -- rounds it, and the phone path stores the post-discount, post-redemption
     -- finalTotal. Round again defensively — money crossing a boundary is always
-    -- whole dollars (house rule), and a legacy row could hold anything.
+    -- whole dollars (house rule), and a stored row could hold anything.
     local amount  = RoundMoney(order.total or 0)
     local account = OrderRefundAccount(order)
 
@@ -2333,50 +2628,47 @@ function TraySig(meta)
     if type(meta) ~= "table" or #meta == 0 then return "" end
     local parts = {}
     for _, l in ipairs(meta) do
-        -- tolerate the older aggregated `count` layer format
-        for _ = 1, (tonumber(l.count) or 1) do
-            local part = tostring(l.item) .. "|" .. tostring(l.half or "")
-            -- a melting topping riding this layer (its `top` field): its item + melt
-            -- state are part of the variation identity
-            local topv = LayerTopping(l)
-            if topv then
-                part = part .. "+" .. tostring(topv.item) .. ":" .. tostring(topv.state)
-            end
-            -- a layer that is itself a product carries its own nested build stack
-            -- (a burger holding a pepperoni pizza ≠ one holding a plain pizza)
-            if type(l.stack) == "table" and #l.stack > 0 then
-                part = part .. "{" .. TraySig(l.stack) .. "}"
-            end
-            -- a finished (frosted…) layer carries its flavor: a strawberry cake and
-            -- a chocolate one are different variations of the same output item
-            if l.flavor ~= nil then
-                part = part .. "#" .. tostring(l.flavor)
-            end
-            -- a meal layer carries its tray offset: the same items in a different
-            -- arrangement are a different meal (offsets are quantized to 1cm at
-            -- make time, so the format is stable through the JSON round trip)
-            if l.dx ~= nil or l.dy ~= nil then
-                part = part .. ("@%.2f,%.2f"):format(tonumber(l.dx) or 0.0, tonumber(l.dy) or 0.0)
-            end
-            -- a meal made in a pizza box (flag on the first layer) is a different
-            -- variation from the same pizza arranged on a serving tray
-            if l.box then
-                part = part .. "^box"
-            end
-            -- a crafted Restaurant Bag carries its craft id (flag on the first
-            -- layer): the bag item is generic, so the craft IS its variation
-            -- identity — two crafts with the same components stay distinct.
-            if l.craft ~= nil then
-                part = part .. "~" .. tostring(l.craft)
-            end
-            parts[#parts + 1] = part
+        local part = tostring(l.item) .. "|" .. tostring(l.half or "")
+        -- a melting topping riding this layer (its `top` field): its item + melt
+        -- state are part of the variation identity
+        local topv = LayerTopping(l)
+        if topv then
+            part = part .. "+" .. tostring(topv.item) .. ":" .. tostring(topv.state)
         end
+        -- a layer that is itself a product carries its own nested build stack
+        -- (a burger holding a pepperoni pizza ≠ one holding a plain pizza)
+        if type(l.stack) == "table" and #l.stack > 0 then
+            part = part .. "{" .. TraySig(l.stack) .. "}"
+        end
+        -- a finished (frosted…) layer carries its flavor: a strawberry cake and
+        -- a chocolate one are different variations of the same output item
+        if l.flavor ~= nil then
+            part = part .. "#" .. tostring(l.flavor)
+        end
+        -- a meal layer carries its tray offset: the same items in a different
+        -- arrangement are a different meal (offsets are quantized to 1cm at
+        -- make time, so the format is stable through the JSON round trip)
+        if l.dx ~= nil or l.dy ~= nil then
+            part = part .. ("@%.2f,%.2f"):format(tonumber(l.dx) or 0.0, tonumber(l.dy) or 0.0)
+        end
+        -- a meal made in a pizza box (flag on the first layer) is a different
+        -- variation from the same pizza arranged on a serving tray
+        if l.box then
+            part = part .. "^box"
+        end
+        -- a crafted Restaurant Bag carries its craft id (flag on the first
+        -- layer): the bag item is generic, so the craft IS its variation
+        -- identity — two crafts with the same components stay distinct.
+        if l.craft ~= nil then
+            part = part .. "~" .. tostring(l.craft)
+        end
+        parts[#parts + 1] = part
     end
     return table.concat(parts, ",")
 end
 
 -- Signature of the i-th counted instance. `metas` can be shorter than `count`
--- (legacy rows persisted before per-instance stacks); the tail is plain ("").
+-- (units added without one — a plain refund); the tail is plain ("").
 local function traySigAt(e, i)
     local m = e.metas and e.metas[i]
     if type(m) ~= "table" then return "" end
@@ -2384,7 +2676,7 @@ local function traySigAt(e, i)
 end
 
 -- `sig` (optional, here and below): address only the instances whose build stack
--- matches that signature. nil = any instance (the legacy LIFO behaviour).
+-- matches that signature. nil = any instance (plain LIFO).
 function GetTrayCount(rid, identifier, item, sig)
     local e = TrayCache[rid] and TrayCache[rid][identifier] and TrayCache[rid][identifier][item]
     if not e then return 0 end
@@ -2582,7 +2874,7 @@ function PoolConsume(rid, item, matchSig, count)
 end
 
 -- Pool count/consume with a CUSTOM instance matcher `match(meta) -> bool` (meta is
--- one instance's build stack, or nil for a plain/legacy instance). The sales
+-- one instance's build stack, or nil for a plain instance). The sales
 -- fulfillment planner matches by VARIATION (a cheeseburger ≠ a plain burger, a
 -- strawberry cake ≠ a plain one) rather than by the raw TraySig, so it can't use
 -- the sig-keyed PoolCount/PoolConsume — it hands the semantics in as a predicate.

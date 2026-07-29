@@ -14,7 +14,7 @@ import { Modal } from "@/components/ui/modal";
 import { Truncate } from "@/components/ui/truncate";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { Plus, Trash2, Pencil, TriangleAlert, EyeOff, Check, Loader2, Tags, ChevronDown, UtensilsCrossed, Wrench, Layers, Download, RotateCcw, Search, X } from "lucide-react";
+import { Plus, Trash2, Pencil, TriangleAlert, EyeOff, Check, Loader2, Tags, ChevronDown, UtensilsCrossed, Wrench, Layers, Download, RotateCcw, Search, X, Package } from "lucide-react";
 
 // The shipped default menu (DEFAULT_FOODS/TOOLS/INGREDIENTS, sent verbatim in the
 // admin payload) — the source list for the Import Defaults dialog.
@@ -29,6 +29,9 @@ type Props = {
   scope: Scope;
   foods: Food[]; tools: Tool[]; ingredients: IngredientDef[]; defaults?: DefaultMenu | null;
   settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void;
+  /** Buy-in costs with every installed pack's defaults underneath the authored map —
+   *  what a cost field shows when this server hasn't set one of its own. */
+  ingredientCosts?: Record<string, number>;
   /** READ-ONLY, from core/shared.lua's Config.BoxQuad (never a setting): the takeout
    *  box's picture rectangle, whose aspect the "Inside the box" cropper locks to. */
   boxQuad?: { w?: number; h?: number };
@@ -96,19 +99,45 @@ const PRESETS = (): Preset[] => (_presets ??= [
   },
 ]);
 
-export default function Menu({ scope, foods, tools, ingredients, defaults, settings, boxQuad, items, groups, onSaved }: Props) {
+export default function Menu({ scope, foods, tools, ingredients, defaults, settings, boxQuad, items, groups, ingredientCosts, onSaved }: Props) {
   const showFood = scope === "food";
   const showIng = scope === "ingredients";
   // Kinds this tab renders (food-only vs tool+ingredient).
   const scopeKinds = showFood ? ["food"] : ["tool", "ing"];
   // The whole menu lives in the settings blob as three arrays, each saved whole
   // via the batched settings autosave (the server sanitizes + rebuilds + syncs).
-  const [foodList, setFoodList] = useState<Food[]>(() => (Array.isArray(foods) ? foods : []));
-  const [toolList, setToolList] = useState<Tool[]>(() => (Array.isArray(tools) ? tools : []));
-  const [ingList, setIngList] = useState<IngredientDef[]>(() => (Array.isArray(ingredients) ? ingredients : []));
+  // DLC-CONTRIBUTED entries arrive in these same arrays (the server merges installed
+  // packs into the three menu getters, which is what makes a pack work everywhere
+  // without special cases) carrying a `dlc` mark. They are split OUT of the editable
+  // state here rather than filtered at render time: these lists are saved WHOLE by
+  // the autosave below, and content that belongs to a pack must never be written
+  // into this server's settings — it would outlive the pack that defines it. The
+  // server refuses such a write too (the sanitizers drop marked entries); keeping
+  // them out of the editable state is what stops the panel from making the attempt,
+  // and from renumbering an admin's rows around entries they can't touch.
+  const isDlc = (e: any) => !!e?.dlc;
+  const dlcEntries = useMemo(() => ({
+    foods: (Array.isArray(foods) ? foods : []).filter(isDlc),
+    tools: (Array.isArray(tools) ? tools : []).filter(isDlc),
+    ingredients: (Array.isArray(ingredients) ? ingredients : []).filter(isDlc),
+  }), [foods, tools, ingredients]);
+  const [foodList, setFoodList] = useState<Food[]>(() => (Array.isArray(foods) ? foods : []).filter((f) => !isDlc(f)));
+  const [toolList, setToolList] = useState<Tool[]>(() => (Array.isArray(tools) ? tools : []).filter((t) => !isDlc(t)));
+  const [ingList, setIngList] = useState<IngredientDef[]>(() => (Array.isArray(ingredients) ? ingredients : []).filter((i) => !isDlc(i)));
   // Tools + ingredients buy their stock via the ingredient_costs map (keyed by
   // the item — saved whole so other costs aren't clobbered).
+  // The AUTHORED cost map — only what this server has actually typed. Seeding it
+  // from the effective map instead would write every installed pack's default price
+  // into the settings table on the next save, freezing prices the pack should still
+  // be able to update.
   const [costs, setCosts] = useState<Record<string, number>>(() => ({ ...(settings?.ingredient_costs || {}) }));
+  // The EFFECTIVE map (authored over each pack's defaults) — what a cost field
+  // DISPLAYS when this server hasn't set one. Without it a DLC-priced item read $0,
+  // and saving that 0 would have written a free toy over the pack's price.
+  const effectiveCosts: Record<string, number> = ingredientCosts || {};
+  const costFor = (key?: string) =>
+    (key && (costs[key] ?? effectiveCosts[key])) || 0;
+
   // Custom per-item images (item → { url, crop }), the `item_images` setting. Held
   // live so an image set on a burger/burnt-patty updates the row + field thumbnails
   // instantly; saved whole (missing keys aren't clobbered — it's the full map).
@@ -232,8 +261,31 @@ export default function Menu({ scope, foods, tools, ingredients, defaults, setti
 
   // Build the unified, grouped row list.
   const groupsOut = useMemo(() => {
-    type Row = { kind: string; key: string; group: string; sortLabel: string; index: number; data: any };
+    type Row = { kind: string; key: string; group: string; sortLabel: string; index: number; data: any;
+                 // set on a row that is one FACE of a multi-faced ingredient: the
+                 // variant it shows, and the parent entry it is defined by
+                 variant?: any };
     const rows: Row[] = [];
+
+    // A variants ingredient is ONE authored entry with several faces (one
+    // `restaurant_toy` holding five toys). List the FACES: that is what the kitchen
+    // bar offers, what the larder stocks and prices, and what a customer ends up
+    // with — a single "Toy" row answers none of the questions this tab is for.
+    // Every face still points at its parent `index`, so editing or deleting any of
+    // them acts on the one entry that defines them all.
+    const pushIng = (g: any, index: number, keyBase: string) => {
+      const group = (g.group as string) || "";
+      const base = g.label || (g.item ? labelOf(items, g.item) : "");
+      const vs = Array.isArray(g.variants) ? g.variants : [];
+      if (vs.length === 0) {
+        rows.push({ kind: "ing", key: keyBase, group, sortLabel: base, index, data: g });
+        return;
+      }
+      vs.forEach((v: any) => rows.push({
+        kind: "ing", key: `${keyBase}:${v.id}`, group,
+        sortLabel: v.label || v.id || base, index, data: g, variant: v,
+      }));
+    };
     if (showFood) foodList.forEach((f, i) => rows.push({
       kind: "food", key: `food:${i}`, group: (f.group as string) || "",
       sortLabel: f.label || (f.id ? prettyName(f.id) : labelOf(items, foodImageItem(f))), index: i, data: f,
@@ -242,16 +294,29 @@ export default function Menu({ scope, foods, tools, ingredients, defaults, setti
       kind: "tool", key: `tool:${i}`, group: (t.group as string) || "",
       sortLabel: t.item ? labelOf(items, t.item) : "", index: i, data: t,
     }));
-    if (showIng) ingList.forEach((g, i) => rows.push({
-      kind: "ing", key: `ing:${i}`, group: (g.group as string) || "",
-      sortLabel: g.label || (g.item ? labelOf(items, g.item) : ""), index: i, data: g,
+    if (showIng) ingList.forEach((g, i) => pushIng(g, i, `ing:${i}`));
+    // DLC rows sit in the SAME grouped list as everything else — a pack's toy is part
+    // of this menu, and hiding it in a separate drawer would make "why can't a
+    // restaurant carrying this group cook that?" much harder to answer. They carry no
+    // list slot (index -1) because there is nothing here to edit: a pack owns its
+    // content, and the row's only control is what the restaurant pays for the item.
+    if (showFood) dlcEntries.foods.forEach((f: any) => rows.push({
+      kind: "food", key: `dlcfood:${f.id}`, group: (f.group as string) || "",
+      sortLabel: f.label || (f.id ? prettyName(f.id) : labelOf(items, foodImageItem(f))), index: -1, data: f,
     }));
+    if (showIng) dlcEntries.tools.forEach((t: any) => rows.push({
+      kind: "tool", key: `dlctool:${t.id}`, group: (t.group as string) || "",
+      sortLabel: t.item ? labelOf(items, t.item) : "", index: -1, data: t,
+    }));
+    if (showIng) dlcEntries.ingredients.forEach((g: any) => pushIng(g, -1, `dlcing:${g.item}`));
 
     const q = search.trim().toLowerCase();
     const shown = q
       ? rows.filter((r) =>
           r.sortLabel.toLowerCase().includes(q) ||
           r.group.toLowerCase().includes(q) ||
+          // a face is searchable by what it IS ("toy"), which is the badge it wears
+          (!!r.variant && String(r.data.label || "").toLowerCase().includes(q)) ||
           _L(KIND_LABEL[r.kind]).toLowerCase().includes(q))
       : rows;
 
@@ -263,7 +328,7 @@ export default function Menu({ scope, foods, tools, ingredients, defaults, setti
       name: g,
       rows: by[g].sort((a, b) => (order.indexOf(a.kind) - order.indexOf(b.kind)) || a.sortLabel.localeCompare(b.sortLabel)),
     }));
-  }, [foodList, toolList, ingList, items, search, showFood, showIng]);
+  }, [foodList, toolList, ingList, dlcEntries, items, search, showFood, showIng]);
 
   // The eat/drink animations a food can be assigned (Settings → Eating). Foods
   // reference one by id; an empty pick means "the global default".
@@ -365,11 +430,21 @@ export default function Menu({ scope, foods, tools, ingredients, defaults, setti
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex min-w-0 items-center gap-3">
                       <EntryThumb items={items} name={imgItem(row)} itemImages={itemImages} className="h-10 w-10 shrink-0"
-                        url={row.kind === "food" ? foodImageUrl(row.data) : undefined} />
+                        url={row.variant?.image || (row.kind === "food" ? foodImageUrl(row.data) : undefined)} />
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <Truncate className="font-medium">{row.sortLabel || "—"}</Truncate>
-                          <Badge variant="secondary">{_L(KIND_LABEL[row.kind])}</Badge>
+                          {/* A FACE wears what its parent says it IS ("Toy"), not the
+                              generic kind — five rows badged "Ingredient" say nothing
+                              about what they are, and the parent's label is exactly
+                              the word for a family of faces. */}
+                          <Badge variant="secondary">{row.variant ? (d.label || _L(KIND_LABEL[row.kind])) : _L(KIND_LABEL[row.kind])}</Badge>
+                          {/* Contributed by an installed pack, not authored here. */}
+                          {!!d.dlc && (
+                            <Badge variant="outline" className="gap-1 border-primary/50 text-primary">
+                              <Package className="h-3 w-3" /> {_L("menu.dlc_badge")}
+                            </Badge>
+                          )}
                           {row.kind === "food" && <Badge variant="outline">{foodSubBadge(d)}</Badge>}
                           {row.kind === "food" && d.drink_item_installed === false && (
                             <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("menu.drink_not_installed")}</Badge>
@@ -385,9 +460,14 @@ export default function Menu({ scope, foods, tools, ingredients, defaults, setti
                           {row.kind === "food" && !!d.duplicate_input && (
                             <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("menu.duplicate_input")}</Badge>
                           )}
-                          {typeof d.defaultPrice === "number" && d.defaultPrice > 0 && (
-                            <Badge variant="outline" className="text-emerald-500">{_L("menu.default_price", d.defaultPrice)}</Badge>
-                          )}
+                          {/* A FACE is priced per face, so it shows ITS default, not
+                              the parent entry's. */}
+                          {(() => {
+                            const dp = row.variant ? row.variant.defaultPrice : d.defaultPrice;
+                            return typeof dp === "number" && dp > 0 ? (
+                              <Badge variant="outline" className="text-emerald-500">{_L("menu.default_price", dp)}</Badge>
+                            ) : null;
+                          })()}
                           {invalid && (
                             <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("recipes.needs_fixing")}</Badge>
                           )}
@@ -395,6 +475,16 @@ export default function Menu({ scope, foods, tools, ingredients, defaults, setti
                             <Badge variant="outline" className="gap-1 border-amber-500/60 text-amber-500"><TriangleAlert className="h-3 w-3" /> {_L("recipes.invalid_model")}</Badge>
                           )}
                         </div>
+                        {/* A FACE of a multi-faced ingredient. The tab lists faces
+                            because that's what the kitchen and the larder deal in,
+                            but they are all one item and one authored entry — say so,
+                            or five rows read as five items to install. */}
+                        {!!row.variant && (
+                          <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
+                            <Layers className="h-3 w-3" />
+                            {_L("menu.variant_of", d.label || d.item)}
+                          </div>
+                        )}
                         {invalid && Array.isArray(d.missing) && d.missing.length > 0 && (
                           <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-destructive">
                             <EyeOff className="h-3 w-3" /> {_L("recipes.hidden_missing")}
@@ -403,6 +493,12 @@ export default function Menu({ scope, foods, tools, ingredients, defaults, setti
                         )}
                       </div>
                     </div>
+                    {/* A DLC entry is the PACK's: models, group, behaviour and the
+                        entry itself all come from that resource, so this row has
+                        nothing to edit and nothing to delete. The one thing that IS
+                        the server's — what it pays for the item — is edited in
+                        Settings → Ingredient Costs, where every cost lives. */}
+                    {d.dlc ? null : (
                     <div className="flex shrink-0 items-center gap-2">
                       <Button size="sm" variant={isEditing ? "secondary" : "outline"} onClick={() => { setPicking(false); setEditKey(row.key); }}><Pencil className="h-4 w-4" /></Button>
                       {/* A deleted DEFAULT entry re-seeds on next restart (the embedded
@@ -414,6 +510,7 @@ export default function Menu({ scope, foods, tools, ingredients, defaults, setti
                         else setIngList((l) => l.filter((_, i) => i !== row.index));
                       }}><Trash2 className="h-4 w-4" /></Button>
                     </div>
+                    )}
                   </div>
                 </div>
               );
@@ -515,7 +612,7 @@ export default function Menu({ scope, foods, tools, ingredients, defaults, setti
         {editing?.kind === "tool" && (
           <ToolForm
             tool={editing.data}
-            cost={Number(costs[editing.data.item || ""] ?? 0)}
+            cost={costFor(editing.data.item)}
             allTools={toolList}
             onChange={(p) => updateTool(editing.index, p)}
             onChangeCost={(v) => setCost(editing.data.item, v)}
@@ -528,7 +625,7 @@ export default function Menu({ scope, foods, tools, ingredients, defaults, setti
         {editing?.kind === "ing" && (
           <IngredientForm
             ing={editing.data}
-            cost={Number(costs[editing.data.item || ""] ?? 0)}
+            cost={costFor(editing.data.item)}
             onChange={(p) => updateIng(editing.index, p)}
             onChangeCost={(v) => setCost(editing.data.item, v)}
             items={items}

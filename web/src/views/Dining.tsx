@@ -20,6 +20,9 @@ type Hover = {
   label?: string;
   image?: string;
   drink?: boolean;
+  // USED rather than eaten (a DLC toy laid on the tray with the meal): there is no
+  // "one bite vs finish it" to choose between, so the tooltip collapses to one button
+  play?: boolean;
   // the food's own crop for `image` ({x,y,w,h}, 0..1) — the tooltip frames exactly
   // the rectangle the admin chose rather than letterboxing the whole picture
   crop?: Crop | null;
@@ -93,23 +96,37 @@ export default function Dining() {
             )}
             <div className="mt-1.5 text-sm font-semibold leading-tight">{hover.label}</div>
             {/* one row, two buttons: a single mouthful (with how many are left) or
-                the whole serving */}
+                the whole serving. A thing that is USED rather than eaten (a toy) is
+                one action — offering it "one bite" of a plush would be nonsense — so
+                it collapses to the single button. */}
             <div className="mt-2.5 flex gap-1.5">
-              <button
-                disabled={busy}
-                onClick={() => act("dining:bite")}
-                className="flex-1 rounded-md bg-secondary px-2 py-1.5 text-xs font-semibold transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {_L(hover.drink ? "dining.take_sip" : "dining.take_bite")}
-                <span className="ml-1 font-mono tabular-nums opacity-60">({hover.bitesLeft ?? 1})</span>
-              </button>
-              <button
-                disabled={busy}
-                onClick={() => act("dining:finish")}
-                className="flex-1 rounded-md bg-primary px-2 py-1.5 text-xs font-semibold text-primary-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
-              >
-                {_L(hover.drink ? "dining.finish_drink" : "dining.finish_food")}
-              </button>
+              {hover.play ? (
+                <button
+                  disabled={busy}
+                  onClick={() => act("dining:finish")}
+                  className="flex-1 rounded-md bg-primary px-2 py-1.5 text-xs font-semibold text-primary-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
+                >
+                  {_L("dining.play_with")}
+                </button>
+              ) : (
+                <>
+                  <button
+                    disabled={busy}
+                    onClick={() => act("dining:bite")}
+                    className="flex-1 rounded-md bg-secondary px-2 py-1.5 text-xs font-semibold transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {_L(hover.drink ? "dining.take_sip" : "dining.take_bite")}
+                    <span className="ml-1 font-mono tabular-nums opacity-60">({hover.bitesLeft ?? 1})</span>
+                  </button>
+                  <button
+                    disabled={busy}
+                    onClick={() => act("dining:finish")}
+                    className="flex-1 rounded-md bg-primary px-2 py-1.5 text-xs font-semibold text-primary-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
+                  >
+                    {_L(hover.drink ? "dining.finish_drink" : "dining.finish_food")}
+                  </button>
+                </>
+              )}
             </div>
           </div>
           <div className="absolute left-1/2 top-full h-0 w-0 -translate-x-1/2 border-x-[6px] border-t-[6px] border-x-transparent border-t-card" />

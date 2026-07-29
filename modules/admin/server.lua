@@ -10,6 +10,19 @@ local function buildAdminData()
         theme       = GetSetting("app_theme", nil), -- App-level: skins /restaurants itself
         phoneTheme  = GetSetting("phone_theme", nil), -- ONE global skin for the companion phone app
         settings    = SettingsCache,
+        -- The EFFECTIVE buy-in costs (the `ingredient_costs` setting with each
+        -- installed pack's defaults underneath it). `settings.ingredient_costs` is
+        -- the AUTHORED map alone, so a panel seeded from that alone showed 0 for
+        -- everything a pack prices — and saving that 0 back would have written a
+        -- free toy over the pack's price. The editors display from this and write to
+        -- the authored map, so only a cost someone actually typed is ever stored.
+        ingredientCosts = IngredientCosts(),
+        -- Each installed pack's DEFAULT prices on their own. The cost editor needs
+        -- these separately from the effective map: it lists a row for every packaged
+        -- item (so a pack's content is priceable at all) but only STORES a row that
+        -- differs from the pack's default — otherwise merely touching that screen
+        -- would author every default and freeze it against future pack updates.
+        dlcCosts = DlcIngredientCosts and DlcIngredientCosts() or {},
         -- The three authored creation kinds, each flagged valid/missing + per-entry
         -- annotations (defaultPrice, tap, duplicate_input, *_installed). The NUI
         -- strips the annotations before saving the array back.
@@ -29,6 +42,11 @@ local function buildAdminData()
         -- Brand-texture aspects for the crop UI, from the ONE render-target registry
         -- (core/shared.lua) so the panel never hardcodes a resolution that drifts.
         renderTargets = BrandRenderTargets(),
+        -- Installed DLC packs (modules/dlc), READ-ONLY: what each one is and what it
+        -- contributes. Their entries also appear in the Menu tab's lists carrying a
+        -- `dlc` mark, which is what renders them uneditable there — this is the
+        -- inventory of packs, Settings → DLC.
+        dlcs        = DlcList and DlcList() or {},
     }
     for _, r in pairs(RestaurantCache) do
         local props = {}

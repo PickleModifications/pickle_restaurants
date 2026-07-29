@@ -26,8 +26,8 @@
 --  RESOLUTION + ORIENTATION come from the ONE render-target registry in
 --  core/shared.lua (`Config.RenderTargets`, key "register"), so the DUI, the texture
 --  name and the crop UI can never disagree. Camera framing / cursor speed are the only
---  register-local tunables — TUNE IN-GAME with /pickle_register_cam and
---  /pickle_register_sens; /pickle_register_res|orient tune the registry copy live.
+--  register-local tunables (TUNE IN-GAME); resolution/orientation belong to the
+--  registry.
 -- =============================================
 
 -- The register's render target (resolution / texture / orientation) — read from the
@@ -44,7 +44,7 @@ local RT_SW, RT_SH = RenderTargetSurface(RT)
 local REGISTER = {
     w = RT_SW or 1024, h = RT_SH or 1024,
     -- Virtual-cursor speed relative to raw mouse-look delta. TUNE IN-GAME
-    -- (/pickle_register_sens <n>).
+    -- TUNE IN-GAME.
     sensitivity = 0.5,
     -- Framing in the counter's LOCAL space (y = the prop's forward, toward the customer
     -- side the screen faces): the scripted camera sits in FRONT of the screen looking

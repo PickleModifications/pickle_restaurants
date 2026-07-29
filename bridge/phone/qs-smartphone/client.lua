@@ -60,6 +60,16 @@ end
 -- client sends none. See bridge/phone/qs-smartphone/server.lua.
 function PhoneApp.Number() return nil end
 
+-- Put the phone away for the doorstep hand-off (bridge/phone/shared.lua explains why).
+-- Quasar publishes no close in its export list either, so these are the plausible names
+-- and the documented close EVENT as the fallback. Add yours here if your build differs.
+local CLOSE_EXPORTS = { "ClosePhone", "closePhone", "CloseCustomPhone" }
+local CLOSE_EVENTS  = { "qs-smartphone:client:closePhone" }
+
+function PhoneApp.Close()
+    PhoneCloseVia(RESOURCE, CLOSE_EXPORTS, CLOSE_EVENTS)
+end
+
 -- Answers modules/phone's `phone:pushSupported` NUI callback, which is what tells the
 -- app to poll rather than wait for pushes that will never arrive.
 function PhoneApp.PushSupported() return resolved ~= false end

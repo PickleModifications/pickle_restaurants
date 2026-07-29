@@ -481,11 +481,6 @@ end
 -- Returns three parallel arrays: models, incremental heights (rise to the next
 -- layer), and per-prop roll in degrees (0 for everything that isn't a patty face).
 -- `state` swaps toppings to their cooked/burnt look, same as before.
--- /pickle_stackdbg toggles a one-shot dump of the NEXT stack laid out: for each
--- expanded layer it prints the model, its raw GetModelDimensions mn.z/mx.z, the
--- height fed to the layout (rise to the next layer) and the running cumulative z.
--- Purely a measurement aid for tuning tower spacing — leaves behavior untouched.
-StackDebug = false
 local function expandStackLayers(models, state)
     local mdls, heights, rolls = {}, {}, {}
     for _, m0 in ipairs(models or {}) do
@@ -513,17 +508,6 @@ local function expandStackLayers(models, state)
             mdls[#mdls + 1] = m; heights[#heights + 1] = topRise;         rolls[#rolls + 1] = DUAL.top_roll
         else
             mdls[#mdls + 1] = m; heights[#heights + 1] = stackLayerHeight(m);  rolls[#rolls + 1] = 0.0
-        end
-    end
-    if StackDebug then
-        StackDebug = false -- one-shot
-        local cz = 0.0
-        print(("[stackdbg] %d layers (state=%s)"):format(#mdls, tostring(state)))
-        for i = 1, #mdls do
-            local mn, mx = GetModelDimensions(EnsureModel(mdls[i]))
-            print(("[stackdbg]  %d  %-32s  mn.z=%.4f  mx.z=%.4f  modelH=%.4f  rise=%.4f  roll=%.1f  seatZ=%.4f"):format(
-                i, mdls[i], mn and mn.z or 0.0, mx and mx.z or 0.0, modelHeight(mdls[i]), heights[i], rolls[i], cz))
-            cz = cz + (heights[i] or 0.0)
         end
     end
     return mdls, heights, rolls
@@ -1818,6 +1802,10 @@ local function makePart(spec)
     -- all), and taking it back out rebuilds the part from this exact spec.
     local part = { pid = prepPid, item = spec.item, half = spec.half,
                    source = spec.source, sig = spec.sig, spec = spec,
+                   -- which FACE of a multi-faced ingredient this is (which toy). Kept
+                   -- on the part so the reservation on release records it, and so a
+                   -- part rebuilt from a decompose spec re-reserves the same one.
+                   variant = spec.variant,
                    top = spec.top, finishTool = spec.finishTool, ents = {} }
 
     -- A MADE TAKEOUT BOX (a bag-kind food: soup, salad…). It has no build tower to
@@ -3071,6 +3059,17 @@ function OpenCookingStation(prop)
                     -- table can still be identified before it's picked up.
                     if part and part.takeout then
                         prepTip.product = { label = part.label, image = part.itemImage }
+                    elseif part then
+                        -- ANY made product has the same problem, not just a boxed one: a
+                        -- finished sandwich standing on the table is a component of
+                        -- nothing, so the recipe guide ranks zero recipes and the tooltip
+                        -- stays hidden — the food goes silent the moment it's made. Send
+                        -- the hovered part's item and let the NUI name it from the recipe
+                        -- catalogue it already holds (labels + art + what it's made of).
+                        -- the pid too: the cursor leaves the prop to reach the tooltip,
+                        -- so its Disassemble button has to address the part by id
+                        -- rather than by whatever happens to be hovered when it's clicked
+                        prepTip.item, prepTip.puid = part.item, part.pid
                     end
                 end
                 -- The serving tray's "Make Meal" / pizza box's "Box It Up" tooltip:
@@ -3496,7 +3495,7 @@ DragGate.callback("cooking:beginPrepPlace", function(d, cb)
         -- product with a build stack renders as its whole layer tower; `sig` keeps
         -- the reservation pinned to that exact build variation.
         specs[1] = { item = d.item, model = d.model, source = d.source, half = d.half,
-                     dual = dual, sig = d.sig,
+                     dual = dual, sig = d.sig, variant = d.variant,
                      stack = stack, state = d.state, finishTool = d.finishTool,
                      label = d.label, image = d.image, -- carried for a model-less pill chip
                      -- a made takeout box renders as the box pair + its food image quad;
@@ -3558,7 +3557,7 @@ DragGate.callback("cooking:endPrepPlace", function(d, cb)
         p.source = d and d.source
         res = lib.callback.await("pickle_restaurants:cooking:prepAdd", false, {
             prop_id = currentCookProp and currentCookProp.id, source = p.source,
-            item = p.item, half = p.half, sig = p.sig,
+            item = p.item, half = p.half, sig = p.sig, variant = p.variant,
         })
         if not (res and res.ok) then failed = res; break end
         p.id = res.id
@@ -3929,11 +3928,15 @@ RegisterNUICallback("cooking:prepMakeStack", function(d, cb)
     local res = lib.callback.await("pickle_restaurants:cooking:prepMakeStack", false, { output = d.output, ids = ids })
     if res and res.ok then
         local tid, dx, dy = stack.tid, stack.dx, stack.dy
+        local hx, hy, hz = stack.x, stack.y, stack.z0
         removePrepStack(sid)
-        -- A pile made into a product while sitting ON a serving tray stays on the
-        -- tray: reserve the freshly made product (res.sig addresses it) and seat
-        -- its prop at the same spot, instead of it vanishing into the holdings.
-        if tid and PrepTrays[tid] and res.spec then
+        -- A pile made into a product STAYS WHERE IT WAS BUILT: reserve the freshly
+        -- made product (res.sig addresses it) and seat its prop at the same spot —
+        -- on the serving tray it was arranged on, or, off-tray, on the bare table
+        -- where the components stood. Only the ITEM is exchanged; the cook keeps
+        -- working on the same patch of table instead of having the burger snatched
+        -- off it into the holdings and needing to drag it back out of the bar.
+        if res.spec then
             local add = lib.callback.await("pickle_restaurants:cooking:prepAdd", false, {
                 prop_id = currentCookProp and currentCookProp.id, source = res.spec.source,
                 item = res.spec.item, sig = res.spec.sig,
@@ -3942,10 +3945,15 @@ RegisterNUICallback("cooking:prepMakeStack", function(d, cb)
                 local spec = res.spec; spec.id = add.id
                 local parts = partsFromDecomposeSpecs({ spec })
                 if #parts > 0 then
-                    local t = PrepTrays[tid]
+                    local t = tid and PrepTrays[tid]
+                    local s
+                    if t then
+                        s = { x = t.x + (dx or 0.0), y = t.y + (dy or 0.0), z0 = t.z + trayFoodDz(t.kind),
+                              tid = tid, dx = dx, dy = dy, parts = parts }
+                    else
+                        s = { x = hx, y = hy, z0 = hz, parts = parts }
+                    end
                     prepSid = prepSid + 1
-                    local s = { x = t.x + (dx or 0.0), y = t.y + (dy or 0.0), z0 = t.z + trayFoodDz(t.kind),
-                                tid = tid, dx = dx, dy = dy, parts = parts }
                     PrepStacks[prepSid] = s
                     relayout(s)
                 end
@@ -3957,6 +3965,69 @@ RegisterNUICallback("cooking:prepMakeStack", function(d, cb)
         ShowNotification(res.error)
     end
     cb(res or { ok = false })
+end)
+
+-- Take a PLACED product apart where it stands (its tooltip's Disassemble). A product
+-- reaches the table whole now — dragged out of the bar, or left there by the make —
+-- so this is the un-make: the components land in its exact place in the pile, which
+-- is why the offer lives on the placed item and not on a bar card (a card has nowhere
+-- to put them).
+--
+-- The part is a RESERVED layer, and prepDecompose works off the STORE (item+sig+source),
+-- so the reservation is released first — that returns the instance to the tray/inventory
+-- it was reserved out of, un-consumed — and the decompose then takes it from there. If
+-- the un-make refuses (a frosted instance is terminal, or the config changed), the
+-- reservation is taken straight back out so the prop on the table still owns its
+-- instance and nothing has quietly moved.
+RegisterNUICallback("cooking:prepDisassemble", function(d, cb)
+    local sid, idx, part = findPart(tonumber(d and d.puid))
+    if not part or not part.id then return cb({ ok = false }) end
+    local stack = PrepStacks[sid]
+
+    lib.callback.await("pickle_restaurants:cooking:prepRemove", false, { id = part.id })
+    local res = lib.callback.await("pickle_restaurants:cooking:prepDecompose", false, {
+        prop_id = currentCookProp and currentCookProp.id,
+        item = part.item, sig = part.sig, source = part.source,
+    })
+    if not (res and res.ok) then
+        -- put the reservation back on the same instance; if even that fails the item
+        -- is still safe in holdings, so drop the orphaned prop rather than leave a
+        -- part on the table that no longer stands for anything
+        local add = lib.callback.await("pickle_restaurants:cooking:prepAdd", false, {
+            prop_id = currentCookProp and currentCookProp.id,
+            source = part.source, item = part.item, sig = part.sig, variant = part.variant,
+        })
+        if add and add.ok then
+            part.id = add.id
+            if part.spec then part.spec.id = add.id end
+        else
+            table.remove(stack.parts, idx)
+            deleteParts({ part })
+            if #stack.parts == 0 then removePrepStack(sid) else relayout(stack) end
+        end
+        if res and res.error then ShowNotification(res.error) end
+        RefreshTray(); RefreshBar()
+        return cb(res or { ok = false })
+    end
+
+    local parts = partsFromDecomposeSpecs(res.parts)
+    if #parts == 0 then
+        -- nothing rendered (a config with no models): the components are reserved
+        -- either way, so just take the product's prop away
+        table.remove(stack.parts, idx)
+        deleteParts({ part })
+        if #stack.parts == 0 then removePrepStack(sid) else relayout(stack) end
+        RefreshTray(); RefreshBar()
+        return cb(res)
+    end
+    -- swap the one product layer for its components, IN PLACE: anything stacked on
+    -- top of it stays on top, exactly as with a drop-in decompose
+    table.remove(stack.parts, idx)
+    deleteParts({ part })
+    for i, p in ipairs(parts) do table.insert(stack.parts, idx + i - 1, p) end
+    relayout(stack)
+    RefreshTray(); RefreshBar()
+    cb(res)
 end)
 
 -- ─── serving tray & pizza box (kitchen_prep) ─────────────────────────────────

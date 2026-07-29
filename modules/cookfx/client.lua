@@ -20,7 +20,7 @@
 --   scale, `dz` how far above the item/station it sits (m).
 local FX = {
     -- gentle steam off anything actively cooking on the plate
-    sizzle  = { asset = "core", name = "ent_sht_steam",         scale = 0.22, dz = 0.03 },
+    sizzle  = { asset = "scr_fbi5a", name = "scr_bio_grille_singed",         scale = 0.05, dz = 0.03 },
     -- a lowered basket churns harder than a griddle
     fry     = { asset = "scr_fbi5a", name = "scr_bio_grille_singed",         scale = 2.40, dz = -0.025 },
     -- burnt food smokes whether or not it's still being cooked

@@ -266,6 +266,32 @@ function BuildSellableCatalog(rid)
         end
     end
 
+    -- INGREDIENTS THAT ARE THINGS IN THEIR OWN RIGHT (a kids-meal toy) sell like
+    -- anything else. What marks one is exactly what makes it usable: a `consume`
+    -- block. A component has none — lettuce is not a menu item — so this admits the
+    -- handful of ingredients a customer actually receives and does something with,
+    -- and nothing else. Belt and braces: anything an assembly builds with is
+    -- excluded too, so an edible component can never leak onto the POS.
+    --
+    -- A MULTI-FACED ingredient sells one line PER FACE, each priced from its own
+    -- stock key — the takeout box's pattern exactly (one item, a sellable per
+    -- variant, the variant pinned on the order line so a Lardboy order is never
+    -- filled with a Smelly Kat).
+    for _, ing in ipairs(GetIngredientsCfg()) do
+        if ing.consume and ing.item and ItemExists(ing.item)
+            and not isComponent[ing.item] and RestaurantHasAccess(rid, ing.group) then
+            local vs = IngredientVariants(ing.item)
+            if vs then
+                for _, v in ipairs(vs) do
+                    add(ing.item, v.id, v.label, "ingredient",
+                        ResolveItemCost(StockKey(ing.item, v.id)), nil, ing.group, v.image)
+                end
+            else
+                add(ing.item, nil, ing.label, "ingredient", ResolveItemCost(ing.item), nil, ing.group)
+            end
+        end
+    end
+
     table.sort(out, function(a, b) return (a.label or a.item):lower() < (b.label or b.item):lower() end)
     return out
 end
@@ -406,6 +432,14 @@ local function variationKey(item, meta)
         local key = (type(meta) == "table" and meta[1] and meta[1].craft) or nil
         if key then return "c:" .. tostring(key) end
     end
+    -- A MULTI-FACED ingredient (one `restaurant_toy` holding five toys) is generic as
+    -- an item, so its face is its menu identity — the same reason a drink pins its
+    -- flavor. Checked last and only when there IS metadata to read, so nothing else
+    -- pays for the lookup.
+    if type(meta) == "table" and meta[1] then
+        local iv = IngredientVariantOf and IngredientVariantOf(item, meta)
+        if iv then return "v:" .. tostring(iv.id) end
+    end
     return "" -- item-name match: any variation of the item fills the line
 end
 
@@ -415,6 +449,11 @@ end
 local function lineVariationKey(line)
     if line.kind == "drink" then return "d:" .. tostring(line.variant or "") end
     if line.kind == "craft" then return "c:" .. tostring(line.variant or "") end
+    -- a multi-faced ingredient pins its face; a single-faced one matches by item
+    -- alone, and must resolve to "" — the same empty key its instances produce.
+    if line.kind == "ingredient" and line.variant and line.variant ~= "" then
+        return "v:" .. tostring(line.variant)
+    end
     return ""
 end
 
@@ -637,8 +676,11 @@ function PlanFulfillment(rid, order, mealSig, vesselItem, looseOk, pool)
     local singles, shortfall = {}, {}
     for _, gk in ipairs(gorder) do
         local g = groups[gk]
+        -- BOTH loose stores: the cooked-items tray AND staff-held singles (a made
+        -- takeout box lives in the cook's inventory, never the tray — see
+        -- SingleCountMatch), so a boxed food fills its own line.
         local have = (looseOk or ItemExists(g.item))
-            and PoolCountMatch(rid, g.item, variationMatcher(g.item, g.key)) or 0
+            and SingleCountMatch(rid, g.item, variationMatcher(g.item, g.key)) or 0
         local take = math.min(have, g.need)
         if take > 0 then singles[#singles + 1] = { item = g.item, key = g.key, count = take } end
         if take < g.need then shortfall[#shortfall + 1] = { g = g, need = g.need - take } end
@@ -721,22 +763,68 @@ local findPlayerByIdentifier
 -- Tray entries are still read too — `giveVessel` falls back to the tray whenever the
 -- item isn't installed or the maker's inventory is full.
 
--- Every vessel of `item` held by an ON-DUTY employee of this restaurant, one entry
--- per slot so a specific one can be taken later.
-local function vesselHolders(rid, item)
+-- Everyone whose pockets count as the restaurant's vessel store: whoever the
+-- restaurant currently grants kitchen/counter permission to, resolved through
+-- ResolvePerms so there is ONE definition of who staffs a restaurant and it can never
+-- drift from the one gating the callbacks.
+--
+-- This was an identifier list built from EmployeeCache + `owner_identifier`, and it
+-- missed anyone who works a restaurant WITHOUT being on its payroll — an admin most
+-- of all. An admin has every permission here: they can cook, bag and ring up like any
+-- employee, but they hold no employee row and own nothing, so a bag in their hands was
+-- invisible to fulfillment and the ticket read "bag it or plate it up" while they were
+-- standing at the till holding the bag. (The owner had the same bug for the same
+-- reason before they were special-cased: management refuses to hire them, so they have
+-- no employee row either. Asking the permission system instead of enumerating stores
+-- is what stops the next such role needing its own special case.)
+--
+-- Sources, not identifiers: every consumer immediately wanted the player anyway, and
+-- the old shape paid a full GetPlayers() scan per identifier to find them.
+local function vesselSources(rid)
     local out = {}
-    if not (Inventory and Inventory.GetItemSlots) then return out end
-    local emps = EmployeeCache[rid]
-    if not emps then return out end
-    for identifier in pairs(emps) do
-        local src = findPlayerByIdentifier(identifier)
+    for _, p in ipairs(GetPlayers()) do
+        local src = tonumber(p)
         if src then
-            for _, s in ipairs(Inventory.GetItemSlots(src, item) or {}) do
-                local m = type(s.metadata) == "table" and s.metadata or {}
-                local stack = type(m.stack) == "table" and m.stack or nil
-                out[#out + 1] = { src = src, slot = s.slot, count = s.count or 1,
-                                  sig = TraySig(stack), meta = stack }
+            -- STRICT SUPERSET of the old employees+owner set: any employee row at all
+            -- (whatever its role — they could always bag food before), the owner and
+            -- admins (both `isBoss`), plus anyone else granted cook/sell.
+            local perms, isBoss, emp = ResolvePerms(rid, src)
+            if isBoss or emp or (perms and (perms.cook or perms.sell)) then
+                out[#out + 1] = src
             end
+        end
+    end
+    return out
+end
+
+-- Memo for ONE AnnotateOrders pass (nil at every other time). That pass plans each
+-- ticket once per available vessel, and the loose-single store is now read inside the
+-- planner too — so without this, a register refresh would search every employee's
+-- inventory tickets × vessels × lines times over. Only ever held across straight-line
+-- code (nothing here yields), so it can't serve a stale read, and it is deliberately
+-- NOT consulted by the consume paths, which must always see the live inventory.
+local holderMemo = nil
+
+-- Every vessel of `item` held by staff of this restaurant, one entry per slot so a
+-- specific one can be taken later.
+local function vesselHolders(rid, item)
+    local memoKey = holderMemo and (tostring(rid) .. "|" .. tostring(item)) or nil
+    if memoKey and holderMemo[memoKey] then return holderMemo[memoKey] end
+    local out = {}
+    if memoKey then holderMemo[memoKey] = out end
+    if not (Inventory and Inventory.GetItemSlots) then return out end
+    -- the staff list is per-restaurant, not per-item: memoized for the pass alongside
+    -- the slot reads so a register refresh resolves permissions once, not once per
+    -- vessel item per ticket
+    local srcKey = holderMemo and ("srcs|" .. tostring(rid)) or nil
+    local sources = (srcKey and holderMemo[srcKey]) or vesselSources(rid)
+    if srcKey then holderMemo[srcKey] = sources end
+    for _, src in ipairs(sources) do
+        for _, s in ipairs(Inventory.GetItemSlots(src, item) or {}) do
+            local m = type(s.metadata) == "table" and s.metadata or {}
+            local stack = type(m.stack) == "table" and m.stack or nil
+            out[#out + 1] = { src = src, slot = s.slot, count = s.count or 1,
+                              sig = TraySig(stack), meta = stack }
         end
     end
     return out
@@ -791,14 +879,99 @@ function VesselConsume(rid, item, sig)
             local before = Inventory.GetItemCount(h.src, item) or 0
             if Inventory.RemoveItemSlot then Inventory.RemoveItemSlot(h.src, item, 1, h.slot)
             else Inventory.RemoveItem(h.src, item, 1) end
-            if (Inventory.GetItemCount(h.src, item) or 0) < before then return true, h.meta end
+            if (Inventory.GetItemCount(h.src, item) or 0) < before then
+                -- same reason as giveVessel: an inventory-side change to the pool has
+                -- to flag the open tickets itself, or the next one keeps reading the
+                -- bag that is already gone as available
+                MarkOrdersDirty(rid)
+                return true, h.meta
+            end
         end
     end
     return false
 end
 
+-- ─── staff-held SINGLES (the takeout box) ────────────────────────────────────
+-- `giveVessel` hands all THREE crafted vessels straight into the maker's inventory,
+-- but only TWO of them fulfil as VESSELS: a meal and a Restaurant Bag are claimed for
+-- the units their layers COVER. A takeout box is different — it holds one food and IS
+-- the sellable unit (a `craft` line asks for the box item pinned to that food's id),
+-- so it fills a ticket as a loose SINGLE. The loose store is the cooked-items TRAY,
+-- which a made box only reaches when the item isn't installed or the cook's pockets
+-- were full — so without this, a boxed soup sitting in the cook's own inventory could
+-- never complete its own order, however plainly ready the ticket read.
+--
+-- Deliberately NOT applied to every item: a cook's personal drink or burger is their
+-- own, and only the vessels this resource CRAFTS into inventory belong to the pool.
+local function isHeldSingle(item)
+    return item ~= nil and item == BoxItemName()
+end
+
+-- Staff-held instances of `item` whose build stack satisfies `match`, one entry per
+-- unit (a slot may stack, even though the shipped box does not).
+local function heldMatches(rid, item, match)
+    local out = {}
+    if not isHeldSingle(item) or not ItemExists(item) then return out end
+    for _, h in ipairs(vesselHolders(rid, item)) do
+        if match(h.meta) then
+            for _ = 1, math.max(1, h.count or 1) do out[#out + 1] = h end
+        end
+    end
+    return out
+end
+
+local function HeldCountMatch(rid, item, match)
+    return #heldMatches(rid, item, match)
+end
+
+-- Take `count` matching instances out of staff pockets, returning { {meta}, … } in
+-- PoolConsumeMatch's shape. Best-effort per unit for the same reason VesselConsume
+-- is: no bridge's remove call reports success, so the COUNT before/after is what
+-- says whether it actually went.
+local function HeldConsumeMatch(rid, item, match, count)
+    local taken = {}
+    for _, h in ipairs(heldMatches(rid, item, match)) do
+        if #taken >= count then break end
+        local before = Inventory.GetItemCount(h.src, item) or 0
+        if Inventory.RemoveItemSlot then Inventory.RemoveItemSlot(h.src, item, 1, h.slot)
+        else Inventory.RemoveItem(h.src, item, 1) end
+        if (Inventory.GetItemCount(h.src, item) or 0) < before then
+            MarkOrdersDirty(rid) -- an inventory-side change to the pool flags the tickets itself
+            taken[#taken + 1] = { meta = h.meta }
+        end
+    end
+    return taken
+end
+
+-- How many units of one required (item, variation) the restaurant can hand over
+-- across BOTH loose stores — the cooked-items tray and staff-held singles.
+-- Global for the same reason VesselCount/VesselConsume are: PlanFulfillment sits
+-- ABOVE this block (the vessel store it already reads is declared here too), and a
+-- local declared after it would not be in its scope.
+function SingleCountMatch(rid, item, match)
+    return PoolCountMatch(rid, item, match) + HeldCountMatch(rid, item, match)
+end
+
+-- Spend `count` of them, tray FIRST for the same reason VesselConsume drains it
+-- first: the tray only ever holds what an inventory couldn't take, so spending it
+-- first drains the fallback store instead of letting it accumulate. Returns fewer
+-- than `count` only if something raced the plan — the caller treats that as a fail.
+function SingleConsumeMatch(rid, item, match, count)
+    local fromPool = math.min(count, PoolCountMatch(rid, item, match))
+    local taken = (fromPool > 0 and PoolConsumeMatch(rid, item, match, fromPool)) or {}
+    if #taken < count then
+        for _, inst in ipairs(HeldConsumeMatch(rid, item, match, count - #taken)) do
+            taken[#taken + 1] = inst
+        end
+    end
+    return taken
+end
+
 local function AnnotateOrders(rid, list)
     local bagItem = BagItemName()
+    -- Read-only pass: every staff-inventory search below is memoized for its duration
+    -- and dropped again at the end, so nothing outside can inherit the snapshot.
+    holderMemo = {}
     -- built ONCE for the whole list: it reads every on-duty employee's inventory, and
     -- each ticket is planned once per available vessel below
     local vessels = vesselPool(rid)
@@ -839,31 +1012,10 @@ local function AnnotateOrders(rid, list)
             o.driver = nil
         end
     end
+    holderMemo = nil
     return list
 end
 
--- Why a ticket isn't offering a meal or a bag. A vessel that isn't an INSTALLED
--- item is skipped silently by AnnotateOrders above (we must never offer to hand
--- over something that would vanish), which looks identical to "bags don't work" —
--- so print the pair, whether each exists, and what the pool actually holds.
-RegisterCommand("pickle_vessels", function(src, args)
-    if src ~= 0 and not IsPlayerAdmin(src) then return end
-    local rid = tonumber(args[1])
-    for _, vi in ipairs(VesselItems()) do
-        local exists = ItemExists(vi)
-        print(("[pickle_vessels] %-16s installed=%s%s"):format(vi, tostring(exists),
-            exists and "" or "  ^3<- never offered as a fulfilment option^7"))
-        if rid and exists then
-            local vars = VesselVariations(rid, vi)
-            if #vars == 0 then print("    pool: none in any cook's tray") end
-            for _, v in ipairs(vars) do
-                print(("    pool: x%d sig=%q layers=%d"):format(
-                    v.count, v.sig or "", #(type(v.meta) == "table" and v.meta or {})))
-            end
-        end
-    end
-    if not rid then print("[pickle_vessels] pass a restaurant id to also list the pool") end
-end, false)
 
 -- ─── register payload ────────────────────────────────────────────────────────
 
@@ -1469,11 +1621,6 @@ lib.callback.register("pickle_restaurants:phone:startDelivery", function(src, d)
     -- running it while they're away costs nothing and recovers the moment they're back.
     TriggerClientEvent("pickle_restaurants:phone:beginDriving", src,
         { orderId = o.id, rid = id, target = DeliveryTargets[o.id], customer = customerSrc })
-    if DeliveryDebug then
-        print(("[delivery] startDelivery ticket #%s (order %s) driver=%s target=%s customerOnline=%s")
-            :format(tostring(o.ticket), tostring(o.id), tostring(src),
-                DeliveryTargets[o.id] and "yes" or "NIL", customerSrc and "yes" or "no"))
-    end
     if customerSrc then
         TriggerClientEvent("pickle_restaurants:phone:driverAssigned", customerSrc, { orderId = o.id, driver = src })
         -- This is the ONLY "on the way" state — completion pushes delivered/collected.
@@ -1513,15 +1660,6 @@ local DriverRate = {}   -- [src] = { ping = lastMs }
 -- [orderId] = { x, y, points, at }
 DriverTelemetry = {}
 
--- Toggled by the `pickle_delivery_debug` server command (admin / console). Also read
--- by startDelivery above. Production stays silent; the relay gate is otherwise a
--- black hole (every rejection is a silent drop, by design against griefers).
-DeliveryDebug = false
-local function ddbg(fmt, ...)
-    if not DeliveryDebug then return end
-    print(("[delivery] " .. fmt):format(...))
-end
-
 local function driverThrottled(src, key, minMs)
     local now = GetGameTimer()
     local seen = DriverRate[src]
@@ -1540,31 +1678,32 @@ local function sane(v)
     return v + 0.0
 end
 
--- The open delivery ticket `src` is the assigned driver of, or nil + WHY. The reason
--- is diagnostic only (printed under DeliveryDebug) — it is never sent to the client.
+-- The open delivery ticket `src` is the assigned driver of, else nil. Every
+-- rejection is a SILENT drop, by design: this gate is what stops anyone spoofing a
+-- driver ping for someone else's ticket, so it must never explain itself to the
+-- caller.
 local function driverOrderFor(src, data)
-    if type(data) ~= "table" then return nil, "payload not a table" end
+    if type(data) ~= "table" then return nil end
     local rid, oid = tonumber(data.rid), tonumber(data.orderId)
-    if not rid or not oid then return nil, "missing rid/orderId" end
+    if not rid or not oid then return nil end
     local o = OrderCache[rid] and OrderCache[rid][oid]
-    if not o then return nil, ("no cached order %s/%s (closed, or wrong restaurant id)"):format(rid, oid) end
-    if o.status ~= "open" then return nil, ("order %s not open (status %s)"):format(oid, tostring(o.status)) end
+    if not o then return nil end                       -- closed, or wrong restaurant id
+    if o.status ~= "open" then return nil end
     -- No driver assigned = startDelivery was never called for this ticket, so there
     -- is nothing legitimate to relay.
-    if not o.driver_identifier then return nil, ("order %s has no driver assigned (startDelivery never ran)"):format(oid) end
-    if o.driver_identifier ~= GetIdentifier(src) then return nil, ("order %s driver identifier mismatch"):format(oid) end
+    if not o.driver_identifier then return nil end
+    if o.driver_identifier ~= GetIdentifier(src) then return nil end
     return o
 end
 
 -- Driver position → the waiting customer (native blip + the in-app map marker).
 RegisterNetEvent("pickle_restaurants:phone:driverPing", function(data)
     local src = source
-    local o, why = driverOrderFor(src, data)
-    if not o then ddbg("ping REJECTED from %s: %s", tostring(src), why); return end
+    local o = driverOrderFor(src, data)
+    if not o then return end
     local x, y = sane(data.x), sane(data.y)
-    if not x or not y then ddbg("ping REJECTED from %s: bad coords", tostring(src)); return end
+    if not x or not y then return end
     if driverThrottled(src, "ping", DRIVER_PING_MIN_MS) then
-        ddbg("ping REJECTED from %s: throttled (< %dms)", tostring(src), DRIVER_PING_MIN_MS)
         return
     end
     -- Cached BEFORE the customer-online check: the whole point of the seed cache is
@@ -1576,8 +1715,6 @@ RegisterNetEvent("pickle_restaurants:phone:driverPing", function(data)
     if customerSrc then
         TriggerClientEvent("pickle_restaurants:phone:driverCoords", customerSrc, { orderId = o.id, x = x, y = y })
     end
-    ddbg("ping order %s (%.1f, %.1f) → customer %s", tostring(o.id), x, y,
-        customerSrc and tostring(customerSrc) or "OFFLINE (cached only)")
 end)
 
 -- Release a claim: the run goes back on the board for anyone to accept. Used by the
@@ -1597,7 +1734,6 @@ function ReleaseDelivery(rid, o, reason)
                    tostring(o.ticket or "?")))
         end
     end
-    ddbg("order %s: delivery released (%s)", tostring(o.id), reason or "?")
     SyncOrders(rid)
 end
 
@@ -1669,13 +1805,11 @@ lib.callback.register("pickle_restaurants:phone:trackOrder", function(src, d)
     if not o or o.status ~= "open" then return {} end
     local me = GetIdentifier(src)
     if not me or not o.customer_identifier or o.customer_identifier ~= me then
-        ddbg("trackOrder DENIED: %s is not the customer of order %s", tostring(src), tostring(oid))
         return {}
     end
     local t = DriverTelemetry[oid]
-    if not t then ddbg("trackOrder order %s: nothing cached yet", tostring(oid)); return {} end
+    if not t then return {} end
     local driver = (t.x and t.y) and { x = t.x, y = t.y } or nil
-    ddbg("trackOrder order %s → driver %s", tostring(oid), driver and "yes" or "no")
     return { driver = driver }
 end)
 
@@ -1768,7 +1902,7 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
                 if not VesselConsume(id, v.item, v.sig) then error(GetItemLabel(v.item), 0) end
             end
             for _, g in ipairs(plan.singles) do
-                local taken = PoolConsumeMatch(id, g.item, variationMatcher(g.item, g.key), g.count)
+                local taken = SingleConsumeMatch(id, g.item, variationMatcher(g.item, g.key), g.count)
                 if not taken or #taken < g.count then error(GetItemLabel(g.item), 0) end
             end
         end)
@@ -1860,7 +1994,7 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
             Inventory.AddItem(customerSrc, v.item, 1, BuildInvMeta(vmeta, v.item))
         end
         for _, g in ipairs(plan.singles) do
-            local taken = PoolConsumeMatch(id, g.item, variationMatcher(g.item, g.key), g.count)
+            local taken = SingleConsumeMatch(id, g.item, variationMatcher(g.item, g.key), g.count)
             if not taken or #taken < g.count then error(GetItemLabel(g.item), 0) end
             for _, inst in ipairs(taken) do
                 Inventory.AddItem(customerSrc, g.item, 1, BuildInvMeta(inst.meta, g.item))

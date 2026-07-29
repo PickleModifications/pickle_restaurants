@@ -6,7 +6,7 @@
 --
 --  The server is authoritative — every event carries the counter transform + the
 --  configured geometry, so this file owns NO settings and never guesses positions.
---  Adapted from the pickle_clubs bartender queue (TEMP_NPC_CONTEXT), trimmed to the
+--  Adapted from the pickle_clubs bartender queue, trimmed to the
 --  spawn/queue/walk-away mechanics. Uses core/client.lua's CreateNPC helper.
 -- =============================================
 
@@ -44,7 +44,7 @@ end
 -- Where a new arrival appears before walking up. Prefer the restaurant's admin-placed
 -- spawn point (a clear, reachable spot near the register) — it's the same for every
 -- customer, and the queue geometry takes over once they reach their slot. Falls back
--- to the legacy computed point (further back along the queue line) when none is placed.
+-- to the computed fallback point (further back along the queue line) when none is placed.
 local function spawnPos(counter, geo, index, spawn)
     if spawn and spawn.x then
         return vector3(spawn.x + 0.0, spawn.y + 0.0, spawn.z + 0.0)

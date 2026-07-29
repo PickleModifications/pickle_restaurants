@@ -89,13 +89,25 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
     -- currently in the larder. Cooking consumes from this pool.
     local supplies = {}
     if effective.manage_stock then
-        for item, cost in pairs(GetSetting("ingredient_costs", {})) do
+        -- Keys here are STOCK KEYS, not necessarily item names: a multi-faced
+        -- ingredient is priced and stocked per face (`restaurant_toy:lardboy`), so
+        -- the larder shows one row per toy at its own price. `item` stays the REAL
+        -- item — it's what the deposit/withdraw buttons would move and what decides
+        -- whether the row is installed at all.
+        for key, cost in pairs(IngredientCosts()) do
+            local item, vid = SplitStockKey(key)
             supplies[#supplies + 1] = {
-                item = item, label = GetItemLabel(item), image = GetItemImage(item),
+                key = key, item = item, variant = vid,
+                label = StockKeyLabel(key), image = StockKeyImage(key),
                 cost = math.max(0, math.floor(tonumber(cost) or 0)),
-                stock = GetStockCount(id, item), installed = ItemExists(item),
-                -- how many the manager is personally carrying (offer to deposit)
-                held = Inventory.GetItemCount(src, item) or 0,
+                stock = GetStockCount(id, key), installed = ItemExists(item),
+                -- how many the manager is personally carrying (offer to deposit).
+                -- A FACE can't move between pocket and larder: the inventory item is
+                -- generic, so a deposited toy has no face to name and a withdrawn one
+                -- would launder a dear toy into a cheap one. Buying is per face;
+                -- moving isn't offered for one.
+                held = vid and 0 or (Inventory.GetItemCount(src, item) or 0),
+                movable = (vid == nil) or nil,
             }
         end
         table.sort(supplies, function(a, b) return (a.label or a.item):lower() < (b.label or b.item):lower() end)
@@ -297,21 +309,25 @@ end)
 lib.callback.register("pickle_restaurants:management:buyStock", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_stock") then return { ok = false, error = _L("no_permission") } end
-    local item = tostring(d.item or "")
-    local costs = GetSetting("ingredient_costs", {})
-    if costs[item] == nil then return { ok = false, error = _L("mgmt_item_required") } end
+    -- A STOCK KEY, which for a multi-faced ingredient names the face being bought
+    -- (`restaurant_toy:lardboy`). It is validated the same way any other is — by
+    -- having a price — so a forged key buys nothing.
+    local key = tostring(d.key or d.item or "")
+    local costs = IngredientCosts()
+    if costs[key] == nil then return { ok = false, error = _L("mgmt_item_required") } end
     local qty = math.max(1, math.min(1000, math.floor(tonumber(d.qty) or 0)))
-    local unit = math.max(0, math.floor(tonumber(costs[item]) or 0))
+    local unit = math.max(0, math.floor(tonumber(costs[key]) or 0))
     local total = unit * qty
     local r = GetRestaurant(id); if not r then return { ok = false } end
     if (r.balance or 0) < total then return { ok = false, error = _L("mgmt_insufficient_funds") } end
+    local label = StockKeyLabel(key)
     if total > 0 then
         AdjustBalance(id, -total)
-        AddLedger(id, "supply", -total, _L("ledger_restock", qty, GetItemLabel(item)), GetIdentifier(src))
+        AddLedger(id, "supply", -total, _L("ledger_restock", qty, label), GetIdentifier(src))
     end
-    AddStock(id, item, qty)
-    ShowNotification(src, _L("mgmt_stock_bought", qty, GetItemLabel(item)))
-    return { ok = true, balance = GetRestaurant(id).balance, stock = GetStockCount(id, item) }
+    AddStock(id, key, qty)
+    ShowNotification(src, _L("mgmt_stock_bought", qty, label))
+    return { ok = true, balance = GetRestaurant(id).balance, stock = GetStockCount(id, key) }
 end)
 
 -- Move ingredients between a manager's own pockets and the shared pool — the
@@ -323,8 +339,14 @@ end)
 lib.callback.register("pickle_restaurants:management:depositStock", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_stock") then return { ok = false, error = _L("no_permission") } end
-    local item = tostring(d.item or "")
-    local costs = GetSetting("ingredient_costs", {})
+    -- Deposit/withdraw move REAL inventory items, so a per-face stock key can never
+    -- be one end of the trade: the pocket item is generic, so a deposit would have no
+    -- face to record and a withdrawal would turn a dear toy into a cheap one. Buying
+    -- is per face; moving is not offered for one, and says so.
+    local key = tostring(d.key or d.item or "")
+    local item, vid = SplitStockKey(key)
+    if vid then return { ok = false, error = _L("mgmt_variant_not_movable") } end
+    local costs = IngredientCosts()
     if costs[item] == nil or not ItemExists(item) then return { ok = false, error = _L("mgmt_item_required") } end
     local qty = math.max(1, math.min(1000, math.floor(tonumber(d.qty) or 0)))
     if (Inventory.GetItemCount(src, item) or 0) < qty then return { ok = false, error = _L("mgmt_not_enough_held") } end
@@ -338,8 +360,14 @@ end)
 lib.callback.register("pickle_restaurants:management:withdrawStock", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_stock") then return { ok = false, error = _L("no_permission") } end
-    local item = tostring(d.item or "")
-    local costs = GetSetting("ingredient_costs", {})
+    -- Deposit/withdraw move REAL inventory items, so a per-face stock key can never
+    -- be one end of the trade: the pocket item is generic, so a deposit would have no
+    -- face to record and a withdrawal would turn a dear toy into a cheap one. Buying
+    -- is per face; moving is not offered for one, and says so.
+    local key = tostring(d.key or d.item or "")
+    local item, vid = SplitStockKey(key)
+    if vid then return { ok = false, error = _L("mgmt_variant_not_movable") } end
+    local costs = IngredientCosts()
     if costs[item] == nil or not ItemExists(item) then return { ok = false, error = _L("mgmt_item_required") } end
     local qty = math.max(1, math.min(1000, math.floor(tonumber(d.qty) or 0)))
     if GetStockCount(id, item) < qty then return { ok = false, error = _L("mgmt_not_enough_stock") } end

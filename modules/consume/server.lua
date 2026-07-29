@@ -84,6 +84,10 @@ local function describeContents(stack)
             label = (d and d.label) or GetItemLabel(l.item),
             image = d and d.image or nil,
             drink = d and d.drink or nil,
+            -- Not everything in a bag is food. A thing that relieves stress and
+            -- feeds nothing (a DLC toy that came with the kid's meal) is USED, not
+            -- eaten — the flag rides along so the menu offers the right verb.
+            play  = spec.play or nil,
             bitesTotal = total,
             bitesLeft  = math.max(1, total - eaten),
         }
@@ -138,6 +142,7 @@ local function useVessel(src, item, slot)
             label = (disp and disp.label) or GetItemLabel(item),
             image = disp and disp.image or nil,
             drink = disp and disp.drink or nil,
+            play  = spec.play or nil,
             bitesLeft = math.max(1, (spec.bites or 1) - eaten),
         }
     end
@@ -205,7 +210,7 @@ lib.callback.register("pickle_restaurants:consume:eat", function(src, d)
         if left > 0 then return math.floor((tonumber(v) or 0) / total * take) end
         return math.max(0, (tonumber(v) or 0) - math.floor((tonumber(v) or 0) / total) * done)
     end
-    local gainH, gainT = share(spec.hunger), share(spec.thirst)
+    local gainH, gainT, gainS = share(spec.hunger), share(spec.thirst), share(spec.stress)
 
     local emptied = false
     if left > 0 then
@@ -219,8 +224,17 @@ lib.callback.register("pickle_restaurants:consume:eat", function(src, d)
         emptied = gone
     end
     Nourish(src, gainH, gainT)
+    -- Calm as well as fed. Split from Nourish because it DRAINS a bar instead of
+    -- filling one; a serving may well do both (a comfort food), so this is never an
+    -- either/or with the call above. `Relax` is a no-op below 1, so a normal
+    -- mouthful costs nothing here.
+    if Relax then Relax(src, gainS) end
 
     return { ok = true, emptied = emptied,
+             -- USED rather than eaten (a toy): picks the verb, the notification and
+             -- the icon on the client. Derived server-side from what the entry
+             -- actually does, so nothing authors it twice.
+             play = spec.play or nil,
              -- what's left of THIS serving, for the "2 bites left" read-out and so
              -- a client knows whether the pile stays on the table
              bites = { total = total, taken = done + take, left = math.max(0, left),

@@ -123,21 +123,29 @@ end)
 -- out and takes the bag (modules/doorstep). The scene runs BEFORE the server call
 -- and a scene that didn't happen (too far from the door, interrupted) leaves the
 -- ticket open, so "delivered" can't be tapped from down the street.
-RegisterNUICallback("phone:completeOrder", function(data, cb)
+-- Serving a ticket: the ONE path, shared by the app's "Delivered" button and the
+-- door's own target option (ArmDoorstepTarget, modules/doorstep) — so a delivery served
+-- without opening the phone behaves identically to one served from it.
+function ServeDelivery(data)
+    data = data or {}
     if RunDoorstepHandoff then
-        local handed = RunDoorstepHandoff(tonumber(data and data.id), tonumber(data and data.orderId))
+        local handed = RunDoorstepHandoff(tonumber(data.id), tonumber(data.orderId))
         -- nil = no door on this order, complete as normal. false = there was one and
         -- the hand-off didn't happen; doorstep already said why.
-        if handed == false then return cb({ ok = false }) end
+        if handed == false then return { ok = false } end
     end
     local res = lib.callback.await("pickle_restaurants:sales:completeOrder", false, data) or {}
-    -- The run is over: retire this delivery's threads (the destination marker and the
-    -- position pings). Completing is the ONE ending the server doesn't announce back
-    -- to the driver — cancelling gets `phone:endDriving`, and accepting another run
-    -- supersedes by generation — so without this the arrow would hang over a doorstep
-    -- that has already been served.
+    -- The run is over: retire this delivery's threads (the destination marker, the
+    -- position pings and the door's target option). Completing is the ONE ending the
+    -- server doesn't announce back to the driver — cancelling gets `phone:endDriving`,
+    -- and accepting another run supersedes by generation — so without this the arrow
+    -- would hang over a doorstep that has already been served.
     if res.ok then EndDriveGen() end
-    cb(res)
+    return res
+end
+
+RegisterNUICallback("phone:completeOrder", function(data, cb)
+    cb(ServeDelivery(data))
 end)
 RegisterNUICallback("phone:cancelOrder",   relay("pickle_restaurants:sales:cancelOrder"))
 -- KDS ticket seed (public, display-safe + fulfil flags) — live updates ride the
@@ -215,19 +223,6 @@ end)
 -- ─────────────────────────────────────────────────────────────────────────────
 local DRIVER_PING_MS = 3000
 
--- ─── /pickle_delivery_debug ───────────────────────────────────────────────────
--- The delivery chain is four hops across two clients and the server (driver ping
--- net event → server relay gate → customer event → app iframe), and every one of
--- them fails SILENTLY by design. This toggle
--- prints a one-liner at each hop so a broken link is obvious from F8. Run it on the
--- DRIVER for the send side, on the CUSTOMER for the receive side, and
--- `pickle_delivery_debug` on the server console for the relay gate.
-local DeliveryDebug = false
-local function ddbg(fmt, ...)
-    if not DeliveryDebug then return end
-    print(("[delivery] " .. fmt):format(...))
-end
-
 -- How far the driver must get from the drop-off before the 12m ARRIVAL check (which
 -- ends the telemetry loop) is allowed to trigger. Comfortably above 12m so leaving
 -- and returning can't chatter the two thresholds. TUNE IN-GAME.
@@ -236,7 +231,13 @@ local ARRIVE_ARM = 40.0
 -- One generation per accepted delivery: a newly accepted run supersedes the previous
 -- thread instead of leaving both pinging (the old loop just falls out on its next tick).
 local DriveGen = 0
-EndDriveGen = function() DriveGen = DriveGen + 1 end
+-- Every ending goes through here, so the door's hand-over option is retired in exactly
+-- one place — a target left on a stranger's doorstep after the run is over would offer
+-- an order that no longer exists.
+EndDriveGen = function()
+    DriveGen = DriveGen + 1
+    if DisarmDoorstepTarget then DisarmDoorstepTarget() end
+end
 
 -- ─── the on-screen destination marker ────────────────────────────────────────
 -- A waypoint on the minimap gets a driver to the STREET; it doesn't get them to the
@@ -312,21 +313,21 @@ RegisterNetEvent("pickle_restaurants:phone:beginDriving", function(d)
     if hasTarget then
         SetNewWaypoint(target.x + 0.0, target.y + 0.0)
         ShowNotification(_L("delivery_accepted"))
-        ddbg("beginDriving order %s: waypoint set (%.1f, %.1f)", tostring(d.orderId), target.x + 0.0, target.y + 0.0)
     else
-        ddbg("beginDriving order %s: TARGET IS NIL — no waypoint set (driver marker still pings)", tostring(d.orderId))
     end
     DriveGen = DriveGen + 1
     local myGen = DriveGen
+    -- Arm the door's own hand-over option for this run (nil when the drop is a plain
+    -- coordinate). This is also where the door's point comes from below — it answers
+    -- with the anchor, so there's no reason to ask the server for it a second time.
+    local runDoor = ArmDoorstepTarget and ArmDoorstepTarget(rid, d.orderId) or nil
     -- The in-world destination marker for this run. A door delivery answers with the
     -- door prop's real height (the same point the hand-off scene plays at), so the
     -- pointer sits on the doorstep; anything else resolves its height off the ground.
     if hasTarget then
         local dz = tonumber(target.z)
         if not dz or dz == 0.0 then
-            local door = lib.callback.await("pickle_restaurants:doorstep:point", false,
-                                            { rid = rid, orderId = d.orderId })
-            dz = (door and door.z) and (door.z + 0.0) or nil
+            dz = (runDoor and runDoor.z) and (runDoor.z + 0.0) or nil
         end
         NavigateTo(myGen, target.x + 0.0, target.y + 0.0, dz, _L("delivery_nav_label"))
     end
@@ -343,7 +344,6 @@ RegisterNetEvent("pickle_restaurants:phone:beginDriving", function(d)
             local c = GetEntityCoords(PlayerPedId())
             TriggerServerEvent("pickle_restaurants:phone:driverPing", {
                 orderId = d.orderId, rid = rid, x = c.x, y = c.y })
-            ddbg("ping sent order %s rid %s (%.1f, %.1f)", tostring(d.orderId), tostring(rid), c.x, c.y)
 
             if hasTarget then
                 local away = #(vector2(c.x, c.y) - vector2(target.x, target.y))
@@ -352,11 +352,9 @@ RegisterNetEvent("pickle_restaurants:phone:beginDriving", function(d)
                     -- can't chatter the two thresholds against each other.
                     if away > ARRIVE_ARM then
                         armed = true
-                        ddbg("order %s: arrival check ARMED (%.0fm from drop-off)", tostring(d.orderId), away)
                     end
                 elseif away < 12.0 then
                     ShowNotification(_L("delivery_arrived"))
-                    ddbg("order %s: arrived — telemetry loop ending", tostring(d.orderId))
                     break
                 end
             end
@@ -372,8 +370,7 @@ RegisterNetEvent("pickle_restaurants:phone:driverAssigned", function(d)
     ToApp("delivery", { orderId = d.orderId, state = "driving" })
 end)
 RegisterNetEvent("pickle_restaurants:phone:driverCoords", function(d)
-    if not d or not d.x then ddbg("driverCoords received but EMPTY — not forwarded"); return end
-    ddbg("driverCoords received order %s (%.1f, %.1f) → forwarded to app", tostring(d.orderId), d.x + 0.0, d.y + 0.0)
+    if not d or not d.x then return end
     if not deliveryBlip or not DoesBlipExist(deliveryBlip) then
         deliveryBlip = AddBlipForCoord(d.x + 0.0, d.y + 0.0, 0.0)
         SetBlipSprite(deliveryBlip, 477)     -- delivery/scooter-ish icon
@@ -403,7 +400,8 @@ end)
 
 -- Driver side: we cancelled our own run — stop the ping loop and clear our waypoint.
 RegisterNetEvent("pickle_restaurants:phone:endDriving", function()
-    DriveGen = DriveGen + 1   -- supersedes the running loop; it falls out on its next tick
+    EndDriveGen()   -- supersedes the running loop (it falls out on its next tick) and
+                    -- takes the door's hand-over option back down with it
     ClearGpsMultiRoute()
     SetWaypointOff()
     ShowNotification(_L("delivery_cancelled_driver"))

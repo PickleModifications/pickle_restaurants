@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
   Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2, RotateCcw, Palette, PersonStanding, Utensils, Flame,
+  Package, Lock,
 } from "lucide-react";
 
 const PERMISSIONS = [
@@ -31,8 +32,28 @@ const PERM_LABEL: Record<string, string> = {
   manage_stock: "settings.perm_manage_stock",
 };
 
+// One installed add-on pack, as modules/dlc reports it. Everything here is
+// READ-ONLY: a pack's content lives in the pack's own resource, so there is nothing
+// on this screen to save.
+export type Dlc = {
+  id: string; name?: string; description?: string; version?: string;
+  author?: string; resource?: string;
+  foods?: { key?: string; label?: string }[];
+  tools?: { key?: string; label?: string }[];
+  ingredients?: { key?: string; label?: string }[];
+};
+
 type Props = {
   settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void;
+  dlcs?: Dlc[];
+  /** The annotated ingredient list, purely so the cost editor can put a NAME and a
+   *  picture to a per-face cost key (`restaurant_toy:lardboy`). Such a key is not an
+   *  item, so the item picker can neither resolve nor safely edit it. */
+  ingredients?: any[];
+  /** Each installed DLC pack's DEFAULT costs. The editor lists a row for every one
+   *  (a pack's items have to be priceable) but only stores those changed away from
+   *  the default. */
+  dlcCosts?: Record<string, number>;
   appTheme?: ThemeConfig | null; onAppTheme?: (t: ThemeConfig) => void;
   phoneTheme?: ThemeConfig | null; onPhoneTheme?: (t: ThemeConfig) => void;
 };
@@ -51,9 +72,10 @@ const GROUPS = () => (_groups ??= [
   { key: "npc_customers", label: _L("settings.group_npc"), icon: PersonStanding },
   { key: "kitchen_fires", label: _L("settings.group_fires"), icon: Flame },
   { key: "blip", label: _L("settings.group_blip"), icon: MapPin },
+  { key: "dlc", label: _L("settings.group_dlc"), icon: Package },
 ]);
 
-export default function Settings({ settings, items, groups, onSaved, appTheme, onAppTheme, phoneTheme, onPhoneTheme }: Props) {
+export default function Settings({ settings, items, groups, dlcs, ingredients, dlcCosts, onSaved, appTheme, onAppTheme, phoneTheme, onPhoneTheme }: Props) {
   const [group, setGroup] = useState("general");
 
   return (
@@ -83,12 +105,13 @@ export default function Settings({ settings, items, groups, onSaved, appTheme, o
         {group === "general" && <General settings={settings} onSaved={onSaved} />}
         {group === "appearance" && <Appearance appTheme={appTheme} onAppTheme={onAppTheme} phoneTheme={phoneTheme} onPhoneTheme={onPhoneTheme} />}
         {group === "economy" && <Economy settings={settings} onSaved={onSaved} />}
-        {group === "pricing" && <Pricing settings={settings} items={items} onSaved={onSaved} />}
+        {group === "pricing" && <Pricing settings={settings} items={items} ingredients={ingredients} dlcCosts={dlcCosts} onSaved={onSaved} />}
         {group === "roles" && <Roles settings={settings} onSaved={onSaved} />}
         {group === "eating" && <Eating settings={settings} onSaved={onSaved} />}
         {group === "npc_customers" && <NpcCustomers settings={settings} onSaved={onSaved} />}
         {group === "kitchen_fires" && <KitchenFires settings={settings} items={items} onSaved={onSaved} />}
         {group === "blip" && <Blip settings={settings} onSaved={onSaved} />}
+        {group === "dlc" && <DlcPacks dlcs={dlcs} />}
       </div>
     </div>
   );
@@ -97,9 +120,13 @@ export default function Settings({ settings, items, groups, onSaved, appTheme, o
 /** Section frame with a title and an auto-save status hint (no Save button — edits
  * persist automatically, debounced). */
 function Section({
-  title, description, status, children,
+  title, description, status, readOnly, children,
 }: {
-  title: string; description?: string; status?: SaveStatus; children: React.ReactNode;
+  title: string; description?: string; status?: SaveStatus;
+  // A section with nothing to save (the DLC inventory). Without this it would
+  // advertise "changes save automatically" over a screen that has no inputs.
+  readOnly?: boolean;
+  children: React.ReactNode;
 }) {
   return (
     <div className="space-y-4">
@@ -108,7 +135,7 @@ function Section({
           <h3 className="text-sm font-semibold">{title}</h3>
           {description && <p className="text-xs text-muted-foreground">{description}</p>}
         </div>
-        <SaveStatusHint status={status} />
+        {!readOnly && <SaveStatusHint status={status} />}
       </div>
       {children}
     </div>
@@ -533,19 +560,124 @@ function Blip({ settings, onSaved }: { settings: any; onSaved: () => void }) {
   );
 }
 
+/** Installed DLC packs. Purely an inventory: a pack's content is read out of the
+ * pack's own resource at runtime and never stored in this server's settings, so
+ * there is nothing here to edit and no Save. What each pack ADDS shows up in the
+ * Food & Drinks / Ingredients tabs alongside everything else, marked and locked.
+ * Stop the pack's resource and its rows disappear from those tabs on the spot. */
+function DlcPacks({ dlcs }: { dlcs?: Dlc[] }) {
+  const list = Array.isArray(dlcs) ? dlcs : [];
+  return (
+    <Section title={_L("settings.dlc_title")} description={_L("settings.dlc_desc")} readOnly>
+      {list.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-border p-6 text-center">
+          <Package className="mx-auto h-6 w-6 text-muted-foreground/50" />
+          <div className="mt-2 text-sm text-muted-foreground">{_L("settings.dlc_none")}</div>
+          <p className="mt-1 text-xs text-muted-foreground/70">{_L("settings.dlc_none_hint")}</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {list.map((d) => <DlcCard key={d.id} dlc={d} />)}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function DlcCard({ dlc }: { dlc: Dlc }) {
+  // Only the buckets a pack actually fills are shown — a toys pack adds
+  // ingredients and nothing else, and three headings with two empty lists reads
+  // like something failed to load.
+  const buckets: { label: string; rows: { key?: string; label?: string }[] }[] = [
+    { label: _L("settings.dlc_foods"), rows: dlc.foods ?? [] },
+    { label: _L("settings.dlc_tools"), rows: dlc.tools ?? [] },
+    { label: _L("settings.dlc_ingredients"), rows: dlc.ingredients ?? [] },
+  ].filter((b) => b.rows.length > 0);
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <Package className="h-4 w-4 shrink-0 text-primary" />
+            <span className="truncate text-sm font-semibold">{dlc.name || dlc.id}</span>
+            {dlc.version && (
+              <span className="shrink-0 rounded-full border border-border px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">
+                v{dlc.version}
+              </span>
+            )}
+          </div>
+          {dlc.description && <p className="mt-1 text-xs text-muted-foreground">{dlc.description}</p>}
+        </div>
+        {dlc.author && <span className="shrink-0 text-xs text-muted-foreground/70">{_L("settings.dlc_by", dlc.author)}</span>}
+      </div>
+
+      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground/70">
+        <Lock className="h-3 w-3" />
+        <span>{_L("settings.dlc_readonly")}</span>
+        {dlc.resource && <span className="ml-auto font-mono">{dlc.resource}</span>}
+      </div>
+
+      {buckets.length > 0 && (
+        <div className="mt-3 space-y-2 border-t border-border/60 pt-3">
+          {buckets.map((b) => (
+            <div key={b.label}>
+              <div className="tape text-[10px] text-muted-foreground">{b.label}</div>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {b.rows.map((r, i) => (
+                  <span key={`${r.key}-${i}`} className="rounded-full border border-border bg-accent/40 px-2 py-0.5 text-xs">
+                    {r.label || r.key}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Ingredient cost map (raw item -> cost). Drives restock spend and the default
  * menu price. Stored as an object; edited here as a list of {item, cost} rows. */
-function Pricing({ settings, items, onSaved }: { settings: any; items: Item[]; onSaved: () => void }) {
+function Pricing({ settings, items, ingredients, dlcCosts, onSaved }: {
+  settings: any; items: Item[]; ingredients?: any[]; dlcCosts?: Record<string, number>; onSaved: () => void;
+}) {
   const initial = settings.ingredient_costs && typeof settings.ingredient_costs === "object" ? settings.ingredient_costs : {};
+  // Every DLC-supplied item gets a row too, at the pack's price. This is the ONE
+  // screen where a pack's content is priceable — its entry in the menu tabs is
+  // read-only — so if it isn't listed here it can't be priced at all.
+  const packs = dlcCosts || {};
   const [rows, setRows] = useState<{ item: string; cost: number }[]>(
-    Object.keys(initial).map((k) => ({ item: k, cost: Number(initial[k]) || 0 })).sort((a, b) => a.item.localeCompare(b.item))
+    Array.from(new Set([...Object.keys(initial), ...Object.keys(packs)]))
+      .map((k) => ({ item: k, cost: Number(initial[k] ?? packs[k]) || 0 }))
+      .sort((a, b) => a.item.localeCompare(b.item))
   );
+  // Rows here are STOCK KEYS, and a multi-faced ingredient's key names a face
+  // (`restaurant_toy:lardboy`) rather than an item. The picker can't resolve one —
+  // there is no such item — so it would show a codename and, worse, silently rewrite
+  // the key if anyone touched it. Faces render as a fixed identity instead: the
+  // toy's own name and picture, with only the cost editable.
+  const faces: Record<string, { label: string; image?: string }> = {};
+  (ingredients || []).forEach((g: any) => {
+    (g?.variants || []).forEach((v: any) => {
+      if (v?.costKey) faces[v.costKey] = { label: v.label || v.id, image: v.image };
+    });
+  });
   const update = (i: number, patch: any) => setRows((l) => l.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
   const add = () => setRows((l) => [...l, { item: "", cost: 0 }]);
 
   const status = useAutoSave(() => {
     const map: Record<string, number> = {};
-    rows.forEach((r) => { if (r.item) map[r.item] = Math.max(0, Math.floor(r.cost || 0)); });
+    rows.forEach((r) => {
+      if (!r.item) return;
+      const cost = Math.max(0, Math.floor(r.cost || 0));
+      // A pack-supplied row left AT the pack's price isn't stored: the pack keeps
+      // owning that number and can change it in an update. Move it and it becomes
+      // this server's, and stays this server's until it's deleted here again.
+      if (r.item in packs && cost === packs[r.item]) return;
+      map[r.item] = cost;
+    });
     return saveSettings({ ingredient_costs: map }).then(onSaved);
   }, [rows]);
 
@@ -555,9 +687,20 @@ function Pricing({ settings, items, onSaved }: { settings: any; items: Item[]; o
         {rows.length === 0 && <div className="py-2 text-xs text-muted-foreground">{_L("settings.no_costs")}</div>}
         {rows.map((r, i) => (
           <div key={i} className="flex items-end gap-2">
-            <Field label={_L("settings.ingredient")} className="flex-1">
-              <ItemPicker items={items} value={r.item} onChange={(v) => update(i, { item: v })} />
-            </Field>
+            {faces[r.item] ? (
+              <Field label={_L("settings.ingredient")} className="flex-1">
+                <div className="flex h-9 items-center gap-2 rounded-md border border-input bg-muted/40 px-2.5">
+                  {faces[r.item].image
+                    ? <img src={faces[r.item].image} alt="" className="h-6 w-6 shrink-0 rounded object-cover" />
+                    : <Package className="h-4 w-4 shrink-0 text-muted-foreground" />}
+                  <span className="truncate text-sm">{faces[r.item].label}</span>
+                </div>
+              </Field>
+            ) : (
+              <Field label={_L("settings.ingredient")} className="flex-1">
+                <ItemPicker items={items} value={r.item} onChange={(v) => update(i, { item: v })} />
+              </Field>
+            )}
             <NumberField label={_L("settings.cost_value")} className="w-28" value={r.cost} min={0} onChange={(v) => update(i, { cost: v })} />
             <Button size="icon" variant="destructive" onClick={() => setRows((l) => l.filter((_, idx) => idx !== i))}><Trash2 className="h-4 w-4" /></Button>
           </div>

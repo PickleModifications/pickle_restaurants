@@ -30,6 +30,13 @@ local DOOR = {
     -- length one time and inside a hedge the next.
     step_back   = 1.2,
     open_delay  = 250,   -- pause between the knock and the door opening
+    -- beat after the phone is put away, before the knock — the put-away is an
+    -- animation of its own and the knock has to start on an empty hand
+    phone_ms    = 700,
+    -- how far ABOVE the door anchor the "hand it over" target zone sits. The anchor is
+    -- the doorway FLOOR, so a zone centred on it hides under the step, below where a
+    -- player aims. Same reasoning as main's SEAT_TARGET_Z.
+    target_z    = 1.0,
     settle_ms   = 400,   -- beat after both are in position, before the exchange
     leave_ms    = 1800,  -- how long the resident walks back inside before despawning
     -- the exchange. `mp_common` givetake1_a / _b is the two-sided hand-over pair
@@ -112,8 +119,8 @@ end
 
 -- Play the scene at `door` ({ x, y, z, heading }); `rid` is the restaurant the food
 -- came from (brands the bag). Split out of the order path so the same sequence can
--- run with no order and no item behind it (see the /pickle_doorstep debug command at
--- the bottom). Returns true when the resident took the bag, false otherwise.
+-- run with no order and no item behind it. Returns true when the resident took the
+-- bag, false otherwise.
 local function runDoorstepScene(door, rid)
     if running then return false end
     local ped = PlayerPedId()
@@ -124,6 +131,18 @@ local function runDoorstepScene(door, rid)
     end
 
     running = true
+
+    -- Put the phone away first. Served from the app, the phone is open and IN THE HAND
+    -- as the knock starts, and its hold/put-away animation fights every clip below —
+    -- so this runs whichever way the hand-off was triggered (the app's "Delivered"
+    -- button or the door's own target option). No phone installed, or one with no close
+    -- path, no-ops. `running` is already set, so the wait can't be re-entered.
+    if PhoneApp and PhoneApp.Close then
+        PhoneApp.Close()
+        Wait(DOOR.phone_ms)
+        ped = PlayerPedId()
+    end
+
     local resident, bag
     local ok = pcall(function()
         local fx, fy = fwdOf(door.heading)
@@ -224,17 +243,54 @@ function RunDoorstepHandoff(rid, orderId)
     return runDoorstepScene(door, rid)
 end
 
--- DEBUG (/pickle_doorstep, admin — see doorstep/server.lua). Plays the whole
--- hand-off with no order, no ticket and nothing in your hands, so the knock →
--- resident → exchange can be watched and tuned on its own. The point
--- comes from the server: a real placed delivery door when you're standing near
--- one, otherwise a synthetic doorway in front of you (`fake`) so the scene can be
--- rehearsed anywhere, including before any door is placed.
-RegisterNetEvent("pickle_restaurants:doorstep:debug", function(door)
-    if type(door) ~= "table" or not door.x then return end
-    if running then return end
-    runDoorstepScene(door, door.rid)
-end)
+-- ─── the door's own target option ─────────────────────────────────────────────
+-- Serving a delivery otherwise means opening the phone, finding the ticket and tapping
+-- "Delivered" — with the phone on screen and in the ped's hand right as the hand-off
+-- animation starts. So the door carries the action itself: while a run to a placed door
+-- is in progress, THAT door has a "Hand the order over" option on it, and taking it
+-- runs the same scene + completion the app's button does (`ServeDelivery`, modules/phone).
+--
+-- It is armed per RUN, never per placed prop. A delivery door is an invisible anchor at
+-- a customer's house: a permanent option on every one of them would offer the whole
+-- server a hand-off they hold no order for (which the server refuses anyway) and put a
+-- target prompt on strangers' doorsteps. modules/phone arms this when a run is accepted
+-- and disarms it when the run ends, however it ends.
+local doorTarget, doorRun = nil, nil
+
+function DisarmDoorstepTarget()
+    if doorTarget then DeleteInteraction(doorTarget) end
+    doorTarget, doorRun = nil, nil
+end
+
+-- Returns the door point (nil if this run's drop is a plain coordinate and there is
+-- nothing to arm) so the caller can reuse it — modules/phone wants its z for the
+-- on-screen destination marker rather than asking the server for it twice.
+function ArmDoorstepTarget(rid, orderId)
+    DisarmDoorstepTarget()
+    rid, orderId = tonumber(rid), tonumber(orderId)
+    if not (rid and orderId) then return nil end
+    local door = lib.callback.await("pickle_restaurants:doorstep:point", false,
+                                    { rid = rid, orderId = orderId })
+    if not (door and door.x) then return nil end
+
+    doorRun = { rid = rid, orderId = orderId }
+    doorTarget = CreateInteraction({
+        coords         = vector3(door.x, door.y, door.z + DOOR.target_z),
+        label          = _L("door_hand_over"),
+        icon           = "fa-solid fa-bag-shopping",
+        radius         = 1.2,
+        interactRadius = 2.5,
+        distance       = 2.5,
+    }, function()
+        local run = doorRun
+        if not run or running then return end
+        -- No vessel PIN: the app's button passes the ticket's first packed meal/bag,
+        -- but the door has no ticket on screen to read one off. The pin is only ever a
+        -- hint — the server's planner claims the vessels the order needs by itself.
+        if ServeDelivery then ServeDelivery({ id = run.rid, orderId = run.orderId }) end
+    end)
+    return door
+end
 
 -- A resource stop mid-scene must not strand the player in an animation.
 AddEventHandler("onResourceStop", function(res)

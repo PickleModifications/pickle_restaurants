@@ -42,7 +42,7 @@ MySQL.ready(function()
 end)
 
 -- Which account column a currency maps to. Anything unknown (incl. nil and the
--- legacy "money") falls back to cash, so existing callers are unchanged.
+-- "money" the settings default uses) falls back to cash.
 local function AccountKey(currency)
     return (currency == "bank") and "bank" or "cash"
 end
@@ -228,4 +228,14 @@ end)
 function Nourish(source, hunger, thirst)
     TriggerEvent("pickle_restaurants:nourish", source,
         math.floor(tonumber(hunger) or 0), math.floor(tonumber(thirst) or 0))
+end
+
+-- Stress RELIEF, the counterpart to Nourish (it drains a bar rather than filling
+-- one) — what a DLC toy out of a kid's meal does. Same story as above on the
+-- standalone bridge: there is no stress system to drain, so this only announces
+-- itself. Handle `pickle_restaurants:relax` from your own status resource.
+function Relax(source, stress)
+    stress = math.floor(tonumber(stress) or 0)
+    if stress <= 0 then return end
+    TriggerEvent("pickle_restaurants:relax", source, stress)
 end

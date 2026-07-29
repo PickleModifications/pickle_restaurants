@@ -1,14 +1,18 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { fetchNui, useNuiEvent } from "@/lib/nui";
 import { Badge } from "@/components/ui/badge";
-import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave, CircleDot, Search, Trash2, ChevronUp, ChevronDown, Timer, Package, ShoppingBag } from "lucide-react";
+import { X, Flame, CupSoda, Sandwich, UtensilsCrossed, Carrot, ChefHat, CookingPot, Heater, Microwave, CircleDot, Search, Trash2, ChevronUp, ChevronDown, Timer, Package, ShoppingBag, Wrench } from "lucide-react";
 import { cn, prettyItem } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import { equipImageUrl, drinkImageUrl } from "@/lib/localImages";
 
 // kind "finish" = a finish tool (frosting): flavors is picked on the card, then the
 // tube is rubbed over a cooked target on the prep table until fully coated.
-type Ingredient = { kind: string; item: string; label: string; image?: string; count?: number; canMake?: boolean; model?: string; dual?: boolean; subkind?: string; flavors?: { id: string; label: string; color?: string }[] };
+// `variant` = which FACE of a multi-faced ingredient this card is (one item,
+// several toys: the bar shows a card per variant, all spending the same stock).
+// It rides the drag and is recorded on the reservation, so the bagged instance
+// keeps its identity.
+type Ingredient = { kind: string; item: string; label: string; image?: string; count?: number; canMake?: boolean; model?: string; dual?: boolean; subkind?: string; variant?: string; flavors?: { id: string; label: string; color?: string }[] };
 
 // Swatch colors for the flavor squares on a finish card. The config can carry a
 // per-flavor `color`; these cover the default flavors on servers seeded before
@@ -42,7 +46,9 @@ type TrayEntry = {
   // a made TAKEOUT BOX (a bag-kind food: soup, salad…): renders as the box pair with
   // the food's image (`quad`) drawn inside it, never as a build tower
   takeout?: boolean; quad?: string; quadCrop?: Crop; lidModel?: string;
-  // a packed RESTAURANT BAG: how many things the customer will find inside it
+  // a packed RESTAURANT BAG: the flag, and how many things the customer will find
+  // inside it. Both stores (tray + inventory) send these and `comps`.
+  bag?: boolean;
   contents?: number;
   // a finished (frosted…) product's recorded flavor, e.g. "Strawberry"
   flavorLabel?: string;
@@ -83,6 +89,12 @@ type PrepTip = {
   // A MADE takeout box standing on the prep table: one finished product, not a build,
   // so there are no recipes to rank — it names itself instead.
   product?: { label?: string; image?: string };
+  // The item under the cursor, sent for any OTHER placed part. Used the same way as
+  // `product` above when the pile ranks no recipe (a finished sandwich): the NUI
+  // resolves it against the recipe catalogue to name it and list what it's made of.
+  // `puid` addresses that exact part, so its tooltip can act on it (Disassemble)
+  // after the cursor has left the prop and travelled onto the tooltip itself.
+  item?: string; puid?: number;
 };
 // One aggregated item sitting in a takeaway vessel (shown in its tooltip).
 type PrepContent = { item: string; label?: string; image?: string; qty: number };
@@ -165,6 +177,15 @@ const inRect = (x: number, y: number, r: DOMRect) =>
 // the per-topping detail lives in the "Made with" list below it.
 const extrasCount = (e?: TrayEntry) => (e?.extras ?? []).reduce((n, c) => n + c.count, 0);
 
+// A packed VESSEL (Restaurant Bag / takeout box) has no base recipe to diff against,
+// so "toppings" is the wrong question for it entirely — it describes itself by what is
+// INSIDE it, the same way its inventory slot does (stackDescription, server-side, off
+// the very same layers). Without this a bag of drumsticks read "Drumsticks" in the
+// inventory and "No toppings" on its kitchen card.
+const isVessel = (e?: TrayEntry) => !!(e?.bag || e?.takeout);
+const contentsSummary = (e?: TrayEntry) =>
+  (e?.comps ?? []).map((c) => (c.count > 1 ? `${c.label} ×${c.count}` : c.label)).join(", ");
+
 // ── tray-card toppings row ────────────────────────────────────────────────────
 // A fixed-height row on every tray card: square icons for the toppings that fit,
 // "+X" for the overflow, grey "No toppings" when the build is exactly the base
@@ -174,7 +195,9 @@ const TOPPING_SLOTS = 4;
 
 function ToppingsRow({ e }: { e: TrayEntry }) {
   const units: TrayComp[] = [];
-  for (const c of e.extras || []) for (let n = 0; n < c.count; n++) units.push(c);
+  // a vessel's `extras` are always empty (nothing to diff against) — show what is
+  // packed inside it instead, so the row never reads as an empty build
+  for (const c of (isVessel(e) ? e.comps : e.extras) || []) for (let n = 0; n < c.count; n++) units.push(c);
   if (units.length === 0) {
     return <div className="flex h-[18px] items-center text-[9px] text-muted-foreground/70">{_L("cook.no_toppings")}</div>;
   }
@@ -253,6 +276,8 @@ function BarTooltip({ tip, actions, onPin, meta }: { tip: BarTip; actions?: Reac
                 </div>
               ) : e.flavorLabel ? (
                 <div className="truncate text-[11px] font-medium text-pink-300">{e.flavorLabel}</div>
+              ) : isVessel(e) && contentsSummary(e) ? (
+                <div className="truncate text-[11px] font-medium text-amber-300">{contentsSummary(e)}</div>
               ) : extrasCount(e) > 0 ? (
                 <div className="truncate text-[11px] font-medium text-amber-300">
                   {extrasCount(e) === 1 ? _L("cook.topping_one", extrasCount(e)) : _L("cook.toppings_other", extrasCount(e))}
@@ -684,8 +709,14 @@ function MealTooltip({
 // finished takeout box (a soup, a salad). It satisfies no recipe, so the recipe guide
 // showed nothing at all and the box read as an unlabelled prop; this names it with the
 // food's own art and says what it's for.
-function ProductTooltip({ product, onPin }: {
-  product: { label?: string; image?: string };
+function ProductTooltip({ product, onDisassemble, onPin }: {
+  // `eyebrow` names the KIND above the food (the vessel for a boxed one, "Finished
+  // Item" for a plain product); `components` lists what it was built from, which is
+  // the only thing a finished build has left to say about itself.
+  product: { label?: string; image?: string; eyebrow?: string; components?: RecipeComp[] };
+  // Present only for a product that can be un-made: takes it apart WHERE IT STANDS,
+  // its components landing back on the table in its place.
+  onDisassemble?: () => void;
   onPin: (pinned: boolean) => void;
 }) {
   return (
@@ -702,14 +733,40 @@ function ProductTooltip({ product, onPin }: {
         )}
         <div className="min-w-0">
           <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-            {_L("cook.takeout_box")}
+            {product.eyebrow || _L("cook.takeout_box")}
           </div>
           {/* the FOOD's name is the headline; the vessel is only the eyebrow above it.
               Falling back to the vessel name here would print "Takeout Box" twice. */}
           <div className="truncate text-sm font-semibold">{product.label || _L("cook.unknown_food")}</div>
         </div>
       </div>
+      {product.components && product.components.length > 0 && (
+        <>
+          <div className="mt-2.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            {_L("cook.made_with")}
+          </div>
+          <div className="mt-1 space-y-1">
+            {product.components.map((c, i) => (
+              <div key={c.item + i} className="flex items-center gap-1.5 text-[11px]">
+                <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-muted/50">
+                  <ItemThumb src={c.image} alt={c.label} className="h-4 w-4 object-contain" />
+                </div>
+                <span className="truncate">{c.label}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
       <div className="mt-2 text-[11px] leading-snug text-muted-foreground">{_L("cook.product_hint")}</div>
+      {onDisassemble && (
+        <button
+          onClick={onDisassemble}
+          className="mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-md bg-secondary px-3 py-1.5 text-[11px] font-semibold text-foreground transition hover:bg-accent"
+        >
+          <Wrench className="h-3 w-3" />
+          {_L("cook.disassemble")}
+        </button>
+      )}
     </div>
   );
 }
@@ -1143,11 +1200,24 @@ export default function Cooking({ data }: { data: any }) {
   // A fresh bag resets the pick to its top craft.
   useEffect(() => { setSelectedCraftId(null); }, [tip?.tid]);
 
+  // A MADE product hovered on the table: it is a component of nothing, so the recipe
+  // guide ranks nothing and the pile would fall silent. Name it from the recipe
+  // catalogue instead — the boxed-food case (`tip.product`) generalized to every
+  // finished build, which is what a freshly made sandwich standing on the prep table
+  // is. Only consulted when nothing ranks, so a product used as a LAYER in a bigger
+  // build still shows the guide.
+  const madeProduct = useMemo(() => {
+    if (!tip?.item || tip.product || tip.tray || ranked.length > 0) return null;
+    const rec = recipes.find((r) => r.output === tip.item);
+    if (!rec) return null;
+    return { label: rec.label, image: rec.image, components: rec.components, eyebrow: _L("cook.finished_item") };
+  }, [tip?.item, tip?.product, tip?.tray, ranked, recipes]);
   // A tray/box tooltip always shows; a build stack's only shows once it relates to a
   // recipe (an unranked pile has nothing to say). A MADE product — a takeout box set
-  // back down — is neither: it ranks nothing, but it still has to identify itself.
+  // back down, or any finished build — is neither: it ranks nothing, but it still has
+  // to identify itself.
   const tipVisible = isPrep && tipShow && !!tip && !!tip.onScreen && !dragging
-    && (tip.tray || tip.product ? true : ranked.length > 0);
+    && (tip.tray || tip.product || madeProduct ? true : ranked.length > 0);
   const onTipPin = (pinned: boolean) => {
     tipPinnedRef.current = pinned;
     if (pinned) {
@@ -1159,6 +1229,17 @@ export default function Cooking({ data }: { data: any }) {
   const onTipMake = () => {
     if (!tip || !selected?.ready) return;
     fetchNui("cooking:prepMakeStack", { sid: tip.sid, output: selected.rec.output });
+    setTipShow(false);
+    setTip(null);
+    tipPinnedRef.current = false;
+  };
+  // The hovered product's Disassemble: un-make it WHERE IT STANDS. The Lua side
+  // releases its reservation, un-makes it, and drops the component parts into its
+  // place in the pile — so the parts land on the table instead of needing anywhere
+  // to be carried to, which is the whole reason this lives here and not on a bar card.
+  const onProductDisassemble = () => {
+    if (tip?.puid == null) return;
+    fetchNui("cooking:prepDisassemble", { puid: tip.puid });
     setTipShow(false);
     setTip(null);
     tipPinnedRef.current = false;
@@ -1241,6 +1322,14 @@ export default function Cooking({ data }: { data: any }) {
     barPinnedRef.current = false;
     const r = (ev.currentTarget as HTMLElement).getBoundingClientRect();
     setBarTip({ x: r.left + r.width / 2, y: r.top, ...tip });
+  };
+  // Close the card tooltip outright (a drag starts): it's rendered only while not
+  // dragging, so leaving it PINNED would pop it straight back open on release —
+  // its own pointer-leave can never fire once it has been unmounted.
+  const dismissBarTip = () => {
+    if (barTipTimer.current) { clearTimeout(barTipTimer.current); barTipTimer.current = null; }
+    barPinnedRef.current = false;
+    setBarTip(null);
   };
   // Leaving a card holds the tooltip briefly so the cursor can travel up onto its
   // action buttons; while hovered (pinned) it stays until the cursor leaves it.
@@ -1341,15 +1430,23 @@ export default function Cooking({ data }: { data: any }) {
   // stovetop); without one it falls back to a 2D ghost + auto-stack.
   const startPrepDrag = (
     e: React.PointerEvent, source: string,
-    entry: { item: string; model?: string; label?: string; image?: string; dual?: boolean; top?: TopState; topModel?: string; decompose?: boolean; uncooked?: boolean; sig?: string; stack?: string[]; stackState?: string; finishTool?: string; takeout?: boolean; quad?: string; quadCrop?: Crop; lidModel?: string }
+    entry: { item: string; model?: string; label?: string; image?: string; dual?: boolean; top?: TopState; topModel?: string; decompose?: boolean; meal?: boolean; uncooked?: boolean; sig?: string; variant?: string; stack?: string[]; stackState?: string; finishTool?: string; takeout?: boolean; quad?: string; quadCrop?: Crop; lidModel?: string }
   ) => {
     e.preventDefault();
     // A bun is one item spawned as a bottom+top pair (handled client-side), so no
-    // half hint is needed here. A finished product from the tray is dragged as its
-    // single prop but, on drop, gets taken apart into its component stack. The
-    // server flags what's decomposable (tray products; meals from either source —
-    // a meal previews and sets down as its whole tray).
-    const decompose = !!entry.decompose;
+    // half hint is needed here.
+    //
+    // TAKING A PRODUCT APART IS AN EXPLICIT CHOICE, MADE ON THE TABLE. A finished
+    // product used to come apart into its components the moment it was dropped,
+    // which made it impossible to put the product itself anywhere — dropping a
+    // burger in the Restaurant Bag bagged a bun and a patty instead of a burger. So
+    // it drags as ITSELF (the normal place path) and lands whole; hovering it out on
+    // the table then offers Disassemble (cooking:prepDisassemble), which un-makes it
+    // in place, where the parts have somewhere to go.
+    // A MEAL is the exception and always un-makes on drop: it isn't one food but a
+    // tray arrangement, and setting it down IS its tray coming back (there is no
+    // single "meal prop" to place).
+    const decompose = !!entry.decompose && !!entry.meal;
     // the exact build variation this drag addresses: tray entries always carry a
     // sig; inventory PRODUCT entries carry one too (slot metadata). Plain
     // Ingredients-bar components have none — they reserve item-wide.
@@ -1364,6 +1461,7 @@ export default function Cooking({ data }: { data: any }) {
     const fromTab = source === "tray" || entry.sig !== undefined;
     dragSwitchTab(fromTab ? (entry.uncooked ? "uncooked" : "cooked") : "ingredients");
     setDragging(true);
+    dismissBarTip(); // the drag may have started ON the tooltip (Disassemble)
     setDragHint(decompose ? _L("cook.draghint_prep_apart") : _L("cook.draghint_prep_stack"));
     if (decompose) {
       // preview the whole component stack (peeked, nothing consumed) under the
@@ -1375,7 +1473,8 @@ export default function Cooking({ data }: { data: any }) {
       fetchNui("cooking:beginPrepPlace", {
         item: entry.item, model: entry.model,
         dual: entry.dual ? 1 : 0, top: entry.top, topModel: entry.topModel,
-        sig, stack: entry.stack, state: entry.stackState, finishTool: entry.finishTool,
+        sig, variant: entry.variant,
+        stack: entry.stack, state: entry.stackState, finishTool: entry.finishTool,
         // A made takeout box: the box pair + the food image drawn inside it, at the
         // exact source rect the admin cropped (the world quad honours it).
         // The two pictures are NOT interchangeable — `quad` is what's painted inside
@@ -1392,7 +1491,7 @@ export default function Cooking({ data }: { data: any }) {
       // endPrepPlace (the pill only lands in a bag; refused elsewhere, server-side).
       prepDragRef.current = { source, item: entry.item, model: null, pill: true, sig };
       fetchNui("cooking:beginPrepPlace", {
-        item: entry.item, source, sig,
+        item: entry.item, source, sig, variant: entry.variant,
         label: entry.label || prettyItem(entry.item), image: entry.image,
       });
       setGhost({ x: e.clientX, y: e.clientY, label: entry.label || prettyItem(entry.item), image: entry.image });
@@ -1646,6 +1745,9 @@ export default function Cooking({ data }: { data: any }) {
   const entryKey = (e: TrayEntry) => e.item + "|" + (e.sig || "") + "|" + (e.source || "tray");
   const tipEntry = barTip?.tray;
   const tipKey = tipEntry ? entryKey(tipEntry) : "";
+  // Taking a product apart is offered on the PLACED item's own tooltip out on the
+  // table (ProductTooltip), never here: a card in the bar has nowhere to put the
+  // parts, and the whole point of dragging one out is that it lands as itself.
   const tipActions =
     tipEntry && tipEntry.source !== "inv" ? (
       <div className="mt-2.5 flex items-center gap-1.5 border-t border-border/60 pt-2.5">
@@ -1734,6 +1836,8 @@ export default function Cooking({ data }: { data: any }) {
             <MealTooltip count={tip.count || 0} box={!!tip.box} bag={!!tip.bag} open={!!tip.open} boxing={!!tip.boxing}
               contents={tip.contents}
               onMake={onMealMake} onTakeOut={onBoxTakeOut} onPin={onTipPin} />
+          ) : madeProduct ? (
+            <ProductTooltip product={madeProduct} onDisassemble={onProductDisassemble} onPin={onTipPin} />
           ) : (
             <BuildTooltip ranked={ranked} selected={selected} onSelect={setSelectedOutput} onMake={onTipMake} onPin={onTipPin} />
           )}
@@ -1925,7 +2029,7 @@ export default function Cooking({ data }: { data: any }) {
                 else if (ing.kind === "finish") startFinish(e, ing);
                 else if (ing.kind === "bakemix") startBakeMix(e, ing);
                 else if (ing.kind === "condiment") startCondiment(e, ing);
-                else if (isPrep) startPrepDrag(e, "inv", { item: ing.item, model: ing.model, label: ing.label, image: ing.image, dual: ing.dual });
+                else if (isPrep) startPrepDrag(e, "inv", { item: ing.item, model: ing.model, label: ing.label, image: ing.image, dual: ing.dual, variant: ing.variant });
                 else startPlace(e, ing);
               };
               return (

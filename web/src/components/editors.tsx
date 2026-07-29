@@ -101,7 +101,15 @@ export type Step =
 export type ConsumeAnim = { id: string; label?: string; dict: string; clip: string; prop?: string; ms?: number };
 // What eating ONE serving of a food does. Anything left blank falls back to the
 // global `consume` setting, so a food only states what makes it different.
-export type FoodConsume = { hunger?: number | null; thirst?: number | null; anim?: string };
+export type FoodConsume = {
+  hunger?: number | null; thirst?: number | null;
+  /** Stress RELIEF (0-100). Drains a bar rather than filling one — what a DLC toy
+   *  out of a kid's meal does. Never inherits the global fallback. */
+  stress?: number | null;
+  anim?: string;
+  /** How many mouthfuls one serving takes. 1 = used in one go (a toy). */
+  bites?: number | null;
+};
 
 export type Food = {
   id?: string;
@@ -125,6 +133,10 @@ export type Food = {
    *  it does ("components" | "cook_input" | "pour_cup" | "steps"). */
   no_input?: string;
   duplicate_input?: string; invalid_models?: string[];
+  /** Set when the entry came from an installed DLC pack (its id). Such an entry
+   *  is contributed by that pack's resource at runtime and is never stored here,
+   *  so the panel shows it but never edits or saves it. */
+  dlc?: string;
 };
 
 export type Tool = {
@@ -138,6 +150,8 @@ export type Tool = {
   }[];
   trays?: { kind?: string; label?: string; tray_model?: string; output?: string; raw_model?: string; slots?: number; group?: string }[];
   valid?: boolean; missing?: string[]; invalid_models?: string[];
+  /** Contributed by an installed DLC pack (its id) — read-only here. */
+  dlc?: string;
 };
 
 export type IngredientDef = {
@@ -145,7 +159,13 @@ export type IngredientDef = {
   box_base?: boolean;
   halves?: { top_model?: string; bottom_model?: string };
   melts?: { applied_model?: string; melted_model?: string; melt_ms?: number };
+  /** What USING one does, for an ingredient that is a thing in its own right
+   *  rather than a component — a toy dropped in a bag is played with, not eaten.
+   *  Resolved by ConsumeSpecFor when no food claims the item. */
+  consume?: FoodConsume;
   valid?: boolean; missing?: string[]; invalid_models?: string[];
+  /** Contributed by an installed DLC pack (its id) — read-only here. */
+  dlc?: string;
 };
 
 // The cook methods valid for a station (fryer is always a basket fry).

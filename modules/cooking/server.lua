@@ -119,6 +119,21 @@ local function findAssembly(output)
     end
 end
 
+-- Does a STATION consume this item directly — a recipe's raw input (grill / fryer /
+-- oven) or a fountain tap's cup? Such a thing is dragged onto its station, never
+-- dropped into a build at the prep table, so it must not reach the prep COMPONENTS
+-- bar through the standalone-ingredient door even though it is a configured
+-- ingredient (which is what gives it its admin row, its price and its prep prop).
+-- A component genuinely used in a build still arrives via the assembly/craft lists.
+local function isStationInput(item)
+    if not item or item == "" then return false end
+    if RecipeByInput[item] then return true end
+    for _, d in ipairs(GetDrinks()) do
+        if d.input == item then return true end
+    end
+    return false
+end
+
 -- The craft a Restaurant Bag's metadata records, by id (the bag's variation identity).
 local function findCraft(id)
     if not id or id == "" then return nil end
@@ -163,17 +178,6 @@ local function finishForOutput(item)
     end
 end
 
--- The target's flavor entry a finished item's meta records (nil when the meta is
--- missing — e.g. stripped by a framework without slot metadata).
-local function metaFlavor(target, meta)
-    local l = type(meta) == "table" and meta[1]
-    local fid = type(l) == "table" and l.flavor or nil
-    if not fid or not target then return nil end
-    for _, fl in ipairs(target.flavors or {}) do
-        if fl.id == fid then return fl end
-    end
-end
-
 -- The finish a meta layer names by its recorded tool (collapsed scheme: the layer
 -- carries `tool`). Returns target, cfg, flavor — nil when the meta names no tool.
 local function finishFromMeta(meta)
@@ -183,19 +187,12 @@ local function finishFromMeta(meta)
     if t then return t, f, fl end
 end
 
--- Whether/how an INSTANCE is a finished product, metadata-driven. Prefers the tool
--- named in the meta (new collapsed scheme); else, ONLY if the meta records a flavor
--- (legacy meta had no `tool`), falls back to the item's finish output. Returns
--- target, cfg, flavor, or nil. A plain cooked_doughnut (no meta) returns nil, so it
--- is never rendered/treated as frosted — this is the guard the collapse depends on.
+-- Whether/how an INSTANCE is a finished product, resolved from the tool its
+-- metadata names. Returns target, cfg, flavor, or nil. A plain cooked_doughnut (no
+-- finish meta) returns nil, so it is never rendered/treated as frosted — this is
+-- the guard the whole one-item collapse depends on.
 local function finishFor(item, meta)
-    local t, f, fl = finishFromMeta(meta)
-    if t then return t, f, fl end
-    local l = type(meta) == "table" and meta[1]
-    if type(l) == "table" and l.flavor then
-        local t2, f2 = finishForOutput(item)
-        if t2 then return t2, f2, metaFlavor(t2, meta) end
-    end
+    return finishFromMeta(meta)
 end
 
 -- The item a serving-tray arrangement becomes (kitchen prep). Its metadata is the
@@ -591,26 +588,42 @@ end
 --   poolInvConsume-> spend `n` (default 1), mirroring poolInvCount's pool-first
 --                    choice. Call only once poolInvCount confirmed enough is held.
 -- (Both are yield-free, so a count immediately followed by a consume always agree.)
-local function poolInvCount(src, rid, item)
-    if isPoolItem(item) and (GetStockCount(rid, item) or 0) > 0 then
-        return GetStockCount(rid, item), true
-    end
+-- Which STOCK KEY (if any) the pool would spend for one ingredient. Returning the
+-- key rather than a boolean is what keeps count and consume in lockstep — they ask
+-- the same question and act on the same answer.
+--
+-- A VARIANT is stocked under its own key (`restaurant_toy:lardboy`), so it is spent
+-- from there first. It then falls back to the ingredient's GENERIC key before
+-- anyone's pockets: a toy can reach the larder without naming a face (a hand
+-- deposit, or the refund from a meal taken apart on an inventory that stripped the
+-- metadata), and such a unit should be usable as any toy rather than stranded.
+local function poolStockKey(rid, item, variant)
+    if not isPoolItem(item) then return nil end
+    local key = StockKey(item, variant)
+    if (GetStockCount(rid, key) or 0) > 0 then return key end
+    if variant and (GetStockCount(rid, item) or 0) > 0 then return item end
+    return nil
+end
+
+local function poolInvCount(src, rid, item, variant)
+    local key = poolStockKey(rid, item, variant)
+    if key then return GetStockCount(rid, key), true end
     return (Inventory.GetItemCount(src, item) or 0), false
 end
 
-local function poolInvConsume(src, rid, item, n)
+local function poolInvConsume(src, rid, item, n, variant)
     n = n or 1
-    if isPoolItem(item) and (GetStockCount(rid, item) or 0) > 0 then
-        RemoveStock(rid, item, n)
+    local key = poolStockKey(rid, item, variant)
+    if key then
+        RemoveStock(rid, key, n)
     else
         Inventory.RemoveItem(src, item, n)
     end
 end
 
--- The migrated form of a bare topped instance is a one-layer "self stack"
--- ({ { item = <the item>, top = ... } }, written by the tray-cheese migration and
--- by collect below). Returns that layer's topping — normalized via LayerTopping,
--- so a legacy numeric-cheese layer decodes too — or nil for any other meta shape.
+-- A bare topped instance is stored as a one-layer "self stack"
+-- ({ { item = <the item>, top = ... } }, written by collect below). Returns that
+-- layer's topping, or nil for any other meta shape.
 local function selfStackTop(item, meta)
     if type(meta) == "table" and #meta == 1 and type(meta[1]) == "table"
         and meta[1].item == item and not meta[1].stack then
@@ -621,21 +634,17 @@ end
 
 -- The ordered component layers a product decomposes into: its stored build stack
 -- (order, topping and half-split intact) or, failing that, the recipe's plain
--- components. Tolerates the older aggregated `count` metadata format; a legacy
--- layer's numeric cheese normalizes into `top` here (LayerTopping), so nothing
--- downstream ever reads the retired field.
+-- components.
 local function compsFromMeta(asm, meta)
     local comps = {}
     if type(meta) == "table" and #meta > 0 then
         for _, m in ipairs(meta) do
-            for _ = 1, (tonumber(m.count) or 1) do
-                -- a product layer keeps its own nested build stack (m.stack) so a
-                -- pizza inside a burger comes back out as THAT pizza, toppings intact;
-                -- a meal layer keeps its (dx, dy) tray offset so the arrangement survives
-                comps[#comps + 1] = { item = m.item, top = LayerTopping(m), half = m.half,
-                                      stack = (type(m.stack) == "table" and #m.stack > 0) and m.stack or nil,
-                                      dx = tonumber(m.dx), dy = tonumber(m.dy) }
-            end
+            -- a product layer keeps its own nested build stack (m.stack) so a
+            -- pizza inside a burger comes back out as THAT pizza, toppings intact;
+            -- a meal layer keeps its (dx, dy) tray offset so the arrangement survives
+            comps[#comps + 1] = { item = m.item, top = LayerTopping(m), half = m.half,
+                                  stack = (type(m.stack) == "table" and #m.stack > 0) and m.stack or nil,
+                                  dx = tonumber(m.dx), dy = tonumber(m.dy) }
         end
     else
         for _, c in ipairs(asm.components or {}) do comps[#comps + 1] = { item = c } end
@@ -825,6 +834,14 @@ local function drinkFlavor(meta)
     end
 end
 
+-- The VARIANT one instance of a multi-faced ingredient is (which of the five toys
+-- this `restaurant_toy` is), read off its build-stack metadata. Structurally the
+-- same trick as drinkFlavor above — one generic item, the identity in the meta —
+-- and nil for every ordinary ingredient, so nothing else changes shape.
+local function ingVariant(item, meta)
+    return IngredientVariantOf and IngredientVariantOf(item, meta) or nil
+end
+
 -- A flavor's capped-cup render (drinks always collect capped).
 local function drinkRender(dd)
     return { dd.model, GetSetting("drink_lid_model", "pickle_drink_lid_01") }
@@ -933,6 +950,28 @@ function LayerDisplay(l)
         out.imageCrop = imageCrop or out.imageCrop
         return out
     end
+    -- An INGREDIENT that says what using one does (a DLC toy) is a thing in its own
+    -- right, so it is held as ITSELF — the same prop the kitchen dropped in the bag,
+    -- not the eat animation's generic burger. Same mechanism the drink above uses
+    -- for its capped cup. Gated on the ingredient authoring a `consume` block: a
+    -- plain component (lettuce) is never used on its own and must not start putting
+    -- a lettuce leaf in anyone's hand.
+    local ing = IngredientDef(item)
+    if ing then
+        -- ONE ITEM, MANY FACES: the item is generic (`restaurant_toy`), so the
+        -- instance is only identifiable by its recorded variant — exactly like a
+        -- takeout box reading as its food and a drink as its flavor. Name and
+        -- picture it as the variant, or every toy in a bag lists as five
+        -- indistinguishable "Restaurant Toy" rows.
+        local v = ingVariant(item, l.stack)
+        if v then
+            out.label = v.label or out.label
+            if v.image then out.image = v.image end
+            if (v.consume or ing.consume) and v.model then out.props = { v.model } end
+            return out
+        end
+        if ing.consume and ing.model then out.props = { ing.model } end
+    end
     return out
 end
 
@@ -950,6 +989,13 @@ local function layerIdentity(l)
     elseif l.item == DrinkItem() then
         local flavor = type(l.stack) == "table" and l.stack[1] and l.stack[1].item
         if flavor then key = "drink:" .. tostring(flavor) end
+    else
+        -- a multi-faced ingredient is generic as an ITEM (one `restaurant_toy`), so
+        -- its variant IS its identity here — same reason a takeout box counts as its
+        -- food. Without this a bag holding a Kitty Kat and a Lardboy would show one
+        -- "Restaurant Toy ×2" row.
+        local iv = ingVariant(l.item, l.stack)
+        if iv then key = l.item .. ":" .. iv.id end
     end
     return key, (d and d.label) or GetItemLabel(l.item), (d and d.image) or GetItemImage(l.item), l.item
 end
@@ -979,6 +1025,16 @@ local function compSpec(c)
         if stack then spec.stack = stack end
         if c.stack then spec.sig = TraySig(c.stack) end
         spec.finishTool = ftcfg and ftcfg.tool
+        return spec
+    end
+    -- a multi-faced ingredient renders as the VARIANT this instance is (which toy),
+    -- resolved from the same one-layer meta the drink below uses. `sig` rides along
+    -- so a drag re-reserves this exact variant rather than any toy in the pool.
+    local iv = ingVariant(c.item, c.stack)
+    if iv then
+        if iv.model then spec.model = iv.model end
+        if c.stack then spec.sig = TraySig(c.stack) end
+        spec.variant = iv.id
         return spec
     end
     -- the generic drink item renders as its recorded flavor's capped cup — the
@@ -1022,7 +1078,7 @@ local function compSpec(c)
     end
     -- a nested product renders as its whole recorded stack (crust swapped to its
     -- cook state), not its single base model, and addresses that exact variation.
-    -- A stackless legacy instance of an assembled cook output (a cooked pizza
+    -- A stackless instance of an assembled cook output (a cooked pizza
     -- collected before stacks survived the cook) falls back to its BASE recipe
     -- stack so it never renders as a bare crust.
     local models = c.stack and stackModelsFromMeta(c.item, c.stack) or nil
@@ -1086,13 +1142,11 @@ local function stackComponents(meta)
     local order, counts, view = {}, {}, {}
     for _, l in ipairs(meta) do
         local key, label, image, item = layerIdentity(l)
-        for _ = 1, (tonumber(l.count) or 1) do
-            if not counts[key] then
-                order[#order + 1] = key; counts[key] = 0
-                view[key] = { item = item, label = label, image = image }
-            end
-            counts[key] = counts[key] + (l.half and 0.5 or 1.0)
+        if not counts[key] then
+            order[#order + 1] = key; counts[key] = 0
+            view[key] = { item = item, label = label, image = image }
         end
+        counts[key] = counts[key] + (l.half and 0.5 or 1.0)
     end
     local out = {}
     for _, key in ipairs(order) do
@@ -1112,13 +1166,11 @@ local function extrasComponents(item, meta)
     local order, counts, view = {}, {}, {}
     for _, l in ipairs(meta) do
         local key, label, image, lit = layerIdentity(l)
-        for _ = 1, (tonumber(l.count) or 1) do
-            if not counts[key] then
-                order[#order + 1] = key; counts[key] = 0
-                view[key] = { item = lit, label = label, image = image }
-            end
-            counts[key] = counts[key] + (l.half and 0.5 or 1.0)
+        if not counts[key] then
+            order[#order + 1] = key; counts[key] = 0
+            view[key] = { item = lit, label = label, image = image }
         end
+        counts[key] = counts[key] + (l.half and 0.5 or 1.0)
     end
     local asm = findAssembly(item)
     if not asm then
@@ -1395,6 +1447,47 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
             -- Finish tools already have their own applicator card above.
             if seen[comp] or finishTools[comp] or condimentTools[comp] or bakeMix[comp] or not ItemExists(comp) or isTrayItem(comp) then return end
             seen[comp] = true
+            -- An ingredient that names its OWN group is gated on it, like every other
+            -- kind of content here (recipes, crafts, finish tools, baking trays). A
+            -- component reached through a recipe is already covered by that recipe's
+            -- group; this catches the other door in — `GetPrepModels()` below, which
+            -- is how a standalone ingredient (a DLC toy) reaches the bar at all.
+            -- Ungrouped ingredients — every one the base ships — are unaffected, and a
+            -- restaurant with no group list carries everything as always.
+            do
+                local def = IngredientDef(comp)
+                if def and def.group and not RestaurantHasAccess(prop.restaurant_id, def.group) then return end
+            end
+
+            -- ONE ITEM, MANY FACES: a variants ingredient gets one card PER VARIANT.
+            -- Five cards beats a flavor picker on one card here — a cook picks the toy
+            -- by looking at it — and each face is STOCKED SEPARATELY, so each card
+            -- carries its own count. The chosen variant rides the drag and is recorded
+            -- on the reservation.
+            --
+            -- This has to run BEFORE the plain count below: that reads the ingredient's
+            -- GENERIC stock line, which for a per-face ingredient is empty by design
+            -- (you buy Lardboys, not "toys"), so the shared early-return would have
+            -- hidden every toy from a fully stocked larder.
+            local variants = IngredientVariants(comp)
+            if variants then
+                for _, v in ipairs(variants) do
+                    local vcount = poolInvCount(src, rid, comp, v.id)
+                    local vres = build and math.ceil(reservedUnits(build, "inv", comp, nil, v.id)) or 0
+                    local left = math.max(0, vcount - vres)
+                    -- an out-of-stock face is hidden exactly like an out-of-stock
+                    -- component: the bar lists what the kitchen can actually use
+                    if left > 0 then
+                        out[#out + 1] = { kind = "component", item = comp, variant = v.id,
+                                          label = v.label or GetItemLabel(comp),
+                                          image = v.image or GetItemImage(comp),
+                                          count = left,
+                                          model = v.model or itemModel(comp) }
+                    end
+                end
+                return
+            end
+
             local count = poolInvCount(src, rid, comp)
             if count <= 0 then return end
             -- Placed-but-not-yet-built parts are "spoken for": show what's left after
@@ -1424,7 +1517,9 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
                 for _, comp in ipairs(cr.components or {}) do addComp(comp) end
             end
         end
-        for comp in pairs(GetPrepModels()) do addComp(comp) end
+        for comp in pairs(GetPrepModels()) do
+            if not isStationInput(comp) then addComp(comp) end
+        end
     end
     return out
 end)
@@ -1513,7 +1608,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
             else
                 stackMeta = invVariationMeta(src, d.item, sig)
             end
-            -- An assembled input whose recorded stack ISN'T readable (a plain/legacy
+            -- An assembled input whose recorded stack ISN'T readable (a plain
             -- tray instance, or an inventory slot on a bridge without slot metadata)
             -- still cooks as its BASE recipe — synthesize that meta instead of losing
             -- it, or the collected product comes out stackless and renders as a bare
@@ -2005,9 +2100,9 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
             -- an assembled product (burger etc.) can be dropped on the prep table to
             -- be taken back apart into its component stack; a meal sets back down as
             -- its full tray (same un-make flow, tray + layout preserved). A finished
-            -- (frosted) instance is terminal — never decomposable, even on servers
-            -- whose DB still carries the legacy stack-assembly recipe for the same
-            -- output item (taking it apart would destroy the applied frosting).
+            -- (frosted) instance is terminal — never decomposable, even when an
+            -- assembly recipe exists for the same output item (taking it apart would
+            -- destroy the applied frosting).
             -- metadata-driven: a plain cooked_doughnut (no finish meta) resolves nil,
             -- so it is NOT finished/terminal even though cooked_doughnut is now also a
             -- frosting output item.
@@ -2074,7 +2169,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 -- burnt outputs are flagged so the NUI can sort them last and offer the bin
                 if state == "burnt" then e.burnt = true end
                 if rout then
-                    -- a legacy stackless instance (collected before stacks were
+                    -- a stackless instance (one collected before stacks were
                     -- preserved through the cook) still renders its BASE recipe
                     -- stack — same fallback the inventory path below uses
                     local models = (e.meta and stackModelsFromMeta(e.item, e.meta))
@@ -2089,6 +2184,14 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                     end
                     models = withContainer(rout, models, (state == "burnt") and rout.burnt_model or rout.cooked_model)
                     if models then e.stack, e.stackState = models, state end
+                end
+                -- A pure ASSEMBLY output (a burger — built, never cooked, so no recipe
+                -- owns it) renders its build tower too. It never needed one while such
+                -- a product could ONLY come apart on the table; now that it's set down
+                -- whole, the bare assembly model would put a lone bun bottom on the
+                -- table where the burger belongs.
+                if not e.stack and findAssembly(e.item) then
+                    e.stack = stackModelsFromMeta(e.item, e.meta)
                 end
             end
             -- a finished (frosted…) product renders by its recorded flavor and
@@ -2204,6 +2307,11 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                         models = withContainer(rout, models, (state == "burnt") and rout.burnt_model or rout.cooked_model)
                         if models then entry.stack, entry.stackState = models, state end
                     end
+                    -- a pure assembly output set down whole renders its build tower,
+                    -- not the bare assembly model (mirrors the tray branch above)
+                    if not entry.stack and findAssembly(item) then
+                        entry.stack = stackModelsFromMeta(item, v.meta)
+                    end
                 end
                 -- finished (frosted…) products render by their recorded flavor —
                 -- metadata-driven so a plain cooked_doughnut in inventory stays plain
@@ -2230,6 +2338,16 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 if v.meta and not ftarget and item ~= drinkItem and not entry.takeout and not entry.bag then
                     entry.extras = extrasComponents(item, v.meta)
                     entry.comps  = stackComponents(v.meta)
+                end
+                -- a bag / takeout box has no base recipe to diff against — just list
+                -- what's inside it. The TRAY path has always done this; the inventory
+                -- path did not, so the SAME bag described itself two different ways
+                -- depending on which store it came from: the inventory slot read
+                -- "Drumsticks" (BuildInvMeta's stackDescription, off the same layers)
+                -- while its kitchen card shipped no contents at all and fell through
+                -- to "No toppings".
+                if (item == bagItem or entry.takeout) and v.meta then
+                    entry.comps = stackComponents(v.meta)
                 end
                 -- an inventory-held meal can be set back down (un-made) at prep too
                 if item == mealItem then
@@ -2351,6 +2469,9 @@ lib.callback.register("pickle_restaurants:consume:mealSpecs", function(src, d)
         -- icon in the box on a diner's table. Everything else takes the display image.
         if not spec.takeout then spec.image = disp and disp.image or spec.image end
         spec.drink = disp and disp.drink or nil
+        -- USED, not eaten (a toy laid on the tray with the meal): the diner's
+        -- tooltip offers one action instead of bite/finish.
+        spec.play = ConsumeSpecFor(l.item, l.stack).play or nil
         spec.bitesLeft = bitesLeftFor(l.item, l.stack, l)
         spec.tipImage = disp and disp.image or spec.image
         spec.tipCrop  = disp and disp.imageCrop or nil
@@ -2456,11 +2577,15 @@ end
 -- reserve; nothing is pulled from the tray/inventory until Make, so this guards
 -- against reserving more than the player actually holds. `sig` (tray layers only)
 -- narrows the match to one build variation; nil matches any.
-function reservedUnits(b, source, item, sig)
+-- `variant` narrows to ONE face of a multi-faced ingredient: each is stocked
+-- separately, so reservations must be counted separately too (two placed Lardboys
+-- must not eat into what the bar reports for Kitty Kats). nil = any face.
+function reservedUnits(b, source, item, sig, variant)
     local n = 0
     for _, l in ipairs(b.layers) do
         if l.source == source and l.item == item
-            and (sig == nil or (l.sig or "") == sig) then
+            and (sig == nil or (l.sig or "") == sig)
+            and (variant == nil or l.variant == variant) then
             n = n + layerUnits(l)
         end
     end
@@ -2482,6 +2607,11 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     -- the pepperoni instance — tray or inventory slot — not whichever is on top);
     -- nil for plain Ingredients-bar components
     local sig = (type(d.sig) == "string") and d.sig or nil
+    -- WHICH FACE of a multi-faced ingredient this layer is (which toy). Re-validated
+    -- against the config — the NUI is untrusted, and an unknown id must not become a
+    -- layer that renders as nothing and names itself after a variant that doesn't
+    -- exist. An unrecognised id simply reserves a plain, unmarked instance.
+    local variant = IngredientVariantById(item, type(d.variant) == "string" and d.variant or nil)
 
     -- starting/continuing a build at this prop; a build at another prop is dropped
     -- (nothing was consumed, so there's nothing to return).
@@ -2507,9 +2637,11 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
         -- a plain raw component comes from the shared restaurant stock pool (personal
         -- inventory once dry) — only reserved here; consumed on Make. Reservations are
         -- per-cook, so two cooks can optimistically reserve the same units — the pool
-        -- (or inventory) re-checks on Make.
-        local needed = math.ceil(reservedUnits(b, "inv", item) + addUnits)
-        local have = poolInvCount(src, rid, item)
+        -- (or inventory) re-checks on Make. A multi-faced ingredient is counted and
+        -- reserved PER FACE: each toy is its own stock line at its own price.
+        local vid = variant and variant.id or nil
+        local needed = math.ceil(reservedUnits(b, "inv", item, nil, vid) + addUnits)
+        local have = poolInvCount(src, rid, item, vid)
         if have < needed then
             return { ok = false, error = _L("cook_missing_item") }
         end
@@ -2518,8 +2650,21 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     b.seq = (b.seq or 0) + 1
     -- the topping (if any) is resolved from the reserved instance's meta by `sig` in
     -- consumeLayers, so the reservation only needs item/half/sig.
+    --
+    -- The VARIANT is written straight onto the layer's nested `stack`, which is the
+    -- field every Make path already copies into the vessel's metadata — so a bagged
+    -- or trayed toy keeps its identity with no change to prepMakeMeal/Bag/Box.
+    -- Safe because it only ever lands on a layer with NO `sig`: consumeLayers
+    -- overwrites `stack` from the store only for signed (product) layers, and spends
+    -- a plain component by item alone. Every toy comes out of the same pool however
+    -- it is faced, which is exactly the point of one item.
+    -- `variant` is kept on the layer as well as in its metadata: the metadata is what
+    -- the finished vessel records, the field is what the POOL is spent by (its stock
+    -- key) and what reservations are counted against.
     b.layers[#b.layers + 1] = { id = b.seq, source = d.source, item = item,
-                                half = half, sig = sig }
+                                half = half, sig = sig,
+                                variant = (not sig) and variant and variant.id or nil,
+                                stack = (not sig) and variant and IngredientVariantMeta(variant.id) or nil }
     return { ok = true, id = b.seq }
 end)
 
@@ -2549,8 +2694,17 @@ lib.callback.register("pickle_restaurants:cooking:getRecipes", function(src, d)
     if not HasPerm(prop.restaurant_id, src, "cook") then return {} end
     local out = {}
     for _, asm in ipairs(GetAssembly()) do
-        local valid = ItemExists(asm.output)
-            and RestaurantHasAccess(prop.restaurant_id, asm.group) -- group-gated per restaurant
+        -- The OUTPUT is a kitchen PRODUCT and is deliberately never required to be an
+        -- installed inventory item — an assembled food lives in the cooked-items pool
+        -- and reaches a customer packed into a meal, bag or box (`__INSTALL/items/`
+        -- ships none of them, and BuildSyncPayload's assembly filter checks only the
+        -- COMPONENTS for exactly this reason). Requiring one here quietly dropped the
+        -- recipe from the prep guide: a stack of bun + fried chicken then ranked only
+        -- against the burger family and read "Still needs: Cooked Beef Patty", while
+        -- the Burger itself showed up purely because many frameworks happen to ship a
+        -- `burger` item. The build still WORKED — prepMakeStack trays the output — so
+        -- the only broken thing was the guide that offers it.
+        local valid = RestaurantHasAccess(prop.restaurant_id, asm.group) -- group-gated per restaurant
         local comps = {}
         for _, c in ipairs(asm.components or {}) do
             -- a component is a real item OR a cooked-pool product (a patty) — the latter
@@ -2559,9 +2713,12 @@ lib.callback.register("pickle_restaurants:cooking:getRecipes", function(src, d)
             comps[#comps + 1] = { item = c, label = GetItemLabel(c), image = GetItemImage(c) }
         end
         if valid then
+            -- a tray-only output has no inventory row to borrow art from, so fall back
+            -- to the picture the FOOD authors (the same source getCrafts uses)
             out[#out + 1] = {
                 output = asm.output, label = asm.label or GetItemLabel(asm.output),
-                image = GetItemImage(asm.output), components = comps,
+                image = GetItemImage(asm.output) or FoodImageUrl(FoodForItem(asm.output), nil),
+                components = comps,
             }
         end
     end
@@ -2689,14 +2846,16 @@ local function consumeLayers(src, b, id, layers)
 
     local trayUnits, invUnits = {}, {}
     for _, l in ipairs(layers) do
-        local k = l.item .. "|" .. (l.sig or "")
+        -- the VARIANT is part of the key: two toys are two stock lines at two
+        -- prices, so a Lardboy and a Kitty Kat must never aggregate into "2 toys"
+        local k = l.item .. "|" .. (l.sig or "") .. "|" .. (l.variant or "")
         local units = (l.source == "tray") and trayUnits or invUnits
-        units[k] = units[k] or { item = l.item, sig = l.sig, u = 0 }
+        units[k] = units[k] or { item = l.item, sig = l.sig, variant = l.variant, u = 0 }
         units[k].u = units[k].u + layerUnits(l)
     end
     local needTray, needInv = {}, {}
     for k, t in pairs(trayUnits) do needTray[k] = { item = t.item, sig = t.sig, n = math.ceil(t.u) } end
-    for k, t in pairs(invUnits) do needInv[k] = { item = t.item, sig = t.sig, n = math.ceil(t.u) } end
+    for k, t in pairs(invUnits) do needInv[k] = { item = t.item, sig = t.sig, variant = t.variant, n = math.ceil(t.u) } end
 
     for _, t in pairs(needTray) do
         if GetTrayCount(b.rid, id, t.item, t.sig) < t.n then
@@ -2706,9 +2865,10 @@ local function consumeLayers(src, b, id, layers)
     for _, t in pairs(needInv) do
         -- raw components come from the shared stock pool (personal inventory once
         -- dry); inventory-held products (with a build-stack signature) come from the
-        -- matching inventory slot. A pool item's variation is always plain.
-        local fromPool = isPoolItem(t.item) and (GetStockCount(b.rid, t.item) or 0) > 0
-        local have = fromPool and GetStockCount(b.rid, t.item)
+        -- matching inventory slot. A pool item's variation is always plain — except
+        -- for a multi-faced ingredient, whose face picks the stock key it spends.
+        t.key = poolStockKey(b.rid, t.item, t.variant)
+        local have = t.key and GetStockCount(b.rid, t.key)
             or invVariationCount(src, t.item, t.sig)
         if have < t.n then
             return nil, _L("cook_missing_components")
@@ -2716,8 +2876,11 @@ local function consumeLayers(src, b, id, layers)
     end
     for _, t in pairs(needTray) do RemoveTray(b.rid, id, t.item, t.n, t.sig) end
     for _, t in pairs(needInv) do
-        if isPoolItem(t.item) and (GetStockCount(b.rid, t.item) or 0) >= t.n then
-            RemoveStock(b.rid, t.item, t.n)
+        -- `t.key` was resolved in the check above, so the units verified are exactly
+        -- the units spent — re-resolving here could pick a different line if two
+        -- cooks raced the pool between the two loops.
+        if t.key and (GetStockCount(b.rid, t.key) or 0) >= t.n then
+            RemoveStock(b.rid, t.key, t.n)
         else removeInvVariation(src, t.item, t.sig, t.n) end
     end
     return true
@@ -2773,7 +2936,7 @@ end
 -- Does this layer sit on a boxable base? The box only takes builds whose bottom
 -- layer is (or derives from) a `box_base` ingredient (the pizza dough by default):
 -- the pile's bottom layer must be a box_base ingredient itself, a product whose
--- recorded build stack starts with one, or (stackless legacy instance) a product
+-- recorded build stack starts with one, or (stackless instance) a product
 -- whose base recipe's first component is one — any cook state.
 local function isBoxBase(item)
     local d = IngredientDef(item)
@@ -2814,14 +2977,22 @@ end
 -- the tray fallback would then hand the cook a SECOND copy of a meal that is
 -- already in their pockets. So ask CanCarryItem first where the inventory
 -- implements it: a yes means the add landed and we never touch the tray.
+-- A vessel that lands in POCKETS still changes what the restaurant can hand over
+-- (fulfillment reads staff inventories as the second half of the pool), but it never
+-- touches the tray — so nothing else flags the open tickets. Without this the bag is
+-- planned correctly and the register just never re-asks: the ticket stays "still
+-- cooking" until some unrelated tray edit happens to kick the flusher.
 local function giveVessel(src, rid, id, item, meta)
     if ItemExists(item) and Inventory.AddItem then
         local can = Inventory.CanCarryItem and Inventory.CanCarryItem(src, item, 1)
         if can ~= false then
             local before = Inventory.GetItemCount and (Inventory.GetItemCount(src, item) or 0) or nil
             Inventory.AddItem(src, item, 1, BuildInvMeta(meta, item))
-            if can == true then return "inv" end
-            if before and (Inventory.GetItemCount(src, item) or 0) > before then return "inv" end
+            if can == true then MarkOrdersDirty(rid) return "inv" end
+            if before and (Inventory.GetItemCount(src, item) or 0) > before then
+                MarkOrdersDirty(rid)
+                return "inv"
+            end
         end
     end
     AddTray(rid, id, item, 1, meta)
@@ -3149,9 +3320,8 @@ lib.callback.register("pickle_restaurants:cooking:prepDecompose", function(src, 
     local sig = (type(d.sig) == "string") and d.sig or nil
 
     -- A finished (frosted…) instance is terminal: the applied frosting can't be
-    -- recovered, so it never comes apart — checked on the meta (per-instance)
-    -- because a legacy stack-assembled instance of the same output item may
-    -- legitimately still decompose on servers whose DB keeps the old recipe.
+    -- recovered, so it never comes apart — checked per-INSTANCE on the meta, since a
+    -- stack-assembled instance of the same output item may legitimately decompose.
     local function isFinishedMeta(m)
         return type(m) == "table" and m[1] ~= nil and m[1].flavor ~= nil
     end
@@ -3209,18 +3379,25 @@ lib.callback.register("pickle_restaurants:cooking:prepDecompose", function(src, 
             AddTray(rid, id, c.item, 1, st)
         else
             local u = c.half and 0.5 or 1.0
-            local key = c.item
-            refund[key] = refund[key] or { item = c.item, tray = isTrayItem(c.item), units = 0 }
+            -- a multi-faced ingredient refunds the FACE it was: pulling a Lardboy
+            -- out of a meal must put a Lardboy back on the shelf, not a generic toy
+            -- someone could re-place as the dearer one.
+            local iv = ingVariant(c.item, st)
+            local vid = iv and iv.id or nil
+            local key = StockKey(c.item, vid)
+            refund[key] = refund[key] or { item = c.item, variant = vid,
+                                           tray = isTrayItem(c.item), units = 0 }
             refund[key].units = refund[key].units + u
         end
     end
-    for _, r in pairs(refund) do
+    for key, r in pairs(refund) do
         local n = math.ceil(r.units)
         -- a raw component pulled out of a decomposed product returns to the shared
-        -- stock POOL (symmetric with how it was consumed); tray products go to the
-        -- tray, anything else falls back to personal inventory
+        -- stock POOL (symmetric with how it was consumed, under the same stock key);
+        -- tray products go to the tray, anything else falls back to personal
+        -- inventory — which can only ever take the REAL item, never a variant key.
         if r.tray then AddTray(rid, id, r.item, n)
-        elseif isPoolItem(r.item) then AddStock(rid, r.item, n)
+        elseif isPoolItem(r.item) then AddStock(rid, key, n)
         else Inventory.AddItem(src, r.item, n) end
     end
 
@@ -3231,10 +3408,15 @@ lib.callback.register("pickle_restaurants:cooking:prepDecompose", function(src, 
     local parts = {}
     for _, c in ipairs(comps) do
         local st = compStack(c)
+        local iv = ingVariant(c.item, st)
         b.seq = (b.seq or 0) + 1
         b.layers[#b.layers + 1] = { id = b.seq, source = isTrayItem(c.item) and "tray" or "inv",
                                     item = c.item, half = c.half,
                                     top = (not st) and c.top or nil,
+                                    -- re-reserve the exact face that was just refunded,
+                                    -- so putting the meal straight back together spends
+                                    -- the same stock line it returned
+                                    variant = iv and iv.id or nil,
                                     sig = (st and isTrayItem(c.item)) and TraySig(st) or nil, stack = st }
         local spec = compSpec(c); spec.id = b.seq
         parts[#parts + 1] = spec

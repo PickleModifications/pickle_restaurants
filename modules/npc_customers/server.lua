@@ -138,7 +138,7 @@ end
 
 -- The admin-placed spawn point for this restaurant (metadata.npc_spawn), or nil.
 -- When set, clients start a new customer's walk-in HERE; when nil they fall back to
--- the legacy computed point (spawn_distance back along the queue line).
+-- the computed fallback point (spawn_distance back along the queue line).
 local function spawnPoint(r)
     return r and r.metadata and r.metadata.npc_spawn or nil
 end
@@ -414,7 +414,7 @@ end
 
 CreateThread(function()
     -- Wait for the DB caches (restaurants, next-ticket numbers) before creating any
-    -- order — the same gate admin/itemgen/core use.
+    -- order — the same gate admin/core use.
     while not RestaurantsReady do Wait(200) end
     while true do
         Wait(3000)

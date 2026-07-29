@@ -35,3 +35,38 @@ end
 function PhoneAppDescription()
     return _L("phone_app_description")
 end
+
+-- ─── closing the phone ────────────────────────────────────────────────────────
+-- `PhoneApp.Close()` (each client bridge defines it) puts the phone away. The
+-- doorstep hand-off is the caller: serving a delivery from the app means the phone is
+-- open and IN THE PED'S HAND as the knock starts, and its hold/put-away animation
+-- fights ours (modules/doorstep/client.lua).
+--
+-- Only lb-phone publishes an unambiguous close (`ToggleOpen(false)`), so the other
+-- bridges hand this helper the plausible export names and the first that doesn't raise
+-- wins, resolved once — the same treatment the Quasar push path gets. A missing export
+-- raises when CALLED, not when indexed, so pcall around the call is the only real test.
+--
+-- Events are the LAST resort and are fired every time rather than resolved: TriggerEvent
+-- succeeds whether or not anything is listening, so there is nothing to learn from it.
+-- Never list a TOGGLE here — on an already-closed phone a toggle would open it.
+local closeExport = {}   -- resource → export name, or false once every candidate failed
+
+function PhoneCloseVia(resource, candidates, events)
+    local resolved = closeExport[resource]
+    if resolved then
+        pcall(exports[resource][resolved], nil)
+        return true
+    end
+    if resolved == nil then
+        for _, name in ipairs(candidates or {}) do
+            if pcall(exports[resource][name], nil) then
+                closeExport[resource] = name
+                return true
+            end
+        end
+        closeExport[resource] = false
+    end
+    for _, ev in ipairs(events or {}) do TriggerEvent(ev) end
+    return false
+end

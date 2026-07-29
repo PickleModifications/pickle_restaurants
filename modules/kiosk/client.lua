@@ -16,21 +16,20 @@
 --  the fulfilment flow changes.
 --
 --  Everything geometry-shaped here (camera framing, cursor speed, DUI aspect) is a
---  best-guess default — TUNE IN-GAME with /pickle_kiosk_cam and /pickle_kiosk_res.
+--  best-guess default — TUNE IN-GAME.
 -- =============================================
 
 -- The DUI runs the built React app at the kiosk screen's SURFACE aspect. That comes from
 -- the `kiosk` render target in the ONE registry (core/shared.lua) — its upright config
 -- w/h swapped for a 90/270 turn (RenderTargetSurface) — so the order DUI and the brand
--- screen can never disagree. /pickle_kiosk_res tunes this copy live; bake the number back
--- into Config.RenderTargets' `kiosk` entry.
+-- screen can never disagree. Edit Config.RenderTargets' `kiosk` entry, not here.
 local KIOSK_RT = RenderTargetByKey("kiosk")
 local KIOSK_SW, KIOSK_SH = 1080, 1920
 if KIOSK_RT then KIOSK_SW, KIOSK_SH = RenderTargetSurface(KIOSK_RT) end
 local KIOSK = {
     w = KIOSK_SW, h = KIOSK_SH,
     -- Virtual-cursor speed relative to raw mouse-look delta (higher = faster).
-    -- TUNE IN-GAME with /pickle_kiosk_sens <n>.
+    -- TUNE IN-GAME.
     sensitivity = 0.5,
     -- How long (ms) to hold the framed screen on close while the page slides its brand
     -- cover back down over the menu, before we swap the texture to the idle brand

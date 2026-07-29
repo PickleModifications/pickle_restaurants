@@ -144,7 +144,9 @@ local function eatPile(idx, whole)
     ConsumeAnim(res.drink, res.label or pile.label, res.anim, res.props)
     local name = res.label or pile.label
     local remaining = res.bites and res.bites.left or 0
-    if remaining > 0 then
+    if res.play then
+        ShowNotification(_L("consume_played", name))
+    elseif remaining > 0 then
         ShowNotification(_L(res.drink and "consume_sipped_left" or "consume_bit_left", name, remaining))
     else
         ShowNotification(_L(res.drink and "consume_drank" or "consume_ate", name))
@@ -193,7 +195,7 @@ function RefreshMealView()
                 -- tipImage/tipCrop, not `image`: a takeout part's `image` is the
                 -- picture painted INSIDE the box, which is not what a card shows.
                 labels[i] = { label = spec.label, image = spec.tipImage or spec.image,
-                              crop = spec.tipCrop, drink = spec.drink,
+                              crop = spec.tipCrop, drink = spec.drink, play = spec.play,
                               bitesLeft = spec.bitesLeft }
                 break
             end
@@ -266,7 +268,8 @@ function OpenMealView(v, _contents)
             SendNUIMessage({ action = "diningHover", index = near,
                              x = tipX, y = tipY, label = l and l.label, image = l and l.image,
                              crop = l and l.crop,
-                             drink = l and l.drink, bitesLeft = l and l.bitesLeft })
+                             drink = l and l.drink, play = l and l.play,
+                             bitesLeft = l and l.bitesLeft })
             Wait(50)
             ::continue::
         end

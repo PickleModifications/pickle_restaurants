@@ -29,27 +29,11 @@ local FADE_MS = 400
 function VirtualFadeMs() return FADE_MS end -- StopCooking fades the exit with this
 function VirtualShellModel() return SHELL_MODEL end -- the admin placement preview spawns the same shell
 
--- Verbose session tracing. Toggle live in-game with /virtual_debug (registered at
--- the bottom of this file) so positions/entities can be reported without a
--- restart. Everything prints to BOTH F8 and the client console (txAdmin live
--- console mirrors it) prefixed [pickle_restaurants][virtual].
-local DEBUG = false
-local function vlog(fmt, ...)
-    if not DEBUG then return end
-    local ok, msg = pcall(string.format, fmt, ...)
-    print(("[pickle_restaurants][virtual] " .. (ok and msg or fmt)))
-end
-local function vpos(label, v)
-    if not DEBUG or not v then return end
-    vlog("%s = %.3f, %.3f, %.3f", label, v.x, v.y, v.z)
-end
-
 -- The open session: { vp, rid, sessionProp, shellEnt, stationEnts = {[type]=ent},
 -- cancelled }. `Opening` latches the whole enter flow (claim -> fade -> build ->
 -- OpenCookingStation) so a double-trigger can't build two environments.
 local Session = nil
 local Opening = false
-local Tuning = false -- /virtual_tune offset-tuning scene is up (blocks real opens)
 
 -- ─── env build / teardown ─────────────────────────────────────────────────────
 
@@ -107,29 +91,20 @@ local function buildEnv(rest, vp, liveMeta)
     -- don't tear down in here.
     local target = vp.metadata and vp.metadata.target
     if not target or not SHELL_STATIONS[target] then
-        vlog("^1ABORT^7 bad target=%s (point #%s)", tostring(target), tostring(vp.id))
         ShowNotification(_L("virtual_shell_missing"))
         return nil
     end
     local shellHash = LoadModelTimeout(SHELL_MODEL)
     if not shellHash then
-        vlog("^1ABORT^7 shell model '%s' not in cdimage / failed to load", SHELL_MODEL)
         ShowNotification(_L("virtual_shell_missing"))
         return nil
     end
 
     local anchor = rest.shell
-    vlog("building point #%s target=%s", tostring(vp.id), target)
-    vpos("shell anchor", anchor)
-    vlog("shell heading = %.1f", anchor.heading or 0.0)
     local shellEnt = spawnLocal(shellHash, vector3(anchor.x, anchor.y, anchor.z), anchor.heading or 0.0)
     if not shellEnt then
-        vlog("^1ABORT^7 shell CreateObject failed")
         return nil
     end
-    vpos("shell entity coords", GetEntityCoords(shellEnt))
-    vlog("shell entity=%s exists=%s visible=%s", tostring(shellEnt),
-        tostring(DoesEntityExist(shellEnt)), tostring(IsEntityVisible(shellEnt)))
 
     Session = { vp = vp, rid = vp.restaurant_id, shellEnt = shellEnt, stationEnts = {} }
 
@@ -139,18 +114,12 @@ local function buildEnv(rest, vp, liveMeta)
             local pos = GetOffsetFromEntityInWorldCoords(shellEnt, seat.offset.x, seat.offset.y, seat.offset.z)
             local ent = spawnLocal(hash, pos, ((anchor.heading or 0.0) + seat.heading) % 360.0)
             Session.stationEnts[stype] = ent
-            vlog("station %-13s model=%s offset=(%.2f,%.2f,%.2f)", stype,
-                PLACEABLE_MODELS[stype], seat.offset.x, seat.offset.y, seat.offset.z)
-            vpos("  -> world", pos)
-            vlog("  -> entity=%s exists=%s", tostring(ent), tostring(ent and DoesEntityExist(ent)))
         else
-            vlog("^3station %s model '%s' failed to load^7", stype, tostring(PLACEABLE_MODELS[stype]))
         end
     end
 
     local stationEnt = Session.stationEnts[target]
     if not stationEnt then
-        vlog("^1ABORT^7 target station '%s' entity missing after spawn", target)
         ShowNotification(_L("virtual_shell_missing"))
         return nil
     end
@@ -173,10 +142,6 @@ local function buildEnv(rest, vp, liveMeta)
     }
     Session.sessionProp = sessionProp
 
-    vlog("target station '%s' pose:", target)
-    vpos("  coords", pos)
-    vlog("  heading = %.1f", sessionProp.heading)
-    vpos("player ped", GetEntityCoords(PlayerPedId()))
 
     if target == "stovetop" and SpawnOvenDoors then SpawnOvenDoors(sessionProp, stationEnt) end
     if OnStationSpawned then OnStationSpawned(sessionProp) end
@@ -192,7 +157,6 @@ local function buildEnv(rest, vp, liveMeta)
     while not IsNewLoadSceneLoaded() and GetGameTimer() - t0 < 1500 do Wait(0) end
     local loaded = IsNewLoadSceneLoaded()
     NewLoadSceneStop()
-    vlog("scene load %s after %dms", tostring(loaded), GetGameTimer() - t0)
     return sessionProp
 end
 
@@ -200,27 +164,20 @@ end
 
 -- Interaction handler for a virtual point anchor (wired in main's SpawnProp).
 function OpenVirtualStation(vp)
-    if Tuning then return ShowNotification(_L("virtual_tuning_busy")) end
     if Opening or Session or (IsCookingOpen and IsCookingOpen()) then
-        vlog("open ignored: Opening=%s Session=%s cooking=%s", tostring(Opening),
-            tostring(Session ~= nil), tostring(IsCookingOpen and IsCookingOpen()))
         return
     end
     if IsSeated and IsSeated() then return end
     local rest = GetRestaurantById(vp.restaurant_id)
     if not rest or not rest.shell then
-        vlog("open rejected: restaurant #%s has no shell anchor", tostring(vp.restaurant_id))
         return ShowNotification(_L("virtual_no_shell"))
     end
-    vlog("=== open point #%s (restaurant #%s, target=%s) ===", tostring(vp.id),
-        tostring(vp.restaurant_id), tostring(vp.metadata and vp.metadata.target))
     Opening = true
 
     -- claim the point BEFORE fading so a taken station rejects instantly.
     -- OpenCookingStation skips its own claim for virtual props — this is the one.
     local claim = lib.callback.await("pickle_restaurants:cooking:openStation", false, { prop_id = vp.id })
     if not (claim and claim.ok) then
-        vlog("claim rejected: %s", tostring(claim and claim.error))
         Opening = false
         return ShowNotification((claim and claim.error) or _L("cook_station_busy"))
     end
@@ -256,8 +213,6 @@ function OpenVirtualStation(vp)
 
     local sessionProp = buildEnv(rest, vp, claim.metadata)
     if not sessionProp or enterInvalidated() then
-        vlog("^1abort after build^7 (sessionProp=%s invalidated=%s)",
-            tostring(sessionProp ~= nil), tostring(enterInvalidated()))
         return abort()
     end
 
@@ -267,7 +222,6 @@ function OpenVirtualStation(vp)
     if not (IsCookingOpen and IsCookingOpen()) then
         -- it declined (a competing open won during its yields): don't let the
         -- environment outlive the session that never started
-        vlog("^1abort^7: OpenCookingStation did not open")
         return abort()
     end
     if enterInvalidated() then
@@ -283,7 +237,6 @@ function OpenVirtualStation(vp)
     if ReplayActiveItemsFor then ReplayActiveItemsFor(vp.id) end
     DoScreenFadeIn(FADE_MS)
     Opening = false
-    vlog("=== open complete, faded in ===")
 end
 
 -- Called by StopCooking after the exit fade + camera/NUI teardown: remove the
@@ -331,10 +284,4 @@ AddEventHandler("onResourceStop", function(res)
     teardownEnv()
     if not IsScreenFadedIn() then DoScreenFadeIn(0) end
 end)
-
--- ─── debug ────────────────────────────────────────────────────────────────────
-
--- Read by the shared station camera (modules/camera) so it logs its own resolved
--- world position/target when a virtual session traces.
-function VirtualDebugOn() return DEBUG end
 

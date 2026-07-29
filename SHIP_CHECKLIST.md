@@ -16,7 +16,9 @@ These were fixed or confirmed in code this pass — listed so you don't re-check
   prep station now always saves/closes normally (this was the top ship-blocker).
 - **Legacy migration layer removed** — the entire pre-"unified menu" pipeline, the legacy
   `pickle_restaurant_recipes` SQL table + its `ALTER` guards, ~22 one-time `*_seeded`
-  backfills, and the itemgen grace-retain list. Live-table columns were folded into their
+  backfills, and the itemgen grace-retain list. The last shims went with the 1.0 sweep too:
+  the aggregated-`count` meta format, the pre-collapse no-`tool` finish fallback (with
+  `metaFlavor`), and the `TEMP_NPC_CONTEXT/` porting scratch. Live-table columns were folded into their
   `CREATE`s (`restaurants.groups`, `menu.variant`, orders `refunded`/`paid_account`/
   `redeemed`, standalone `accounts.bank`) — verified in code.
 - **Cooking numeric-cheese decode removed** — `LegacyCheeseItem`, `legacy_cheese_item`,
@@ -27,12 +29,14 @@ These were fixed or confirmed in code this pass — listed so you don't re-check
 - **XP integration dropped** — `bridge/xp` deleted (it was never called; the phone's
   achievements/leveling covers progression).
 - **All debug/tuning console commands removed** — every `/pickle_*` and `/virtual_*` debug/
-  calibration command plus their orphaned scaffolding (kept only the always-off internal
-  `debugForce`/`DEBUG` guards, which are inert). Bake any tuning into the config tables.
+  calibration command AND all of their scaffolding: the `debugForce`/`debugProps` preview
+  rigs (rendertarget + screens), the `virtual` vlog/vpos tracing and `VirtualDebugOn`, the
+  `stackdbg` layout dump, and both halves of the `DeliveryDebug` relay tracing. Nothing
+  inert is left behind. Bake any tuning into the config tables.
 - **NPC facial reactions wired** — a served customer walks off with a happy face, an impatient
   one with an angry face (`SetFacialIdleAnimOverride`).
-- **itemgen replaced by static `install/` files** — the module + `/restaurants_items` command
-  are gone; `install/{ox_inventory.lua, esx_items.sql, qbcore_items.lua, README.md}` define
+- **itemgen replaced by static `__INSTALL/` files** — the module + its command
+  are gone; `__INSTALL/items/{ox_inventory.lua, esx_items.sql, qbcore_items.lua}` define
   the exact item set: handout items (bag/meal/drink/receipt) + every raw input the kitchen
   consumes. Cooked/assembled foods are intentionally NOT items (they stay tray/pool
   intermediates, packaged into a container before sale).

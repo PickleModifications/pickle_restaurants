@@ -85,3 +85,13 @@ end
 --     resolves it authoritatively with GetPhoneBySource(src) server-side.
 function PhoneApp.Notify(_, _) end
 function PhoneApp.Number() return nil end
+
+-- Put the phone away for the doorstep hand-off (bridge/phone/shared.lua explains why).
+-- GKSPhone publishes no close export, so these are the plausible names with its close
+-- event as the fallback. Add yours here if your build differs.
+local CLOSE_EXPORTS = { "PhoneClose", "ClosePhone", "closePhone" }
+local CLOSE_EVENTS  = { "gksphone:CloseAllPhone" }
+
+function PhoneApp.Close()
+    PhoneCloseVia("gksphone", CLOSE_EXPORTS, CLOSE_EVENTS)
+end

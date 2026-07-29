@@ -130,11 +130,11 @@ end
 --   rot    0|90|180|270 clockwise turn applied so a correct image lands upright
 --   flipx / flipy  mirror to fix a back/upside-down UV (default false)
 -- Group-specific extras:
---   packaging/kiosk: debugGap (/pickle_brand_debug footprint), blackDefault
+--   packaging/kiosk: debugGap (layout footprint), blackDefault
 --                    (unbranded → solid black, not the baked placeholder), configKey
 --                    (borrow another target's brand config)
 --   screen/register: kind (menu|orders|register), prop_type (placed prop that drives
---                    it), gap (/pickle_screen_debug footprint)
+--                    it), gap (layout footprint)
 -- w/h are the UPRIGHT display aspect (see the field notes above). A 90/270 `rot` means
 -- the on-prop content is portrait/landscape-swapped from the texture's own pixels; the
 -- surface the DUI actually renders at is RenderTargetSurface(t) (w/h swapped for 90/270).

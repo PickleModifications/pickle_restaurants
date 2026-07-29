@@ -21,12 +21,10 @@
 --  any brand configured, swapping images as the player moves between restaurants and
 --  removing the replacement (restoring the original texture) when none is in range.
 --
---  Finding a texture's resolution: the numbers in TARGETS below define each texture's
---  aspect ratio. Run /pickle_brand_debug (no url) to spawn every branded model with a
---  CALIBRATION grid (a circle + WxH label) drawn on each — a squashed circle means the
---  aspect is wrong. /pickle_brand_res <key> <w> <h> re-sizes a texture's DUI live so
---  you can dial it in, then bake the final numbers in here. NOTE: keep these w/h in
---  sync with BRAND_TEXTURES in web/src/views/Management.tsx (the crop UI's aspects).
+--  Finding a texture's resolution: the w/h in the registry define each texture's
+--  aspect ratio, and an unbranded target paints a CALIBRATION grid (a circle + a WxH
+--  label) — a squashed circle means the aspect is wrong. The NUI crop UI reads the
+--  same numbers (BrandRenderTargets), so the two can never disagree.
 -- =============================================
 
 -- The branded textures this module paints are the "packaging" and "kiosk" render
@@ -36,12 +34,12 @@
 --   key/txd/txn — the config id, the model's txd, the texture inside it we replace
 --   w/h         — DUI resolution = the texture's real pixel aspect (rot turns it)
 --   rot/flipx/flipy — orientation brand.html applies (a pure canvas transform; it does
---                 NOT change what the owner crops). Tune with /pickle_brand_orient.
---   debugGap    — /pickle_brand_debug row footprint (the big kiosk needs more room)
+--                 NOT change what the owner crops).
+--   debugGap    — layout row footprint (the big kiosk needs more room)
 --   blackDefault / configKey — kiosk screens: black when unbranded, and the floor
 --                 kiosk borrows the wall kiosk's brand config.
--- The debug commands mutate w/h/rot on these entries live; bake the tuned numbers back
--- into Config.RenderTargets. flipx/flipy default nil (falsey) when omitted there.
+-- Edit w/h/rot in Config.RenderTargets, not here. flipx/flipy default nil (falsey)
+-- when omitted there.
 local TARGETS = RenderTargetsByGroup("packaging", "kiosk")
 local TARGET_BY_KEY, TARGET_BY_MODEL = {}, {}
 for _, t in ipairs(TARGETS) do TARGET_BY_KEY[t.key] = t; TARGET_BY_MODEL[t.txd] = t end
@@ -51,7 +49,6 @@ local TICK_MS = 1000   -- how often we re-pick the nearest restaurant
 
 -- forced state while debugging: a spec shown on EVERY target, pausing the nearest-
 -- restaurant logic. nil = normal production driver.
-local debugForce = nil  -- { url = "..." } | { calib = true } | nil
 
 -- ─── per-target DUI + runtime texture ────────────────────────────────────────
 
@@ -275,14 +272,9 @@ end
 -- across town from a rival's counter.
 local pinnedRid = nil
 
--- One pass of the production driver: force the debug spec on everything, else the
--- pinned restaurant, else the nearest branded one (nil = none in range → restore
--- the original textures).
+-- One pass of the production driver: the pinned restaurant, else the nearest
+-- branded one (nil = none in range → restore the original textures).
 local function driveOnce()
-    if debugForce then
-        for _, t in ipairs(TARGETS) do setTargetBrand(t, debugForce) end
-        return
-    end
     if pinnedRid then
         local r = Restaurants and Restaurants[pinnedRid]
         if r then return applyBrand(r) end
@@ -328,11 +320,10 @@ end
 -- Re-assert every replacement from scratch, forcing the image to re-push and — via
 -- setTargetBrand → rebindAfterPaint — the txd to re-bind once brand.html has PAINTED
 -- the image (not against the blank surface it would otherwise catch). Runs on the
--- sync handler the instant brand_images changes, plus /pickle_brand_reload. You still
+-- sync handler the instant brand_images changes. You still
 -- need the branded model to STREAM IN after the final rebind (cook/hold the item) —
 -- AddReplaceTexture only takes on txds streamed while it's active.
 function RefreshBrands()
-    if debugForce then return end -- don't fight an active debug session
     for _, t in ipairs(TARGETS) do
         removeReplacement(t) -- drop the stale binding so setTargetBrand re-binds fresh
         t.sig = nil          -- force the current image to re-push to the (warm) DUI
@@ -347,7 +338,7 @@ end
 -- No-op unless that target currently has a brand applied.
 function ReassertBrandFor(model)
     local t = model and TARGET_BY_MODEL[model]
-    if t and t.applied and not debugForce then
+    if t and t.applied then
         removeReplacement(t)
         applyReplacement(t)
     end
@@ -360,24 +351,13 @@ end
 -- (a blank/calibration frame never does), so t.cur is the active brand. Idempotent.
 RegisterNUICallback("rt:painted", function(d, cb)
     local t = d and d.key and TARGET_BY_KEY[d.key]
-    if t and t.dui and t.cur and not debugForce then
+    if t and t.dui and t.cur then
         removeReplacement(t)
         applyReplacement(t)
     end
     cb("ok")
 end)
 
--- Debug-preview cleanup scaffolding (the /pickle_brand_* tuning commands were
--- removed for ship; `debugForce` stays nil, so the guards below are inert).
-local debugProps  = {}
-
-local function clearDebug()
-    for _, e in ipairs(debugProps) do
-        if DoesEntityExist(e) then SetEntityAsMissionEntity(e, true, true); DeleteEntity(e) end
-    end
-    debugProps = {}
-    debugForce = nil
-end
 -- ─── teardown ────────────────────────────────────────────────────────────────
 
 AddEventHandler("onResourceStop", function(res)
@@ -386,5 +366,4 @@ AddEventHandler("onResourceStop", function(res)
         removeReplacement(t)
         if t.dui then DestroyDui(t.dui); t.dui = nil end
     end
-    clearDebug()
 end)

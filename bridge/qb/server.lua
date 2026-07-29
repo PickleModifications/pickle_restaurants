@@ -409,3 +409,27 @@ function Nourish(source, hunger, thirst)
     end
     TriggerEvent("pickle_restaurants:nourish", source, hunger, thirst)
 end
+
+-- Stress RELIEF (0-100 percentage of the bar), the counterpart to Nourish: it
+-- DRAINS a bar rather than filling one, which is why it isn't a fourth argument up
+-- there. Used by anything whose effect is calming rather than feeding — a DLC toy
+-- out of a kid's meal.
+--
+-- QBCore and QBox both keep stress as 0-100 player metadata and repaint the HUD
+-- from one event, exactly like the needs above (QBox runs through this bridge —
+-- qbx_core exposes the qb-core object we bound at the top of this file). We write
+-- the metadata AND fire `hud:client:UpdateStress`, which is what qb-smallresources'
+-- own relief path does, so a server using either sees the bar move immediately. The
+-- public event at the end is the supported hook for any other stress system.
+function Relax(source, stress)
+    stress = math.floor(tonumber(stress) or 0)
+    if stress <= 0 then return end
+    local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
+    if xPlayer then
+        local meta = xPlayer.PlayerData.metadata or {}
+        local s = math.max(0, (tonumber(meta.stress) or 0) - stress)
+        xPlayer.Functions.SetMetaData("stress", s)
+        TriggerClientEvent("hud:client:UpdateStress", source, s)
+    end
+    TriggerEvent("pickle_restaurants:relax", source, stress)
+end

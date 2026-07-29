@@ -183,10 +183,21 @@ Each module is a self-contained feature loaded by the `modules/**` glob. Key one
   true = go. The resident is client-local on purpose — no ped netcode, and nothing
   is left standing in the street for other players if the driver crashes mid-scene.
   `doorstep:point` grants nothing; it only answers where the door is, for the
-  assigned driver of that open delivery. `/pickle_doorstep` (admin) plays the whole
-  scene with NO order, ticket or item behind it — at the delivery door you're
-  standing at, else a rehearsed doorway 1.5m in front of you — so the `DOOR`
-  timings are tuned in one command instead of by driving a delivery (TUNE IN-GAME).
+  assigned driver of that open delivery. The scene's timings are the `DOOR` table
+  in `modules/doorstep/client.lua` (TUNE IN-GAME).
+  **The door carries the action itself, so a delivery is served without opening the
+  phone**: accepting a run ARMS a target option on that door (`ArmDoorstepTarget`,
+  called from `beginDriving`; it returns the point, which is also where the nav
+  marker's z comes from) and every ending disarms it (`EndDriveGen` → 
+  `DisarmDoorstepTarget`). Armed per RUN, never per placed prop — a standing option on
+  every invisible door would put a prompt on strangers' doorsteps for an order they
+  don't hold. Both entry points call ONE function, `ServeDelivery` (modules/phone) =
+  scene + `sales:completeOrder`; the door path passes no `mealSig`/`mealItem` (it has
+  no ticket on screen to read one off, and the pin is only ever a hint).
+  The scene CLOSES THE PHONE first (`PhoneApp.Close()`, defined per phone bridge —
+  lb-phone's `ToggleOpen(false)`, candidate exports + a close event elsewhere via
+  `PhoneCloseVia`): served from the app the phone is open and in the ped's hand, and
+  its put-away animation fights every clip in the hand-off.
 - `management` / `admin` — the boss/owner and admin panels (employees, roles, finances,
   settings, recipes).
 - `sales` / `npc_customers` — selling to players and NPC customers.
@@ -203,9 +214,8 @@ that paint them are filtered VIEWS of the registry
 in `register`/`kiosk`), and they size their DUIs with `RenderTargetSurface`. The NUI crop
 UI reads the SAME numbers: `BrandRenderTargets()` (the config w/h directly; `configKey`
 borrowers skipped) is synced into the admin + management payloads as `renderTargets` and
-consumed by `Branding.tsx` — NO more hardcoded `BRAND_TEXTURES`. The `/pickle_*_res|orient`
-debug commands mutate these entries live (orient rebuilds the DUI, since a 90/270 turn
-changes the surface); bake the tuned numbers back into `Config.RenderTargets`.
+consumed by `Branding.tsx` — NO more hardcoded `BRAND_TEXTURES`. Tune these numbers in `Config.RenderTargets` itself — a 90/270 turn changes the
+derived surface, so the DUI is rebuilt from it.
 
 - `rendertarget` — runtime **brand-texture replacement** via a DUI (`html/brand.html`);
   `AddReplaceTexture` is global per txd+txn, so only the nearest branded restaurant is
@@ -231,8 +241,7 @@ changes the surface); bake the tuned numbers back into `Config.RenderTargets`.
   `SendDuiMouseMove` at the surface pixel) drives the page; CEF renders its OWN cursor
   onto the surface (never a world-drawn sprite — that lives in a different projection and
   clicks would miss it). The order still becomes a normal ticket (`sales:kioskOrder`).
-  Camera framing / cursor speed / DUI aspect are `KIOSK` tunables (TUNE IN-GAME:
-  `/pickle_kiosk_cam`, `/pickle_kiosk_res`).
+  Camera framing / cursor speed / DUI aspect are `KIOSK` tunables (TUNE IN-GAME).
 - `register` — the STAFF POS register painted on the counter's `register_brand`
   screen. It is an **ALWAYS-ON board** (like the `screens` menu/orders boards): an idle
   driver picks the nearest counter's restaurant, keeps the `register_brand` texture
@@ -249,9 +258,8 @@ changes the surface); bake the tuned numbers back into `Config.RenderTargets`.
   `cancelOrder`; the live open-ticket list is forwarded into the DUI (`SendDuiMessage`,
   action `registerOrders`) off the `sales:orders` broadcast, for both the idle board and
   an open session. `ReassertRegister()` (from main's counter spawn) + `RefreshRegister()`
-  (from `ApplySync`) keep it bound/current. Camera/cursor tunables (TUNE IN-GAME:
-  `/pickle_register_cam`, `/pickle_register_sens`); `/pickle_register_res|orient` tune
-  the shared registry copy (see the render-target registry note below).
+  (from `ApplySync`) keep it bound/current. Camera/cursor tunables (TUNE IN-GAME);
+  its resolution/orientation live in the shared render-target registry (below).
   A VIRTUAL register (`prop_type = "virtual_register"`) is an invisible anchor with no
   screen to paint — placed like a seat (`StartVirtualRegisterPlacement` → ghost-ball
   gizmo → `saveVirtualRegister`), it keeps the ordinary fullscreen NUI register
@@ -260,9 +268,7 @@ changes the surface); bake the tuned numbers back into `Config.RenderTargets`.
   (`web/src/components/RegisterTickets.tsx`). Management stays a fullscreen NUI on both.
 - `screens` — the customer-facing DUI boards (`html/screens.html`), same replacement
   trick as `rendertarget` but the page is DYNAMIC and fed live data each tick. One
-  `SCREENS` entry per board (`txd`/`txn`/`w`/`h`/`rot`/`flip*`, TUNE IN-GAME:
-  `/pickle_screen_res`, `/pickle_screen_orient`, `/pickle_screen_debug`,
-  `/pickle_screen_state`):
+  `SCREENS` entry per board (`txd`/`txn`/`w`/`h`/`rot`/`flip*`, TUNE IN-GAME):
   **menu** (`pickle_screen_menu_01`/`s_m_brand`, the priced menu as a paged slideshow)
   and **orders** (`pickle_screen_orders_01`/`s_o_brand`, open tickets newest-first, live
   off the `sales:orders` broadcast). Each is driven from the NEAREST restaurant with that
@@ -307,11 +313,12 @@ changes the surface); bake the tuned numbers back into `Config.RenderTargets`.
   claim doesn't outlive them). Putting it out (G, `cookfx:extinguish`; requires the
   configured extinguisher item if it's installed, never consumed) destroys
   everything the station held. Settings live in `kitchen_fires` (Settings →
-  Kitchen fires); `/pickle_fire` (admin) lights/douses the nearest station through
-  the real `ignite()` so you don't have to burn food and wait to test one.
-- `itemgen` — `/restaurants_items` admin command exports ready-to-install item
-  definitions (ox_inventory / ESX SQL / QBCore) into `generated_items/` from the **live**
-  in-game config.
+  Kitchen fires).
+- `dlc` — the **DLC registry**. An add-on pack is its own resource that hands us a
+  content table; its content is read out of THAT resource and **never written to our
+  database**. Held in memory, overlaid on the three authored arrays at read time, and
+  gone the moment the pack stops — nothing to migrate, nothing to clean up.
+  See "DLC packs" below.
 
 ### Client interaction & NUI conventions
 
@@ -331,8 +338,7 @@ single `setView` message between views: `cooking`, `admin`, `management`, `order
 `NormalizeGroup` (trim + case-fold): group names are free text typed in one panel
 and typed again on a food in another, so "Bakery" / "bakery" / "Bakery " is a
 naming slip, not a distinction — and an exact match turns that slip into a
-restaurant that silently can't cook anything. `/pickle_groups <id>` (admin) prints
-a restaurant's stored groups against every group in use, marked ACCESS/blocked.
+restaurant that silently can't cook anything.
 Empty group list on a restaurant = access to everything (groups are an opt-in
 restriction). `admin:setGroups` must `SyncToClient(-1)` — the synced payload is
 group-filtered per restaurant, so without it the boards/kiosk/register/cooking bar
@@ -396,8 +402,7 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   layer tower via `compSpec`).
 - **Serving tray & meals (kitchen prep).** The prep bar's "Serving Tray" card (kitchen
   equipment, never gated on an inventory item — the `meal_item` setting's item, default
-  `meal`, is what gets *generated*, itemgen exports it; only `trayToInventory` requires
-  it installed) places `pickle_tray_01` + `pickle_tray_paper_01` on the table. Food dropped over the tray anchors where it lands on the paper (clamped
+  `meal`, is what gets *generated*; only `trayToInventory` requires it installed) places `pickle_tray_01` + `pickle_tray_paper_01` on the table. Food dropped over the tray anchors where it lands on the paper (clamped
   inside the rim); a pile on a tray is a normal client `PrepStacks` entry carrying
   `tid` + its `(dx, dy)` offset. `prepMakeMeal` consumes the arranged parts (the same
   `consumeLayers` path recipe makes use) and stores ONE meal whose metadata layers
@@ -497,8 +502,7 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   `{ item, flavor, flavorLabel, stack }` — `TraySig` appends `#flavor`, so flavors are
   separate variations end-to-end (replace-mode deletes the container+sheet props;
   finished items are deliberately NOT decomposable). Sync ships only `ItemExists`-valid
-  entries (`BuildSyncPayload` → client `Finishes` global); itemgen collects finish
-  tools/targets/outputs + `prep_models` keys. A sprinkles tool is one more config row —
+  entries (`BuildSyncPayload` → client `Finishes` global). A sprinkles tool is one more config row —
   no code. Finishes now HAVE a full admin-panel editor (admin Menu tab → New Finish;
   `FinishFields` in `web/src/components/editors.tsx` edits tool/tool_model/rub_dist/
   group/cost + a nested targets→flavors editor incl. per-flavor hex colour). Fed by
@@ -509,8 +513,7 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   `{ item, container_model, applied_model }` (each flavor's `container_01` holds the sauce,
   `applied_01` is what's left on the food — no separate sauce item). Sibling to the finish
   tools in wiring (synced as the client `Condiments` global via `BuildSyncPayload`; a
-  `kind = "condiment"` applicator card in `getIngredients`; itemgen exports the bottle
-  item; `ingredient_costs` prices it) but DIFFERENT in effect: a finish consumes a FINISHED
+  `kind = "condiment"` applicator card in `getIngredients`; `ingredient_costs` prices it) but DIFFERENT in effect: a finish consumes a FINISHED
   tray product and re-trays a decorated one, whereas a condiment adds a LAYER to an
   in-progress prep BUILD exactly like a pepperoni/pickle component — reserved via `prepAdd`
   (source nil, pool item), consumed at Make, riding along as a build-stack variation
@@ -578,7 +581,16 @@ THE ITEM COUNT before/after: no bridge's `Inventory.AddItem` returns anything, s
 trusting a return value would send every vessel to the tray.
 Because of that, POS fulfilment reads TWO stores: `VesselCount`/`VesselTopMeta`/
 `VesselVariations`/`VesselConsume` in `modules/sales/server.lua` union the tray pool
-with the vessels ON-DUTY EMPLOYEES are carrying (`vesselHolders`). That is the same
+with the vessels the restaurant's STAFF are carrying (`vesselHolders`). Who counts as
+staff is `vesselSources` → **`ResolvePerms`**, never an enumeration of stores: it was
+`EmployeeCache` + `owner_identifier`, which missed everyone who works a restaurant
+without being on its payroll. An ADMIN is the case that bites — they have every
+permission, so they cook, bag and ring up like an employee, but they hold no employee
+row and own nothing, so a bag in their hands was invisible and the ticket read "bag it
+or plate it up" while they stood at the till holding it. (The owner had the identical
+bug before being special-cased — management refuses to hire them, so they have no
+employee row either.) Asking the permission system is what stops the next such role
+needing its own special case. That is the same
 restaurant-wide pool by a different storage — the tray pool already spans every
 cook's tray — and without it, crafting a bag would quietly remove it from the POS.
 
@@ -612,6 +624,23 @@ hands over every one. `AnnotateOrders` offers meals AND bags in one `mealOptions
 (an option must both complete the order and actually carry something it asked for), so
 `ok` and `ready` now agree and one-tap Complete works. `VesselItem` rejects anything that
 isn't the meal or bag item, so a forged payload can never hand over an arbitrary item.
+
+**A takeout box is a SINGLE, not a coverage vessel — and it lives in a POCKET.**
+`giveVessel` puts all THREE crafted vessels straight into the maker's inventory, but
+only the meal and the bag fulfil as VESSELS (claimed for the units their layers
+cover). A box holds one food and IS the sellable unit — a `craft` line asks for the
+box item pinned to that food id (`c:<id>`) — so it fills a ticket as a loose single.
+The loose store used to be the cooked-items TRAY alone, which a made box only reaches
+when the item isn't installed or the cook's pockets were full: a boxed soup sitting in
+the cook's own inventory could never complete its own order, however ready the ticket
+read. `SingleCountMatch` / `SingleConsumeMatch` (`modules/sales/server.lua`) are
+therefore the loose store now — tray + staff-held, tray spent first for the same
+reason `VesselConsume` drains it first. Scoped to the box on purpose (`isHeldSingle`):
+a cook's personal drink or burger is their own, and only what this resource CRAFTS
+into a pocket belongs to the pool. `AnnotateOrders` plans each ticket once per vessel
+and now reads that store inside the planner, so the staff-inventory search is memoized
+for the pass (`holderMemo`) — never consulted by the consume paths, which must always
+see live inventory.
 - **Takeout box → `box_item` (`pickle_takeout_box_01` + `_02`).** Where every
   `kind = "bag"` FOOD (soup, salad — the non-stack miscellaneous foods) is now
   created; the bag used to be that vessel. Mechanically the pizza box's twin (`TAKEP`
@@ -664,6 +693,17 @@ not by item name: a generic vessel item is only told apart by what it holds, so 
 takeout box counts and reads as its FOOD (`craft:<id>`, the food's label + art) and a
 drink as its flavor. Grouping by item name would collapse a soup and a salad into two
 indistinguishable "Takeout Box" rows.
+
+**Both of `getTray`'s stores must describe a vessel the SAME way.** It lists the
+cooked-items tray AND inventory-held products, in two separate branches — and a bag or
+takeout box only ever got its `comps` (contents) on the TRAY branch. So the same bag
+described itself two different ways depending on which store it came from: its
+inventory slot read "Drumsticks" (`BuildInvMeta` → `stackDescription`, off exactly
+those layers) while its kitchen card shipped no contents at all and fell through to
+"No toppings". Anything added to one branch belongs in the other. On the NUI side a
+vessel is not a build: `isVessel`/`contentsSummary` (`web/src/views/Cooking.tsx`) make
+the card subtitle and the toppings row read its CONTENTS, since a packed vessel has no
+base recipe to diff against and its `extras` are always empty.
 **A serving is eaten in BITES (a drink, in SIPS).** `ConsumeSpecFor` resolves
 `bites` (per food → global `consume` fallback → 3, or 4 for a drink), and
 `consume:eat` takes ONE unless the caller passes `whole = true`. Progress is
@@ -730,6 +770,188 @@ the output). An assembled input placed to cook with no readable recorded stack g
 its BASE recipe meta SYNTHESIZED at `place` so the cooked product never comes out
 stackless (getTray/compSpec also fall back to the base stack for legacy stackless
 instances). Follow this pattern for any new food family.
+
+**Every raw STATION INPUT is also an ingredient entry.** A raw patty / drumstick /
+cut fries / nuggets / doughnut / cup was previously nothing but a key in
+`ingredient_costs` — buyable in Supplies, but with no row in Menu → Ingredients, no
+picture beside its price and no prep prop. An ingredient entry is what gives an item
+an admin-visible identity, so they are all in `DEFAULT_INGREDIENTS` now, mapped to the
+single-serving RAW props (`pickle_side_fries_01`, `pickle_chicken_drumstick_01`,
+`pickle_dough_unapplied_01`, … — the `_01` of each family; the recipe's own cook-state
+models are the in-basket/on-griddle piles instead). They must NOT become droppable
+prep components: `isStationInput` (`modules/cooking/server.lua`) filters the
+`GetPrepModels()` door in `getIngredients`, so a raw patty stays on its grill while a
+DLC toy still reaches the bar through it. Components genuinely used in a build arrive
+via the assembly/craft lists, which that guard never touches.
+
+## DLC packs
+
+An add-on pack (`pickle_restaurants_toys` is the first) is **its own resource**, and
+its content lives and dies with it. There is no DB table, no settings row and no
+migration: `modules/dlc/server.lua` holds a registry in memory and overlays it on
+`GetFoods()` / `GetTools()` / `GetIngredientsCfg()` — the ONE place the runtime reads
+the menu from. That single seam is why a pack needs no support anywhere else: recipe
+cache, derived assembly/crafts/prep-models, the cooking bar, the POS catalogue, sync
+validation, group filtering and the admin annotations all derive from those getters.
+`ConsumeAnims()`, `IngredientCosts()` (the new accessor — **use it, not
+`GetSetting("ingredient_costs")`**) and `RebuildItemImages()` take the same overlay.
+
+**The authored config always wins.** A pack entry whose id/item an admin has also
+authored is DROPPED, not appended — appending would double the entry and let a pack
+take over a `DerivedPrepModels` / `DerivedFoodById` key the server's own config owns.
+Same rule for costs, item art and clips (an admin can retune a pack's `consume_anims`
+entry by authoring one with the same id).
+
+**Pack content carries a `dlc` mark, and the three sanitizers DROP marked entries.**
+That is the guarantee, and it belongs on the way IN: the admin panel saves its menu
+lists whole, so without it a pack's food could be persisted into the settings table
+and outlive the pack that defines it. `Menu.tsx` splits marked entries out of its
+editable state for the same reason.
+
+**A DLC entry is READ-ONLY in the menu tabs — no editor, no delete.** Models, group,
+behaviour, the entry itself: all the pack's. The panel never prints a pack's PROP
+names either. Settings → DLC (`DlcList()`) is the pack inventory.
+
+**The one thing the server owns is PRICE, and it is edited in exactly one place:
+Settings → Ingredient Costs** (internal key `pricing`; the tab is LABELLED "Ingredient
+Costs"). Cost was never pack content — it is the `ingredient_costs` setting — so the
+editor lists a row for every packaged item at the pack's default and STORES only rows
+that differ from it (`packs` in `Pricing`). That rule is the whole design:
+ - seeding the editor from `settings.ingredient_costs` alone showed $0 for everything
+   a pack prices, and saving that back wrote a free toy over the pack's price;
+ - seeding its STATE from the effective map instead would author every pack default
+   the first time anything on that screen changed, freezing prices the pack should
+   still be able to update.
+Deleting an overridden row (or typing the pack's own number back) hands the price
+back to the pack. `buildAdminData` therefore sends BOTH `ingredientCosts` (effective,
+for display) and `dlcCosts` (the pack defaults alone, to compare against).
+A per-FACE key is not an item, so the item picker can neither resolve nor safely edit
+one: those rows render as a fixed identity (the toy's own name + art, cost only),
+resolved from the annotated ingredients the panel already has.
+
+`AnnotateIngredients` also carries `costKey`/`cost`/`defaultPrice` (per variant, on a
+COPIED array — never stamp annotations onto a pack's own tables), which is what makes
+an ingredient row show a default price at all; it previously computed neither.
+
+**Handshake, both start orders:** the pack calls
+`exports.pickle_restaurants:RegisterDLC(content)` on its own `onResourceStart` AND on
+our `pickle_restaurants:dlcRequest` (fired at our boot, covering "the pack was already
+running when we restarted"). Registration is idempotent by id. We watch
+`onResourceStop` **ourselves** rather than trusting a pack to unregister — a pack that
+crashed on start would never get the chance. Registered content is UNTRUSTED and goes
+through the same sanitizers the NUI's writes do.
+
+Merges are memoized on a shared `DlcRev` counter + the authored table's identity
+(`SetSetting` writes a fresh table): with no pack installed the authored array is
+handed straight back, and with one the merge rebuilds only on an actual change. This
+matters — the cooking engine polls `IngredientDef`/`MeltingToppingFor`, and
+`ResolveItemCost` walks the cost map per sellable.
+
+**Ingredients can now author `consume`**, resolved by `ConsumeSpecFor` when no FOOD
+claims the item. That is what makes a thing-in-its-own-right possible without a fourth
+authoring kind: a **toy** is an ingredient (item + prop, bought into the larder,
+dragged off the prep bar, dropped in a bag / box / serving tray like any component)
+that also says what USING one does. The block gained `stress` (RELIEF — it drains a
+bar rather than filling one, and deliberately never inherits the global `consume`
+fallback, which is the FOOD default) and now actually keeps `bites` (it was documented
+but silently stripped by `sanitizeConsume`).
+
+**Ingredients can also author `variants`** — the one-item consolidation rule applied
+to ingredients. A family of interchangeable things (the five kids-meal toys) is ONE
+installed item (`restaurant_toy`) whose variation rides in metadata; each variant has
+its own `id`/`label`/`model`/`image` and an optional `consume` layered over the
+ingredient's, so the shared parts are stated once. **The metadata shape is the
+DRINK's**: a nested one-layer stack `{ { item = <variant id> } }`
+(`IngredientVariantMeta`), which is why `TraySig` tells two toys apart for free and
+every store that already threads `stack` carries it — `prepAdd` writes it onto the
+reservation and `prepMakeMeal`/`Bag`/`Box` needed no change at all. That write is only
+safe on an UNSIGNED layer: `consumeLayers` overwrites `stack` from the store for
+signed (product) layers and spends a plain component by item alone, so every toy comes
+out of the same pool however it is faced — which is the point of one item.
+Readers: `IngredientVariantOf` (core) → `compSpec` (model), `LayerDisplay`
+(label/image/held prop), `layerIdentity` (a bag lists "Kitty Kat" and "Lardboy", not
+"Toy ×2"), `ConsumeSpecFor` (variant `consume` merged over the ingredient's — shared
+parts stated once, per-variant parts stated where they differ).
+
+**Faces are what every surface LISTS** — a single generic row answers none of the
+questions those surfaces exist for. The prep bar emits one card per variant
+(`getIngredients`; an out-of-stock face is hidden like any out-of-stock component).
+**The variant branch there MUST run before the plain `poolInvCount` early return** —
+that reads the ingredient's GENERIC stock line, which is empty by design once faces
+are stocked separately, so the shared `count <= 0` guard hid every toy from a fully
+stocked larder. Supplies shows a row per face. The admin Menu tab expands an
+ingredient into a row per face (`pushIng` in `Menu.tsx`), each carrying a "one of the
+`<item>` items" line so five rows never read as five items to install, and each
+pointing at its PARENT `index` so Edit/Delete act on the one authored entry that
+defines them all. The chosen id rides the drag (`beginPrepPlace` → part → `prepAdd`)
+and is re-validated server-side.
+
+**Fallback for a metadata-less instance** (bare ESX, a hand-spawned item): a
+variants-only ingredient authors no `model`, so `RebuildDerived` maps the item to the
+FIRST variant's prop, and `ConsumeSpecFor` falls back to the INGREDIENT's own block.
+Such a toy is generic — unnamed, average effect — but it renders, it works, and it is
+never a dud. Author the ingredient's `consume` as the middle of the variant range for
+exactly this reason.
+
+**STOCK KEYS: variants are stocked and priced PER FACE.** `StockKey(item, variant)` →
+`restaurant_toy:lardboy`; `SplitStockKey` reverses it and only reports a variant the
+ingredient actually declares, so an item whose name contains a colon can't be mistaken
+for one. This costs no schema change — `pickle_restaurant_stock.item` is a plain
+varchar in OUR table, never a foreign key into the framework's inventory.
+**Per-toy pricing is only meaningful with per-toy stock**: one generic line at one
+price would let a restaurant buy five $7 Smelly Kats and hand out five $14 Lardboys.
+`ingredient_costs` is therefore keyed by stock key, and Supplies shows a row per face.
+
+`poolStockKey(rid, item, variant)` is the ONE resolver — it returns the key to spend,
+so `poolInvCount` and `poolInvConsume` (both now taking an optional `variant`) can
+never disagree about which line they're looking at. Order: the face's own line →
+the ingredient's GENERIC line (a hand deposit, or a refund whose metadata was stripped;
+such a unit should be usable as any face rather than stranded) → personal inventory.
+`consumeLayers` puts the variant in its aggregation key and pins `t.key` during the
+CHECK loop so the units verified are the units spent — re-resolving in the spend loop
+could pick a different line if two cooks raced the pool. `reservedUnits` takes a
+variant so placed Lardboys don't eat into the Kitty Kat count. `prepDecompose` refunds
+under the same stock key it was spent from, so pulling a Lardboy out of a meal puts a
+Lardboy back.
+
+**A face's picture comes from the PACK, not the inventory.** An inventory resolves
+art by ITEM name, and a variant is not an item — there is no `lardboy` row for it to
+look up — so a variant's `image` is an absolute `nui://<pack>/…` url, served by the
+pack's own `files{}`. (The generic item's art can ride the DLC payload's
+`item_images` into `ItemImageCache`; that still does NOT reach the inventory's own
+slot rendering, which only its image folder can feed.) An ingredient's own `group`
+is a REAL access gate in `addComp` — the `GetPrepModels()` door is how a standalone
+ingredient reaches the bar, and it was the only content path with no group check.
+Ungrouped ingredients (every one the base ships) are unaffected. The Menu tab badges
+a face with its PARENT's `label` ("TOY") rather than the generic kind.
+
+**An ingredient with a `consume` block is SELLABLE** (`BuildSellableCatalog`) — the
+same marker that makes it usable makes it orderable, so a toy reaches the POS, the
+kiosk, the boards and the phone while a component (lettuce) never can. Assembly
+components are excluded belt-and-braces. A multi-faced one sells ONE LINE PER FACE
+(`restaurant_toy::lardboy`), priced from that face's stock key and carrying its own
+art — the takeout box's pattern. Fulfilment pins the face through the paired keys
+`variationKey` (`v:<id>`, read off the instance's metadata) / `lineVariationKey`, so
+a Lardboy line is filled by a bagged Lardboy and never by a Smelly Kat. Like every
+cooked food, a toy has no loose-pool store, so it reaches a customer inside a bag or
+on a meal tray.
+
+A per-face line is **bought, never carried**: deposit/withdraw move real inventory
+items, and the pocket item is generic — a deposit would have no face to record and a
+withdrawal would launder a dear toy into a cheap one. Both callbacks refuse a variant
+key (`mgmt_variant_not_movable`) and the Supplies row hides those buttons (`movable`).
+`ResolveItemCost` prices a bare variants item at its CHEAPEST face so it never reads
+as free.
+
+`spec.play` is DERIVED, not authored: relieves stress + feeds nothing ⇒ used, not
+eaten. It collapses the bag's "bite / finish it" sub-menu to one "Play with this" row,
+swaps the dining tooltip to a single button, changes the notification, and
+`LayerDisplay` returns the ingredient's own model as `props` so the ped holds the
+actual toy instead of the eat clip's generic burger. Stress reaches the framework
+through the bridge's new `Relax(source, amount)` (QB/QBox: `stress` metadata +
+`hud:client:UpdateStress`; ESX: `esx_status:remove` on `stress`; standalone: nothing),
+with the public `pickle_restaurants:relax` event as the hook for any other system —
+the exact shape `Nourish` already uses.
 
 ## Stack-height corrections
 

@@ -60,3 +60,14 @@ function PhoneApp.Number()
     local ok, num = pcall(function() return exports["lb-phone"]:GetEquippedPhoneNumber() end)
     return ok and num or nil
 end
+
+-- Put the phone away — the doorstep hand-off can't play with it in the ped's hand
+-- (see bridge/phone/shared.lua). lb-phone is the one phone with a documented, explicit
+-- close, so this bridge calls it directly instead of going through PhoneCloseVia.
+-- The IsOpen check is its OWN pcall: on a build that doesn't publish it, one shared
+-- pcall would swallow the close as well.
+function PhoneApp.Close()
+    local ok, open = pcall(function() return exports["lb-phone"]:IsOpen() end)
+    if ok and open == false then return end
+    pcall(function() exports["lb-phone"]:ToggleOpen(false) end)
+end

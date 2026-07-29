@@ -60,15 +60,15 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
             that apply things — condiments, finishes). Both drive the same Menu
             component, scoped to which kinds it shows/creates. */}
         <TabsContent value="food" className="flex min-h-0 flex-1 flex-col">
-          <Menu scope="food" foods={foods} tools={tools} ingredients={menuIngredients} defaults={data?.defaults} settings={settings} boxQuad={data?.boxQuad} items={items} groups={groups} onSaved={refresh} />
+          <Menu scope="food" foods={foods} tools={tools} ingredients={menuIngredients} defaults={data?.defaults} settings={settings} boxQuad={data?.boxQuad} items={items} groups={groups} ingredientCosts={data?.ingredientCosts} onSaved={refresh} />
         </TabsContent>
 
         <TabsContent value="ingredients" className="flex min-h-0 flex-1 flex-col">
-          <Menu scope="ingredients" foods={foods} tools={tools} ingredients={menuIngredients} defaults={data?.defaults} settings={settings} boxQuad={data?.boxQuad} items={items} groups={groups} onSaved={refresh} />
+          <Menu scope="ingredients" foods={foods} tools={tools} ingredients={menuIngredients} defaults={data?.defaults} settings={settings} boxQuad={data?.boxQuad} items={items} groups={groups} ingredientCosts={data?.ingredientCosts} onSaved={refresh} />
         </TabsContent>
 
         <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">
-          <Settings settings={settings} items={items} groups={groups} onSaved={refresh} appTheme={appTheme} onAppTheme={setAppTheme} phoneTheme={phoneTheme} onPhoneTheme={setPhoneTheme} />
+          <Settings settings={settings} items={items} groups={groups} dlcs={data?.dlcs} ingredients={menuIngredients} dlcCosts={data?.dlcCosts} onSaved={refresh} appTheme={appTheme} onAppTheme={setAppTheme} phoneTheme={phoneTheme} onPhoneTheme={setPhoneTheme} />
         </TabsContent>
       </Tabs>
     </Panel>

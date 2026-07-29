@@ -53,13 +53,6 @@ function StartStationCamera(prop)
     local camPos = localToWorld(prop, ent, cfg.pos)
     local lookAt = localToWorld(prop, ent, cfg.lookAt)
 
-    if VirtualDebugOn and VirtualDebugOn() then
-        print(("[pickle_restaurants][virtual] camera for '%s' (ent=%s exists=%s): "
-            .. "pos %.2f,%.2f,%.2f  lookAt %.2f,%.2f,%.2f  fov %.0f")
-            :format(tostring(prop.prop_type), tostring(ent), tostring(ent and DoesEntityExist(ent)),
-                camPos.x, camPos.y, camPos.z, lookAt.x, lookAt.y, lookAt.z, cfg.fov))
-    end
-
     local cam = CreateCamWithParams("DEFAULT_SCRIPTED_CAMERA",
         camPos.x, camPos.y, camPos.z, 0.0, 0.0, 0.0, cfg.fov, false, 0)
     PointCamAtCoord(cam, lookAt.x, lookAt.y, lookAt.z)

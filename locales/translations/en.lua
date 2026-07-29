@@ -158,8 +158,6 @@ Language["en"] = {
     -- is owed and persisted, and pays out automatically when they next log in.
     ["order_cancelled_refund_pending"] = "Ticket #%d cancelled. The customer is offline, so their refund is paid on their next login.",
     ["order_refund_failed"] = "Couldn't refund that ticket. Nothing was charged twice. Try again.",
-    -- Admin diagnostic: the /pickle_delivery_debug toggle's confirmation.
-    ["delivery_debug"] = "Delivery debug tracing is now %s. Traces print to the server console.",
     -- Phone push notifications (companion app): one title/body pair per order state.
     -- NEVER put ~x~ GTA colour tokens in these; the phone can't render them.
     ["phone_order_fallback"] = "Your order",
@@ -197,6 +195,8 @@ Language["en"] = {
     ["place_door_placed"] = "Delivery door placed.",
     ["place_door_fail"] = "Failed to place delivery door.",
     ["door_too_far"] = "Get to the door before handing the order over.",
+    -- the target option on the door itself, while a run to it is in progress
+    ["door_hand_over"] = "Hand the order over",
     ["door_handoff_failed"] = "Nobody came to the door. Try again.",
     ["place_seat_tray_hint"] = "Now place the meal tray spot on the table. Cancel to work it out automatically.",
     ["place_seat_exit_hint"] = "Now place where they stand up. Cancel to stand up in place.",
@@ -233,7 +233,6 @@ Language["en"] = {
     ["virtual_point_removed"] = "This station was removed.",
     ["virtual_shell_missing"] = "Kitchen shell model missing. Is pickle_restaurants_assets running?",
     ["virtual_shell_moved"] = "The kitchen shell was moved. Step back in.",
-    ["virtual_tuning_busy"] = "Finish the offset tuning session first.",
     ["virtual_tune_select"] = "Select station",
     ["virtual_tune_move"] = "Move (shell-local)",
     ["virtual_tune_rotate"] = "Rotate",
@@ -522,6 +521,8 @@ Language["en"] = {
     ["cook.collapse_row"] = "Collapse to one row",
     ["cook.collect_now"] = "Collect now",
     ["cook.confirm"] = "Confirm?",
+    ["cook.finished_item"] = "Finished Item",
+    ["cook.disassemble"] = "Disassemble",
     ["cook.discard"] = "Discard",
     ["cook.discard_burnt"] = "Discard burnt (%s)",
     ["cook.done"] = "Done",
@@ -610,7 +611,7 @@ Language["en"] = {
     ["cook.trayhint_burnt"] = "Burnt. Discard it below, or keep it in your inventory.",
     ["cook.trayhint_cook_fryer"] = "Drag into the fryer basket to cook it.",
     ["cook.trayhint_cook_oven"] = "Drag into an open oven door to bake it.",
-    ["cook.trayhint_decompose"] = "Drag onto the table to take it apart, or stack it as a layer.",
+    ["cook.trayhint_decompose"] = "Drag onto the table to set it down, or stack it as a layer. Hover it there to take it apart.",
     ["cook.trayhint_in_inventory"] = "In your inventory, ready to stock or sell.",
     ["cook.trayhint_meal"] = "Drag onto the table to set the meal down, exactly as it was arranged.",
     ["cook.trayhint_still_raw"] = "Still raw. Cook it at the %s.",
@@ -892,7 +893,7 @@ Language["en"] = {
     ["settings.profit_margin"] = "Default profit margin %%",
     ["settings.profit_margin_hint"] = "Menu prices default to an item's ingredient cost plus this margin. Bosses can override per-restaurant.",
     ["settings.pricing_title"] = "Ingredient Costs",
-    ["settings.pricing_desc"] = "What each raw ingredient costs the restaurant to buy. Drives restock spend and the default menu price (cost + profit margin).",
+    ["settings.pricing_desc"] = "What each raw ingredient costs the restaurant to buy. Drives restock spend and the default menu price (cost + profit margin). Items from a DLC are listed at the pack's price — change one and it becomes yours; delete it to go back to the pack's.",
     ["settings.no_costs"] = "No ingredient costs set.",
     ["settings.fill_time"] = "Fill time (ms)",
     ["settings.drink_color"] = "Flavor color",
@@ -1396,5 +1397,32 @@ Language["en"] = {
     ["dining.take_sip"] = "Take a sip",
     ["dining.finish_food"] = "Eat all of it",
     ["dining.finish_drink"] = "Drink all of it",
+    ["dining.play_with"] = "Play with it",
     ["dining.hint"] = "Hover what you want — ESC to put the meal away",
+
+    -- Things that are USED rather than eaten (a DLC toy out of a kid's meal).
+    ["consume_played"] = "You play with the %s.",
+    ["consume_pick_use"] = "Play with this",
+
+    -- ── DLC packs (Settings → DLC, modules/dlc) ──────────────────────────────
+    ["settings.group_dlc"] = "DLC",
+    ["settings.dlc_title"] = "Installed DLC",
+    ["settings.dlc_desc"] = "Add-on packs found on this server. A pack's content is read from its own resource, never stored here — stop the resource and everything it added disappears.",
+    ["settings.dlc_none"] = "No DLC packs installed. Drop one into your resources folder, ensure it, and it appears here.",
+    ["settings.dlc_none_hint"] = "A pack must start AFTER (or alongside) pickle_restaurants; either order works.",
+    ["settings.dlc_by"] = "by %s",
+    ["settings.dlc_resource"] = "Resource",
+    ["settings.dlc_adds"] = "Adds",
+    ["settings.dlc_foods"] = "Food & Drinks",
+    ["settings.dlc_tools"] = "Tools",
+    ["settings.dlc_ingredients"] = "Ingredients",
+    ["settings.dlc_readonly"] = "Editable in the pack, not here.",
+    ["menu.dlc_badge"] = "DLC",
+    ["menu.dlc_section"] = "From DLC",
+    -- One face of a multi-faced ingredient: all faces are one installed item and one
+    -- authored entry, but the kitchen and the larder deal in faces, so they're listed.
+    ["menu.variant_of"] = "One of the %s items",
+    -- A per-variant stock line (one toy) can't be moved between a pocket and the
+    -- larder: the inventory item is generic, so there'd be no face to record.
+    ["mgmt_variant_not_movable"] = "These are bought by the crate, not carried — buy them into the larder instead.",
 }

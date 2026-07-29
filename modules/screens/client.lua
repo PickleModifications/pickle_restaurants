@@ -24,16 +24,14 @@
 --  different model AND a different texture, so they never collide with each other or
 --  with the packaging brands.
 --
---  Aspect + orientation are TUNED IN-GAME like the brand textures: /pickle_screen_res
---  and /pickle_screen_orient (plus /pickle_screen_debug to spawn every screen on a wall
---  with live data), then bake the numbers into SCREENS below.
+--  Aspect + orientation are TUNED like the brand textures: in the ONE render-target
+--  registry (core/shared.lua), which SCREENS below is a filtered view of.
 -- =============================================
 
 -- The menu + orders boards are the "screen" render targets — a filtered VIEW of the
 -- ONE registry in core/shared.lua (`Config.RenderTargets`), so their resolution +
 -- orientation live in exactly one place. Each entry carries key/kind/prop_type/txd/txn/
--- w/h/rot/gap; the /pickle_screen_res|orient commands mutate w/h/rot on them live (bake
--- the tuned numbers back into Config.RenderTargets).
+-- w/h/rot/gap — edit them in Config.RenderTargets, not here.
 -- NOTE: the counter's `register_brand` screen is NO LONGER a screen here — the register
 -- is now the cashier's interactive POS DUI (modules/register), which owns that texture.
 local SCREENS = RenderTargetsByGroup("screen")
@@ -43,7 +41,6 @@ for _, t in ipairs(SCREENS) do SCREEN_BY_KEY[t.key] = t; SCREEN_BY_MODEL[t.txd] 
 local TICK_MS = 1000   -- driver cadence: re-pick nearest + re-push changed data
 
 -- forced state while debugging (a fixed rid shown on every screen), else nil.
-local debugForce = nil  -- { rid = <id> } | nil
 
 -- Live open-order lists, per restaurant, projected for the orders board and kept
 -- current by the sales orders broadcast below. Seeded once per restaurant the first
@@ -249,7 +246,7 @@ end
 
 local function driveOnce()
     for _, t in ipairs(SCREENS) do
-        local r = debugForce and Restaurants[debugForce.rid] or nearestFor(t)
+        local r = nearestFor(t)
         driveScreen(t, r)
     end
 end
@@ -291,7 +288,7 @@ end)
 -- catch. Idempotent; only fires for a board that has content.
 RegisterNUICallback("screen:painted", function(d, cb)
     local t = d and d.key and SCREEN_BY_KEY[d.key]
-    if t and t.dui and t.applied and not debugForce then
+    if t and t.dui and t.applied then
         removeReplacement(t); applyReplacement(t)
     end
     cb("ok")
@@ -305,7 +302,7 @@ end)
 -- restaurant yet (the DUI shows its warm frame until the next tick pushes real data).
 function ReassertScreenFor(model)
     local t = model and SCREEN_BY_MODEL[model]
-    if not t or debugForce then return end
+    if not t then return end
     ensureDui(t)
     applyReplacement(t)   -- remove+add path is inside rebindAfterPaint below
     rebindAfterPaint(t)   -- re-bind against the painted surface while the prop exists
@@ -315,7 +312,6 @@ end
 -- and then calls this (mirroring RefreshBrands): re-push the current data and re-bind
 -- each active screen while its freshly-spawned prop exists.
 function RefreshScreens()
-    if debugForce then return end
     for _, t in ipairs(SCREENS) do t.sig = nil end -- force a re-push with fresh data
     driveOnce()
     for _, t in ipairs(SCREENS) do
@@ -323,17 +319,6 @@ function RefreshScreens()
     end
 end
 
--- Debug-preview cleanup scaffolding (the /pickle_screen_* tuning commands were
--- removed for ship; `debugForce` stays nil, so the guards below are inert).
-local debugProps  = {}
-
-local function clearScreenDebug()
-    for _, e in ipairs(debugProps) do
-        if DoesEntityExist(e) then SetEntityAsMissionEntity(e, true, true); DeleteEntity(e) end
-    end
-    debugProps = {}
-    debugForce = nil
-end
 -- ─── teardown ────────────────────────────────────────────────────────────────
 
 AddEventHandler("onResourceStop", function(res)
@@ -342,5 +327,4 @@ AddEventHandler("onResourceStop", function(res)
         removeReplacement(t)
         if t.dui then DestroyDui(t.dui); t.dui = nil end
     end
-    clearScreenDebug()
 end)

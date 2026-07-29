@@ -395,3 +395,20 @@ function Nourish(source, hunger, thirst)
     if thirst > 0 then TriggerClientEvent("esx_status:add", source, "thirst", thirst * 10000) end
     TriggerEvent("pickle_restaurants:nourish", source, hunger, thirst)
 end
+
+-- Stress RELIEF (0-100 percentage of the bar), the counterpart to Nourish: it
+-- DRAINS a bar rather than filling one, which is why it isn't a fourth argument up
+-- there. Used by anything whose effect is calming rather than feeding — a DLC toy
+-- out of a kid's meal.
+--
+-- Stress is not part of base ESX. Where a server has it, it is almost always
+-- another esx_status entry, so we remove from it the same way we add to hunger; on
+-- a server without one the event goes nowhere and using the item still works. The
+-- public event is the supported hook for any other stress system — handle
+-- `pickle_restaurants:relax` instead of editing this bridge.
+function Relax(source, stress)
+    stress = math.floor(tonumber(stress) or 0)
+    if stress <= 0 then return end
+    TriggerClientEvent("esx_status:remove", source, "stress", stress * 10000)
+    TriggerEvent("pickle_restaurants:relax", source, stress)
+end

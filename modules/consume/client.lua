@@ -139,8 +139,12 @@ function ConsumeLayer(vessel, index, whole)
     ConsumeAnim(res.drink, res.label, res.anim, res.props)
     -- Say what happened: a mouthful with more to come reads differently from the
     -- last one, and without the count a bite looks like a no-op on a big serving.
+    -- A thing that is USED rather than eaten (a toy) is never part-finished — it is
+    -- always the one-and-done line, whatever `bites` says.
     local left = res.bites and res.bites.left or 0
-    if left > 0 then
+    if res.play then
+        ShowNotification(_L("consume_played", res.label))
+    elseif left > 0 then
         ShowNotification(_L(res.drink and "consume_sipped_left" or "consume_bit_left", res.label, left))
     else
         ShowNotification(_L(res.drink and "consume_drank" or "consume_ate", res.label))
@@ -195,6 +199,22 @@ local function showBagMenu(vessel, contents)
     local options = {}
     for _, c in ipairs(contents) do
         local left = c.bitesLeft or 1
+        -- A thing that is USED rather than eaten (a toy that came with the meal) has
+        -- no "one bite / finish it" to choose between — it's one action, so it gets a
+        -- plain row instead of a sub-menu.
+        if c.play then
+            options[#options + 1] = {
+                title = c.label,
+                description = _L("consume_pick_use"),
+                icon = "hand-sparkles",
+                image = c.image,
+                onSelect = function()
+                    local rest = ConsumeLayer(vessel, c.index, true)
+                    if rest then showBagMenu(vessel, rest) end
+                end,
+            }
+            goto continue
+        end
         local sub = "pickle_restaurants_bite_" .. tostring(c.index)
         lib.registerContext({
             id = sub,
@@ -232,6 +252,7 @@ local function showBagMenu(vessel, contents)
             arrow = true,
             menu = sub,
         }
+        ::continue::
     end
     lib.registerContext({
         id = "pickle_restaurants_bag",
