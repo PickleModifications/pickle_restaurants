@@ -59,6 +59,14 @@ function StartMovement(prop, data)
     -- spawn is overwritten on the first frame the ray hits something — the flip has
     -- to live in the loop. Manual rotation (frozen) still works from there.
     local faceFlip = data.facePlacer and 180.0 or 0.0
+    -- Persistent HEIGHT TRIM. Unfrozen, the prop rides the camera raycast, which
+    -- pins it to whatever surface is under the cursor — so an anchor that has to sit
+    -- a few centimetres above (or below) the mesh it lands on could only be trimmed
+    -- by freezing first, which most admins never discover. This offset survives
+    -- every raycast frame, so a seat, a serving-tray point or a virtual anchor can
+    -- be lifted clear of the geometry it would otherwise clip into.
+    local zAdjust = 0.0
+    local Z_TRIM_STEP = 0.005 -- metres per frame (x4 with SHIFT). TUNE IN-GAME.
     while true do
         local speedMode = 1
         -- keep a seated-preview ped in its pose if moving it dropped the animation.
@@ -73,7 +81,7 @@ function StartMovement(prop, data)
         local hit, hitCoords, entity = GetDirectionCoords()
         if hit and hitCoords then 
             if not isFrozen then
-                coords = vector3(hitCoords.x, hitCoords.y, hitCoords.z + coordsOffset.z)
+                coords = vector3(hitCoords.x, hitCoords.y, hitCoords.z + coordsOffset.z + zAdjust)
                 heading = (GetGameplayCamRot(2).z + faceFlip) % 360.0
                 -- Wall-mounted props: nudge the prop back off the surface it's aimed
                 -- at (toward the camera/placer) by data.wallOffset so it doesn't bury
@@ -98,6 +106,7 @@ function StartMovement(prop, data)
         ShowInteractText(
             '[G]     - ' .. (isFrozen and _L("objects_unfreeze") or _L("objects_freeze")) .. '  \n' ..
             (isFrozen and _L("objects_position") or '') ..
+            _L("objects_height") ..
             '[E]     - ' .. _L("objects_save") ..
             (data.enableCancel and '  \n[ESC / BACKSPACE]     - ' .. _L("objects_cancel") or '')
         )
@@ -129,6 +138,17 @@ function StartMovement(prop, data)
                 CleanupGizmoEntity(prop)
             end
             return nil
+        end
+        -- Height trim, live in BOTH modes: unfrozen it re-offsets every raycast
+        -- frame (so the prop keeps its lift as you sweep the cursor around), frozen
+        -- it nudges the parked point directly.
+        if IsControlPressed(1, 172) or IsControlPressed(1, 173) then
+            local step = Z_TRIM_STEP * speedMode * (IsControlPressed(1, 172) and 1.0 or -1.0)
+            zAdjust = zAdjust + step
+            if isFrozen then
+                coords = vector3(coords.x, coords.y, coords.z + step)
+                SetEntityCoords(prop, coords.x + coordsOffset.x, coords.y + coordsOffset.y, coords.z)
+            end
         end
         if isFrozen then
             -- Nudging is CAMERA-relative: "up" on the mouse pushes the prop away from

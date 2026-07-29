@@ -9,6 +9,8 @@
 -- ─────────────────────────────────────────────────────────────────────────────
 if GetResourceState("gksphone") == "missing" then return end   -- presence, not readiness
 
+PhoneBridgeResource = "gksphone"   -- which phone this server's bridge claimed
+
 -- Guarded so a phone-less player never errors the callback that's notifying them.
 -- GKSPhone's NotifData carries the body as `message` (lb-phone calls it `content`) and
 -- takes an `icon` URL — we pass the order thumbnail when present, else the app icon.

@@ -69,7 +69,16 @@ export default function Dining() {
         >
           {/* pointer-events-auto ONLY on the card: the tooltip carries the buttons,
               while the rest of the screen stays a click-through surface for the world */}
-          <div className="pointer-events-auto w-60 rounded-xl border border-border bg-card p-3 text-center shadow-2xl">
+          {/* PIN the world hover while the cursor is on the card. The buttons sit
+              above the pile, so reaching for one leaves the pile's hover radius and
+              Lua would otherwise drop the target out from under the click. Lua holds
+              a lost pile briefly on its own, which covers the gap between the food
+              and this card; the pin covers the rest of the reach. */}
+          <div
+            onPointerEnter={() => fetchNui("dining:pin", { on: true })}
+            onPointerLeave={() => fetchNui("dining:pin", { on: false })}
+            className="pointer-events-auto w-60 rounded-xl border border-border bg-card p-3 text-center shadow-2xl"
+          >
             {hover.image && (
               <div className="mx-auto h-12 w-12 overflow-hidden rounded">
                 <img

@@ -285,40 +285,6 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
           </div>
         </div>
 
-        {/* registers — a PHYSICAL counter spawns the register model and its screen
-            becomes the in-world POS DUI; a VIRTUAL register is an invisible anchor
-            that opens the fullscreen NUI register instead (no screen to paint). Both
-            are placed additively; the first physical counter also anchors the map
-            blip, kitchen shell, and NPC queue. */}
-        <div ref={countersRef} className="rounded-lg border border-border p-3">
-          <div className="mb-1.5 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-sm font-semibold">
-              <Receipt className="h-4 w-4 text-primary" /> {_L("admin.counters")}
-              <Badge variant="secondary">{byType("counter").length + byType("virtual_register").length}</Badge>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <Button size="sm" variant="outline" onClick={() => fetchNui("admin:setCounter", { id: r.id })}>
-                <Plus className="h-3.5 w-3.5" /> {_L("admin.place_physical")}
-              </Button>
-              <Button size="sm" variant="outline" onClick={() => fetchNui("admin:setVirtualRegister", { id: r.id })}>
-                <Sparkles className="h-3.5 w-3.5" /> {_L("admin.place_virtual")}
-              </Button>
-            </div>
-          </div>
-          {byType("counter").length + byType("virtual_register").length > 0 ? (
-            <div className="flex flex-wrap gap-1.5">
-              {byType("counter").map((p) => (
-                <PropChip key={p.id} p={p} act={act} restaurantId={r.id} section="counters" />
-              ))}
-              {byType("virtual_register").map((p) => (
-                <PropChip key={p.id} p={p} act={act} restaurantId={r.id} section="counters" virtual />
-              ))}
-            </div>
-          ) : (
-            <p className="text-[11px] text-muted-foreground">{_L("admin.counters_hint")}</p>
-          )}
-        </div>
-
         {/* stations — each type places EITHER a physical world prop or a virtual
             point (an invisible anchor that opens the station inside the kitchen
             shell). The per-row toggle picks the mode; the shell control up top is
@@ -326,7 +292,11 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
         <div ref={stationsRef} className="rounded-lg border border-border p-3">
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="text-sm font-semibold">{_L("admin.stations")}</div>
-            <Button size="sm" variant="outline" disabled={!r.hasCounter} onClick={() => fetchNui("admin:placeShell", { id: r.id })}>
+            {/* NOT gated on a counter any more: with none placed, the flow runs the
+                register placement first and rolls straight into the shell (see
+                StartShellPlacement) — a greyed-out button just left the admin
+                guessing what the missing prerequisite was. */}
+            <Button size="sm" variant="outline" onClick={() => fetchNui("admin:placeShell", { id: r.id })}>
               <Building2 className="h-3.5 w-3.5" /> {r.hasShell ? _L("admin.adjust_shell") : _L("admin.place_shell")}
             </Button>
           </div>
@@ -334,6 +304,61 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
             {!r.hasCounter ? _L("admin.shell_needs_counter") : r.hasShell ? _L("admin.shell_placed") : _L("admin.no_shell")}
           </p>
           <div className="space-y-3">
+            {/* REGISTER — the same row shape as every other station, and it leads the
+                list because it's what a restaurant needs first (the first physical
+                one anchors the map blip, the kitchen shell and the NPC queue). It is
+                NOT a STATIONS() entry: physical/virtual here mean their own prop
+                types (`counter` / `virtual_register`) with their own placement
+                callbacks, not the generic prop/virtual_point pair the rows below
+                share — a virtual register opens the fullscreen NUI register rather
+                than fading the player into the shell. */}
+            {(() => {
+              const physical = byType("counter");
+              const virtual = byType("virtual_register");
+              const isVirtual = (modes.__register || "physical") === "virtual";
+              return (
+                <div ref={countersRef}>
+                  <div className="mb-1.5 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-sm">
+                      <Receipt className="h-4 w-4 text-muted-foreground" />
+                      {_L("admin.counters")}
+                      <Badge variant="secondary">{physical.length + virtual.length}</Badge>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <div className="flex rounded-md border border-border p-0.5 text-[11px]">
+                        <button
+                          className={`rounded px-2 py-0.5 transition-colors ${!isVirtual ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                          onClick={() => setMode("__register", "physical")}
+                        >{_L("admin.mode_physical")}</button>
+                        <button
+                          className={`rounded px-2 py-0.5 transition-colors ${isVirtual ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                          onClick={() => setMode("__register", "virtual")}
+                        >{_L("admin.mode_virtual")}</button>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => fetchNui(isVirtual ? "admin:setVirtualRegister" : "admin:setCounter", { id: r.id })}
+                      >
+                        {isVirtual ? <Sparkles className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />} {_L("admin.place")}
+                      </Button>
+                    </div>
+                  </div>
+                  {physical.length + virtual.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {physical.map((p) => (
+                        <PropChip key={p.id} p={p} act={act} restaurantId={r.id} section="counters" />
+                      ))}
+                      {virtual.map((p) => (
+                        <PropChip key={p.id} p={p} act={act} restaurantId={r.id} section="counters" virtual />
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground">{_L("admin.counters_hint")}</p>
+                  )}
+                </div>
+              );
+            })()}
             {STATIONS().map((s) => {
               const physical = byType(s.key);
               const virtual = props.filter((p) => p.prop_type === "virtual_point" && p.target === s.key);

@@ -16,40 +16,56 @@ local RESOURCE
 for _, res in ipairs(QS_RESOURCES) do
     if GetResourceState(res) ~= "missing" then RESOURCE = res break end
 end
--- Yield to a bridge that already claimed the API: a server runs ONE phone, and
--- lb-phone owning it shouldn't be clobbered by a qs resource that merely exists on disk.
-if not RESOURCE or PhoneAppNotify then return end
+-- Yield to a bridge that already claimed the API — but not to one whose phone is
+-- sitting stopped in the resources folder. See PhoneBridgeClaim in bridge/phone/shared.
+if not RESOURCE then return end
+if not PhoneBridgeClaim(RESOURCE) then return end
 
-QSPhoneResource = RESOURCE   -- read by the client half
+QSPhoneResource = RESOURCE   -- server-side only; the client half detects for itself
 
+-- Quasar has moved its custom-app registration between names AND payload shapes
+-- across builds (and the pro fork differs again), and none of it is in the published
+-- export list — so the whole matrix is tried (PhoneTryRegister, bridge/phone/shared)
+-- and the winning cell announced, rather than one guessed call silently doing nothing.
+QSAppRegistered = false      -- read by the client half's fallback probe
+local lastErr
+
+-- The app is auto-removed when THIS resource stops, so there's no teardown to write.
 local function AddApp()
-    -- Quasar's registration shape: `id` / `label` / `icon`, and the page goes in a
-    -- nested `iframe.url` (lb-phone takes a flat `ui`). The app is auto-removed when
-    -- THIS resource stops, so there's no teardown to write.
-    local ok, err = pcall(function()
-        exports[RESOURCE]:addCustomApp({
-            id          = PhoneAppMeta.id,
-            label       = PhoneAppMeta.name,
-            description = PhoneAppDescription(),
-            developer   = PhoneAppMeta.developer,
-            icon        = PhoneAppIcon(),
-            iframe      = { url = PhoneAppUI() },
-        })
-    end)
-    if not ok then
-        print(("[pickle_restaurants] %s addCustomApp failed: %s"):format(RESOURCE, tostring(err)))
-    end
+    if QSAppRegistered then return true end
+    local name, shape, err = PhoneTryRegister(RESOURCE)
+    if not name then lastErr = err return false end
+    QSAppRegistered = true
+    print(("[pickle_restaurants] %s: app registered via %s (shape %d)"):format(RESOURCE, name, shape))
+    return true
 end
 
 CreateThread(function()
     while GetResourceState(RESOURCE) ~= "started" do Wait(500) end
     Wait(1000)   -- let the exports come up
-    AddApp()
+    if AddApp() then return end
+    -- Server-side registration is out. The client half gets a shot (the pro fork
+    -- registers per-player), and if that misses too the admin still has the values.
+    print(("[pickle_restaurants] %s: no server-side app registration export answered (last error: %s)")
+        :format(RESOURCE, tostring(lastErr)))
+    TriggerClientEvent("pickle_restaurants:phone:qsClientRegister", -1)
+    PrintPhoneAppInstall(("%s did not accept a runtime app registration."):format(RESOURCE))
+end)
+
+-- A client that joined after the probe ran still needs telling to try its own side.
+RegisterNetEvent("pickle_restaurants:phone:qsAsk", function()
+    if not QSAppRegistered then
+        TriggerClientEvent("pickle_restaurants:phone:qsClientRegister", source)
+    end
 end)
 
 -- The phone restarting drops every registered app, so add ours back.
 AddEventHandler("onResourceStart", function(res)
-    if res == RESOURCE then Wait(1000); AddApp() end
+    if res == RESOURCE then
+        Wait(1000)
+        QSAppRegistered = false
+        if not AddApp() then TriggerClientEvent("pickle_restaurants:phone:qsClientRegister", -1) end
+    end
 end)
 
 function PhoneAppNotify(src, title, content, thumbnail)

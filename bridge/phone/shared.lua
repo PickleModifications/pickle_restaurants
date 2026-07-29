@@ -36,6 +36,133 @@ function PhoneAppDescription()
     return _L("phone_app_description")
 end
 
+-- The two registration payload shapes a phone might want, in preference order.
+-- Shape A is Quasar's form (label + a nested `iframe.url`); shape B is the flat form
+-- the pro forks and most lb-phone-alikes take. Shared because a bridge may have to
+-- try both from either side (see bridge/phone/qs-smartphone) — an unknown key is
+-- ignored by every registrar we've seen, so B deliberately carries the aliases.
+function PhoneAppShapes()
+    return {
+        {
+            id          = PhoneAppMeta.id,
+            label       = PhoneAppMeta.name,
+            description = PhoneAppDescription(),
+            developer   = PhoneAppMeta.developer,
+            icon        = PhoneAppIcon(),
+            iframe      = { url = PhoneAppUI() },
+        },
+        {
+            id          = PhoneAppMeta.id,
+            identifier  = PhoneAppMeta.id,
+            name        = PhoneAppMeta.name,
+            label       = PhoneAppMeta.name,
+            description = PhoneAppDescription(),
+            developer   = PhoneAppMeta.developer,
+            icon        = PhoneAppIcon(),
+            url         = PhoneAppUI(),
+            ui          = PhoneAppUI(),
+            size        = PhoneAppMeta.size,
+            defaultApp  = true,
+        },
+    }
+end
+
+-- ─── claiming the bridge ─────────────────────────────────────────────────────
+-- A server runs ONE phone, but several phone resources can sit in the resources
+-- folder — an old one left behind and never started still reads as "not missing".
+-- Presence is therefore not a CLAIM: a bridge stands down for an earlier claimant
+-- only while that claimant's resource isn't sitting stopped. Getting this wrong is
+-- silent and total (the running phone simply never gets the app), so it lives here
+-- rather than being re-reasoned per bridge.
+--
+-- The marker differs by side because the two runtimes share no globals: the server
+-- sets PhoneBridgeResource, the client sets PhoneApp.resource.
+function PhoneBridgeClaim(resource)
+    local server = IsDuplicityVersion()
+    local held = server and PhoneBridgeResource or (PhoneApp and PhoneApp.resource)
+    if held and GetResourceState(held) ~= "stopped" then return false end
+    if held then
+        print(("[pickle_restaurants] phone bridge: %s is stopped — using %s instead")
+            :format(held, resource))
+    end
+    if server then
+        PhoneBridgeResource = resource
+    else
+        PhoneApp = PhoneApp or {}
+        PhoneApp.resource = resource
+    end
+    return true
+end
+
+-- ─── runtime app registration ────────────────────────────────────────────────
+-- The phones that publish no stable custom-app API (Quasar, qb-phone and their forks)
+-- have moved registration between export names AND payload shapes across builds, and
+-- some builds expose it on the other side entirely. A single guessed call that
+-- silently does nothing is exactly the failure mode this exists to avoid: try the
+-- whole matrix, report which cell won, and let the caller print the manual route when
+-- none do. A missing export raises when CALLED, not when indexed, so pcall around the
+-- call is the only real test — there is no way to ask "does this export exist".
+--
+-- Add a name here if your build calls it something else; that is the only edit needed.
+PHONE_REGISTER_EXPORTS = {
+    "addCustomApp", "AddCustomApp",
+    "addApp", "AddApp",
+    "registerCustomApp", "RegisterCustomApp",
+    "createCustomApp",
+}
+
+function PhoneTryRegister(resource)
+    local lastErr
+    for _, name in ipairs(PHONE_REGISTER_EXPORTS) do
+        for shape, payload in ipairs(PhoneAppShapes()) do
+            local ok, err = pcall(exports[resource][name], nil, payload)
+            if ok then return name, shape end
+            lastErr = err
+        end
+    end
+    return nil, nil, lastErr
+end
+
+-- Everything a phone needs to know about this app, as console lines. A phone whose
+-- runtime registration API we can't reach (or that has none — several expect apps to
+-- be listed in their own config file) can still be set up BY HAND, and this is the
+-- exact set of values to paste in. Printed when registration fails, and on demand via
+-- the `pickle_phoneapp` console command, so "the app never showed up" always has an
+-- answer sitting in the server log rather than needing the URLs reverse-engineered.
+-- `notes` is an optional list of extra lines for the phone in question (qb-phone, for
+-- one, needs more than a config entry — see its bridge).
+function PrintPhoneAppInstall(reason, notes)
+    -- built with inserts, not a literal: a nil in the middle of a table literal ends
+    -- ipairs early, so an absent `reason` would swallow every line after it
+    local lines = {
+        "",
+        "  ┌─ pickle_restaurants — companion app (\"" .. PhoneAppMeta.name .. "\") ─────────",
+    }
+    if reason then
+        lines[#lines + 1] = "  │  " .. reason
+        lines[#lines + 1] = "  │"
+    end
+    for _, l in ipairs({
+        "  │  Add it to your phone by hand with these values:",
+        "  │    id / identifier : " .. PhoneAppMeta.id,
+        "  │    name / label    : " .. PhoneAppMeta.name,
+        "  │    developer       : " .. PhoneAppMeta.developer,
+        "  │    page (iframe)   : " .. PhoneAppUI(),
+        "  │    icon            : " .. PhoneAppIcon(),
+        "  │",
+        "  │  Most phones take these in their own app config file. The page is a plain",
+        "  │  iframe URL — it talks back to pickle_restaurants directly, so it works",
+        "  │  whichever phone hosts it.",
+    }) do lines[#lines + 1] = l end
+    if notes and #notes > 0 then
+        lines[#lines + 1] = "  │"
+        for _, l in ipairs(notes) do lines[#lines + 1] = "  │  " .. l end
+    end
+    lines[#lines + 1] = "  └──────────────────────────────────────────────────────────────────────"
+    lines[#lines + 1] = ""
+    for _, l in ipairs(lines) do print(l) end
+end
+
 -- ─── closing the phone ────────────────────────────────────────────────────────
 -- `PhoneApp.Close()` (each client bridge defines it) puts the phone away. The
 -- doorstep hand-off is the caller: serving a delivery from the app means the phone is

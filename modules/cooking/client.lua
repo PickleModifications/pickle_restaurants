@@ -2754,8 +2754,20 @@ local function runDragThread(drag)
                 end
                 Wait(0)
             else
-                local sid = pickPart(nil) -- stack under the cursor (append to its top)
-                local tid = (not sid and hit and coords) and pickTray(coords) or nil
+                -- Over a SERVING TRAY or a BAG, every drop is its OWN pile — never an
+                -- addition to whatever is already sitting there. Arranging a meal is
+                -- laying things out side by side, but the pile pick is a generous
+                -- screen-space radius (deliberately, so a build reads as one target),
+                -- and on a tray with anything on it that radius swallowed nearly
+                -- every drop into the nearest existing pile. So the pile pick is
+                -- SKIPPED over those two surfaces and the tray branch below seats the
+                -- drop at the cursor's own offset. Boxes are unaffected — they seat
+                -- their single item centrally and gate on their own rules.
+                local overTid = (hit and coords) and pickTray(coords) or nil
+                local loose = overTid and PrepTrays[overTid]
+                    and (PrepTrays[overTid].kind == "tray" or PrepTrays[overTid].kind == "bag")
+                local sid = (not loose) and pickPart(nil) or nil
+                local tid = (not sid) and overTid or nil
                 drag.boxBlock = nil
                 if sid then
                     local s = PrepStacks[sid]

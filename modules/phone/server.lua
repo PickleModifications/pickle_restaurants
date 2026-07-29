@@ -1178,3 +1178,23 @@ function SourceForIdentifier(identifier)
     end
     return nil
 end
+
+-- ─── `pickle_phoneapp` ────────────────────────────────────────────────────────
+-- Prints everything needed to add the companion app to a phone by hand, plus which
+-- phone resources are actually on this server and what state they're in. A phone
+-- whose runtime registration API we can't reach (or that has none — several expect
+-- apps to be listed in their own config file) leaves "the app never appeared" with
+-- no visible cause; this makes the answer one command away instead of a code read.
+local PHONE_RESOURCES = { "lb-phone", "qs-smartphone", "qs-smartphone-pro", "gksphone", "qb-phone" }
+
+RegisterCommand("pickle_phoneapp", function(source)
+    if source ~= 0 and not IsPlayerAdmin(source) then return end
+    local found = {}
+    for _, res in ipairs(PHONE_RESOURCES) do
+        local state = GetResourceState(res)
+        if state ~= "missing" then found[#found + 1] = ("%s (%s)"):format(res, state) end
+    end
+    PrintPhoneAppInstall(#found > 0
+        and ("Phone resources detected: " .. table.concat(found, ", "))
+        or "No supported phone resource is installed on this server.")
+end, false)

@@ -16,9 +16,54 @@
 -- If your build exposes the emitter under another name, add it to PUSH_EXPORTS —
 -- that's the only edit needed to get live push working.
 -- ─────────────────────────────────────────────────────────────────────────────
-if not QSPhoneResource then return end
+-- Detect on THIS side. This used to gate on `QSPhoneResource`, which the SERVER half
+-- sets — a server global is not visible in the client runtime, so the check was always
+-- nil and every line below was dead code: on Quasar, `PhoneApp` was never defined at
+-- all, so there was no live push into the app page and no phone-close for the doorstep
+-- hand-off.
+local QS_RESOURCES = { "qs-smartphone", "qs-smartphone-pro" }
 
-local RESOURCE = QSPhoneResource
+local RESOURCE
+for _, res in ipairs(QS_RESOURCES) do
+    if GetResourceState(res) ~= "missing" then RESOURCE = res break end
+end
+if not RESOURCE then return end
+-- Stand down for a bridge that already claimed the API — unless its phone is sitting
+-- STOPPED in the resources folder, which is a leftover, not the server's phone.
+if not PhoneBridgeClaim(RESOURCE) then return end   -- also stamps PhoneApp.resource
+
+-- ─── client-side registration fallback ───────────────────────────────────────
+-- Registration is a SERVER export on Quasar proper, but the pro fork registers
+-- per-player from the client, so a server-only attempt is how an app "just never
+-- appears" with nothing obviously broken. The server half tells us when its own
+-- probe came up empty (`qsClientRegister`) and we run the same matrix here.
+local registered = false
+
+local function TryClientRegister()
+    if registered then return end
+    local name, shape = PhoneTryRegister(RESOURCE)
+    if name then
+        registered = true
+        return print(("[pickle_restaurants] %s: app registered client-side via %s (shape %d)")
+            :format(RESOURCE, name, shape))
+    end
+    print(("[pickle_restaurants] %s: client-side app registration found no export either — "
+        .. "add the app by hand (run `pickle_phoneapp` in the server console for the values)")
+        :format(RESOURCE))
+end
+
+RegisterNetEvent("pickle_restaurants:phone:qsClientRegister", function()
+    while GetResourceState(RESOURCE) ~= "started" do Wait(500) end
+    Wait(1000)
+    TryClientRegister()
+end)
+
+-- Ask on spawn: a player who joined after the server ran its probe never saw the
+-- broadcast, and this is the only side that can register for them.
+CreateThread(function()
+    Wait(5000)
+    TriggerServerEvent("pickle_restaurants:phone:qsAsk")
+end)
 
 local PUSH_EXPORTS = {
     "sendCustomAppMessage", "SendCustomAppMessage",

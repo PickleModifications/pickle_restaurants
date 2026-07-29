@@ -46,6 +46,15 @@ dependencies {
 -- into your inventory and the icons to drop in its image folder. Escrow would
 -- otherwise encrypt the .lua files in there and hand the buyer a blob they can't
 -- read — which is the one thing those files exist to be. Kept open.
+--
+-- bridge/ is the framework/inventory/target/phone adapter layer, and it is open for
+-- the same reason: it is where a server's own setup has to be met. Every server runs
+-- a different fork — a renamed inventory export, a phone whose custom-app API moved,
+-- a bespoke permission check — and each bridge file is written to be edited (the
+-- phone bridges literally say "add yours to this list"). Encrypted, the one thing a
+-- buyer needs to change to make the resource work on their server would be the one
+-- thing they can't open. Nothing here is gameplay logic; that all lives in modules/.
 escrow_ignore {
     '__INSTALL/**',
+    'bridge/**',
 }

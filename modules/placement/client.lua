@@ -308,9 +308,28 @@ end
 -- shared with modules/virtual so the preview and the session build can't drift.
 local SHELL_CAM     = { back = -18.0, up = 8.0, fov = 50.0, lookUp = 2.0 } -- framing offsets. TUNE IN-GAME.
 local SHELL_Z_STEP  = 2.5 -- meters per scroll notch (x4 with SHIFT)
+-- Where an UNPLACED shell starts: 20m over the counter. Seated at the counter's own
+-- height it opens up inside whatever building the restaurant is in, and the camera —
+-- which sits 18m back — is then looking at the shell through that building's exterior
+-- walls, so the admin can't see the thing they're positioning. Starting above the
+-- roofline puts it in clear air on the first frame; scroll brings it back down.
+local SHELL_DEFAULT_UP = 20.0 -- TUNE IN-GAME.
 
 function StartShellPlacement(restaurantId)
     local rest = GetRestaurantById(restaurantId)
+    -- No register placed yet? The shell anchors to the counter, so there is nothing
+    -- to position it against. This used to be a greyed-out button; instead, run the
+    -- counter placement first and carry straight on into the shell once it lands.
+    if rest and not rest.counter then
+        ShowNotification(_L("place_shell_counter_first"))
+        if not StartCounterPlacement(restaurantId) then return end
+        -- the counter is saved server-side; wait for the sync that carries it back
+        local t = GetGameTimer()
+        repeat
+            Wait(50)
+            rest = GetRestaurantById(restaurantId)
+        until (rest and rest.counter) or GetGameTimer() - t > 5000
+    end
     if not rest or not rest.counter then return ShowNotification(_L("place_shell_needs_counter")) end
     Wait(250) -- let the NUI fully release focus before the loop takes input
     -- Carry the launching panel's theme onto this loop's control-hint overlay
@@ -321,7 +340,7 @@ function StartShellPlacement(restaurantId)
     if not hash then return ShowNotification(_L("virtual_shell_missing")) end
 
     local c = rest.counter
-    local z = (rest.shell and rest.shell.z) or c.z
+    local z = (rest.shell and rest.shell.z) or (c.z + SHELL_DEFAULT_UP)
     local heading = (rest.shell and rest.shell.heading) or 0.0
     local shell = CreateObject(hash, c.x, c.y, z, false, false, false)
     SetModelAsNoLongerNeeded(hash)
@@ -431,10 +450,12 @@ end
 -- itself (modules/main spawns exactly this at the point), so the preview IS the result.
 -- Placing is additive: a restaurant can have several registers (modules/main gives each
 -- one its interaction; the lowest-id counter is the primary blip/shell/NPC anchor).
+-- Returns whether a counter was actually saved, so a caller that needs one to exist
+-- (the shell) can chain onto it and bail cleanly on a cancel.
 function StartCounterPlacement(restaurantId)
     Wait(250)
     local result = StartGizmoEditor({ model = CounterModel(), enableCancel = true, deleteEntity = true })
-    if not result or not result.position then return end
+    if not result or not result.position then return false end
     local res = lib.callback.await("pickle_restaurants:placement:saveCounter", false, {
         restaurant_id = restaurantId,
         x = result.position.x, y = result.position.y, z = result.position.z,
@@ -442,9 +463,10 @@ function StartCounterPlacement(restaurantId)
     })
     if res and res.ok then
         ShowNotification(_L("place_counter_set"))
-    else
-        ShowNotification((res and res.error) or _L("place_counter_fail"))
+        return true
     end
+    ShowNotification((res and res.error) or _L("place_counter_fail"))
+    return false
 end
 
 -- Reposition an already-placed prop. Re-runs the gizmo SEEDED at the prop's current

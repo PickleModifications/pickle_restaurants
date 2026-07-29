@@ -27,6 +27,7 @@ local DINE = {
     fade_ms    = 700,   -- camera ease in/out (deliberately unhurried: this plays
                         -- on every bite, and a quick cut reads as a glitch)
     hover_r    = 0.075, -- normalized-screen radius that counts as hovering a pile
+    hover_hold = 600,   -- ms a lost pile stays targeted (see `pinned` below)
 }
 
 local render = nil   -- the live SpawnMealRender handle
@@ -40,6 +41,18 @@ local open   = false
 -- mid-bite, leaving something highlighted under a camera that has flipped away and
 -- letting a second click queue up against a tray that's already being changed.
 local busy   = false
+-- The tooltip's buttons sit ABOVE the pile they belong to, so moving the cursor onto
+-- one takes it straight out of that pile's hover radius. Dropping the target the
+-- instant that happens is what made the menu vanish on the way to the button you were
+-- reaching for. Two things keep it alive: a lost pile stays targeted for
+-- DINE.hover_hold ms, and `pinned` (the NUI reports the cursor actually being over
+-- the card) holds it indefinitely — so the pile is still `hovered` when the click
+-- lands and dining:bite/finish has something to eat.
+local pinned = false
+local heldSince = nil -- when the cursor left the pile, while we're still holding it
+-- Last on-screen anchor of the targeted pile, so a HELD tooltip stays put instead of
+-- snapping to wherever the projection last happened to be.
+local lastTip = { x = 0.5, y = 0.5 }
 -- Where the current arrangement was laid out. Kept so a bite that changed nothing
 -- on the table can re-frame the camera without re-running the whole layout.
 local laidAt = nil
@@ -95,6 +108,7 @@ function CloseMealView()
     if not open then return end
     open = false
     hovered = nil
+    pinned, heldSince = false, nil
     if render then OutlineMealPile(render, nil); DeleteMealRender(render); render = nil end
     stopCam()
     labels = {}
@@ -125,6 +139,7 @@ local function eatPile(idx, whole)
     -- left the table — there is nothing correct for the cursor to be pointing at.
     busy = true
     hovered = nil
+    pinned, heldSince = false, nil -- the card is going away; don't hold its target
     OutlineMealPile(render, nil)
     SendNUIMessage({ action = "diningHover", index = nil })
     local res = lib.callback.await("pickle_restaurants:consume:eat", false,
@@ -260,6 +275,22 @@ function OpenMealView(v, _contents)
                 end
             end
             if nearD and nearD > DINE.hover_r * DINE.hover_r then near = nil end
+            if near then
+                lastTip.x, lastTip.y = tipX, tipY
+                heldSince = nil
+            elseif hovered then
+                -- nothing under the cursor, but we had a target: HOLD it (forever
+                -- while the cursor is on the tooltip card, briefly otherwise) so the
+                -- reach from pile to button doesn't cancel the selection
+                if pinned then
+                    near, tipX, tipY, heldSince = hovered, lastTip.x, lastTip.y, nil
+                else
+                    heldSince = heldSince or GetGameTimer()
+                    if GetGameTimer() - heldSince < DINE.hover_hold then
+                        near, tipX, tipY = hovered, lastTip.x, lastTip.y
+                    end
+                end
+            end
             if near ~= hovered then
                 hovered = near
                 OutlineMealPile(render, near)
@@ -290,6 +321,15 @@ end)
 -- The tooltip's "finish it": the same pile, consumed in one go.
 RegisterNUICallback("dining:finish", function(_, cb)
     if hovered then eatPile(hovered, true) end
+    cb({ ok = true })
+end)
+
+-- The tooltip card reports its own pointer enter/leave. While the cursor is on the
+-- card the world hover is FROZEN on whatever pile the card belongs to — the pile
+-- itself is nowhere near the cursor at that point, and without this the target (and
+-- with it the outline and the buttons) would be gone before the click landed.
+RegisterNUICallback("dining:pin", function(d, cb)
+    pinned = (d and d.on) and true or false
     cb({ ok = true })
 end)
 

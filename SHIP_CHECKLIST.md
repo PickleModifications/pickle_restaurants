@@ -173,8 +173,13 @@ and that config-driven cheese melt still round-trips. If any fails, the refactor
 
 ## F. Phone app ("Pickle Eats")
 
-- [ ] Open the app on your phone bridge (lb-phone / gksphone / qs-smartphone). With no phone
-  installed, nothing errors — the app just doesn't appear.
+- [ ] Open the app on your phone bridge (lb-phone / gksphone / qs-smartphone / qb-phone). With
+  no phone installed, nothing errors — the app just doesn't appear.
+- [ ] If it never appears, run **`pickle_phoneapp`** in the server console: it prints which
+  phone resources are installed plus the app id / page URL / icon to add by hand. Only
+  lb-phone and gksphone publish a stable custom-app API; on Quasar and qb-phone the bridge
+  probes for one and falls back to that manual route (stock qb-phone has no iframe app host
+  at all — its notifications and phone number still work).
 - [ ] Browse a storefront, **place a delivery order** → charged to **bank**, appears in the
   kitchen (KDS) queue; apply a promo / loyalty redemption if configured.
 - [ ] Favorite & reorder; leave a review (1–5, order-gated); earn a loyalty punch.

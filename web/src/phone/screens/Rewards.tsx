@@ -222,12 +222,19 @@ export function Reserve(_props: { params?: any }) {
               </span>
             )}
           </div>
+          {/* The slot picker WRAPS, it does not scroll. The slots are a short fixed
+              list, and five chips carrying a clock time plus a "N left" line need
+              ~440px against a phone screen's ~360 — so as a `pf-rail` (overflow-x
+              with a hidden scrollbar) the last time sat half past the edge and read
+              as clipped rather than as scrollable. A rail is right for the
+              restaurant list above, which is genuinely open-ended; a time picker
+              should show every option at once. */}
           {noSeats ? (
             <p className="rounded-xl border border-border bg-card px-3 py-2 text-[0.74rem] text-muted-foreground">
               {_L("phone.reserve.no_seats")}
             </p>
           ) : (
-          <div className="pf-rail">
+          <div className="flex flex-wrap gap-2">
             {SLOTS.map((s) => {
               const full = slotFull(s);
               return (
@@ -236,7 +243,8 @@ export function Reserve(_props: { params?: any }) {
                   disabled={full}
                   onClick={() => setSlot(s)}
                   className={cn(
-                    "flex flex-col items-center rounded-2xl border px-3 py-1.5 text-sm font-semibold",
+                    // whitespace-nowrap: never break a clock across lines ("6:00" / "PM")
+                    "flex flex-col items-center whitespace-nowrap rounded-2xl border px-3 py-1.5 text-sm font-semibold",
                     slot === s ? "border-brand bg-brand text-brand-ink" : "border-border bg-card",
                     full && "opacity-40"
                   )}

@@ -29,7 +29,9 @@
       "Bash(perl -0pi -e 's/-- step back → resident → exchange can be watched and tuned on its own\\\\. The point/-- resident → exchange can be watched and tuned on its own. The point/' modules/doorstep/client.lua)",
       "Bash(luac5.4 -p modules/doorstep/client.lua modules/rendertarget/client.lua)",
       "Bash(luac5.4 -p modules/doorstep/server.lua modules/doorstep/client.lua modules/rendertarget/client.lua)",
-      "Bash(luac5.4 -p modules/doorstep/client.lua)"
+      "Bash(luac5.4 -p modules/doorstep/client.lua)",
+      "Bash(luac5.4 -p bridge/phone/qs-smartphone/client.lua)",
+      "Bash(luac5.4 -p fxmanifest.lua)"
     ]
   }
 }
