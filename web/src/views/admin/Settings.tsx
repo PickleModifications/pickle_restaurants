@@ -11,16 +11,20 @@ import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
   Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2, RotateCcw, Palette, PersonStanding, Utensils, Flame,
-  Package, Lock,
+  Package, Lock, Briefcase, CalendarClock, ChevronDown, ChevronRight,
 } from "lucide-react";
 
+// Every permission there is, in the order the server declares them (core's
+// PERMISSIONS). Used by the Jobs group's "what a new grade gets" editor — the
+// per-RESTAURANT rank editor lives in the management panel and renders the list the
+// server sends it, so this copy is only ever for the server-wide DEFAULT.
 const PERMISSIONS = [
   "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance", "manage_stock",
+  "manage_payroll",
 ];
 
-// Raw permission key → locale key for its human-readable label. Keeps the chips
-// in the Default Roles editor localized (and Title Cased) instead of showing the
-// bare snake_case keys.
+// Raw permission key → locale key for its human-readable label, so the chips read as
+// English instead of bare snake_case keys.
 const PERM_LABEL: Record<string, string> = {
   cook: "settings.perm_cook",
   sell: "settings.perm_sell",
@@ -30,6 +34,7 @@ const PERM_LABEL: Record<string, string> = {
   view_finances: "settings.perm_view_finances",
   manage_balance: "settings.perm_manage_balance",
   manage_stock: "settings.perm_manage_stock",
+  manage_payroll: "settings.perm_manage_payroll",
 };
 
 // One installed add-on pack, as modules/dlc reports it. Everything here is
@@ -56,6 +61,9 @@ type Props = {
   dlcCosts?: Record<string, number>;
   appTheme?: ThemeConfig | null; onAppTheme?: (t: ThemeConfig) => void;
   phoneTheme?: ThemeConfig | null; onPhoneTheme?: (t: ThemeConfig) => void;
+  /** Whether a real framework job system is present. False = WE are the framework, and
+   *  the Jobs group's authored list is the one restaurants pick from. */
+  jobsAvailable?: boolean;
 };
 
 // Drinks + Assembly editors moved to the Menu tab (foods live together there).
@@ -67,7 +75,11 @@ const GROUPS = () => (_groups ??= [
   { key: "appearance", label: _L("settings.group_appearance"), icon: Palette },
   { key: "economy", label: _L("settings.group_economy"), icon: Coins },
   { key: "pricing", label: _L("settings.group_pricing"), icon: DollarSign },
-  { key: "roles", label: _L("settings.group_roles"), icon: Users },
+  // JOBS replaces the retired "Roles" group: permissions and pay are per RANK of a
+  // restaurant's job now (edited in the boss panel), so the only role-ish thing left
+  // server-wide is the job LIST (standalone) and what a fresh grade starts with.
+  { key: "jobs", label: _L("settings.group_jobs"), icon: Briefcase },
+  { key: "reservations", label: _L("settings.group_reservations"), icon: CalendarClock },
   { key: "eating", label: _L("settings.group_eating"), icon: Utensils },
   { key: "npc_customers", label: _L("settings.group_npc"), icon: PersonStanding },
   { key: "kitchen_fires", label: _L("settings.group_fires"), icon: Flame },
@@ -75,7 +87,7 @@ const GROUPS = () => (_groups ??= [
   { key: "dlc", label: _L("settings.group_dlc"), icon: Package },
 ]);
 
-export default function Settings({ settings, items, groups, dlcs, ingredients, dlcCosts, onSaved, appTheme, onAppTheme, phoneTheme, onPhoneTheme }: Props) {
+export default function Settings({ settings, items, groups, dlcs, ingredients, dlcCosts, onSaved, appTheme, onAppTheme, phoneTheme, onPhoneTheme, jobsAvailable }: Props) {
   const [group, setGroup] = useState("general");
 
   return (
@@ -106,7 +118,8 @@ export default function Settings({ settings, items, groups, dlcs, ingredients, d
         {group === "appearance" && <Appearance appTheme={appTheme} onAppTheme={onAppTheme} phoneTheme={phoneTheme} onPhoneTheme={onPhoneTheme} />}
         {group === "economy" && <Economy settings={settings} onSaved={onSaved} />}
         {group === "pricing" && <Pricing settings={settings} items={items} ingredients={ingredients} dlcCosts={dlcCosts} onSaved={onSaved} />}
-        {group === "roles" && <Roles settings={settings} onSaved={onSaved} />}
+        {group === "jobs" && <Jobs settings={settings} jobsAvailable={jobsAvailable} onSaved={onSaved} />}
+        {group === "reservations" && <Reservations settings={settings} onSaved={onSaved} />}
         {group === "eating" && <Eating settings={settings} onSaved={onSaved} />}
         {group === "npc_customers" && <NpcCustomers settings={settings} onSaved={onSaved} />}
         {group === "kitchen_fires" && <KitchenFires settings={settings} items={items} onSaved={onSaved} />}
@@ -258,9 +271,20 @@ function Economy({ settings, onSaved }: { settings: any; onSaved: () => void }) 
   const [starting, setStarting] = useState(Number(settings.starting_balance ?? 0));
   const [commission, setCommission] = useState(Number(settings.default_commission ?? 10));
   const [margin, setMargin] = useState(Number(settings.profit_margin ?? 40));
+  // Paying the staff. `payroll_interval_minutes` = 0 means wages are only ever paid
+  // when a boss presses Run Payroll; anything higher runs one automatically per
+  // restaurant on that cadence. `tip_split` decides how a tip pool is divided among
+  // the roster: evenly, or weighted by grade (grade + 1 shares).
+  const [payrollInterval, setPayrollInterval] = useState(Number(settings.payroll_interval_minutes ?? 0));
+  const [tipSplit, setTipSplit] = useState<string>(settings.tip_split === "grade" ? "grade" : "even");
   const status = useAutoSave(
-    () => saveSettings({ currency, starting_balance: starting, default_commission: commission, profit_margin: Math.max(0, Math.floor(margin || 0)) }).then(onSaved),
-    [currency, starting, commission, margin]
+    () => saveSettings({
+      currency, starting_balance: starting, default_commission: commission,
+      profit_margin: Math.max(0, Math.floor(margin || 0)),
+      payroll_interval_minutes: Math.max(0, Math.floor(payrollInterval || 0)),
+      tip_split: tipSplit,
+    }).then(onSaved),
+    [currency, starting, commission, margin, payrollInterval, tipSplit]
   );
   return (
     <Section title={_L("settings.economy_title")} description={_L("settings.economy_desc")} status={status}>
@@ -274,76 +298,168 @@ function Economy({ settings, onSaved }: { settings: any; onSaved: () => void }) 
         <NumberField label={_L("settings.starting_balance")} value={starting} min={0} onChange={setStarting} />
         <NumberField label={_L("settings.default_commission")} value={commission} min={0} onChange={setCommission} />
         <NumberField label={_L("settings.profit_margin")} hint={_L("settings.profit_margin_hint")} value={margin} min={0} onChange={setMargin} />
+        <NumberField label={_L("settings.payroll_interval")} hint={_L("settings.payroll_interval_hint")} value={payrollInterval} min={0} step={5} onChange={setPayrollInterval} />
+        <Select
+          label={_L("settings.tip_split")}
+          hint={_L("settings.tip_split_hint")}
+          value={tipSplit}
+          onChange={setTipSplit}
+          options={[{ value: "even", label: _L("settings.tip_split_even") }, { value: "grade", label: _L("settings.tip_split_grade") }]}
+        />
       </div>
     </Section>
   );
 }
 
-function Roles({ settings, onSaved }: { settings: any; onSaved: () => void }) {
-  // default_roles is a map keyed by grade number -> { label, commission, permissions }
-  const initial = settings.default_roles ?? {};
-  const [roles, setRoles] = useState<{ grade: string; label: string; commission: number; permissions: Record<string, boolean> }[]>(
-    Object.keys(initial)
-      .map((k) => ({
-        grade: k,
-        label: initial[k].label ?? _L("settings.grade_n", k),
-        commission: Number(initial[k].commission ?? 0),
-        permissions: initial[k].permissions ?? {},
-      }))
-      .sort((a, b) => Number(a.grade) - Number(b.grade))
+/** JOBS. Two server-wide things live here, and neither is a per-restaurant rank (those
+ * are edited by the boss, in the management panel's Ranks tab):
+ *  - the job LIST itself, which only WE own on a standalone server (`jobsAvailable`
+ *    false). With a framework running, the framework's list wins and this is unused —
+ *    the note says so rather than letting an admin author a shadow list that nothing
+ *    reads.
+ *  - `default_rank_permissions`: what a NON-boss grade is seeded with the moment a job
+ *    is assigned to a restaurant, so a fresh assignment is immediately workable. */
+type JobRow = { name: string; label: string; grades: { grade: number; label: string; isboss: boolean }[] };
+
+function Jobs({ settings, jobsAvailable, onSaved }: { settings: any; jobsAvailable?: boolean; onSaved: () => void }) {
+  const [rows, setRows] = useState<JobRow[]>(
+    (Array.isArray(settings.jobs) ? settings.jobs : []).map((j: any) => ({
+      name: j.name ?? "",
+      label: j.label ?? "",
+      grades: (Array.isArray(j.grades) ? j.grades : []).map((g: any) => ({
+        grade: Math.max(0, Math.floor(Number(g.grade) || 0)),
+        label: g.label ?? "",
+        isboss: !!g.isboss,
+      })),
+    }))
   );
+  const [defaults, setDefaults] = useState<Record<string, boolean>>(
+    settings.default_rank_permissions && typeof settings.default_rank_permissions === "object"
+      ? { ...settings.default_rank_permissions } : {}
+  );
+  const [open, setOpen] = useState<number | null>(null);
 
-  const update = (i: number, patch: any) => setRoles((rs) => rs.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
-  const togglePerm = (i: number, perm: string) =>
-    setRoles((rs) => rs.map((r, idx) => (idx === i ? { ...r, permissions: { ...r.permissions, [perm]: !r.permissions[perm] } } : r)));
-  const addRole = () => {
-    const nextGrade = roles.reduce((m, r) => Math.max(m, Number(r.grade)), -1) + 1;
-    setRoles((rs) => [...rs, { grade: String(nextGrade), label: _L("settings.grade_n", nextGrade), commission: 0, permissions: {} }]);
-  };
-  const removeRole = (i: number) => setRoles((rs) => rs.filter((_, idx) => idx !== i));
+  const status = useAutoSave(() => saveSettings({
+    // A job with no name can't be assigned to anything (the admin Job card validates
+    // against this list by name), so half-typed rows are simply not stored.
+    jobs: rows.filter((j) => j.name.trim()).map((j) => ({
+      name: j.name.trim(), label: j.label.trim() || j.name.trim(),
+      grades: j.grades.map((g) => ({ grade: g.grade, label: g.label.trim() || String(g.grade), isboss: g.isboss })),
+    })),
+    default_rank_permissions: defaults,
+  }).then(onSaved), [rows, defaults]);
 
-  const status = useAutoSave(() => {
-    const map: Record<string, any> = {};
-    roles.forEach((r) => { map[String(r.grade)] = { label: r.label, commission: r.commission, permissions: r.permissions }; });
-    return saveSettings({ default_roles: map }).then(onSaved);
-  }, [roles]);
+  const setJob = (i: number, patch: Partial<JobRow>) => setRows((l) => l.map((j, idx) => (idx === i ? { ...j, ...patch } : j)));
+  const setGrade = (i: number, gi: number, patch: Partial<JobRow["grades"][number]>) =>
+    setRows((l) => l.map((j, idx) => (idx === i ? { ...j, grades: j.grades.map((g, gx) => (gx === gi ? { ...g, ...patch } : g)) } : j)));
+  const addGrade = (i: number) =>
+    setRows((l) => l.map((j, idx) => (idx === i
+      ? { ...j, grades: [...j.grades, { grade: j.grades.reduce((m, g) => Math.max(m, g.grade), -1) + 1, label: "", isboss: false }] }
+      : j)));
 
   return (
-    <Section
-      title={_L("settings.roles_title")}
-      description={_L("settings.roles_desc")}
-      status={status}
-    >
-      <div className="space-y-3">
-        {roles.map((r, i) => (
+    <Section title={_L("settings.jobs_title")} description={_L("settings.jobs_desc")} status={status}>
+      {jobsAvailable !== false && (
+        <p className="rounded-md border border-dashed border-border px-3 py-2 text-xs text-muted-foreground">
+          {_L("settings.jobs_framework_note")}
+        </p>
+      )}
+
+      <div className="space-y-2">
+        {rows.length === 0 && <div className="py-2 text-xs text-muted-foreground">{_L("settings.jobs_none")}</div>}
+        {rows.map((j, i) => (
           <div key={i} className="rounded-lg border border-border p-3">
             <div className="flex items-end gap-2">
-              <NumberField label={_L("settings.grade")} className="w-20" value={Number(r.grade)} min={0} onChange={(v) => update(i, { grade: String(v) })} />
-              <TextField label={_L("settings.label")} className="flex-1" value={r.label} onChange={(v) => update(i, { label: v })} />
-              <NumberField label={_L("settings.commission")} className="w-28" value={r.commission} min={0} onChange={(v) => update(i, { commission: v })} />
-              <Button size="icon" variant="destructive" onClick={() => removeRole(i)}><Trash2 className="h-4 w-4" /></Button>
+              <TextField label={_L("settings.job_name")} hint={_L("settings.job_name_hint")} className="w-40" value={j.name} onChange={(v) => setJob(i, { name: v })} />
+              <TextField label={_L("settings.job_label")} className="flex-1" value={j.label} onChange={(v) => setJob(i, { label: v })} />
+              <Button size="icon" variant="ghost" onClick={() => setOpen(open === i ? null : i)}>
+                {open === i ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+              </Button>
+              <Button size="icon" variant="destructive" onClick={() => setRows((l) => l.filter((_, idx) => idx !== i))}><Trash2 className="h-4 w-4" /></Button>
             </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {PERMISSIONS.map((p) => (
-                <button
-                  key={p}
-                  onClick={() => togglePerm(i, p)}
-                  className={cn(
-                    "rounded-full border px-2.5 py-0.5 text-xs transition-colors",
-                    r.permissions[p] ? "border-primary/30 bg-primary/15 text-primary" : "border-border text-muted-foreground hover:bg-accent"
-                  )}
-                >
-                  {_L(PERM_LABEL[p] || "")}
-                </button>
-              ))}
-            </div>
+            <div className="mt-1 text-[11px] text-muted-foreground">{_L("settings.job_grade_count", j.grades.length)}</div>
+
+            {open === i && (
+              <div className="mt-3 space-y-2 border-t border-border/60 pt-3">
+                {j.grades.map((g, gi) => (
+                  <div key={gi} className="flex items-end gap-2">
+                    <NumberField label={_L("settings.grade")} className="w-20" value={g.grade} min={0} onChange={(v) => setGrade(i, gi, { grade: Math.max(0, Math.floor(v || 0)) })} />
+                    <TextField label={_L("settings.label")} className="flex-1" value={g.label} onChange={(v) => setGrade(i, gi, { label: v })} />
+                    {/* A boss grade holds every permission at the restaurant, so this
+                        flag is the one that hands over the business — not a label. */}
+                    <div className="pb-2">
+                      <Toggle checked={g.isboss} onChange={(v) => setGrade(i, gi, { isboss: v })} label={_L("settings.job_isboss")} />
+                    </div>
+                    <Button size="icon" variant="ghost" onClick={() => setJob(i, { grades: j.grades.filter((_, gx) => gx !== gi) })}><Trash2 className="h-4 w-4" /></Button>
+                  </div>
+                ))}
+                <Button size="sm" variant="outline" onClick={() => addGrade(i)}><Plus className="h-4 w-4" /> {_L("settings.job_add_grade")}</Button>
+              </div>
+            )}
           </div>
         ))}
-        <Button variant="outline" size="sm" onClick={addRole}><Plus className="h-4 w-4" /> {_L("settings.add_role")}</Button>
+        <Button variant="outline" size="sm" onClick={() => setRows((l) => [...l, { name: "", label: "", grades: [{ grade: 0, label: "", isboss: false }] }])}>
+          <Plus className="h-4 w-4" /> {_L("settings.job_add")}
+        </Button>
       </div>
+
+      <Field label={_L("settings.default_rank_perms")} hint={_L("settings.default_rank_perms_hint")} className="mt-4">
+        <div className="flex flex-wrap gap-2">
+          {PERMISSIONS.map((p) => (
+            <button
+              key={p}
+              onClick={() => setDefaults((m) => ({ ...m, [p]: !m[p] }))}
+              className={cn(
+                "rounded-full border px-2.5 py-0.5 text-xs transition-colors",
+                defaults[p] ? "border-primary/30 bg-primary/15 text-primary" : "border-border text-muted-foreground hover:bg-accent"
+              )}
+            >
+              {_L(PERM_LABEL[p] || "")}
+            </button>
+          ))}
+        </div>
+      </Field>
     </Section>
   );
 }
+
+/** RESERVATIONS. A reservation holds SPECIFIC seat anchors for one timeslot, so both
+ * knobs here are about the slot: which ones exist (canonical ids the server validates
+ * a booking against — "now" is special-cased to start the moment it's booked) and how
+ * long one stays live before the sweep expires it and frees its seats. */
+function Reservations({ settings, onSaved }: { settings: any; onSaved: () => void }) {
+  const [slots, setSlots] = useState<string[]>(Array.isArray(settings.reservation_slots) ? settings.reservation_slots.map(String) : []);
+  const [hold, setHold] = useState(Number(settings.reservation_hold_minutes ?? 90));
+  const status = useAutoSave(() => saveSettings({
+    reservation_slots: slots.map((s) => s.trim()).filter(Boolean),
+    reservation_hold_minutes: Math.max(5, Math.floor(hold || 0)),
+  }).then(onSaved), [slots, hold]);
+
+  return (
+    <Section title={_L("settings.reservations_title")} description={_L("settings.reservations_desc")} status={status}>
+      <NumberField label={_L("settings.reservation_hold")} hint={_L("settings.reservation_hold_hint")} value={hold} min={5} step={5} onChange={setHold} />
+      <Field label={_L("settings.reservation_slots")} hint={_L("settings.reservation_slots_hint")} className="mt-4">
+        <div className="space-y-2">
+          {slots.length === 0 && <div className="py-2 text-xs text-muted-foreground">{_L("settings.reservation_no_slots")}</div>}
+          {slots.map((s, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <Input className="flex-1 font-mono tabular-nums" value={s} placeholder="19:00"
+                onChange={(e) => setSlots((l) => l.map((x, idx) => (idx === i ? e.target.value : x)))} />
+              <Button size="icon" variant="destructive" onClick={() => setSlots((l) => l.filter((_, idx) => idx !== i))}><Trash2 className="h-4 w-4" /></Button>
+            </div>
+          ))}
+          <Button variant="outline" size="sm" onClick={() => setSlots((l) => [...l, ""])}><Plus className="h-4 w-4" /> {_L("settings.reservation_add_slot")}</Button>
+        </div>
+      </Field>
+    </Section>
+  );
+}
+
+// The Settings → ROLES editor is GONE. `default_roles` no longer exists server-side:
+// permissions, commission and salary are per RANK of a restaurant's job now, edited by
+// the boss in the management panel's Ranks tab (which renders the permission list the
+// server sends it). What remains server-wide is the Jobs group above — the standalone
+// job list, and `default_rank_permissions` for a freshly assigned job.
 
 /** NPC customers — AI customers that queue at a restaurant's counter, place a real POS
  * ticket, and pay on serve. All values are clamped server-side (NpcConfig) too, so this
@@ -483,6 +599,9 @@ function Eating({ settings, onSaved }: { settings: any; onSaved: () => void }) {
   const [hunger, setHunger] = useState(Number(c.hunger ?? 25));
   const [thirst, setThirst] = useState(Number(c.thirst ?? 0));
   const [anim, setAnim] = useState<string>(c.anim ?? "");
+  // The default number of mouthfuls a serving takes, for a food that doesn't state
+  // its own. 0 = the built-in default (3, or 4 for a drink — sipping reads slower).
+  const [bites, setBites] = useState(Number(c.bites ?? 0));
   const [rows, setRows] = useState<AnimRow[]>(
     (Array.isArray(settings.consume_anims) ? settings.consume_anims : []).map((a: any) => ({
       id: a.id ?? "", label: a.label ?? "", dict: a.dict ?? "", clip: a.clip ?? "",
@@ -491,19 +610,24 @@ function Eating({ settings, onSaved }: { settings: any; onSaved: () => void }) {
   );
   const status = useAutoSave(
     () => saveSettings({
-      consume: { hunger: clampPct(hunger), thirst: clampPct(thirst), anim },
+      // `bites` rides in the same block and MUST be sent: this group is saved
+      // whole, so omitting it would wipe an authored default the first time
+      // anything else on this screen changed. null = "use the built-in default".
+      consume: { hunger: clampPct(hunger), thirst: clampPct(thirst), anim,
+                 bites: bites > 0 ? Math.min(20, Math.floor(bites)) : null },
       consume_anims: rows.filter((r) => r.id && r.dict && r.clip),
     }).then(onSaved),
-    [hunger, thirst, anim, rows]
+    [hunger, thirst, anim, bites, rows]
   );
   const set = (i: number, patch: Partial<AnimRow>) =>
     setRows(rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
 
   return (
     <Section title={_L("settings.eating_title")} description={_L("settings.eating_desc")} status={status}>
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-4 gap-3">
         <NumberField label={_L("settings.eat_hunger")} hint={_L("settings.eat_needs_hint")} value={hunger} min={0} onChange={(v) => setHunger(clampPct(v))} />
         <NumberField label={_L("settings.eat_thirst")} value={thirst} min={0} onChange={(v) => setThirst(clampPct(v))} />
+        <NumberField label={_L("settings.eat_bites")} hint={_L("settings.eat_bites_hint")} value={bites} min={0} onChange={(v) => setBites(Math.max(0, Math.min(20, Math.floor(v))))} />
         <Select label={_L("settings.eat_anim")} value={anim} onChange={setAnim}
           options={[{ value: "", label: _L("settings.eat_anim_none") },
                     ...rows.filter((r) => r.id).map((r) => ({ value: r.id, label: r.label || r.id }))]} />

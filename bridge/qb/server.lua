@@ -1,6 +1,26 @@
-if GetResourceState('qb-core') ~= 'started' then return end
+-- QB **and QBox**. QBox ships as `qbx_core` and no `qb-core`, so guarding on
+-- GetResourceState('qb-core') alone sent every QBox server down the standalone
+-- bridge — which is why RegisterUsableItem there has a qbx_core special case. What
+-- makes one bridge serve both is that qbx_core's compatibility layer REGISTERS THE
+-- `qb-core` EXPORTS (`__cfx_export_qb-core_GetCoreObject`), so the core object below
+-- is reachable under that name on either framework. `provide 'qb-core'` does not
+-- reliably show up as a started resource, so we test for qbx_core by its own name.
+--
+-- bridge/custom's negative guard MUST stay the mirror image of this one (it checks
+-- qbx_core too) — the two files decide independently, and only one may take over.
+local QBOX = GetResourceState('qbx_core') == 'started'
+if GetResourceState('qb-core') ~= 'started' and not QBOX then return end
 
-QBCore = exports['qb-core']:GetCoreObject()
+-- A QBox server that has turned its qb compatibility bridge off (convar
+-- `qbx:enablebridge false`) exposes no core object at all. Say so plainly and stand
+-- down rather than erroring on every call: a silent nil QBCore would break the
+-- resource in a hundred confusing places instead of one clear line.
+local okCore, core = pcall(function() return exports['qb-core']:GetCoreObject() end)
+if not okCore or type(core) ~= "table" then
+    print("[pickle_restaurants] qbx_core is running but its qb-core compatibility bridge is disabled (convar `qbx:enablebridge`). Enable it so this resource can talk to the framework.")
+    return
+end
+QBCore = core
 
 function RegisterCallback(name, cb)
     QBCore.Functions.CreateCallback(name, cb)
@@ -200,6 +220,140 @@ function GetJobGrades(jobName)
     table.sort(grades, function(a, b) return a.level < b.level end)
     return grades
 end
+
+-- ─── the normalized JOB API ───────────────────────────────────────────────────
+-- A restaurant is STAFFED BY A FRAMEWORK JOB (its `metadata.job`) rather than by a
+-- private employee table, so every bridge variant answers the same questions about
+-- jobs in the same shape. Core's ResolvePerms and the admin/management panels only
+-- ever speak this API — they never touch QB(ox) directly.
+--
+-- QBox is preferred through its OWN export (`exports.qbx_core:GetJobs()`): the
+-- compat object's `Shared.Jobs` is a snapshot kept in step by an event, while the
+-- export is the live table. Both frameworks agree on the shape a grade has —
+-- numeric level as the KEY, display name in `name`, boss flag per grade in `isboss`.
+
+function JobsAvailable() return true end
+
+local function jobDefs()
+    if QBOX then
+        local ok, jobs = pcall(function() return exports.qbx_core:GetJobs() end)
+        if ok and type(jobs) == "table" then return jobs end
+    end
+    return (QBCore.Shared and QBCore.Shared.Jobs) or {}
+end
+
+local function qbGradeList(job)
+    local grades = {}
+    for level, g in pairs((job and job.grades) or {}) do
+        local lvl = tonumber(level) or tonumber(g.grade) or 0
+        grades[#grades + 1] = {
+            grade  = lvl,
+            label  = g.name or g.label or _L("job_grade_n", lvl),
+            isboss = g.isboss == true,
+        }
+    end
+    table.sort(grades, function(a, b) return a.grade < b.grade end)
+    return grades
+end
+
+function GetJobList()
+    local out = {}
+    for name, job in pairs(jobDefs()) do
+        out[#out + 1] = { name = name, label = job.label or name, grades = qbGradeList(job) }
+    end
+    table.sort(out, function(a, b) return (a.label or a.name):lower() < (b.label or b.name):lower() end)
+    return out
+end
+
+function GetJobGradeList(jobName)
+    local job = jobName and jobDefs()[jobName]
+    return job and qbGradeList(job) or {}
+end
+
+function GetJobLabel(jobName)
+    if not jobName or jobName == "" then return nil end
+    local job = jobDefs()[jobName]
+    return (job and job.label) or jobName
+end
+
+function GetPlayerJobInfo(source)
+    local xPlayer = QBCore.Functions.GetPlayer(tonumber(source))
+    local job = xPlayer and xPlayer.PlayerData and xPlayer.PlayerData.job
+    if not job or not job.name then return nil end
+    -- `grade` is a TABLE on both frameworks ({ name, level }); tolerate a flat
+    -- number too, since a fork that stores it that way is not worth crashing on.
+    local grade = (type(job.grade) == "table" and tonumber(job.grade.level)) or tonumber(job.grade) or 0
+    local gradeLabel = (type(job.grade) == "table" and job.grade.name) or _L("job_grade_n", grade)
+    local isBoss = job.isboss == true
+        or (type(job.grade) == "table" and job.grade.isboss == true)
+        or IsJobBossGrade(job.name, grade)
+    return {
+        name = job.name, label = job.label or GetJobLabel(job.name),
+        grade = grade, gradeLabel = gradeLabel, isBoss = isBoss,
+        -- QB tracks duty; treat an absent flag as ON so a server that never toggles
+        -- it doesn't have a restaurant nobody can work.
+        onDuty = job.onduty ~= false,
+    }
+end
+
+-- jobName nil/"" = FIRE: 'unemployed' is the fallback job both frameworks ship.
+function SetPlayerJobGrade(source, jobName, grade)
+    source = tonumber(source)
+    jobName = (jobName and jobName ~= "") and jobName or "unemployed"
+    grade = tonumber(grade) or 0
+    if QBOX then
+        local ok, res = pcall(function() return exports.qbx_core:SetJob(source, jobName, grade) end)
+        if ok then return res ~= false end
+    end
+    local xPlayer = QBCore.Functions.GetPlayer(source)
+    if not xPlayer then return false end
+    xPlayer.Functions.SetJob(jobName, grade)
+    return true
+end
+
+function IsJobBossGrade(jobName, grade)
+    grade = tonumber(grade) or 0
+    for _, g in ipairs(GetJobGradeList(jobName)) do
+        if g.grade == grade then return g.isboss == true end
+    end
+    return false
+end
+
+-- ONLINE players only. QB keeps offline job data in the `players` JSON blob, which
+-- would mean a raw query against one framework's schema from the bridge; a roster of
+-- who is actually on shift is also the more useful answer for tips + payroll.
+function GetJobEmployees(jobName, cb)
+    local out = {}
+    if jobName and jobName ~= "" then
+        for _, player in pairs(QBCore.Functions.GetQBPlayers() or {}) do
+            local pd = player and player.PlayerData
+            if pd and pd.job and pd.job.name == jobName then
+                local grade = (type(pd.job.grade) == "table" and tonumber(pd.job.grade.level)) or tonumber(pd.job.grade) or 0
+                out[#out + 1] = {
+                    identifier = pd.citizenid,
+                    name       = pd.charinfo and (pd.charinfo.firstname .. " " .. pd.charinfo.lastname) or pd.citizenid,
+                    grade      = grade,
+                    gradeLabel = (type(pd.job.grade) == "table" and pd.job.grade.name) or _L("job_grade_n", grade),
+                }
+            end
+        end
+    end
+    if type(cb) == "function" then cb(out) end
+    return out
+end
+
+-- ONE resource event for "this player's job may have changed", whatever the
+-- framework calls it. Core listens and invalidates what it derived from the old job.
+-- QBox fires the same player-level event through its compat layer; its
+-- `qbx_core:server:onJobUpdate` is a JOB DEFINITION edit (grades renamed, boss flag
+-- moved), which changes what every holder of that job may do — so it counts too, and
+-- is announced with no source (every player re-resolves).
+AddEventHandler("QBCore:Server:OnJobUpdate", function(src, _job)
+    TriggerEvent("pickle_restaurants:jobChanged", tonumber(src))
+end)
+AddEventHandler("qbx_core:server:onJobUpdate", function(_jobName, _job)
+    TriggerEvent("pickle_restaurants:jobChanged", nil)
+end)
 
 function IsPlayerAdmin(source)
     local source = tonumber(source)

@@ -9,7 +9,9 @@
 --      matching server callback, and PUSH server events back into the iframe via the
 --      phone's app-message export (a web iframe can't RegisterNetEvent).
 --   3. The world side the web app can't do: the live driver GPS blip + the driver's
---      position ping loop, the private-booth teleport, and kitchen backup alerts.
+--      position ping loop, and kitchen backup alerts. (There used to be a third: the
+--      private-booth teleport a reservation put you in. A reservation is an access grant
+--      over real seats now — see the reservations note at the bottom.)
 --
 -- NOTHING here talks to a specific phone resource — that all lives in bridge/phone/*,
 -- which defines the PhoneApp table (Register / Send / Notify / Number). A server with
@@ -67,6 +69,11 @@ RegisterNUICallback("phone:reserve",          relay("pickle_restaurants:phone:re
 RegisterNUICallback("phone:reserveAvailability", relay("pickle_restaurants:phone:reserveAvailability"))
 RegisterNUICallback("phone:cancelReservation",relay("pickle_restaurants:phone:cancelReservation"))
 RegisterNUICallback("phone:myReservations",   relay("pickle_restaurants:phone:myReservations"))
+-- A reservation holds real seats, and those seats can be SHARED: the holder lists,
+-- grants and revokes guests from the app (server-gated to the holder).
+RegisterNUICallback("phone:reservationGuests", relay("pickle_restaurants:phone:reservationGuests"))
+RegisterNUICallback("phone:grantGuest",       relay("pickle_restaurants:phone:grantGuest"))
+RegisterNUICallback("phone:revokeGuest",      relay("pickle_restaurants:phone:revokeGuest"))
 RegisterNUICallback("phone:leaderboard",      relay("pickle_restaurants:phone:leaderboard"))
 -- One-shot SEED for the in-app delivery map (last known driver position).
 -- The map is otherwise live-events-only, so re-opening a ticket mid-delivery drew
@@ -164,10 +171,19 @@ end)
 RegisterNUICallback("phone:mgmtData",       relay("pickle_restaurants:management:getData"))
 RegisterNUICallback("phone:saveMenuItem",   relay("pickle_restaurants:management:saveMenuItem"))
 RegisterNUICallback("phone:deleteMenuItem", relay("pickle_restaurants:management:deleteMenuItem"))
+-- Employment is a JOB now: hire takes { id, serverId, grade } (the framework's job +
+-- grade is what's written — there is no employee row any more), fire/setGrade act on an
+-- identifier at a grade, and per-EMPLOYEE commission is gone — commission is a property
+-- of the RANK, edited with the rest of a rank through `management:setRank`. So there is
+-- no `phone:setCommission` relay to keep: the callback behind it no longer exists.
 RegisterNUICallback("phone:hire",           relay("pickle_restaurants:management:hire"))
 RegisterNUICallback("phone:fire",           relay("pickle_restaurants:management:fire"))
 RegisterNUICallback("phone:setGrade",       relay("pickle_restaurants:management:setGrade"))
-RegisterNUICallback("phone:setCommission",  relay("pickle_restaurants:management:setCommission"))
+RegisterNUICallback("phone:setRank",        relay("pickle_restaurants:management:setRank"))
+-- Paying the staff: the tip pool goes out to whoever is on the roster, payroll pays
+-- each rank's salary out of the balance. Both are perm-gated (`manage_payroll`).
+RegisterNUICallback("phone:payTips",        relay("pickle_restaurants:management:payTips"))
+RegisterNUICallback("phone:runPayroll",     relay("pickle_restaurants:management:runPayroll"))
 RegisterNUICallback("phone:buyStock",       relay("pickle_restaurants:management:buyStock"))
 RegisterNUICallback("phone:deposit",        relay("pickle_restaurants:management:deposit"))
 RegisterNUICallback("phone:withdraw",       relay("pickle_restaurants:management:withdraw"))
@@ -416,38 +432,15 @@ RegisterNUICallback("phone:endDeliveryBlip", function(_, cb)
 end)
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- RESERVATIONS — private dining booth teleport (instanced routing bucket)
--- BOOTH: the interior anchor a reservation teleports into. TUNE IN-GAME.
+-- RESERVATIONS — nothing to do on the client any more.
+--
+-- Booking used to TELEPORT the party into a private dining booth inside its own routing
+-- bucket, so this file owned a BOOTH anchor, the fade-out/fade-in and a "put me back
+-- where I was" return point. All of it is gone: a reservation now HOLDS the
+-- restaurant's own placed seat anchors in the shared world (modules/phone/server.lua),
+-- so the world-side work is sitting down — which is modules/seating's job, through the
+-- ordinary seat interaction. Reserving and cancelling are plain relays above.
 -- ─────────────────────────────────────────────────────────────────────────────
-local BOOTH = { x = -1201.5, y = -895.0, z = 12.9, heading = 35.0 }
-local boothReturn = nil
-
-RegisterNUICallback("phone:enterBooth", function(d, cb)
-    local res = lib.callback.await("pickle_restaurants:phone:enterBooth", false, d or {})
-    if not res or not res.ok then cb(res or {}) return end
-    local ped = PlayerPedId()
-    local c = GetEntityCoords(ped)
-    boothReturn = { x = c.x, y = c.y, z = c.z, h = GetEntityHeading(ped) }
-    DoScreenFadeOut(400); Wait(450)
-    SetEntityCoords(ped, BOOTH.x, BOOTH.y, BOOTH.z, false, false, false, false)
-    SetEntityHeading(ped, BOOTH.heading)
-    Wait(300); DoScreenFadeIn(400)
-    ShowNotification(_L("reserve_booth_welcome"))
-    cb(res)
-end)
-
-RegisterNUICallback("phone:leaveBooth", function(_, cb)
-    local res = lib.callback.await("pickle_restaurants:phone:leaveBooth", false, {})
-    local ped = PlayerPedId()
-    DoScreenFadeOut(400); Wait(450)
-    if boothReturn then
-        SetEntityCoords(ped, boothReturn.x, boothReturn.y, boothReturn.z, false, false, false, false)
-        SetEntityHeading(ped, boothReturn.h)
-        boothReturn = nil
-    end
-    Wait(300); DoScreenFadeIn(400)
-    cb(res or { ok = true })
-end)
 
 -- Tunables (TUNE IN-GAME).
 BACKUP_THRESHOLD = 6   -- open tickets that trip the "kitchen backing up" alert

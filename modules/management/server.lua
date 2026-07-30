@@ -1,40 +1,90 @@
 -- =============================================
 --  modules/management | server.lua
---  Employees (hire/fire/promote/demote/commission), finances (deposit/
---  withdraw/ledger) and the per-restaurant sellable menu.
+--  Employment (hire/fire/promote via the FRAMEWORK JOB), per-rank pay,
+--  tips & payroll, finances (deposit/withdraw/ledger) and the
+--  per-restaurant sellable menu.
 -- =============================================
 
-local function rolesOf(r)
-    return r.roles or GetSetting("default_roles", {})
+-- EMPLOYMENT IS THE FRAMEWORK'S JOB. There is no employee row any more: a
+-- restaurant carries a job name (`metadata.job`, set by an admin) and everyone
+-- holding that job works there, at the rank their grade names. So this file never
+-- writes `pickle_restaurant_employees` — it moves players between job grades and
+-- edits the per-RANK config (permissions, commission, salary) that every holder of
+-- that grade shares.
+
+-- The restaurant's job, as the panel needs to render it. nil = unassigned, which is
+-- the one state that disables the whole Employees/Ranks side of the panel: a
+-- restaurant REQUIRES a job to employ anyone.
+local function jobBlock(rid)
+    local name = RestaurantJob(rid)
+    if not name then return nil end
+    return { name = name, label = GetJobLabel(name), grades = GetJobGradeList(name) }
 end
 
-local function maxGrade(roles)
-    local mg = 0
-    for k in pairs(roles) do
-        local n = tonumber(k); if n and n > mg then mg = n end
-    end
-    return mg
-end
-
-local function rolesArray(roles)
+-- The NUI wants a stable ORDERED list. `RestaurantRanks` is keyed by grade NUMBER,
+-- and a 0-based numeric map is exactly the shape json.encode can't be trusted to
+-- hand over intact — so flatten it, sorted by grade (the same wire shape the retired
+-- `roles` array had, plus salary/boss).
+local function ranksArray(rid)
     local arr = {}
-    for k, v in pairs(roles) do
-        arr[#arr + 1] = { grade = tonumber(k) or 0, label = v.label, commission = v.commission }
+    for grade, cfg in pairs(RestaurantRanks(rid) or {}) do
+        arr[#arr + 1] = {
+            grade       = tonumber(grade) or 0,
+            label       = cfg.label,
+            permissions = cfg.permissions or {},
+            commission  = tonumber(cfg.commission) or 0,
+            salary      = tonumber(cfg.salary) or 0,
+            boss        = cfg.boss or false,
+        }
     end
     table.sort(arr, function(a, b) return a.grade < b.grade end)
     return arr
 end
 
-local function buildEmployees(rid, roles)
-    local list = {}
-    for _, emp in pairs(EmployeeCache[rid] or {}) do
-        local role = roles[tostring(emp.grade)] or {}
-        list[#list + 1] = {
-            identifier = emp.identifier, name = emp.name, grade = emp.grade,
-            gradeLabel = role.label or ("Grade " .. emp.grade), commission = emp.commission_rate,
-        }
+-- `RestaurantRoster` reads the FRAMEWORK's roster, which may answer asynchronously
+-- (an ESX/QB player query). An ox_lib callback has to return a value, so block this
+-- coroutine on the reply instead of handing the panel an empty list it would never
+-- get a correction for. The callback always fires, so this can't hang.
+local function rosterAwait(rid)
+    local p = promise.new()
+    RestaurantRoster(rid, function(list) p:resolve(list or {}) end)
+    return Citizen.Await(p) or {}
+end
+
+-- Grades are validated against the JOB's real grade ladder, never against anything
+-- we author: the framework owns the ladder, and a grade it doesn't define would put
+-- a player in a rank nothing can resolve (no label, no pay). A job with no ladder at
+-- all (a standalone job authored without grades) has grade 0 and nothing else.
+-- Returns the clamped grade, or nil when the submitted one isn't real.
+local function validGrade(jobName, grade)
+    grade = math.floor(tonumber(grade) or 0)
+    local grades = GetJobGradeList(jobName) or {}
+    if #grades == 0 then return (grade == 0) and 0 or nil end
+    for _, g in ipairs(grades) do
+        if math.floor(tonumber(g.grade) or 0) == grade then return grade end
     end
-    return list
+    return nil
+end
+
+-- Employment mutators act on a PLAYER, not on a row: `SetPlayerJobGrade` needs a
+-- source. The panel names someone either way — the nearby picker knows a server id,
+-- the roster knows an identifier — so resolve both to a source here. An identifier
+-- with nobody online behind it can't be moved (a framework only knows how to set a
+-- LOADED player's job), and that is reported rather than silently succeeding.
+-- Returns source|nil, identifier|nil.
+local function resolveTarget(d)
+    local sid = tonumber(d.serverId or d.target)
+    if sid then
+        local ident = GetIdentifier(sid)
+        if ident then return sid, ident end
+    end
+    local ident = d.identifier and tostring(d.identifier) or nil
+    if not ident or ident == "" then return nil, nil end
+    for _, p in ipairs(GetPlayers()) do
+        p = tonumber(p)
+        if p and GetIdentifier(p) == ident then return p, ident end
+    end
+    return nil, ident
 end
 
 -- ─── open ────────────────────────────────────────────────────────────────────
@@ -42,15 +92,29 @@ end
 lib.callback.register("pickle_restaurants:management:getData", function(src, d)
     local id = tonumber(d.id)
     local r = GetRestaurant(id); if not r then return { ok = false } end
-    local perms, isOwner = ResolvePerms(id, src)
+    -- ResolvePerms' 2nd return is "holds every permission here": a server admin, the
+    -- owner, or someone on a BOSS grade of the restaurant's job. That is what gates
+    -- the pay-by-rank editor — setting what a grade earns is a boss's job, not a
+    -- shift lead's.
+    local perms, isBoss = ResolvePerms(id, src)
     if not perms then return { ok = false, error = _L("no_work_here") } end
-    local effective = isOwner and ALL_PERMS or perms
-    local roles = rolesOf(r)
+    local effective = isBoss and ALL_PERMS or perms
 
     local ledger = {}
     if effective.view_finances then
         ledger = MySQL.query.await(
             "SELECT type, amount, description, identifier, created_at FROM pickle_restaurant_ledger WHERE restaurant_id = ? ORDER BY id DESC LIMIT 50",
+            { id }) or {}
+    end
+
+    -- Payslip history (tips + salary runs), newest first and capped like the ledger.
+    -- Visible to whoever can see the money OR runs the payroll — a manager who can pay
+    -- wages but not read the ledger still has to see what was already paid, or they'd
+    -- pay twice.
+    local payroll = {}
+    if effective.view_finances or effective.manage_payroll then
+        payroll = MySQL.query.await(
+            "SELECT identifier, name, grade, amount, kind, paid_at FROM pickle_restaurant_payroll WHERE restaurant_id = ? ORDER BY id DESC LIMIT 50",
             { id }) or {}
     end
 
@@ -99,6 +163,9 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
             supplies[#supplies + 1] = {
                 key = key, item = item, variant = vid,
                 label = StockKeyLabel(key), image = StockKeyImage(key),
+                -- the heading the tab files this row under (the item's authored
+                -- group, else derived from what consumes it). nil = Ungrouped.
+                group = ItemGroup(item),
                 cost = math.max(0, math.floor(tonumber(cost) or 0)),
                 stock = GetStockCount(id, key), installed = ItemExists(item),
                 -- how many the manager is personally carrying (offer to deposit).
@@ -120,7 +187,11 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
     -- clockIn/clockOut callbacks the phone uses, so the two surfaces can never drift.
     -- Everything else is a read-only summary assembled from caches we already hold;
     -- the money figures are gated on view_finances like the rest of the panel.
-    local employees = buildEmployees(id, roles)
+    -- Who works here, straight from the framework's job roster (never a table of
+    -- ours) — so a hire made in another resource's boss menu shows up here, and
+    -- nobody can be on our payroll without holding the job.
+    local job     = jobBlock(id)
+    local staff   = job and rosterAwait(id) or {}
     local dash
     do
         local myId = GetIdentifier(src)
@@ -165,7 +236,7 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
             roster     = roster,
             openOrders = openCount,
             openValue  = effective.view_finances and RoundMoney(openValue) or nil,
-            employees  = #employees,
+            employees  = #staff,   -- headcount on the JOB, not rows in a table of ours
             registers  = registers, kiosks = kiosks, seats = seats,
             menuSize   = #priceList,
             outOfStock = out,
@@ -191,11 +262,28 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
                        theme        = r.metadata and r.metadata.theme or nil },
         theme     = r.metadata and r.metadata.theme or nil, -- App-level: skins the open panel
         perms     = effective,
-        -- Owner-or-admin. Gates the rename card in the Brand tab, which is NOT a
-        -- staff permission (see management:setName).
-        isOwner   = isOwner or false,
-        roles     = rolesArray(roles),
-        employees = employees,
+        -- Holds-everything: owner, server admin, or a boss grade of the job. Gates the
+        -- rename card in the Brand tab and the Ranks editor, neither of which is a
+        -- staff permission (see management:setName / management:setRank). `isOwner` is
+        -- kept as the same value under its old name so nothing that reads it breaks.
+        isBoss    = isBoss or false,
+        isOwner   = isBoss or false,
+        -- The job this restaurant employs through. nil + jobMissing = an admin hasn't
+        -- assigned one, which is the ONE state where nobody can be hired: the panel
+        -- says so rather than offering a hire form that can only fail.
+        job        = job,
+        jobMissing = (job == nil) or nil,
+        -- Every permission key there is, so the Ranks editor renders the real list
+        -- instead of a copy that drifts when PERMISSIONS grows.
+        permissions = PERMISSIONS,
+        -- Pay by RANK: one config per grade, shared by everyone on it.
+        ranks     = ranksArray(id),
+        roster    = staff,
+        -- Tips are STAFF money held in escrow (unpaid `pickle_restaurant_tips` rows),
+        -- never house money — the balance never sees them. Paying them out is
+        -- manage_payroll's job.
+        tipPool   = TipPool(id),
+        payroll   = payroll,
         ledger    = ledger,
         priceList = priceList,
         stale     = stale,
@@ -208,61 +296,177 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
     }
 end)
 
--- ─── employees ───────────────────────────────────────────────────────────────
+-- ─── employment (the framework job) ──────────────────────────────────────────
+-- Hiring puts a player ON the restaurant's job; firing takes them off it. Nothing
+-- is written to our own tables, which is the whole point: the job IS the employment
+-- record, so a hire made here is visible to every other resource that reads jobs and
+-- a job change made elsewhere needs no reconciliation on our side.
+--
+-- Every one of these needs the restaurant to HAVE a job. `management:setCommission`
+-- is GONE — commission is a property of the rank now (management:setRank), so there
+-- is nothing per-person left to set.
 
 lib.callback.register("pickle_restaurants:management:hire", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_employees") then return { ok = false, error = _L("no_permission") } end
-    local target = tonumber(d.target)
-    local identifier = GetIdentifier(target)
-    if not identifier then return { ok = false, error = _L("mgmt_player_not_found") } end
-    if EmployeeCache[id] and EmployeeCache[id][identifier] then return { ok = false, error = _L("mgmt_already_employed") } end
-    local r = GetRestaurant(id)
-    if r.owner_identifier == identifier then return { ok = false, error = _L("mgmt_player_owns") } end
+    local r = GetRestaurant(id); if not r then return { ok = false, error = _L("mgmt_no_restaurant") } end
+    local job = RestaurantJob(id)
+    -- No job = literally nothing to hire into. An admin assigns one in /restaurants.
+    if not job then return { ok = false, error = _L("mgmt_no_job") } end
 
-    local roles = rolesOf(r)
-    local grade = tonumber(d.grade) or 0
-    local commission = (roles[tostring(grade)] and roles[tostring(grade)].commission) or GetSetting("default_commission", 10)
-    local name = GetPlayerCharacterName(target)
-    MySQL.insert.await(
-        "INSERT INTO pickle_restaurant_employees (restaurant_id, identifier, name, grade, commission_rate) VALUES (?, ?, ?, ?, ?)",
-        { id, identifier, name, grade, commission })
-    CacheEmployee(id, { restaurant_id = id, identifier = identifier, name = name, grade = grade, commission_rate = commission })
+    local target, identifier = resolveTarget(d)
+    if not target then return { ok = false, error = _L("mgmt_player_not_found") } end
+    if r.owner_identifier == identifier then return { ok = false, error = _L("mgmt_player_owns") } end
+    local info = GetPlayerJobInfo(target)
+    if info and info.name == job then return { ok = false, error = _L("mgmt_already_employed") } end
+
+    local grade = validGrade(job, d.grade)
+    if not grade then return { ok = false, error = _L("mgmt_bad_grade") } end
+    -- Hiring straight onto a BOSS grade is an escalation: it hands over every
+    -- permission at this restaurant, so only someone who already holds them all may
+    -- do it. A shift lead with manage_employees hires staff, not bosses.
+    if IsJobBossGrade(job, grade) then
+        local _, isBoss = ResolvePerms(id, src)
+        if not isBoss then return { ok = false, error = _L("mgmt_boss_grade_denied") } end
+    end
+    if not SetPlayerJobGrade(target, job, grade) then return { ok = false, error = _L("mgmt_hire_failed") } end
+
     ShowNotification(target, _L("mgmt_hired_at", r.label))
-    return { ok = true }
+    ShowNotification(src, _L("mgmt_hired", GetPlayerCharacterName(target) or ""))
+    return { ok = true, grade = grade }
 end)
 
 lib.callback.register("pickle_restaurants:management:fire", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_employees") then return { ok = false, error = _L("no_permission") } end
-    MySQL.update.await("DELETE FROM pickle_restaurant_employees WHERE restaurant_id = ? AND identifier = ?", { id, d.identifier })
-    UncacheEmployee(id, d.identifier)
+    local r = GetRestaurant(id); if not r then return { ok = false, error = _L("mgmt_no_restaurant") } end
+    local job = RestaurantJob(id)
+    if not job then return { ok = false, error = _L("mgmt_no_job") } end
+
+    local target, identifier = resolveTarget(d)
+    -- Firing sets the framework's unemployed job, which only works on a loaded player.
+    if not target then return { ok = false, error = _L("mgmt_player_offline") } end
+    if r.owner_identifier == identifier then return { ok = false, error = _L("mgmt_player_owns") } end
+    -- CHECK THE JOB, always: this callback can otherwise be pointed at any player in
+    -- the server and would strip them of a job that has nothing to do with us.
+    local info = GetPlayerJobInfo(target)
+    if not info or info.name ~= job then return { ok = false, error = _L("mgmt_not_employed") } end
+    -- A boss can only be dismissed by someone who is one.
+    if info.isBoss or RankFor(id, info.grade).boss then
+        local _, isBoss = ResolvePerms(id, src)
+        if not isBoss then return { ok = false, error = _L("mgmt_boss_grade_denied") } end
+    end
+
+    if not SetPlayerJobGrade(target, nil, 0) then return { ok = false, error = _L("mgmt_fire_failed") } end
+    ShowNotification(target, _L("mgmt_fired_from", r.label))
+    ShowNotification(src, _L("mgmt_fired", GetPlayerCharacterName(target) or ""))
     return { ok = true }
 end)
 
 lib.callback.register("pickle_restaurants:management:setGrade", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_employees") then return { ok = false, error = _L("no_permission") } end
-    local emp = EmployeeCache[id] and EmployeeCache[id][d.identifier]
-    if not emp then return { ok = false } end
-    local roles = rolesOf(GetRestaurant(id))
-    local grade = math.max(0, math.min(maxGrade(roles), tonumber(d.grade) or 0))
-    MySQL.update.await("UPDATE pickle_restaurant_employees SET grade = ? WHERE restaurant_id = ? AND identifier = ?", { grade, id, d.identifier })
-    emp.grade = grade
+    local job = RestaurantJob(id)
+    if not job then return { ok = false, error = _L("mgmt_no_job") } end
+
+    local target = resolveTarget(d)
+    if not target then return { ok = false, error = _L("mgmt_player_offline") } end
+    local info = GetPlayerJobInfo(target)
+    if not info or info.name ~= job then return { ok = false, error = _L("mgmt_not_employed") } end
+
+    local grade = validGrade(job, d.grade)
+    if not grade then return { ok = false, error = _L("mgmt_bad_grade") } end
+    -- Same escalation guard as hiring, in BOTH directions: promoting someone into a
+    -- boss grade, or demoting a boss out of one, is a boss-only act.
+    if IsJobBossGrade(job, grade) or info.isBoss or RankFor(id, info.grade).boss then
+        local _, isBoss = ResolvePerms(id, src)
+        if not isBoss then return { ok = false, error = _L("mgmt_boss_grade_denied") } end
+    end
+    if not SetPlayerJobGrade(target, job, grade) then return { ok = false, error = _L("mgmt_grade_failed") } end
+
     ShowNotification(src, _L("mgmt_role_saved"))
     return { ok = true, grade = grade }
 end)
 
-lib.callback.register("pickle_restaurants:management:setCommission", function(src, d)
+-- ─── ranks (pay & permissions per grade) ─────────────────────────────────────
+-- One config per grade of the restaurant's job, shared by everyone on it: what they
+-- may do here, what cut of a sale they take, what they're paid per payroll run.
+-- BOSS-ONLY on purpose — this is where the money is decided, and `manage_employees`
+-- (which moves people between grades) must not also let someone write their own pay.
+lib.callback.register("pickle_restaurants:management:setRank", function(src, d)
     local id = tonumber(d.id)
-    if not HasPerm(id, src, "manage_employees") then return { ok = false, error = _L("no_permission") } end
-    local emp = EmployeeCache[id] and EmployeeCache[id][d.identifier]
-    if not emp then return { ok = false } end
-    local rate = math.max(0, math.min(100, tonumber(d.commission) or 0))
-    MySQL.update.await("UPDATE pickle_restaurant_employees SET commission_rate = ? WHERE restaurant_id = ? AND identifier = ?", { rate, id, d.identifier })
-    emp.commission_rate = rate
-    ShowNotification(src, _L("mgmt_commission_saved"))
-    return { ok = true }
+    local perms, isBoss = ResolvePerms(id, src)
+    if not perms or not isBoss then return { ok = false, error = _L("no_permission") } end
+    local job = RestaurantJob(id)
+    if not job then return { ok = false, error = _L("mgmt_no_job") } end
+    local grade = validGrade(job, d.grade)
+    if not grade then return { ok = false, error = _L("mgmt_bad_grade") } end
+
+    -- The NUI is untrusted: take only REAL permission keys (never whatever keys the
+    -- payload happens to carry), a commission that is a percentage, and a whole-dollar
+    -- salary. `label` and `boss` are deliberately NOT writable — the job owns the one
+    -- and the framework's grade flag owns the other.
+    local granted = {}
+    local submitted = type(d.permissions) == "table" and d.permissions or {}
+    for _, k in ipairs(PERMISSIONS) do
+        if submitted[k] == true then granted[k] = true end
+    end
+    SetRestaurantRank(id, grade, {
+        permissions = granted,
+        commission  = math.max(0, math.min(100, math.floor(tonumber(d.commission) or 0))),
+        salary      = math.max(0, math.floor(tonumber(d.salary) or 0)),
+    })
+    ShowNotification(src, _L("mgmt_rank_saved"))
+    return { ok = true, ranks = ranksArray(id) }
+end)
+
+-- ─── tips & payroll ──────────────────────────────────────────────────────────
+-- Tips are staff money the restaurant merely HOLDS (unpaid rows, never the balance);
+-- salaries come OUT of the balance. Both are one gate, `manage_payroll`, which a boss
+-- holds implicitly through ALL_PERMS.
+
+-- `PayTips`/`RunPayroll` (core) refuse with a KEY as their THIRD return, because the
+-- engine has no business deciding how a panel words a refusal. This maps each one to
+-- the boss-facing string; an unmapped key falls back to the generic failure rather
+-- than printing a raw key at somebody.
+local PAYOUT_ERRORS = {
+    tips_none            = "mgmt_no_tips",
+    tips_no_staff        = "mgmt_no_recipients",
+    payroll_none         = "mgmt_payroll_nobody",
+    payroll_insufficient = "payroll_insufficient",
+    no_restaurant        = "mgmt_no_restaurant",
+}
+
+lib.callback.register("pickle_restaurants:management:payTips", function(src, d)
+    local id = tonumber(d.id)
+    if not HasPerm(id, src, "manage_payroll") then return { ok = false, error = _L("no_permission") } end
+    if not GetRestaurant(id) then return { ok = false, error = _L("mgmt_no_restaurant") } end
+    -- THREE returns: paid, the recipient ROWS, and a refusal key. `recipients` is a
+    -- table (who got what), never a count — the count is #recipients.
+    local paid, recipients, errKey = PayTips(id)
+    -- Nothing owed, or nobody on shift to split it between: say WHICH rather than
+    -- reporting a $0 payout as a success, and never collapse the two ("no tips" when
+    -- the pool is full and the room is empty sends a boss looking for the wrong fault).
+    if errKey then return { ok = false, error = _L(PAYOUT_ERRORS[errKey] or "mgmt_payroll_failed") } end
+    local n = #(recipients or {})
+    if not paid or paid <= 0 or n == 0 then return { ok = false, error = _L("mgmt_no_tips") } end
+    ShowNotification(src, _L("mgmt_tips_paid", paid, n))
+    return { ok = true, paid = paid, recipients = n, tipPool = TipPool(id) }
+end)
+
+lib.callback.register("pickle_restaurants:management:runPayroll", function(src, d)
+    local id = tonumber(d.id)
+    if not HasPerm(id, src, "manage_payroll") then return { ok = false, error = _L("no_permission") } end
+    local r = GetRestaurant(id); if not r then return { ok = false, error = _L("mgmt_no_restaurant") } end
+    -- A run is ATOMIC: a restaurant that can't cover the whole wage bill pays nobody,
+    -- and comes back as (nil, <locale key>) rather than paying the first few names in
+    -- the roster and leaving the rest short.
+    local paid, recipients, errKey = RunPayroll(id)
+    if errKey then return { ok = false, error = _L(PAYOUT_ERRORS[errKey] or "mgmt_payroll_failed") } end
+    local n = #(recipients or {})
+    if not paid or paid <= 0 or n == 0 then return { ok = false, error = _L("mgmt_payroll_nobody") } end
+    ShowNotification(src, _L("mgmt_payroll_paid", paid, n))
+    return { ok = true, paid = paid, recipients = n, balance = GetRestaurant(id).balance }
 end)
 
 -- ─── price list (POS menu) ───────────────────────────────────────────────────
@@ -546,10 +750,11 @@ lib.callback.register("pickle_restaurants:management:setName", function(src, d)
     -- Renaming the business is an OWNER-level act, not a staff one: there is no
     -- per-employee permission for it in PERMISSIONS, and the name lands on every
     -- customer-facing surface (blip, screens, phone, receipts). ResolvePerms'
-    -- second return is exactly "owner or server admin", so gate on that rather
-    -- than inventing a perm or borrowing manage_props (which a shift lead may hold).
-    local perms, isOwner = ResolvePerms(id, src)
-    if not perms or not isOwner then return { ok = false, error = _L("no_permission") } end
+    -- second return is exactly "holds everything here" — owner, server admin or a
+    -- BOSS grade of the job — so gate on that rather than inventing a perm or
+    -- borrowing manage_props (which a shift lead may hold).
+    local perms, isBoss = ResolvePerms(id, src)
+    if not perms or not isBoss then return { ok = false, error = _L("no_permission") } end
     local res = SetRestaurantName(id, d.label)
     if res and res.ok then ShowNotification(src, _L("mgmt_name_saved", res.label)) end
     return res

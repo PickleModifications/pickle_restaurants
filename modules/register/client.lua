@@ -43,9 +43,10 @@ local RT_SW, RT_SH = RenderTargetSurface(RT)
 
 local REGISTER = {
     w = RT_SW or 1024, h = RT_SH or 1024,
-    -- Virtual-cursor speed relative to raw mouse-look delta. TUNE IN-GAME
-    -- TUNE IN-GAME.
-    sensitivity = 0.5,
+    -- Virtual-cursor speed relative to raw mouse-look delta. 0.375 = three quarters of
+    -- the 0.5 this shipped at, matching the kiosk — the two in-world screens must feel
+    -- the same, since a cashier uses both. TUNE IN-GAME.
+    sensitivity = 0.375,
     -- Framing in the counter's LOCAL space (y = the prop's forward, toward the customer
     -- side the screen faces): the scripted camera sits in FRONT of the screen looking
     -- back at it, so the cashier uses it head-on whichever side they walked up from (the
@@ -318,20 +319,25 @@ end
 
 -- ─── the interactive session ─────────────────────────────────────────────────
 
+-- Per-frame, cleared on close, beep on the first frame only — see the same helper in
+-- modules/kiosk for why (a re-armed bubble outlives the session it describes).
+local helpBeeped = false
 local function helpThisFrame()
-    if IsHelpMessageBeingDisplayed() then return end
     AddTextEntry("pk_register_help", _L("register_exit_hint"))
     BeginTextCommandDisplayHelp("pk_register_help")
-    EndTextCommandDisplayHelp(0, false, true, -1)
+    EndTextCommandDisplayHelp(0, false, not helpBeeped, -1)
+    helpBeeped = true
 end
 
 function CloseRegisterScreen()
     if not active then return end
     active = nil
+    ClearAllHelpMessages()
+    helpBeeped = false
     if dui then SendDuiMouseUp(dui, "l") end -- release a held button, just in case
     local ped = PlayerPedId()
     FreezeEntityPosition(ped, false)
-    SetEntityVisible(ped, true, false)
+    SetLocalPedHidden(false)
     teardownCam()
     -- Hand the screen back to the idle board (keep it bound — never blank).
     pushedRid = nil
@@ -357,7 +363,7 @@ function OpenRegisterScreen(prop, ent)
     lastCurX, lastCurY = nil, nil -- force the cursor to (re)show, centred
     local ped = PlayerPedId()
     FreezeEntityPosition(ped, true)
-    SetEntityVisible(ped, false, false)
+    SetLocalPedHidden(true)
     active = { rid = rid, ent = ent }
 
     -- Swap the idle board for the cashier's perm-gated payload (adds the nearby
@@ -440,7 +446,7 @@ AddEventHandler("onResourceStop", function(res)
         RenderScriptCams(false, false, 0, true, true)
         if registerCam then DestroyCam(registerCam, false) end
         local ped = PlayerPedId()
-        SetEntityVisible(ped, true, false)
+        SetLocalPedHidden(false)
         FreezeEntityPosition(ped, false)
     end
     removeScreen()

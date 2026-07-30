@@ -190,6 +190,29 @@ lib.callback.register("pickle_restaurants:consume:eat", function(src, d)
     -- the layer is dropped, since it reads that layer's metadata.
     local spec = ConsumeSpecFor(subject.item, subject.stack)
 
+    -- WHAT GOES IN THE HAND. Resolved BEFORE the layers are dropped, since it reads
+    -- them. `LayerDisplay` already answers for the things whose prop IS their
+    -- identity (a drink's capped cup, a toy), and everything else is rendered by the
+    -- kitchen's own resolver — so a burger is eaten as its bun/patty/cheese tower and
+    -- a boxed soup as its box, instead of the `consume_anims` clip's generic prop
+    -- (which had the whole restaurant eating a doughnut).
+    --
+    -- A MEAL PILE may be several layers stacked at one spot: they are rebuilt in the
+    -- hand bottom-to-top (idxs is sorted high-to-low for removal, so it's walked
+    -- backwards), which is the same order they stood in on the tray.
+    local props = disp and disp.props or nil
+    if not props then
+        if kind == "box" then
+            props = LayerHeldProps and LayerHeldProps({ item = item, stack = stack }) or nil
+        elseif LayerHeldProps then
+            local out = {}
+            for i = #idxs, 1, -1 do
+                for _, m in ipairs(LayerHeldProps(stack[idxs[i]]) or {}) do out[#out + 1] = m end
+            end
+            props = (#out > 0) and out or nil
+        end
+    end
+
     -- ── bites / sips ─────────────────────────────────────────────────────────
     -- A serving is eaten over `spec.bites` mouthfuls unless the player asked to
     -- finish it (`whole`). Progress is recorded ON THE LAYER (`eaten`) and written
@@ -245,11 +268,12 @@ lib.callback.register("pickle_restaurants:consume:eat", function(src, d)
              -- the full clip spec (dict/clip/prop/ms), so the client needs no
              -- catalogue of its own and an admin's retune applies immediately
              anim = spec.anim,
-             -- What goes IN THE HAND. For a drink this is the restaurant's own
-             -- capped cup (cup + lid) rather than the generic bottle the animation
-             -- catalogue would otherwise hold — the cup's texture is a brand render
-             -- target, so it arrives branded without anything extra here.
-             props = disp and disp.props or nil,
+             -- What goes IN THE HAND: the food's OWN props (see above) — a drink's
+             -- branded capped cup, a burger's whole tower, a box. The cup's texture
+             -- is a brand render target, so it arrives branded with nothing extra
+             -- here. Only a layer that resolves to no prop at all falls back to the
+             -- animation catalogue's own.
+             props = props,
              -- what's left, so an open menu can refresh itself without a round trip
              contents = describeContents(stack) }
 end)

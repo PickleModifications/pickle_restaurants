@@ -162,8 +162,20 @@ and that config-driven cheese melt still round-trips. If any fails, the refactor
 
 ## E. Management panel (boss/owner)
 
-- [ ] Open the boss panel; each tab is permission-gated. **Hire** a nearby player, set grade &
-  commission; **fire** someone.
+- [ ] **Assign the restaurant a JOB first** (admin panel → the restaurant → Job). Until one is
+  assigned nobody but an admin or the owner can work there — that is deliberate, and the panel
+  says so. Confirm the job's real grade ladder (labels included) appears whatever framework
+  you run; on a frameworkless server author the ladder in Settings → Jobs instead.
+- [ ] Open the boss panel; each tab is permission-gated. **Hire** a nearby player onto the job at
+  a grade, **promote** them, **fire** them — then check the framework's own job UI agrees (there
+  is no separate employee list any more).
+- [ ] **Ranks** tab (boss only): set each grade's permissions, commission % and salary. A
+  non-boss grade must NOT be able to open it, and only a boss may hire/promote to a boss grade.
+- [ ] **Payroll** tab: tips accrue to the pool (serve an NPC that tips) and are paid to STAFF,
+  never to the balance — pay the pool out and confirm each recipient is paid and the pool zeroes.
+  **Run payroll** pays each rank's salary from the balance, and refuses the whole run (paying
+  nobody) when the balance can't cover it. Payslip history lists both kinds.
+- [ ] Set `payroll_interval_minutes` > 0 → salaries run on that cadence with no console noise.
 - [ ] **Price list**: set/remove prices (incl. a per-flavor drink price) → boards update.
 - [ ] **Supplies**: buy stock from balance; deposit/withdraw between pocket and pool.
 - [ ] **Finances**: deposit/withdraw cash ↔ balance; ledger shows the entries.
@@ -184,8 +196,14 @@ and that config-driven cheese melt still round-trips. If any fails, the refactor
   kitchen (KDS) queue; apply a promo / loyalty redemption if configured.
 - [ ] Favorite & reorder; leave a review (1–5, order-gated); earn a loyalty punch.
 - [ ] Staff: **clock in/out**; owner: check the analytics tab; create a promotion (broadcasts live).
-- [ ] Reserve a **booth** → enter/leave teleports you into the instanced spot. ⚙ single global
-  `BOOTH` anchor — confirm it's acceptable for your map.
+- [ ] **Reserve a table** → the booking HOLDS that many real seat anchors for one timeslot
+  (no instance, no teleport). Sit on one as the holder; walk another player up to it and
+  confirm they're refused and offered "Ask to sit here"; accept the request from the holder's
+  side and confirm the guest can now sit. Cancel the booking → the seats free up.
+- [ ] Book a second table at a **different time** while one is live → refused. Book more seats
+  in the **same** slot → the existing reservation grows instead.
+- [ ] Leave a "now" booking past `reservation_hold_minutes` → the sweep expires it and the
+  seats stop reading "Reserved".
 
 ## G. Delivery
 

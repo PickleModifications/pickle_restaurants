@@ -36,6 +36,12 @@ local function buildAdminData()
         -- The "Inside the box" cropper locks its frame to this aspect so a crop lands
         -- in the box exactly as it was dragged. Nothing in the panel writes it back.
         boxQuad     = Config.BoxQuad,
+        -- Every job the framework knows, with its grade ladder — what the per-restaurant
+        -- Job card picks from. `jobsAvailable` is false on a standalone server, where WE
+        -- are the framework and the list is the `jobs` setting the admin authors himself;
+        -- the panel says so instead of showing an empty picker that looks broken.
+        jobs          = GetJobList(),
+        jobsAvailable = JobsAvailable(),
         items       = BuildItemList(),     -- catalogue for item-pickers
         groups      = CollectGroups(),     -- every group name in use (UI suggestions)
         players     = {},
@@ -63,6 +69,16 @@ local function buildAdminData()
             hasShell     = (r.metadata and r.metadata.shell) ~= nil,
             hasNpcSpawn  = (r.metadata and r.metadata.npc_spawn) ~= nil,
             groups       = r.groups or {},
+            -- The job this restaurant employs through. A restaurant REQUIRES one —
+            -- employment, permissions, commission and wages all hang off the grade a
+            -- player holds — so an unassigned restaurant is reported as MISSING rather
+            -- than merely empty, and the panel flags it in the list.
+            job          = r.metadata and r.metadata.job or nil,
+            jobLabel     = (r.metadata and r.metadata.job) and GetJobLabel(r.metadata.job) or nil,
+            jobMissing   = ((r.metadata and r.metadata.job) == nil) or nil,
+            -- Per-restaurant map blip override; nil = following the global
+            -- Settings → Map Blip default (the panel shows that default's values).
+            blip         = r.blip,
             props        = props,
             propCount    = #props,
             brand_image  = r.metadata and r.metadata.brand_image or nil,
@@ -116,9 +132,14 @@ end
 lib.callback.register("pickle_restaurants:admin:create", function(src, d)
     if not IsPlayerAdmin(src) then return { ok = false } end
     if not d or not d.name or d.name == "" then return { ok = false, error = _L("admin_name_required") } end
+    -- NO BLIP COLUMN: a new restaurant FOLLOWS the global `blip` setting (an empty
+    -- column is what BuildClientRestaurant resolves against the setting). It used to
+    -- be seeded with a COPY of the setting here, and since a per-restaurant override
+    -- always wins, that made Settings → Map Blip permanently inert — saved, synced
+    -- and shadowed on every restaurant that existed.
     local id = MySQL.insert.await(
-        "INSERT INTO pickle_restaurants (name, label, blip, balance) VALUES (?, ?, ?, ?)",
-        { d.name, d.label or d.name, json.encode(GetSetting("blip", {})), GetSetting("starting_balance", 0) })
+        "INSERT INTO pickle_restaurants (name, label, balance) VALUES (?, ?, ?)",
+        { d.name, d.label or d.name, GetSetting("starting_balance", 0) })
     if not id then return { ok = false } end
     reloadRestaurant(id)
     SyncToClient(-1)
@@ -158,13 +179,17 @@ lib.callback.register("pickle_restaurants:admin:delete", function(src, d)
 
     MySQL.update.await("DELETE FROM pickle_restaurants WHERE id = ?", { id })
     MySQL.update.await("DELETE FROM pickle_restaurant_props WHERE restaurant_id = ?", { id })
-    MySQL.update.await("DELETE FROM pickle_restaurant_employees WHERE restaurant_id = ?", { id })
     MySQL.update.await("DELETE FROM pickle_restaurant_menu WHERE restaurant_id = ?", { id })
     MySQL.update.await("DELETE FROM pickle_restaurant_stock WHERE restaurant_id = ?", { id })
     MySQL.update.await("DELETE FROM pickle_restaurant_ledger WHERE restaurant_id = ?", { id })
     MySQL.update.await("DELETE FROM pickle_restaurant_orders WHERE restaurant_id = ?", { id })
+    -- Payroll history and any UNPAID tips go with the restaurant. `pickle_restaurant_
+    -- employees` is not touched: employment is the framework's job now, so that table
+    -- is legacy and nothing reads or writes it. Job ASSIGNMENTS aren't per-restaurant
+    -- either (a standalone player's job outlives one business), so they stay put.
+    MySQL.update.await("DELETE FROM pickle_restaurant_payroll WHERE restaurant_id = ?", { id })
+    MySQL.update.await("DELETE FROM pickle_restaurant_tips WHERE restaurant_id = ?", { id })
     RestaurantCache[id] = nil
-    EmployeeCache[id] = nil
     StockCache[id] = nil
     ClearOrders(id) -- drops OrderCache/NextTicket + bumps the rev so a stale register can't re-apply
     for _, pid in ipairs(propIds) do
@@ -189,6 +214,36 @@ lib.callback.register("pickle_restaurants:admin:setOwner", function(src, d)
     MySQL.update.await("UPDATE pickle_restaurants SET owner_identifier = ? WHERE id = ?", { identifier, id })
     RestaurantCache[id].owner_identifier = identifier
     return { ok = true, owner = identifier }
+end)
+
+-- ─── job assignment ──────────────────────────────────────────────────────────
+-- The restaurant's JOB is the one thing that makes it employable: staff are whoever
+-- holds it, permissions/commission/salary are per GRADE of it, and the boss panel's
+-- Employees tab is the framework's roster for it. Assigning it is an ADMIN act —
+-- it decides who has power over the business, so a boss can't hand it to himself.
+--
+-- Setting it SEEDS the per-rank config from the job's grade ladder (SetRestaurantJob,
+-- core) so a freshly assigned job is immediately usable: boss grades hold everything,
+-- the rest get `default_rank_permissions`. Clearing it (blank/absent `job`) leaves the
+-- ranks behind on purpose — re-assigning the same job restores the pay the boss set.
+lib.callback.register("pickle_restaurants:admin:setJob", function(src, d)
+    if not IsPlayerAdmin(src) then return { ok = false } end
+    local id = tonumber(d and d.id); if not GetRestaurant(id) then return { ok = false } end
+    local job = d.job and tostring(d.job) or nil
+    if job == "" then job = nil end
+    -- Validate against the real job list: a name the framework doesn't know would leave
+    -- the restaurant with a job nobody can hold and no grade ladder to seed ranks from
+    -- — i.e. permanently unstaffable, with nothing on screen to say why.
+    if job then
+        local known = false
+        for _, j in ipairs(GetJobList() or {}) do
+            if j.name == job then known = true break end
+        end
+        if not known then return { ok = false, error = _L("admin_unknown_job") } end
+    end
+    SetRestaurantJob(id, job) -- write-through + seeds ranks + syncs
+    ShowNotification(src, job and _L("admin_job_set", GetJobLabel(job)) or _L("admin_job_cleared"))
+    return { ok = true, job = job, jobLabel = job and GetJobLabel(job) or nil }
 end)
 
 -- Recipe groups carried by a restaurant (what it may cook & sell). Groups are
@@ -235,6 +290,47 @@ lib.callback.register("pickle_restaurants:admin:setItemImage", function(src, d)
     SyncToClient(-1)
     ShowNotification(src, _L("admin_settings_saved"))
     return { ok = true }
+end)
+
+-- ─── map blip (per restaurant) ───────────────────────────────────────────────
+-- The `blip` column is that restaurant's OWN map presence, and it is only ever
+-- written HERE, by an admin deciding this restaurant differs. A new restaurant is
+-- created with the column EMPTY (it used to be seeded with a copy of the global
+-- setting, which shadowed that setting forever). Empty is "follow the server
+-- default", never "no blip": BuildClientRestaurant falls through to the setting when
+-- the column is empty, so an override can always be handed back — explicitly with
+-- the panel's reset, or implicitly by ReleaseCopiedBlips when the default changes.
+local function SanitizeBlip(b)
+    if type(b) ~= "table" then return nil end
+    local function num(v, d, lo, hi)
+        v = tonumber(v); if not v then return d end
+        if v < lo then return lo elseif v > hi then return hi end
+        return v
+    end
+    return {
+        enabled = b.enabled ~= false,
+        sprite  = math.floor(num(b.sprite, 93, 1, 826)),  -- blip sprite id
+        color   = math.floor(num(b.color, 1, 0, 85)),     -- blip colour index
+        scale   = num(b.scale, 0.8, 0.1, 3.0),
+    }
+end
+
+lib.callback.register("pickle_restaurants:admin:setBlip", function(src, d)
+    if not IsPlayerAdmin(src) then return { ok = false } end
+    local id = tonumber(d and d.id); if not id then return { ok = false } end
+    local r = GetRestaurant(id); if not r then return { ok = false, error = _L("mgmt_no_restaurant") } end
+    local blip = SanitizeBlip(d.blip)
+    -- Two statements, not one nil-able parameter: a nil in the middle of a Lua
+    -- parameter table truncates the list, so the NULL case is its own query.
+    if blip then
+        MySQL.update.await("UPDATE pickle_restaurants SET blip = ? WHERE id = ?", { json.encode(blip), id })
+    else
+        MySQL.update.await("UPDATE pickle_restaurants SET blip = NULL WHERE id = ?", { id })
+    end
+    r.blip = blip -- write-through: the cache is what the sync payload reads
+    SyncToClient(-1) -- the blip rides the restaurant sync payload
+    ShowNotification(src, _L("blip_saved"))
+    return { ok = true, blip = blip }
 end)
 
 -- Theme: same seed config as the boss panel, admin-gated. Shares
@@ -296,12 +392,70 @@ local MENU_SANITIZERS = {
     consume_anims = SanitizeConsumeAnims,
 }
 
+-- Keys that are sanitized on the way in but are NOT menu content, so writing one must
+-- not drag `RebuildDerived()` (the recipe/assembly/prep-model derivation) along with it.
+-- `jobs` is the standalone job ladder: with no framework installed that list IS the job
+-- system, so a malformed entry doesn't merely look wrong — it decides who may work
+-- somewhere.
+local PLAIN_SANITIZERS = {
+    jobs = function(v) return SanitizeJobs and SanitizeJobs(v) or v end,
+    -- The bookable slot vocabulary. A slot id is what a hold's WINDOW is computed from,
+    -- so junk here would create bookings that never start and never expire — the exact
+    -- bug the reservation rewrite fixed on the way in from the phone. `"now"` always
+    -- survives: it needs no clock, and an emptied list must still be bookable.
+    reservation_slots = function(v)
+        local out, seen = { "now" }, { now = true }
+        for _, s in ipairs(type(v) == "table" and v or {}) do
+            s = tostring(type(s) == "table" and (s.id or s.slot or "") or s):gsub("%s+", "")
+            if s == "now" or s:match("^%d%d?:%d%d$") then
+                -- normalise 9:00 → 09:00 so two spellings can't hold the same table twice
+                if s ~= "now" then s = ("%02d:%02d"):format(tonumber(s:match("^(%d+)")), tonumber(s:match(":(%d+)$"))) end
+                if not seen[s] then seen[s] = true; out[#out + 1] = s end
+            end
+        end
+        return out
+    end,
+    -- An enum, not free text: PayTips branches on it, and an unrecognised value would
+    -- silently mean "even" anyway — better to store what actually happens.
+    tip_split = function(v) return (tostring(v) == "grade") and "grade" or "even" end,
+}
+
+-- A global BLIP edit has to be visible on the restaurants that never made a choice.
+-- Creation used to stamp a copy of the setting into every restaurant's own `blip`
+-- column, and an override always wins — so the setting did nothing, on every
+-- restaurant that already existed. Creation no longer copies (admin:create), and a
+-- global edit hands back any column that still holds the OLD default verbatim: a
+-- value that only ever got there by being copied from the setting was never a
+-- decision. (A deliberate override that happens to equal the old default is
+-- indistinguishable from a copy — and follows the setting from now on, which is
+-- what it looked like anyway.) Restaurants with genuinely different numbers keep them,
+-- and the panel's "Use server default" is still the explicit way back.
+local function ReleaseCopiedBlips(prev)
+    if type(prev) ~= "table" then return end
+    local function same(a, b)
+        return (a.enabled ~= false) == (b.enabled ~= false)
+            and tonumber(a.sprite) == tonumber(b.sprite)
+            and tonumber(a.color) == tonumber(b.color)
+            and math.abs((tonumber(a.scale) or 0) - (tonumber(b.scale) or 0)) < 0.001
+    end
+    for id, r in pairs(RestaurantCache) do
+        if type(r.blip) == "table" and same(r.blip, prev) then
+            MySQL.update.await("UPDATE pickle_restaurants SET blip = NULL WHERE id = ?", { id })
+            r.blip = nil -- write-through: the cache is what the sync payload reads
+        end
+    end
+end
+
 -- Apply a settings write, routing the three authored menu keys through their
 -- sanitizer. Returns true if a menu key was written (caller rebuilds derived).
 local function applySetting(key, value)
+    -- read BEFORE the write: the release compares against the outgoing default
+    local prevBlip = (key == "blip") and GetSetting("blip", nil) or nil
     local san = MENU_SANITIZERS[key]
     if san then SetSetting(key, san(value)); return true end
-    SetSetting(key, value)
+    local plain = PLAIN_SANITIZERS[key]
+    SetSetting(key, plain and plain(value) or value)
+    if key == "blip" then ReleaseCopiedBlips(prevBlip) end
     return false
 end
 

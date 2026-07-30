@@ -66,7 +66,12 @@ function StartMovement(prop, data)
     -- every raycast frame, so a seat, a serving-tray point or a virtual anchor can
     -- be lifted clear of the geometry it would otherwise clip into.
     local zAdjust = 0.0
-    local Z_TRIM_STEP = 0.005 -- metres per frame (x4 with SHIFT). TUNE IN-GAME.
+    local Z_TRIM_STEP = 0.005 -- metres per frame, arrow keys (x4 with SHIFT). TUNE IN-GAME.
+    -- UNFROZEN the trim is the SCROLL WHEEL: the prop is riding the cursor there, so
+    -- the hand that lifts it should be the one already on the mouse. Per NOTCH, not
+    -- per frame, hence the much larger step. Frozen, scroll is rotation and the arrows
+    -- keep the height (the mouse is nudging position there).
+    local Z_SCROLL_STEP = 0.05 -- metres per scroll notch (x4 with SHIFT). TUNE IN-GAME.
     while true do
         local speedMode = 1
         -- keep a seated-preview ped in its pose if moving it dropped the animation.
@@ -106,7 +111,7 @@ function StartMovement(prop, data)
         ShowInteractText(
             '[G]     - ' .. (isFrozen and _L("objects_unfreeze") or _L("objects_freeze")) .. '  \n' ..
             (isFrozen and _L("objects_position") or '') ..
-            _L("objects_height") ..
+            _L(isFrozen and "objects_height" or "objects_height_scroll") ..
             '[E]     - ' .. _L("objects_save") ..
             (data.enableCancel and '  \n[ESC / BACKSPACE]     - ' .. _L("objects_cancel") or '')
         )
@@ -142,8 +147,18 @@ function StartMovement(prop, data)
         -- Height trim, live in BOTH modes: unfrozen it re-offsets every raycast
         -- frame (so the prop keeps its lift as you sweep the cursor around), frozen
         -- it nudges the parked point directly.
-        if IsControlPressed(1, 172) or IsControlPressed(1, 173) then
-            local step = Z_TRIM_STEP * speedMode * (IsControlPressed(1, 172) and 1.0 or -1.0)
+        local step
+        if not isFrozen then
+            -- scroll wheel while the prop follows the cursor
+            if IsControlJustPressed(1, 15) then
+                step = Z_SCROLL_STEP * speedMode
+            elseif IsControlJustPressed(1, 14) then
+                step = -Z_SCROLL_STEP * speedMode
+            end
+        elseif IsControlPressed(1, 172) or IsControlPressed(1, 173) then
+            step = Z_TRIM_STEP * speedMode * (IsControlPressed(1, 172) and 1.0 or -1.0)
+        end
+        if step then
             zAdjust = zAdjust + step
             if isFrozen then
                 coords = vector3(coords.x, coords.y, coords.z + step)

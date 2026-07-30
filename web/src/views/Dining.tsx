@@ -10,8 +10,14 @@ import type { Crop } from "@/components/Branding";
 // the hover tooltip for whatever the cursor is over, and a one-line hint.
 //
 // Clicks are resolved WORLD-side, not here: a DOM element can't sit on a 3D prop,
-// so the Lua hover loop decides what's under the cursor and `dining:click` eats it
-// — the same split the kitchen uses for clicking food on the prep table.
+// so the Lua hover loop decides what's under the cursor and `dining:click` acts on
+// it — the same split the kitchen uses for clicking food on the prep table.
+//
+// SELECTION IS EXPLICIT. Hovering a serving only names it; clicking LOCKS it in, and
+// only a locked card carries the eat/drink buttons. The card sits above the food, so
+// reaching for a button always leaves the food's hover radius and passes over its
+// neighbours on the way — with hover alone driving the target, that reach is a race
+// between the cursor and whatever it crosses. A lock has nothing to race.
 
 type Hover = {
   index?: number | null;
@@ -28,6 +34,9 @@ type Hover = {
   crop?: Crop | null;
   // mouthfuls left on this serving; shown on the "take a bite" button
   bitesLeft?: number;
+  // The selection was CLICKED, not merely hovered — the card is pinned to this
+  // serving and may offer the actions. Hover-only shows the name and how to pick it.
+  locked?: boolean;
 };
 
 export default function Dining() {
@@ -37,19 +46,20 @@ export default function Dining() {
   useNuiEvent("diningHover", (d: Hover) => setHover(d || {}));
 
   // ESC hands the meal back (nothing is consumed) — mirrored in Lua so the props
-  // and camera come down either way.
+  // and camera come down either way. Lua refuses mid-mouthful, and so does this: a
+  // bite the server has already committed is not cancellable.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") fetchNui("dining:close");
+      if (e.key === "Escape" && !busy) fetchNui("dining:close");
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+    // `busy` is in the deps on purpose: with [] the listener closes over the first
+    // render's value and would post through a mouthful.
+  }, [busy]);
 
-  // BOTH actions are buttons on the tooltip. Clicking the world eats nothing:
-  // "click to take a bite" and "a button to finish" were two gestures aimed at the
-  // same thing, and which one you got depended on hitting a button you might not
-  // have noticed. One row, two explicit choices.
+  // Both actions are buttons on the LOCKED tooltip. A world click never eats — it
+  // only picks what the buttons will act on.
   const act = async (event: string) => {
     if (busy || hover.index == null) return;
     setBusy(true);
@@ -61,23 +71,27 @@ export default function Dining() {
 
   return (
     <div className="h-full w-full select-none">
-      {/* hovered food: the same card language the kitchen's bar tooltip uses */}
+      {/* The world click surface: a click anywhere that ISN'T the card locks the
+          selection onto whatever the cursor is over (or clears it on empty space).
+          It sits UNDER the tooltip and is a separate element, so a click on a button
+          never reaches it. */}
+      <div className="fixed inset-0 z-30" onPointerDown={() => fetchNui("dining:click")} />
+
+      {/* the targeted food: the same card language the kitchen's bar tooltip uses */}
       {has && (
         <div
           className="pointer-events-none fixed z-40 -translate-x-1/2 -translate-y-[140%]"
           style={{ left: `${(hover.x ?? 0.5) * 100}%`, top: `${(hover.y ?? 0.5) * 100}%` }}
         >
           {/* pointer-events-auto ONLY on the card: the tooltip carries the buttons,
-              while the rest of the screen stays a click-through surface for the world */}
-          {/* PIN the world hover while the cursor is on the card. The buttons sit
-              above the pile, so reaching for one leaves the pile's hover radius and
-              Lua would otherwise drop the target out from under the click. Lua holds
-              a lost pile briefly on its own, which covers the gap between the food
-              and this card; the pin covers the rest of the reach. */}
+              while the rest of the screen stays a click-through surface for the world.
+              A locked card reads as selected (brand border); an un-locked one is just
+              a label. */}
           <div
-            onPointerEnter={() => fetchNui("dining:pin", { on: true })}
-            onPointerLeave={() => fetchNui("dining:pin", { on: false })}
-            className="pointer-events-auto w-60 rounded-xl border border-border bg-card p-3 text-center shadow-2xl"
+            className={cn(
+              "pointer-events-auto w-60 rounded-xl border bg-card p-3 text-center shadow-2xl",
+              hover.locked ? "border-primary" : "border-border"
+            )}
           >
             {hover.image && (
               <div className="mx-auto h-12 w-12 overflow-hidden rounded">
@@ -104,10 +118,17 @@ export default function Dining() {
               </div>
             )}
             <div className="mt-1.5 text-sm font-semibold leading-tight">{hover.label}</div>
+            {/* NOT selected yet: say how to select it, and offer nothing to aim at.
+                The card can't be reached without crossing other food, so there is
+                deliberately no action here to reach for. */}
+            {!hover.locked && (
+              <div className="mt-1.5 text-[11px] text-muted-foreground">{_L("dining.click_to_select")}</div>
+            )}
             {/* one row, two buttons: a single mouthful (with how many are left) or
                 the whole serving. A thing that is USED rather than eaten (a toy) is
                 one action — offering it "one bite" of a plush would be nonsense — so
                 it collapses to the single button. */}
+            {hover.locked && (
             <div className="mt-2.5 flex gap-1.5">
               {hover.play ? (
                 <button
@@ -137,22 +158,16 @@ export default function Dining() {
                 </>
               )}
             </div>
+            )}
           </div>
           <div className="absolute left-1/2 top-full h-0 w-0 -translate-x-1/2 border-x-[6px] border-t-[6px] border-x-transparent border-t-card" />
         </div>
       )}
 
-      {/* standing hint: what this view is and how to leave it */}
-      <div className="pointer-events-none fixed inset-x-0 bottom-8 flex justify-center">
-        <div
-          className={cn(
-            "tape rounded-full border border-border bg-card/90 px-4 py-1.5 text-[11px] text-muted-foreground shadow-xl transition",
-            busy && "opacity-60"
-          )}
-        >
-          {_L("dining.hint")}
-        </div>
-      </div>
+      {/* NO bottom-of-screen hint. The seated help prompt already says ESC puts the
+          meal away (modules/seating, which owns that line because it also owns what
+          ESC does next), and the tooltip says how to pick a serving — a third copy
+          of the same instruction was just furniture over the food. */}
     </div>
   );
 }

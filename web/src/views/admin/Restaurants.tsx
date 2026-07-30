@@ -3,14 +3,16 @@ import { fetchNui, setPeek } from "@/lib/nui";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Field } from "@/components/form";
+import { Field, NumberField, Toggle } from "@/components/form";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import Branding, { ThemeEditor, NameEditor } from "@/components/Branding";
+import { Card, CardContent } from "@/components/ui/card";
+import { useAutoSave } from "@/lib/autosave";
 import { applyTheme, type ThemeConfig } from "@/lib/theme";
 import { money } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
-  Plus, Trash2, Pencil, MapPin, ChevronRight, ChevronDown, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X, Building2, Sparkles, Monitor, Users, DoorOpen,
+  Plus, Trash2, Pencil, MapPin, ChevronRight, ChevronDown, ArrowLeft, CupSoda, Flame, Sandwich, CookingPot, UserCog, Receipt, Armchair, Image as ImageIcon, Tags, X, Building2, Sparkles, Monitor, Users, DoorOpen, Map as MapIcon, RotateCcw, Check, Loader2, Briefcase, TriangleAlert,
 } from "lucide-react";
 
 // LAZY getter (memoized): `_L()` resolves at render, not at module import — a
@@ -69,9 +71,13 @@ function PropChip({ p, act, restaurantId, section, virtual }:
 }
 
 type Focus = { restaurant?: number; section?: string };
-type Props = { restaurants: any[]; players: any[]; groups: string[]; refresh: () => void; focus?: Focus; appTheme?: ThemeConfig | null; onDetailChange?: (open: boolean) => void; renderTargets?: { key: string; w: number; h: number }[] };
+type BlipCfg = { enabled?: boolean; sprite?: number; color?: number; scale?: number };
+/** One framework job with its grade ladder, as the server's `jobs` list reports it. */
+export type Job = { name: string; label?: string; grades?: { grade: number; label?: string; isboss?: boolean }[] };
+type JobCfg = { job: string | null; jobLabel: string | null };
+type Props = { restaurants: any[]; players: any[]; groups: string[]; refresh: () => void; focus?: Focus; appTheme?: ThemeConfig | null; onDetailChange?: (open: boolean) => void; renderTargets?: { key: string; w: number; h: number }[]; defaultBlip?: BlipCfg; jobs?: Job[]; jobsAvailable?: boolean };
 
-export default function Restaurants({ restaurants, players, groups, refresh, focus, appTheme, onDetailChange, renderTargets }: Props) {
+export default function Restaurants({ restaurants, players, groups, refresh, focus, appTheme, onDetailChange, renderTargets, defaultBlip, jobs, jobsAvailable }: Props) {
   // After a placement reopen, `focus.restaurant` drops us straight back into that
   // restaurant (and `focus.section` scrolls to its stations/seating).
   const [selectedId, setSelectedId] = useState<number | null>(focus?.restaurant ?? null);
@@ -84,14 +90,24 @@ export default function Restaurants({ restaurants, players, groups, refresh, foc
   // the panel (a refresh would remount the field mid-typing), so the detail header
   // and the list row read the live label from here.
   const [nameEdits, setNameEdits] = useState<Record<number, string>>({});
-  const withEdits = (r: any) => (r && (themeEdits[r.id] || nameEdits[r.id])
+  // And the same for the map blip — null is a MEANINGFUL value here ("follow the
+  // server default"), so presence is tested with `in`, never truthiness.
+  const [blipEdits, setBlipEdits] = useState<Record<number, BlipCfg | null>>({});
+  // And for the assigned JOB — same reason (the Job card auto-saves without refreshing
+  // the panel), and `null` is meaningful here too ("unassigned"), so presence is `in`.
+  const [jobEdits, setJobEdits] = useState<Record<number, JobCfg>>({});
+  const withEdits = (r: any) => (r && (themeEdits[r.id] || nameEdits[r.id] || r.id in blipEdits || r.id in jobEdits)
     ? {
         ...r,
         theme: themeEdits[r.id] || r.theme,
         label: nameEdits[r.id] || r.label,
+        job: r.id in jobEdits ? jobEdits[r.id].job : r.job,
+        jobLabel: r.id in jobEdits ? jobEdits[r.id].jobLabel : r.jobLabel,
+        jobMissing: r.id in jobEdits ? (jobEdits[r.id].job ? undefined : true) : r.jobMissing,
         // The internal key is re-derived from the label server-side; mirror the
         // same slug so the header's codename doesn't read stale until a refetch.
         name: nameEdits[r.id] ? (restSlug(nameEdits[r.id]) || r.name) : r.name,
+        blip: r.id in blipEdits ? blipEdits[r.id] : r.blip,
       }
     : r);
   const selected = withEdits(restaurants.find((r) => r.id === selectedId) || null);
@@ -121,6 +137,11 @@ export default function Restaurants({ restaurants, players, groups, refresh, foc
         onThemeChange={(t) => setThemeEdits((m) => ({ ...m, [selected.id]: t }))}
         onNameChange={(l) => setNameEdits((m) => ({ ...m, [selected.id]: l }))}
         renderTargets={renderTargets}
+        defaultBlip={defaultBlip}
+        onBlipChange={(b) => setBlipEdits((m) => ({ ...m, [selected.id]: b }))}
+        jobs={jobs}
+        jobsAvailable={jobsAvailable}
+        onJobChange={(j) => setJobEdits((m) => ({ ...m, [selected.id]: j }))}
       />
     );
   }
@@ -166,6 +187,14 @@ function List({ restaurants, act, onOpen }: { restaurants: any[]; act: (e: strin
                   <span className="truncate font-semibold">{r.label}</span>
                   <Badge variant="secondary">#{r.id}</Badge>
                   {r.owner ? <Badge>{_L("admin.owned")}</Badge> : <Badge variant="outline">{_L("admin.server_owned")}</Badge>}
+                  {/* A restaurant REQUIRES a job now — nobody can be hired, paid or
+                      given a permission without one — so an unassigned one is flagged
+                      in the list rather than only inside its own settings tab. */}
+                  {r.jobMissing && (
+                    <Badge variant="destructive" className="gap-1">
+                      <TriangleAlert className="h-3 w-3" /> {_L("admin.job_missing_badge")}
+                    </Badge>
+                  )}
                 </div>
                 <div className="truncate text-xs text-muted-foreground">
                   {_L("admin.restaurant_summary", money(r.balance), r.propCount, r.hasCounter ? _L("admin.counter_set") : _L("admin.no_counter"))}
@@ -180,7 +209,7 @@ function List({ restaurants, act, onOpen }: { restaurants: any[]; act: (e: strin
   );
 }
 
-function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThemeChange, onNameChange, renderTargets }: { r: any; players: any[]; groups: string[]; act: (e: string, p: any) => void; onBack: () => void; focusSection?: string; appTheme?: ThemeConfig | null; onThemeChange?: (t: ThemeConfig) => void; onNameChange?: (label: string) => void; renderTargets?: { key: string; w: number; h: number }[] }) {
+function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThemeChange, onNameChange, renderTargets, defaultBlip, onBlipChange, jobs, jobsAvailable, onJobChange }: { r: any; players: any[]; groups: string[]; act: (e: string, p: any) => void; onBack: () => void; focusSection?: string; appTheme?: ThemeConfig | null; onThemeChange?: (t: ThemeConfig) => void; onNameChange?: (label: string) => void; renderTargets?: { key: string; w: number; h: number }[]; defaultBlip?: BlipCfg; onBlipChange?: (b: BlipCfg | null) => void; jobs?: Job[]; jobsAvailable?: boolean; onJobChange?: (j: JobCfg) => void }) {
   const props: any[] = r.props || [];
   const byType = (t: string) => props.filter((p) => p.prop_type === t);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -483,6 +512,13 @@ function Detail({ r, players, groups, act, onBack, focusSection, appTheme, onThe
 
           <ThemeEditor id={r.id} theme={r.theme} event="admin:setTheme" onChange={onThemeChange} scoped />
 
+          {/* WHO WORKS HERE. Assigning the job is an admin act (it decides who has
+              power over the business), which is why it lives here and not in the boss
+              panel — the boss only edits what each GRADE of it may do and earns. */}
+          <JobEditor r={r} jobs={jobs} jobsAvailable={jobsAvailable} onChange={onJobChange} />
+
+          <BlipEditor r={r} defaultBlip={defaultBlip} onChange={onBlipChange} />
+
           {/* recipe access groups — what this restaurant may cook & sell */}
           <div className="rounded-lg border border-border p-3">
             <div className="mb-1 flex items-center gap-2 text-sm font-semibold">
@@ -603,5 +639,178 @@ function GroupsEditor({ r, groups, act }: { r: any; groups: string[]; act: (e: s
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * The FRAMEWORK JOB this restaurant employs through. Everything about employment hangs
+ * off it: staff are whoever holds the job, and permissions / commission / salary are
+ * per GRADE of it (edited by the boss in the management panel's Ranks tab). A
+ * restaurant with none can employ nobody, so the card says so loudly instead of just
+ * reading empty. Assigning one SEEDS the ranks from the job's grade ladder server-side.
+ *
+ * Shaped like BlipEditor: auto-saves debounced (no save buttons in this app) and
+ * WITHOUT `act` — a panel refresh would remount the card mid-change — so the parent
+ * mirrors the live value through `onChange`.
+ *
+ * `jobsAvailable = false` means there is no framework job system: the list is then the
+ * admin's OWN `jobs` setting (Settings → Jobs), and saying so is the difference between
+ * "author some jobs first" and an empty picker that reads as broken.
+ */
+function JobEditor({ r, jobs, jobsAvailable, onChange }: {
+  r: any; jobs?: Job[]; jobsAvailable?: boolean; onChange?: (j: JobCfg) => void;
+}) {
+  const list = jobs || [];
+  const [job, setJob] = useState<string>(r.job || "");
+  // The label the picker knows for the chosen name, so the mirrored value the list row
+  // reads is complete without waiting for the server's reply.
+  const labelFor = (name: string) => list.find((j) => j.name === name)?.label || name || null;
+  const status = useAutoSave(() => {
+    onChange?.({ job: job || null, jobLabel: job ? labelFor(job) : null });
+    // "" clears it server-side; the ranks are deliberately left behind so re-assigning
+    // the same job restores the pay the boss configured.
+    return fetchNui("admin:setJob", { id: r.id, job });
+  }, [job]);
+
+  const chosen = list.find((j) => j.name === job);
+  const grades = chosen?.grades || [];
+
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <Briefcase className="h-4 w-4 text-primary" /> {_L("admin.job_title")}
+          </h3>
+          <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+            {status === "saving" ? (
+              <><Loader2 className="h-3 w-3 animate-spin" /> {_L("theme.saving")}</>
+            ) : status === "saved" ? (
+              <><Check className="h-3 w-3 text-primary" /> {_L("theme.saved")}</>
+            ) : null}
+          </span>
+        </div>
+        <p className="mb-3 text-[11px] text-muted-foreground">{_L("admin.job_hint")}</p>
+
+        {list.length === 0 ? (
+          <p className="rounded-md border border-dashed border-border px-3 py-2 text-[11px] text-muted-foreground">
+            {jobsAvailable === false ? _L("admin.job_none_standalone") : _L("admin.job_none_framework")}
+          </p>
+        ) : (
+          <Field label={_L("admin.job_field")}>
+            <select
+              value={job}
+              onChange={(e) => setJob(e.target.value)}
+              className="h-9 w-full rounded-md border border-input bg-muted/50 px-2 text-sm transition-colors focus-visible:border-primary/60 focus-visible:outline-none"
+            >
+              {/* Unassigning is a real choice (a restaurant being decommissioned), and
+                  the ranks survive it — re-assigning the same job restores the pay. */}
+              <option value="">{_L("admin.job_unassigned")}</option>
+              {list.map((j) => (
+                <option key={j.name} value={j.name}>{j.label || j.name}</option>
+              ))}
+            </select>
+          </Field>
+        )}
+
+        {!job ? (
+          <p className="mt-2 flex items-center gap-1.5 text-[11px] text-destructive">
+            <TriangleAlert className="h-3.5 w-3.5" /> {_L("admin.job_missing_hint")}
+          </p>
+        ) : (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <span className="tape text-muted-foreground">{_L("admin.job_grades")}</span>
+            {grades.length === 0 ? (
+              <span className="text-[11px] text-muted-foreground">{_L("admin.job_no_grades")}</span>
+            ) : (
+              grades.map((g) => (
+                <Badge key={g.grade} variant={g.isboss ? "default" : "outline"} className="gap-1">
+                  <span className="font-mono tabular-nums opacity-60">{g.grade}</span>
+                  {g.label || String(g.grade)}
+                </Badge>
+              ))
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * This restaurant's own MAP BLIP — sprite / colour / scale / shown-at-all, sitting
+ * on the same anchor everything else pins to (the first register placed, or the
+ * first prop with none). A restaurant is created with the column EMPTY, meaning
+ * "follow the server-wide Settings → Map Blip default", which the server resolves
+ * when it builds the sync — so "Use server default" is a real reset, not a blank
+ * blip, and this card is only ever how a restaurant comes to DIFFER from that
+ * default. (Creation used to seed a copy of the default here, which shadowed the
+ * setting permanently — see ReleaseCopiedBlips in modules/admin/server.lua.) Auto-saves debounced (this app has
+ * no save buttons) and saves WITHOUT `act`: a panel refresh would remount the
+ * fields mid-edit, so the parent mirrors the live value through `onChange`.
+ */
+function BlipEditor({ r, defaultBlip, onChange }: { r: any; defaultBlip?: BlipCfg; onChange?: (b: BlipCfg | null) => void }) {
+  const fallback: BlipCfg = { enabled: true, sprite: 93, color: 1, scale: 0.8, ...(defaultBlip || {}) };
+  const seed = (r.blip || fallback) as BlipCfg;
+  // `own` is what the column holds: false = following the server default. The
+  // fields stay editable while following and show the default's numbers, so a
+  // first edit is one gesture (touching anything claims the override).
+  const [own, setOwn] = useState(!!r.blip);
+  const [cfg, setCfg] = useState<BlipCfg>({
+    enabled: seed.enabled !== false,
+    sprite: Number(seed.sprite ?? 93),
+    color: Number(seed.color ?? 1),
+    scale: Number(seed.scale ?? 0.8),
+  });
+
+  const status = useAutoSave(() => {
+    const blip = own ? cfg : null;
+    onChange?.(blip);
+    return fetchNui("admin:setBlip", { id: r.id, blip });
+  }, [own, cfg]);
+
+  // Any field edit claims the override; the reset button hands it back and pulls
+  // the default's numbers into the fields so what's shown is what's live.
+  const set = (patch: BlipCfg) => { setOwn(true); setCfg((c) => ({ ...c, ...patch })); };
+  const reset = () => {
+    setOwn(false);
+    setCfg({ enabled: fallback.enabled !== false, sprite: Number(fallback.sprite ?? 93), color: Number(fallback.color ?? 1), scale: Number(fallback.scale ?? 0.8) });
+  };
+
+  return (
+    <Card>
+      <CardContent className="pt-4">
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <MapIcon className="h-4 w-4 text-primary" /> {_L("admin.blip_title")}
+          </h3>
+          <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+            {status === "saving" ? (
+              <><Loader2 className="h-3 w-3 animate-spin" /> {_L("theme.saving")}</>
+            ) : status === "saved" ? (
+              <><Check className="h-3 w-3 text-primary" /> {_L("theme.saved")}</>
+            ) : (
+              own ? _L("admin.blip_custom") : _L("admin.blip_following")
+            )}
+          </span>
+        </div>
+        <p className="mb-3 text-[11px] text-muted-foreground">{_L("admin.blip_hint")}</p>
+
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <Toggle checked={cfg.enabled !== false} onChange={(v) => set({ enabled: v })} label={_L("admin.blip_show")} />
+          {own && (
+            <Button variant="ghost" size="sm" onClick={reset}>
+              <RotateCcw className="h-3.5 w-3.5" /> {_L("admin.blip_reset")}
+            </Button>
+          )}
+        </div>
+
+        <div className="grid grid-cols-3 gap-3">
+          <NumberField label={_L("admin.blip_sprite")} value={Number(cfg.sprite)} min={1} onChange={(v) => set({ sprite: v })} />
+          <NumberField label={_L("admin.blip_colour")} value={Number(cfg.color)} min={0} onChange={(v) => set({ color: v })} />
+          <NumberField label={_L("admin.blip_scale")} value={Number(cfg.scale)} min={0.1} step={0.1} onChange={(v) => set({ scale: v })} />
+        </div>
+      </CardContent>
+    </Card>
   );
 }

@@ -21,6 +21,7 @@ ConfigGen        = 0     -- bumped every sync so lazily-built hash caches invali
 BagItem          = "restaurant_bag" -- the ONE takeaway CARRIER item (its contents ride as metadata)
 BagModel         = "pickle_restaurant_bag_01" -- the Restaurant Bag vessel prop
 BoxItem          = "takeout_box"    -- the ONE item every bag-KIND food (soup, salad…) becomes
+DrinkItem        = "drink"          -- the ONE item every poured drink becomes (flavor in metadata)
 BoxBaseModel     = "pickle_takeout_box_01" -- takeout box: base half
 BoxLidModel      = "pickle_takeout_box_02" -- takeout box: hinged lid
 
@@ -32,8 +33,13 @@ local STATION_LABELS = {
     kitchen_prep = "main_station_kitchen_prep",
 }
 
+-- Target icons, FONT AWESOME 6 **FREE** SOLID ONLY. The target resources ship the
+-- free set, and a Pro-only name doesn't fall back to anything — it renders an empty
+-- target, which is what the soda machine had: `fa-cup-straw` is a Pro icon (and the
+-- Bootstrap Icons spelling), so the one station you'd most expect to be marked was
+-- the one with no mark on it. Check a name is in the free set before using it here.
 local STATION_ICONS = {
-    soda_machine = "fa-solid fa-cup-straw",
+    soda_machine = "fa-solid fa-glass-water",
     fryer        = "fa-solid fa-fire-burner",
     stovetop     = "fa-solid fa-fire",
     kitchen_prep = "fa-solid fa-bowl-food",
@@ -166,6 +172,16 @@ end
 -- player is actually looking — otherwise it hides under the chair. TUNE IN-GAME.
 local SEAT_TARGET_Z = 1.0
 
+-- Same problem, per STATION TYPE: a station's row is its floor position, so the target
+-- zone sits at the base of the machine. That works for the counter-height units (the
+-- zone's radius reaches the worktop), but the SODA FOUNTAIN is a tall body whose whole
+-- working face — the taps, the cup seat at `SODA.cup_z` ≈ 1.12 — is a metre up, so a zone
+-- at its feet reads as "too far" while you're standing right at the nozzles. Lift it to
+-- the taps. Anything not listed keeps the row's own z. TUNE IN-GAME.
+local STATION_TARGET_Z = {
+    soda_machine = 1.0,
+}
+
 local function SpawnProp(prop)
     -- A seat is an INVISIBLE sit anchor: no world model spawns — just a "Sit"
     -- interaction at the point. Players sit on the restaurant's own furniture here
@@ -177,6 +193,17 @@ local function SpawnProp(prop)
     if prop.prop_type == "delivery_door" then return end
 
     if prop.prop_type == "seat" then
+        -- Does a reservation hold this anchor? The synced `reservedSeats` map
+        -- (BuildSyncPayload) is HOLDER-AGNOSTIC — it says a seat is booked, not by whom —
+        -- so this is a LABEL HINT only: the holder and their guests read "Reserved" too
+        -- and sit down perfectly well, because `seating:sit` is the actual gate. Making
+        -- the label the gate would need every party's guest list on every client.
+        -- Keys survive the wire as numbers, but a payload that ever ships them as JSON
+        -- object keys would arrive as strings, so both are checked rather than silently
+        -- labelling every seat free.
+        local rest = Restaurants[prop.restaurant_id]
+        local resMap = rest and rest.reservedSeats or nil
+        local reserved = (resMap and (resMap[prop.id] or resMap[tostring(prop.id)])) and true or false
         -- Generous reach: the anchor sits at the seated pose (often up on a chair),
         -- so a tight radius reads as "too far" even standing right at it. These are
         -- forgiving enough to sit from beside the chair in both target and
@@ -188,8 +215,9 @@ local function SpawnProp(prop)
             -- table. SEAT_TARGET_Z lifts it to roughly torso height, where the eye
             -- (and the target ray) actually goes.
             coords         = vector3(prop.x, prop.y, prop.z + SEAT_TARGET_Z),
-            label          = _L("main_sit"),
-            icon           = "fa-solid fa-chair",
+            label          = _L(reserved and "main_sit_reserved" or "main_sit"),
+            -- FONT AWESOME 6 FREE SOLID only (see STATION_ICONS) — `fa-lock` is free.
+            icon           = reserved and "fa-solid fa-lock" or "fa-solid fa-chair",
             radius         = 1.2,
             interactRadius = 2.5,
             distance       = 2.5,
@@ -334,7 +362,7 @@ local function SpawnProp(prop)
 
     local label = _L(STATION_LABELS[prop.prop_type] or "main_station_generic")
     propInteractions[prop.id] = CreateInteraction({
-        coords         = vector3(prop.x, prop.y, prop.z),
+        coords         = vector3(prop.x, prop.y, prop.z + (STATION_TARGET_Z[prop.prop_type] or 0.0)),
         label          = _L("main_use_station", label),
         icon           = STATION_ICONS[prop.prop_type] or "fa-solid fa-utensils",
         radius         = 1.2,
@@ -390,6 +418,7 @@ local function DoApplySync(payload)
         BagItem  = payload.settings.bag_item or "restaurant_bag"
         BagModel = payload.settings.bag_model or "pickle_restaurant_bag_01"
         BoxItem      = payload.settings.box_item or "takeout_box"
+        DrinkItem    = payload.settings.drink_item or "drink"
         BoxBaseModel = payload.settings.box_base_model or "pickle_takeout_box_01"
         BoxLidModel  = payload.settings.box_lid_model or "pickle_takeout_box_02"
         SideContainerModel = payload.settings.side_container_model or ""

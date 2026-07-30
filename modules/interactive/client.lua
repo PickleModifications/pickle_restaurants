@@ -103,3 +103,44 @@ function CursorToWorld()
     end
     return GetCursorRaycast(camPos, camRot)
 end
+
+-- ─── hiding your OWN body, and only on your own screen ───────────────────────
+-- Every in-world interactive view (the station camera, the kiosk, the register) takes
+-- the ped out of its own shot. That is a LOCAL presentation choice, and it was being
+-- made with `SetEntityVisible(ped, false, false)` — which on a PLAYER ped propagates:
+-- everyone else watched the cashier vanish from behind the counter. `SetEntityVisible`
+-- has no "local only" mode for a networked ped; the native that does is
+-- `SetEntityLocallyInvisible`, documented as "not visible FOR YOURSELF", and it lasts
+-- one FRAME, so it has to be re-asserted every tick for as long as the view is open.
+--
+-- Every consumer goes through here rather than reaching for either native: one loop,
+-- one flag, and no way for two views to leave the ped hidden after both have closed.
+local pedHidden, pedHideLoop = false, false
+
+function SetLocalPedHidden(on)
+    pedHidden = on and true or false
+    if not pedHidden then
+        -- HEAL a ped hidden by the old networked call (a client that opened a view
+        -- before this fix, or a session torn down mid-hide): asserting real visibility
+        -- costs nothing when it was never taken away.
+        SetEntityVisible(PlayerPedId(), true, false)
+        return
+    end
+    if pedHideLoop then return end
+    pedHideLoop = true
+    CreateThread(function()
+        while pedHidden do
+            SetEntityLocallyInvisible(PlayerPedId())
+            Wait(0)
+        end
+        pedHideLoop = false
+    end)
+end
+
+function IsLocalPedHidden() return pedHidden end
+
+AddEventHandler("onResourceStop", function(res)
+    if res ~= GetCurrentResourceName() then return end
+    -- never leave a player looking at an invisible body of their own
+    if pedHidden then SetLocalPedHidden(false) end
+end)

@@ -26,8 +26,9 @@ local DINE = {
     cam_fov    = 42.0,
     fade_ms    = 700,   -- camera ease in/out (deliberately unhurried: this plays
                         -- on every bite, and a quick cut reads as a glitch)
-    hover_r    = 0.075, -- normalized-screen radius that counts as hovering a pile
-    hover_hold = 600,   -- ms a lost pile stays targeted (see `pinned` below)
+    hover_r    = 0.075, -- MINIMUM normalized-screen radius that counts as hovering a
+                        -- pile (a bigger pile picks by its own projected size)
+    hover_pad  = 0.012, -- slack added to a pile's projected radius
 }
 
 local render = nil   -- the live SpawnMealRender handle
@@ -41,18 +42,19 @@ local open   = false
 -- mid-bite, leaving something highlighted under a camera that has flipped away and
 -- letting a second click queue up against a tray that's already being changed.
 local busy   = false
--- The tooltip's buttons sit ABOVE the pile they belong to, so moving the cursor onto
--- one takes it straight out of that pile's hover radius. Dropping the target the
--- instant that happens is what made the menu vanish on the way to the button you were
--- reaching for. Two things keep it alive: a lost pile stays targeted for
--- DINE.hover_hold ms, and `pinned` (the NUI reports the cursor actually being over
--- the card) holds it indefinitely — so the pile is still `hovered` when the click
--- lands and dining:bite/finish has something to eat.
-local pinned = false
-local heldSince = nil -- when the cursor left the pile, while we're still holding it
--- Last on-screen anchor of the targeted pile, so a HELD tooltip stays put instead of
--- snapping to wherever the projection last happened to be.
-local lastTip = { x = 0.5, y = 0.5 }
+-- CLICK TO LOCK IN. The tooltip's buttons sit ABOVE the pile they belong to, so
+-- moving the cursor onto one takes it out of that pile's hover radius — and any
+-- scheme that keeps a HOVER alive across that gap (a grace period, the card
+-- reporting its own pointer-enter) is guessing at intent: the cursor passes over
+-- other food on the way, and whichever guess loses picks the wrong serving.
+-- So selection is explicit. Hovering only NAMES a pile; clicking it locks the
+-- selection, and only then does the tooltip offer the eat/drink buttons. While a
+-- pile is locked the cursor is free to go anywhere — hover stops re-targeting
+-- entirely. Clicking another pile moves the lock; clicking empty space drops it.
+local locked = nil
+-- What the cursor is actually over this frame, whether or not anything is locked —
+-- the click reads this to decide what to lock onto.
+local rawHover = nil
 -- Where the current arrangement was laid out. Kept so a bite that changed nothing
 -- on the table can re-frame the camera without re-running the whole layout.
 local laidAt = nil
@@ -104,11 +106,17 @@ local function tablePoint(ped)
     return p.x, p.y, base.z + DINE.fallback_z
 end
 
+-- Is the eat-in view up, and is a mouthful in flight? Read by modules/seating: ESC
+-- means "put the meal away" while the view is open and "stand up" once it isn't, and
+-- it means NEITHER mid-bite.
+function IsMealViewOpen() return open end
+function IsMealBusy() return busy end
+
 function CloseMealView()
     if not open then return end
     open = false
     hovered = nil
-    pinned, heldSince = false, nil
+    locked, rawHover = nil, nil
     if render then OutlineMealPile(render, nil); DeleteMealRender(render); render = nil end
     stopCam()
     labels = {}
@@ -120,9 +128,16 @@ end
 -- intact). Handled by the shared per-frame reader in modules/interactive, which
 -- also keeps the key from reaching the pause menu. Registered a frame late: the
 -- module glob loads `dining` before `interactive`.
+-- A MOUTHFUL IS NOT CANCELLABLE. The server has already committed the bite and the
+-- ped is animating it; tearing the view down under it would put the vessel away with
+-- the food gone and leave a diner eating thin air in the middle of the room. The
+-- press is simply ignored — it's a moment long, and the view is handed straight back.
 CreateThread(function()
     Wait(0)
-    SetEscapeHandler("dining", CloseMealView)
+    SetEscapeHandler("dining", function()
+        if busy then return end
+        CloseMealView()
+    end)
 end)
 
 -- Eat the hovered pile: the server drops exactly its layers and tells us what it
@@ -139,7 +154,6 @@ local function eatPile(idx, whole)
     -- left the table — there is nothing correct for the cursor to be pointing at.
     busy = true
     hovered = nil
-    pinned, heldSince = false, nil -- the card is going away; don't hold its target
     OutlineMealPile(render, nil)
     SendNUIMessage({ action = "diningHover", index = nil })
     local res = lib.callback.await("pickle_restaurants:consume:eat", false,
@@ -156,6 +170,12 @@ local function eatPile(idx, whole)
     -- your plate rather than a cut. RefreshMealView re-frames afterwards (it only
     -- starts a camera when there isn't one, and stopCam cleared it).
     stopCam()
+    -- The serving is IN THE DINER'S HAND for the length of the clip — the branded cup,
+    -- the burger, the box — so the copy of it standing on the tray comes off the table
+    -- for exactly that long, or the same drink is visibly in two places at once.
+    -- Hidden, never deleted: the props stay laid out (and keep their pooled box-quad
+    -- textures), so putting a part-eaten serving back down can't flash.
+    if render then SetMealPileVisible(render, idx, false) end
     ConsumeAnim(res.drink, res.label or pile.label, res.anim, res.props)
     local name = res.label or pile.label
     local remaining = res.bites and res.bites.left or 0
@@ -180,6 +200,8 @@ local function eatPile(idx, whole)
         -- is a pooled DUI texture, so dropping the last reference to it freed the
         -- texture and re-created it: the flash. Only the count changed, so only the
         -- count is updated, and the camera is re-framed on the layout still standing.
+        -- what's left of it goes back on the tray, in the same place, untouched
+        if render then SetMealPileVisible(render, idx, true) end
         if labels[idx] then labels[idx].bitesLeft = res.bites and res.bites.left or nil end
         if not cam and laidAt then startCam(laidAt.x, laidAt.y, laidAt.z, laidAt.yaw) end
     end
@@ -189,6 +211,10 @@ end
 -- (Re)build the laid-out meal from the slot's CURRENT metadata.
 function RefreshMealView()
     if not (open and vessel) then return end
+    -- The arrangement is about to be rebuilt from scratch, so pile indices stop
+    -- meaning what they meant: drop any locked selection rather than let the card
+    -- point at whatever food happens to land on that index next.
+    locked, rawHover = nil, nil
     local res = lib.callback.await("pickle_restaurants:consume:mealSpecs", false,
         { item = vessel.item, slot = vessel.slot })
     if not (res and res.ok and res.parts and #res.parts > 0) then return CloseMealView() end
@@ -199,6 +225,22 @@ function RefreshMealView()
         x, y, z = tablePoint(ped)
         yaw = GetEntityHeading(ped)
     end
+    -- The render yaw is the DINER'S OWN HEADING, handed straight through. That is the
+    -- same convention the prep table uses: props there are laid out at the station's
+    -- heading, and a station's heading runs the way the cook faces — so tray-local
+    -- (dx, dy) is literally the cook's screen frame (dx = right, dy = away). Handing
+    -- the diner's heading through reproduces that frame for them, so a nugget the cook
+    -- put at the far left is at the diner's far left too, and every prop presents the
+    -- same face it did in the kitchen.
+    --
+    -- This was briefly turned 180° on the theory that a station faces the cook rather
+    -- than with them. It doesn't: that flip put a freshly arranged meal exactly back to
+    -- front (top-left nugget serving up bottom-right). The ACTUAL bug behind "the tray
+    -- is the opposite way round" was that pile offsets were recorded in world axes — see
+    -- TrayOffsetWorld — not the facing.
+    --
+    -- `yaw` also drives the camera (cam_back steps BACKWARD along it to sit on the
+    -- diner's side), which is the other reason it must stay the diner's heading.
     render = SpawnMealRender(res.parts, res.box and "box" or "tray", x, y, z, yaw)
     laidAt = { x = x, y = y, z = z, yaw = yaw }
     -- one label per PILE, taken from the pile's bottom layer (the thing it is)
@@ -258,47 +300,62 @@ function OpenMealView(v, _contents)
                 Wait(50)
                 goto continue
             end
+            -- a lock that outlived its pile (the arrangement was rebuilt) is dropped
+            if locked and not (render and render.piles and render.piles[locked]) then locked = nil end
             local cx, cy = GetNuiCursorPosition()
             local sw, sh = GetActiveScreenResolution()
             local cnx = (sw > 0) and (cx / sw) or 0.0
             local cny = (sh > 0) and (cy / sh) or 0.0
             local near, nearD, tipX, tipY
+            local tips = {} -- [pileIndex] = { x, y } tooltip anchor, projected this frame
             for i in ipairs((render and render.piles) or {}) do
+                -- Pick by the pile's CENTRE and its own projected size, not by its
+                -- top: a capped drink is mostly cup under a thin lid, and hovering
+                -- from the top of the stack put the target on the lid with the cup
+                -- reading as pass-through. The TOOLTIP still hangs off the top
+                -- anchor, so the card never covers the food it describes.
                 local px, py, pz = MealRenderPileAnchor(render, i)
-                if px then
-                    local on, sx, sy = GetScreenCoordFromWorldCoord(px, py, pz)
+                local z0, hgt, rad = MealRenderPileSpan(render, i)
+                if px and z0 then
+                    local cz = z0 + hgt * 0.5
+                    local on, sx, sy = GetScreenCoordFromWorldCoord(px, py, cz)
                     if on then
+                        -- project one "radius" above the centre to get a screen radius
+                        local R = DINE.hover_r
+                        local on2, sx2, sy2 = GetScreenCoordFromWorldCoord(px, py, cz + math.max(rad, hgt * 0.5))
+                        if on2 then
+                            local rx, ry = sx2 - sx, sy2 - sy
+                            R = math.max(math.sqrt(rx * rx + ry * ry) + DINE.hover_pad, DINE.hover_r)
+                        end
+                        -- tooltip anchor: the pile's TOP (fall back to the centre if
+                        -- the top happens to project off screen). Recorded for EVERY
+                        -- pile, so a locked card keeps tracking its own food while the
+                        -- cursor is somewhere else entirely.
+                        local onT, tx, ty = GetScreenCoordFromWorldCoord(px, py, pz)
+                        tips[i] = { x = (onT and tx or sx), y = (onT and ty or sy) }
                         local dx, dy = sx - cnx, sy - cny
                         local d2 = dx * dx + dy * dy
-                        if not nearD or d2 < nearD then near, nearD, tipX, tipY = i, d2, sx, sy end
+                        if d2 <= R * R and (not nearD or d2 < nearD) then near, nearD = i, d2 end
                     end
                 end
             end
-            if nearD and nearD > DINE.hover_r * DINE.hover_r then near = nil end
-            if near then
-                lastTip.x, lastTip.y = tipX, tipY
-                heldSince = nil
-            elseif hovered then
-                -- nothing under the cursor, but we had a target: HOLD it (forever
-                -- while the cursor is on the tooltip card, briefly otherwise) so the
-                -- reach from pile to button doesn't cancel the selection
-                if pinned then
-                    near, tipX, tipY, heldSince = hovered, lastTip.x, lastTip.y, nil
-                else
-                    heldSince = heldSince or GetGameTimer()
-                    if GetGameTimer() - heldSince < DINE.hover_hold then
-                        near, tipX, tipY = hovered, lastTip.x, lastTip.y
-                    end
-                end
+            -- What the cursor is over is only a candidate; the LOCK decides what the
+            -- card describes (and it never moves on its own).
+            rawHover = near
+            local shown = locked or near
+            local tip = shown and tips[shown] or nil
+            tipX, tipY = tip and tip.x or 0.5, tip and tip.y or 0.5
+            if shown ~= hovered then
+                hovered = shown
+                OutlineMealPile(render, shown)
             end
-            if near ~= hovered then
-                hovered = near
-                OutlineMealPile(render, near)
-            end
-            local l = near and labels[near] or nil
-            SendNUIMessage({ action = "diningHover", index = near,
+            local l = shown and labels[shown] or nil
+            SendNUIMessage({ action = "diningHover", index = shown,
                              x = tipX, y = tipY, label = l and l.label, image = l and l.image,
                              crop = l and l.crop,
+                             -- the buttons only exist on a LOCKED card: a hovered one
+                             -- names the food and says to click it
+                             locked = (locked ~= nil) or nil,
                              drink = l and l.drink, play = l and l.play,
                              bitesLeft = l and l.bitesLeft })
             Wait(50)
@@ -307,34 +364,34 @@ function OpenMealView(v, _contents)
     end)
 end
 
--- A click anywhere in the view eats what the cursor is over (the NUI can't put a
--- DOM target on a world prop, so the world hover decides — exactly like the
--- kitchen's worldClick).
--- Both actions come from the tooltip's buttons now — a click on the world itself
--- eats nothing. Clicking to eat and a button to finish were two gestures for the
--- same target with no way to tell them apart until after the fact.
+-- A click on the WORLD (the view's click-through surface, never the card) locks the
+-- selection onto whatever the cursor is over — the NUI can't put a DOM target on a
+-- world prop, so the hover loop's own pick decides, exactly like the kitchen's
+-- worldClick. Clicking a different pile moves the lock straight over; clicking
+-- nothing drops it, which is how you change your mind without eating anything.
+RegisterNUICallback("dining:click", function(_, cb)
+    if not busy then locked = rawHover end
+    cb({ ok = true })
+end)
+
+-- The locked pile's buttons. They act on the LOCK, never on what the cursor happens
+-- to be over — the whole point of locking is that the cursor has left the food to
+-- reach these.
 RegisterNUICallback("dining:bite", function(_, cb)
-    if hovered then eatPile(hovered, false) end
+    if locked then eatPile(locked, false) end
     cb({ ok = true })
 end)
 
--- The tooltip's "finish it": the same pile, consumed in one go.
+-- "Finish it": the same locked pile, consumed in one go.
 RegisterNUICallback("dining:finish", function(_, cb)
-    if hovered then eatPile(hovered, true) end
+    if locked then eatPile(locked, true) end
     cb({ ok = true })
 end)
 
--- The tooltip card reports its own pointer enter/leave. While the cursor is on the
--- card the world hover is FROZEN on whatever pile the card belongs to — the pile
--- itself is nowhere near the cursor at that point, and without this the target (and
--- with it the outline and the buttons) would be gone before the click landed.
-RegisterNUICallback("dining:pin", function(d, cb)
-    pinned = (d and d.on) and true or false
-    cb({ ok = true })
-end)
-
+-- The page's own ESC handler lands here. Same rule as the Lua reader above: never
+-- mid-mouthful.
 RegisterNUICallback("dining:close", function(_, cb)
-    CloseMealView()
+    if not busy then CloseMealView() end
     cb({ ok = true })
 end)
 

@@ -1,6 +1,13 @@
-if GetResourceState('qb-core') ~= 'started' then return end
+-- QB **and QBox** — see bridge/qb/server.lua for the whole story: QBox runs as
+-- `qbx_core` with no `qb-core` resource, but registers the `qb-core` EXPORTS, so the
+-- core object below is reachable on either framework. The client half must load
+-- wherever the server half did, or a QBox server would get server-side money and
+-- inventory with no notifications.
+if GetResourceState('qb-core') ~= 'started' and GetResourceState('qbx_core') ~= 'started' then return end
 
-QBCore = exports['qb-core']:GetCoreObject()
+local okCore, core = pcall(function() return exports['qb-core']:GetCoreObject() end)
+if not okCore or type(core) ~= "table" then return end -- compat bridge off; custom takes over
+QBCore = core
 
 function ServerCallback(name, cb, ...)
     QBCore.Functions.TriggerCallback(name, cb,  ...)

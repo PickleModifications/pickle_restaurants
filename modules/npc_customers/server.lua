@@ -130,17 +130,41 @@ local function randomName()
     return FIRST_NAMES[math.random(#FIRST_NAMES)] .. " " .. LAST_NAMES[math.random(#LAST_NAMES)]
 end
 
-local function counterVec(r)
-    local c = r and r.counter
-    if not c then return nil end
-    return vector3(c.x + 0.0, c.y + 0.0, c.z + 0.0)
-end
-
 -- The admin-placed spawn point for this restaurant (metadata.npc_spawn), or nil.
 -- When set, clients start a new customer's walk-in HERE; when nil they fall back to
 -- the computed fallback point (spawn_distance back along the queue line).
 local function spawnPoint(r)
     return r and r.metadata and r.metadata.npc_spawn or nil
+end
+
+-- Which counter the NPC queue forms at. A restaurant can place SEVERAL counters, and
+-- `r.counter` (the lowest-id one) is the primary anchor everything else pins to —
+-- but the queue is a walk-in, so it belongs at the register NEAREST the admin-placed
+-- spawn point, not at whichever register happened to be placed first. Without a
+-- spawn point there is nothing to measure against, so the primary anchor stands.
+-- Returned in the same shape as `r.counter` (x/y/z/heading), since every payload,
+-- client render and geometry helper reads it that way.
+local function npcCounter(r)
+    if not r then return nil end
+    local sp = spawnPoint(r)
+    if not sp then return r.counter end
+    local best, bestDist
+    local from = vector3(sp.x + 0.0, sp.y + 0.0, sp.z + 0.0)
+    for _, p in pairs(PropCache) do
+        if p.restaurant_id == r.id and p.prop_type == "counter" then
+            local d = #(from - vector3(p.x + 0.0, p.y + 0.0, p.z + 0.0))
+            if not bestDist or d < bestDist then best, bestDist = p, d end
+        end
+    end
+    if not best then return r.counter end
+    return { x = best.x + 0.0, y = best.y + 0.0, z = best.z + 0.0,
+             heading = (best.heading or 0.0) + 0.0 }
+end
+
+local function counterVec(r)
+    local c = npcCounter(r)
+    if not c then return nil end
+    return vector3(c.x + 0.0, c.y + 0.0, c.z + 0.0)
 end
 
 -- ─── presence gating ─────────────────────────────────────────────────────────
@@ -187,7 +211,7 @@ local function broadcastQueue(rid, r, cfg)
     local map = {}
     for i, e in ipairs(st.queue) do map[tostring(e.orderId)] = i - 1 end
     TriggerClientEvent("pickle_restaurants:npc:queue", -1, {
-        rid = rid, counter = r.counter, geo = geometry(cfg), queue = map,
+        rid = rid, counter = npcCounter(r), geo = geometry(cfg), queue = map,
     })
 end
 
@@ -292,7 +316,7 @@ local function spawnNpcCustomer(rid, r, cfg)
         rid        = rid,
         orderId    = order.id,
         model      = model,
-        counter    = r.counter,
+        counter    = npcCounter(r),
         spawn      = spawnPoint(r),
         geo        = geometry(cfg),
         queueIndex = #st.queue - 1,
@@ -485,7 +509,7 @@ RegisterNetEvent("pickle_restaurants:npc:requestState", function()
     local out = {}
     for rid, st in pairs(NpcState) do
         local r = GetRestaurant(rid)
-        if r and r.counter and #st.queue > 0 then
+        if r and npcCounter(r) and #st.queue > 0 then
             local entries = {}
             for i, e in ipairs(st.queue) do
                 local o = OrderCache[rid] and OrderCache[rid][e.orderId]
@@ -496,7 +520,7 @@ RegisterNetEvent("pickle_restaurants:npc:requestState", function()
                     ticket     = o and o.ticket or nil,
                 }
             end
-            out[#out + 1] = { rid = rid, counter = r.counter, spawn = spawnPoint(r), geo = geometry(cfg), entries = entries }
+            out[#out + 1] = { rid = rid, counter = npcCounter(r), spawn = spawnPoint(r), geo = geometry(cfg), entries = entries }
         end
     end
     TriggerClientEvent("pickle_restaurants:npc:state", src, out)

@@ -201,11 +201,44 @@ local function LoadPromos()
     end
 end
 
+-- A reservation is not just a row any more: it HOLDS seat anchors and may ADMIT
+-- guests, so both children are loaded onto the cached row (`seats` = array of prop
+-- ids, `guests` = array of { identifier, name }). Everything downstream — the sit
+-- gate in modules/seating, the `reservedSeats` sync map, the phone screens — reads
+-- the cache, never these tables, so the two lists have to be there from boot.
+-- `created_ts` rides along because the "now" slot's window starts at CREATION, and
+-- ReservationActive (core/server.lua) needs a number to compare against os.time().
 local function LoadReservations()
     ReservationCache = {}
-    for _, row in ipairs(MySQL.query.await("SELECT id, restaurant_id, identifier, name, party, slot, status FROM pickle_restaurant_reservations WHERE status = 'booked'") or {}) do
+    -- Prune the children of reservations that are no longer live FIRST. Cancelling and
+    -- the expiry sweep both free their own seats, but a crash between the two writes (or
+    -- a row cancelled straight in the database) would otherwise leave an anchor held by a
+    -- reservation nobody can cancel — a seat locked forever, with no in-game way back.
+    -- This is a prune, like the delivery-chat retention sweep, not a migration.
+    for _, tbl in ipairs({ "pickle_restaurant_reservation_seats", "pickle_restaurant_reservation_guests" }) do
+        MySQL.query.await(("DELETE FROM `%s` WHERE `reservation_id` NOT IN (SELECT `id` FROM `pickle_restaurant_reservations` WHERE `status` = 'booked')"):format(tbl))
+    end
+    local byId = {}
+    for _, row in ipairs(MySQL.query.await([[
+        SELECT id, restaurant_id, identifier, name, party, slot, status,
+               created_at, UNIX_TIMESTAMP(created_at) AS created_ts
+          FROM pickle_restaurant_reservations WHERE status = 'booked'
+    ]]) or {}) do
+        row.seats, row.guests = {}, {}
         ReservationCache[row.restaurant_id] = ReservationCache[row.restaurant_id] or {}
         ReservationCache[row.restaurant_id][row.id] = row
+        byId[row.id] = row
+    end
+    for _, s in ipairs(MySQL.query.await("SELECT reservation_id, prop_id FROM pickle_restaurant_reservation_seats") or {}) do
+        local row = byId[s.reservation_id]
+        -- Rows whose reservation is gone (cancelled/expired between the two queries)
+        -- are simply dropped: the sweep deletes them, and a held seat with no live
+        -- reservation would lock an anchor nobody can free.
+        if row then row.seats[#row.seats + 1] = tonumber(s.prop_id) end
+    end
+    for _, g in ipairs(MySQL.query.await("SELECT reservation_id, identifier, name FROM pickle_restaurant_reservation_guests") or {}) do
+        local row = byId[g.reservation_id]
+        if row then row.guests[#row.guests + 1] = { identifier = g.identifier, name = g.name } end
     end
 end
 
@@ -256,16 +289,31 @@ function ActivePromo(rid)
 end
 
 -- The employment context for a source at every restaurant they can act on: which
--- ones they work at, their effective perms, and whether they're the owner/admin.
--- Used to decide which phone tabs (Kitchen / Manage) to surface.
+-- ones they work at, their effective perms, and whether they're a boss (owner/admin
+-- or a boss GRADE). Used to decide which phone tabs (Kitchen / Manage) to surface.
+--
+-- Employment is a JOB now, not a payroll row: a restaurant names a framework job in
+-- `metadata.job` and anyone holding that job works there at their grade's rank. We
+-- don't compare the two ourselves — ResolvePerms is the ONE authority and already
+-- does (admin → owner → job+rank), and its 3rd return is the player's job info, which
+-- is what carries the grade the phone prints. Asking it is also what keeps a role it
+-- learns about later (an admin, the owner) working here without a second special case.
 local function EmploymentFor(src)
     local id = GetIdentifier(src)
     local out = {}
     for rid, r in pairs(RestaurantCache) do
-        local perms, isOwner = ResolvePerms(rid, src)
+        local perms, isBoss, job = ResolvePerms(rid, src)
         if perms then
             out[#out + 1] = {
-                id = rid, label = r.label, isOwner = isOwner or false,
+                id = rid, label = r.label,
+                -- `isOwner` is kept as the name the app already reads (it has always
+                -- meant "may do everything here"), with isBoss alongside it for the
+                -- new copy — a boss grade is not the owner, but holds the same keys.
+                isOwner = isBoss or false,
+                isBoss  = isBoss or false,
+                job     = RestaurantJob and RestaurantJob(rid) or nil,
+                grade      = job and job.grade or nil,
+                gradeLabel = job and job.gradeLabel or nil,
                 perms = perms,
                 clockedIn = ShiftCache[rid] ~= nil and ShiftCache[rid][id] ~= nil,
             }
@@ -614,6 +662,26 @@ function PlayerOrders(identifier, limit)
     return out
 end
 
+-- Every placed seat anchor at a restaurant (modules/seating props), lowest prop id
+-- first. A reservation HOLDS specific anchors out of this list, so allocation has to
+-- walk it in a stable order — otherwise two bookings a second apart could pick the
+-- same "first free" seat in a different order and read as a different table each time.
+-- A restaurant with no seats placed can't be reserved at all (nowhere to seat the
+-- party), so capacity is 0 and booking is refused — we never guess a default.
+-- Defined up here, above the reservations section it belongs to, because the MENU
+-- payload reports the count too: booking a table is reached from the storefront, and
+-- a restaurant with no seating shouldn't offer the row.
+local function SeatAnchors(rid)
+    local out = {}
+    for _, p in pairs(PropCache or {}) do
+        if p.restaurant_id == rid and p.prop_type == "seat" then out[#out + 1] = p.id end
+    end
+    table.sort(out)
+    return out
+end
+
+local function SeatCapacity(rid) return #SeatAnchors(rid) end
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- MENU — the storefront for one restaurant (public, display-safe).
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -649,6 +717,7 @@ lib.callback.register("pickle_restaurants:phone:menu", function(src, d)
         reviewCount = rev and rev.count or 0,
         reviews   = reviews,
         loyalty   = { punches = l and l.punches or 0, goal = LoyaltyGoal(), on = LoyaltyOn() },
+        seats     = SeatCapacity(id), -- 0 = nowhere to seat a party; hides "reserve a table"
         currency  = _L("currency_symbol"),
     }
 end)
@@ -758,116 +827,390 @@ function PhoneRestoreRedeem(rid, identifier)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- RESERVATIONS — book a private booth; the client teleports into an instanced
--- routing bucket on enter (see modules/phone/client.lua).
+-- RESERVATIONS — a reservation is an ACCESS GRANT over real seat anchors.
+--
+-- It used to be a PLACE: booking handed the party a private booth in its own routing
+-- bucket, teleported them into it and teleported them back out. That is gone (the
+-- bucket, `phone:enterBooth`/`phone:leaveBooth`, the client's BOOTH anchor). Two
+-- reasons it had to go: a routing bucket takes the party OUT of the world their
+-- restaurant is in — nobody can serve them, and the staff at the counter can't even
+-- see the guests they booked — and the "put this player back in bucket 0" drop handler
+-- it needed CLOBBERED every other resource's bucket assignment for that player (jails,
+-- apartments, instanced jobs), which is a bug we were shipping for a feature nobody
+-- could be served in. A reservation now holds the restaurant's OWN placed seats, in
+-- the world, for one timeslot.
+--
+-- Rules (the sit gate in modules/seating/server.lua is the ONE door that enforces it):
+--   * ONE active reservation per person, anywhere. Asking for more seats in the SAME
+--     slot at the SAME restaurant EXTENDS it; a different slot or restaurant is
+--     refused rather than silently becoming a second booking.
+--   * The SERVER allocates which anchors are held — the phone never names a seat.
+--   * The slot must be a canonical id from the `reservation_slots` setting. This used
+--     to accept ANY string up to 20 chars, so a hand-made payload could book a slot
+--     that no capacity check, no other booking and no expiry sweep would ever match.
+--   * Only the holder and its granted guests may sit on a held anchor.
+--   * Expiry is core's sweep (`status = 'expired'`), which drops the cache entry and
+--     frees the seats; nothing here has to poll for it.
 -- ─────────────────────────────────────────────────────────────────────────────
--- Seat capacity for reservations = number of placed seat anchors at the restaurant
--- (modules/seating props). A restaurant with no seats placed can't be reserved —
--- there's nowhere to seat the party — so capacity is 0 and booking is refused (we
--- never guess a default). A slot is "full" when the parties already booked into it
--- would meet or exceed this.
-local function SeatCapacity(rid)
-    local n = 0
-    for _, p in pairs(PropCache or {}) do
-        if p.restaurant_id == rid and p.prop_type == "seat" then n = n + 1 end
+local MAX_PARTY  = 12   -- seats one reservation may hold in total
+local MAX_GUESTS = 12   -- extra people admitted to those seats
+
+-- Canonical slot ids, read through the core accessor so an admin's `reservation_slots`
+-- edit applies immediately. Normalized here because the setting is admin-typed (a list
+-- of ids, or of { id = … } rows if the editor ever grows labels) and a broken/empty
+-- list must not make booking impossible — "now" always exists.
+local function SlotIds()
+    local out = {}
+    for _, s in ipairs((ReservationSlots and ReservationSlots()) or {}) do
+        local id = (type(s) == "table") and s.id or s
+        if type(id) == "string" and id ~= "" then out[#out + 1] = id end
     end
-    return n
+    if #out == 0 then out[1] = "now" end
+    return out
 end
 
--- Total party size already booked into one slot (normalize a nil slot to "Now").
-local function SlotUsage(rid, slot)
-    local key, used = slot or "Now", 0
-    for _, res in pairs(ReservationCache[rid] or {}) do
-        if (res.slot or "Now") == key then used = used + (tonumber(res.party) or 1) end
-    end
-    return used
+-- The submitted slot, or nil for anything that isn't on the canonical list.
+local function ValidSlot(slot)
+    slot = tostring(slot or "")
+    for _, id in ipairs(SlotIds()) do if id == slot then return id end end
+    return nil
 end
 
-local function HasBooking(rid, identifier)
-    for _, res in pairs(ReservationCache[rid] or {}) do
-        if res.identifier == identifier then return true end
+-- Is this row still live? ReservationActive (core/server.lua) owns the window maths —
+-- status, plus the slot's time today .. + `reservation_hold_minutes`. Guarded so a
+-- load order that reaches us first degrades to "booked means live" instead of erroring.
+local function ResActive(res)
+    if not res then return false end
+    if ReservationActive then return ReservationActive(res) and true or false end
+    return (res.status or "booked") == "booked"
+end
+
+-- Seat anchors already held for one slot at one restaurant, as a set. `exceptId` skips
+-- the caller's own reservation, so EXTENDING one doesn't count its existing seats
+-- against the capacity it's allowed to grow into.
+local function HeldSeats(rid, slot, exceptId)
+    local held = {}
+    for id, res in pairs(ReservationCache[rid] or {}) do
+        if id ~= exceptId and res.slot == slot and ResActive(res) then
+            for _, pid in ipairs(res.seats or {}) do held[pid] = true end
+        end
+    end
+    return held
+end
+
+-- The one active reservation a player holds, anywhere (nil = none). Scanning every
+-- restaurant is the point: the limit is per PERSON, not per restaurant, so the check
+-- can't be scoped to the one they're booking.
+local function MyReservation(identifier)
+    for _, byId in pairs(ReservationCache) do
+        for _, res in pairs(byId) do
+            if res.identifier == identifier and ResActive(res) then return res end
+        end
+    end
+    return nil
+end
+
+-- ─── globals the rest of the resource reads ──────────────────────────────────
+
+-- The active reservation holding a seat anchor, or nil for a free seat. This is what
+-- modules/seating's sit gate asks — the truth about who may sit is here, server-side,
+-- never in the synced hint map.
+function ReservationForSeat(propId)
+    propId = tonumber(propId)
+    if not propId then return nil end
+    for _, byId in pairs(ReservationCache) do
+        for _, res in pairs(byId) do
+            if ResActive(res) then
+                for _, pid in ipairs(res.seats or {}) do
+                    if pid == propId then return res end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- May this identifier take a seat this reservation holds? The holder and every granted
+-- guest, nobody else. Guests are per RESERVATION (so all of its seats at once) — a
+-- party splits itself across the table it booked, and per-seat grants would mean the
+-- host handing out permission six times for one group.
+function ReservationAdmits(res, identifier)
+    if not res or not identifier then return false end
+    if res.identifier == identifier then return true end
+    for _, g in ipairs(res.guests or {}) do
+        if g.identifier == identifier then return true end
     end
     return false
 end
 
--- Per-slot availability for a restaurant, so the phone can grey out full slots and
--- hide the booking form when the player already holds a table here.
+-- Add a guest to a reservation (write-through). Returns ok, error-key. Used by the
+-- phone's own grant AND by the "ask to sit here" accept in modules/seating.
+function ReservationAddGuest(res, identifier, name)
+    if not res or not identifier then return false, "reserve_not_found" end
+    if res.identifier == identifier then return true end          -- the holder is already in
+    for _, g in ipairs(res.guests or {}) do
+        if g.identifier == identifier then return true end        -- idempotent: already a guest
+    end
+    if #(res.guests or {}) >= MAX_GUESTS then return false, "reserve_guest_limit" end
+    MySQL.insert.await("INSERT INTO pickle_restaurant_reservation_guests (reservation_id, identifier, name) VALUES (?, ?, ?)",
+        { res.id, identifier, name })
+    res.guests = res.guests or {}
+    res.guests[#res.guests + 1] = { identifier = identifier, name = name }
+    return true
+end
+
+-- The per-restaurant seat-hold map BuildSyncPayload ships to clients so a held seat's
+-- interaction can READ as reserved (modules/main/client.lua). Deliberately
+-- holder-agnostic — it's a label hint, and a map naming who holds what would publish
+-- every party's guest list to every client. The sit callback is the authority.
+function ReservedSeatMap(rid)
+    local out = {}
+    for _, res in pairs(ReservationCache[rid] or {}) do
+        if ResActive(res) then
+            for _, pid in ipairs(res.seats or {}) do out[pid] = true end
+        end
+    end
+    return out
+end
+
+-- Free every seat + guest a reservation held and drop it from the cache. ONE place, so
+-- cancel (below) and any other ending can't disagree about what "over" means. The row
+-- itself is left to the caller — cancel marks it cancelled, the sweep marks it expired.
+function ReleaseReservation(res)
+    if not res then return end
+    MySQL.update.await("DELETE FROM pickle_restaurant_reservation_seats WHERE reservation_id = ?", { res.id })
+    MySQL.update.await("DELETE FROM pickle_restaurant_reservation_guests WHERE reservation_id = ?", { res.id })
+    if ReservationCache[res.restaurant_id] then ReservationCache[res.restaurant_id][res.id] = nil end
+end
+
+-- ─── display shapes ──────────────────────────────────────────────────────────
+
+-- One reservation as the phone renders it. `seats` is the real held anchor ids (the
+-- Reserve screen counts them — a party of four that only got three anchors must not
+-- read as four) and `guests` is the manage-able list.
+local function ReservationView(res)
+    local r = GetRestaurant(res.restaurant_id)
+    local guests = {}
+    for _, g in ipairs(res.guests or {}) do
+        guests[#guests + 1] = { identifier = g.identifier, name = g.name }
+    end
+    local seats = {}
+    for _, pid in ipairs(res.seats or {}) do seats[#seats + 1] = pid end
+    return {
+        id           = res.id,
+        restaurantId = res.restaurant_id,
+        restaurant   = r and (r.label or r.name) or ("#" .. tostring(res.restaurant_id)),
+        slot         = res.slot,
+        party        = tonumber(res.party) or #seats,
+        seats        = seats,
+        seatCount    = #seats,
+        guests       = guests,
+        maxParty     = MAX_PARTY,
+        maxGuests    = MAX_GUESTS,
+        createdAt    = res.created_at,
+    }
+end
+
+-- Per-slot availability for a restaurant, so the phone can grey out full slots, size
+-- its party stepper to what's actually left, and show the caller their own booking.
 lib.callback.register("pickle_restaurants:phone:reserveAvailability", function(src, d)
     local id = GetIdentifier(src)
     local rid = tonumber(d and d.id)
-    if not GetRestaurant(rid) then return { ok = false } end
-    local usage = {}
-    for _, res in pairs(ReservationCache[rid] or {}) do
-        local s = res.slot or "Now"
-        usage[s] = (usage[s] or 0) + (tonumber(res.party) or 1)
+    if not GetRestaurant(rid) then return { ok = false, error = _L("phone_restaurant_unavailable") } end
+    local anchors = SeatAnchors(rid)
+    local mine = MyReservation(id)
+    local slots = {}
+    for _, slot in ipairs(SlotIds()) do
+        -- A slot's own held seats, minus the caller's if theirs is in this slot: what
+        -- they can still take is what nobody else holds.
+        local held = HeldSeats(rid, slot, mine and mine.restaurant_id == rid and mine.id or nil)
+        local taken = 0
+        for _, pid in ipairs(anchors) do if held[pid] then taken = taken + 1 end end
+        slots[#slots + 1] = { id = slot, taken = taken, remaining = math.max(0, #anchors - taken) }
     end
-    return { ok = true, capacity = SeatCapacity(rid), usage = usage, hasReservation = HasBooking(rid, id) }
+    return {
+        ok       = true,
+        capacity = #anchors,
+        slots    = slots,
+        maxParty = MAX_PARTY,
+        -- The caller's ONE active reservation, wherever it is — the screen needs it even
+        -- when it belongs to another restaurant, because that's what makes booking here
+        -- impossible until they cancel it.
+        mine     = mine and ReservationView(mine) or nil,
+    }
 end)
 
+-- Book (or extend) a table. `party` is the DESIRED TOTAL party size, not an increment:
+-- the phone's stepper is a party size, and treating it as "add this many" would double
+-- a party every time the screen was re-submitted.
 lib.callback.register("pickle_restaurants:phone:reserve", function(src, d)
     local id = GetIdentifier(src)
     local rid = tonumber(d and d.id)
-    if not GetRestaurant(rid) then return { ok = false } end
-    local party = math.max(1, math.min(12, math.floor(tonumber(d.party) or 2)))
-    local slot = d.slot and tostring(d.slot):sub(1, 20) or nil
-    -- One active booking per restaurant per player — no spamming reservations.
-    if HasBooking(rid, id) then return { ok = false, error = _L("reserve_duplicate") } end
-    -- Enforce seat capacity for the chosen time (0 seats = nothing to reserve).
-    local capacity = SeatCapacity(rid)
-    if capacity <= 0 then return { ok = false, error = _L("reserve_no_seats") } end
-    if SlotUsage(rid, slot) + party > capacity then
-        return { ok = false, error = _L("reserve_slot_full") }
+    if not GetRestaurant(rid) then return { ok = false, error = _L("phone_restaurant_unavailable") } end
+    local party = math.max(1, math.min(MAX_PARTY, math.floor(tonumber(d and d.party) or 2)))
+    local slot = ValidSlot(d and d.slot)
+    if not slot then return { ok = false, error = _L("reserve_bad_slot") } end
+
+    -- ONE active reservation per person. The same slot at the same restaurant EXTENDS
+    -- it (a party that grew); anything else is a second booking, which is what we're
+    -- refusing — so say WHICH mismatch it is, or "you already have one" reads as a bug
+    -- to someone who thinks they're editing the booking they can see on screen.
+    local mine = MyReservation(id)
+    if mine then
+        if mine.restaurant_id ~= rid then return { ok = false, error = _L("reserve_other_restaurant", ReservationView(mine).restaurant) } end
+        if mine.slot ~= slot then return { ok = false, error = _L("reserve_other_slot") } end
     end
-    local resId = MySQL.insert.await(
-        "INSERT INTO pickle_restaurant_reservations (restaurant_id, identifier, name, party, slot) VALUES (?, ?, ?, ?, ?)",
-        { rid, id, GetPlayerCharacterName(src), party, slot })
-    ReservationCache[rid] = ReservationCache[rid] or {}
-    ReservationCache[rid][resId] = { id = resId, restaurant_id = rid, identifier = id,
-        name = GetPlayerCharacterName(src), party = party, slot = slot, status = "booked" }
-    return { ok = true, id = resId }
+
+    local anchors = SeatAnchors(rid)
+    if #anchors <= 0 then return { ok = false, error = _L("reserve_no_seats") } end
+
+    local have = mine and #(mine.seats or {}) or 0
+    local need = party - have
+    if need <= 0 then
+        -- Nothing to allocate: they already hold at least the party they asked for. A
+        -- reservation is never SHRUNK here — giving seats back is what cancelling is —
+        -- so this is a success, not a no-such-thing error.
+        return { ok = true, id = mine.id, party = tonumber(mine.party) or have, reservation = ReservationView(mine) }
+    end
+
+    -- Allocate from the anchors nobody else holds for this slot, in id order.
+    local held = HeldSeats(rid, slot, mine and mine.id or nil)
+    local mineHeld = {}
+    for _, pid in ipairs(mine and mine.seats or {}) do mineHeld[pid] = true end
+    local pick = {}
+    for _, pid in ipairs(anchors) do
+        if not held[pid] and not mineHeld[pid] then
+            pick[#pick + 1] = pid
+            if #pick >= need then break end
+        end
+    end
+    if #pick < need then return { ok = false, error = _L("reserve_slot_full") } end
+
+    local name = GetPlayerCharacterName(src)
+    local res = mine
+    if res then
+        res.party = have + #pick
+        MySQL.update.await("UPDATE pickle_restaurant_reservations SET party = ? WHERE id = ?", { res.party, res.id })
+    else
+        local resId = MySQL.insert.await(
+            "INSERT INTO pickle_restaurant_reservations (restaurant_id, identifier, name, party, slot) VALUES (?, ?, ?, ?, ?)",
+            { rid, id, name, #pick, slot })
+        if not resId then return { ok = false, error = _L("reserve_failed") } end
+        res = {
+            id = resId, restaurant_id = rid, identifier = id, name = name,
+            party = #pick, slot = slot, status = "booked",
+            -- Both stamps, because "now" starts at CREATION and ReservationActive reads
+            -- whichever it prefers; the row's own DEFAULT CURRENT_TIMESTAMP is the same
+            -- instant, so the cache can't drift from the table.
+            created_at = os.date("%Y-%m-%d %H:%M:%S"), created_ts = os.time(),
+            seats = {}, guests = {},
+        }
+        ReservationCache[rid] = ReservationCache[rid] or {}
+        ReservationCache[rid][resId] = res
+    end
+    for _, pid in ipairs(pick) do
+        MySQL.insert.await("INSERT INTO pickle_restaurant_reservation_seats (reservation_id, prop_id) VALUES (?, ?)",
+            { res.id, pid })
+        res.seats[#res.seats + 1] = pid
+    end
+    -- The seat interaction's "Reserved" label rides the sync payload, so a booking that
+    -- doesn't re-sync leaves every client offering a plain "Sit" on a held anchor until
+    -- the next config change.
+    SyncToClient(-1)
+    return { ok = true, id = res.id, party = res.party, seats = res.seats, reservation = ReservationView(res) }
 end)
 
 lib.callback.register("pickle_restaurants:phone:cancelReservation", function(src, d)
     local id = GetIdentifier(src)
     local resId = tonumber(d and d.id)
-    MySQL.update.await("UPDATE pickle_restaurant_reservations SET status = 'cancelled' WHERE id = ? AND identifier = ?", { resId, id })
-    for _, byId in pairs(ReservationCache) do byId[resId] = nil end
-    return { ok = true }
-end)
-
-lib.callback.register("pickle_restaurants:phone:myReservations", function(src, d)
-    local id = GetIdentifier(src)
-    local rows = MySQL.query.await(
-        "SELECT id, restaurant_id, party, slot, status, created_at FROM pickle_restaurant_reservations WHERE identifier = ? AND status = 'booked' ORDER BY id DESC", { id }) or {}
-    for _, row in ipairs(rows) do
-        local r = GetRestaurant(row.restaurant_id)
-        row.restaurant = r and (r.label or r.name) or ("#" .. row.restaurant_id)
+    -- Find it in the cache rather than trusting the id: the UPDATE below is scoped to
+    -- the owner anyway, but the SEATS have to be freed too, and that needs the row.
+    local res
+    for _, byId in pairs(ReservationCache) do
+        local r = byId[resId]
+        if r and r.identifier == id then res = r break end
     end
-    return { ok = true, reservations = rows }
-end)
-
--- Enter the private dining booth for a reservation: put the player in an instanced
--- routing bucket (so the booth is theirs) and hand the client the booth coords to
--- teleport to. The client teleports + remembers where to return them on leave.
-PhoneBoothReturn = {} -- [src] = { x, y, z, heading, bucket } prior state
-lib.callback.register("pickle_restaurants:phone:enterBooth", function(src, d)
-    local id = GetIdentifier(src)
-    local resId = tonumber(d and d.id)
-    local res = ReservationCache[tonumber(d.rid)] and ReservationCache[tonumber(d.rid)][resId]
-    if not res or res.identifier ~= id then return { ok = false, error = _L("reserve_not_found") } end
-    local bucket = 6000 + resId
-    SetPlayerRoutingBucket(tostring(src), bucket)
-    return { ok = true, bucket = bucket }
-end)
-
-lib.callback.register("pickle_restaurants:phone:leaveBooth", function(src)
-    SetPlayerRoutingBucket(tostring(src), 0)
+    if not res then return { ok = false, error = _L("reserve_not_found") } end
+    MySQL.update.await("UPDATE pickle_restaurant_reservations SET status = 'cancelled' WHERE id = ? AND identifier = ?", { resId, id })
+    ReleaseReservation(res)
+    SyncToClient(-1)   -- the freed anchors go back to reading as plain seats
     return { ok = true }
 end)
 
-AddEventHandler("playerDropped", function()
-    local src = source
-    if GetPlayerRoutingBucket(tostring(src)) ~= 0 then SetPlayerRoutingBucket(tostring(src), 0) end
+lib.callback.register("pickle_restaurants:phone:myReservations", function(src)
+    local id = GetIdentifier(src)
+    -- Read the CACHE, not the table: it's the only store that carries the held seats and
+    -- the guest list, and it's what the sit gate answers from — one source of truth.
+    local out = {}
+    for _, byId in pairs(ReservationCache) do
+        for _, res in pairs(byId) do
+            if res.identifier == id and ResActive(res) then out[#out + 1] = ReservationView(res) end
+        end
+    end
+    table.sort(out, function(a, b) return a.id > b.id end)
+    return { ok = true, reservations = out }
+end)
+
+-- ─── guests ──────────────────────────────────────────────────────────────────
+-- Who else may use the seats this reservation holds. Listed, granted and revoked by
+-- the HOLDER only — a guest can't invite the rest of the street into a table they
+-- were let into.
+local function OwnedReservation(src, resId)
+    local id = GetIdentifier(src)
+    for _, byId in pairs(ReservationCache) do
+        local res = byId[tonumber(resId)]
+        if res and res.identifier == id then return res end
+    end
+    return nil
+end
+
+lib.callback.register("pickle_restaurants:phone:reservationGuests", function(src, d)
+    local res = OwnedReservation(src, d and d.id)
+    if not res then return { ok = false, error = _L("reserve_not_found") } end
+    local guests = {}
+    for _, g in ipairs(res.guests or {}) do
+        guests[#guests + 1] = {
+            identifier = g.identifier, name = g.name,
+            -- online-ness is what tells the holder whether revoking has any effect
+            -- right now (a seated guest is standing up), so it's resolved per call.
+            online = SourceForIdentifier(g.identifier) ~= nil,
+        }
+    end
+    return { ok = true, id = res.id, guests = guests, maxGuests = MAX_GUESTS }
+end)
+
+-- Granting takes a SERVER ID, not an identifier: the holder is inviting somebody who
+-- is standing in front of them, and a server id is the only handle a player can read
+-- off another player. An identifier from the NUI would also let anyone name anyone.
+lib.callback.register("pickle_restaurants:phone:grantGuest", function(src, d)
+    local res = OwnedReservation(src, d and d.id)
+    if not res then return { ok = false, error = _L("reserve_not_found") } end
+    local target = tonumber(d and d.serverId)
+    if not target or target == src or GetPlayerName(target) == nil then
+        return { ok = false, error = _L("reserve_guest_not_found") }
+    end
+    local ident = GetIdentifier(target)
+    if not ident then return { ok = false, error = _L("reserve_guest_not_found") } end
+    local ok, err = ReservationAddGuest(res, ident, GetPlayerCharacterName(target))
+    if not ok then return { ok = false, error = _L(err or "reserve_guest_limit") } end
+    PhoneNotify(target, _L("reserve_guest_added_title"), _L("reserve_guest_added_body", ReservationView(res).restaurant))
+    return { ok = true, guests = ReservationView(res).guests }
+end)
+
+lib.callback.register("pickle_restaurants:phone:revokeGuest", function(src, d)
+    local res = OwnedReservation(src, d and d.id)
+    if not res then return { ok = false, error = _L("reserve_not_found") } end
+    local ident = d and d.identifier and tostring(d.identifier) or nil
+    if not ident then return { ok = false, error = _L("reserve_guest_not_found") } end
+    MySQL.update.await("DELETE FROM pickle_restaurant_reservation_guests WHERE reservation_id = ? AND identifier = ?",
+        { res.id, ident })
+    for i = #(res.guests or {}), 1, -1 do
+        if res.guests[i].identifier == ident then table.remove(res.guests, i) end
+    end
+    -- A revoked guest sitting on one of the held seats is NOT thrown out mid-meal: the
+    -- gate is checked when someone sits down, and standing a player up from another
+    -- player's phone is a grief vector. They simply can't sit back down.
+    return { ok = true, guests = ReservationView(res).guests }
 end)
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -922,6 +1265,12 @@ end)
 
 -- Called by the sales tip path (see the orderCompleted seam) to split a tip across
 -- everyone currently on shift at that restaurant. Even split, remainder to the cook.
+--
+-- The shift row's `tips` is a SHIFT STAT — what this person earned tonight, printed on
+-- the clock-out summary. It is not money. The money side is the unpaid tip POOL
+-- (`AddTip`, paid out by the boss with `PayTips`), which is why each share is recorded
+-- there too: tips are staff money, and a tip that only ever incremented a stat was a
+-- number nobody could ever collect.
 function DistributeTip(rid, amount, cookIdentifier)
     local onShift = {}
     for pid, sh in pairs(ShiftCache[rid] or {}) do onShift[#onShift + 1] = pid end
@@ -930,7 +1279,10 @@ function DistributeTip(rid, amount, cookIdentifier)
     local rem = amount - each * #onShift
     for _, pid in ipairs(onShift) do
         local sh = ShiftCache[rid][pid]
-        sh.tips = (sh.tips or 0) + each + (pid == cookIdentifier and rem or 0)
+        local share = each + (pid == cookIdentifier and rem or 0)
+        sh.tips = (sh.tips or 0) + share
+        -- Guarded: AddTip lives in core, and a zero share is not worth a row.
+        if AddTip and share > 0 then AddTip(rid, share, pid, "order") end
     end
 end
 

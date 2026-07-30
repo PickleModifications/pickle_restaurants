@@ -144,6 +144,17 @@ end
 -- Is anything attached to this entity? (Lets a caller skip re-resolving an image.)
 function QuadAttached(ent) return ent and Attached[ent] ~= nil end
 
+-- Stop/resume DRAWING an attached quad without detaching it. `SetEntityVisible`
+-- can't reach a quad — it isn't part of the model, it's drawn from the entity's
+-- matrix — so hiding a takeout box (a diner picking it up to eat) would otherwise
+-- leave its food picture hanging in mid air. The attachment and its texture
+-- reference are kept, so coming back is free and nothing re-loads.
+function QuadSetVisible(ent, vis)
+    local a = ent and Attached[ent]
+    if not a then return end
+    a.hidden = (not vis) and true or nil
+end
+
 -- Draw one quad in an entity's local frame. The corners come from the entity
 -- matrix, so rotation is free; both triangles are drawn twice with reversed
 -- winding so the quad is visible from above AND below.
@@ -180,7 +191,7 @@ ensureDrawThread = function()
             for ent, a in pairs(Attached) do
                 if not DoesEntityExist(ent) then
                     QuadDetach(ent)
-                else
+                elseif not a.hidden then
                     local c = GetEntityCoords(ent)
                     if #(c - cam) <= DRAW_DIST then
                         local t = Textures[a.key]

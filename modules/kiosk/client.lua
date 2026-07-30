@@ -29,8 +29,10 @@ if KIOSK_RT then KIOSK_SW, KIOSK_SH = RenderTargetSurface(KIOSK_RT) end
 local KIOSK = {
     w = KIOSK_SW, h = KIOSK_SH,
     -- Virtual-cursor speed relative to raw mouse-look delta (higher = faster).
-    -- TUNE IN-GAME.
-    sensitivity = 0.5,
+    -- 0.375 = three quarters of the 0.5 this shipped at: an in-world screen is small in
+    -- the frame and a mouse-look delta that reads as a gentle turn was throwing the
+    -- cursor across the page. TUNE IN-GAME.
+    sensitivity = 0.375,
     -- How long (ms) to hold the framed screen on close while the page slides its brand
     -- cover back down over the menu, before we swap the texture to the idle brand
     -- driver. Keep >= KioskDui's SLIDE_MS so the conceal finishes first. TUNE IN-GAME.
@@ -263,19 +265,31 @@ end
 
 -- ─── the interactive session ─────────────────────────────────────────────────
 
+-- The exit hint is drawn EVERY FRAME the session is up, never re-armed for its own
+-- ~7s lifetime: a bubble left to live out its timer is still on screen seconds after
+-- you have stepped away from the kiosk, telling you how to leave something you have
+-- already left. Per-frame is gone the frame the session ends — the same way
+-- modules/seating's seated prompt behaves, which is the model here.
+--
+-- The BEEP is what the old expire-and-re-arm guard was really avoiding, so it fires
+-- on the first frame only. Silencing a repeat is the fix for that; letting the
+-- message outlive the thing it describes was not.
+local helpBeeped = false
 local function helpThisFrame()
-    -- Re-arm only once the last bubble has expired, so we don't re-trigger the beep
-    -- every frame (the message lingers ~7s on its own).
-    if IsHelpMessageBeingDisplayed() then return end
     AddTextEntry("pk_kiosk_help", _L("kiosk_exit_hint"))
     BeginTextCommandDisplayHelp("pk_kiosk_help")
-    EndTextCommandDisplayHelp(0, false, true, -1)
+    EndTextCommandDisplayHelp(0, false, not helpBeeped, -1)
+    helpBeeped = true
 end
 
 function CloseKioskScreen()
     if not active then return end
     local model = active.model
     active = nil
+    -- take the hint down NOW: the last frame's bubble would otherwise sit there for
+    -- its full lifetime while the player walks off
+    ClearAllHelpMessages()
+    helpBeeped = false
     if dui then
         SendDuiMouseUp(dui, "l") -- release a held button, just in case
         -- Slide the brand cover back down over the menu. We hold the framed screen
@@ -294,7 +308,7 @@ function CloseKioskScreen()
         closing = false
         local ped = PlayerPedId()
         FreezeEntityPosition(ped, false)
-        SetEntityVisible(ped, true, false)
+        SetLocalPedHidden(false)
         teardownCam()
         removeOrderScreen()
         -- Hand the screen back to the brand driver (idle brand / black default) by
@@ -354,7 +368,7 @@ function OpenKioskScreen(prop, ent)
     -- the scripted camera frames only the screen, so the ped shouldn't be in shot.
     local ped = PlayerPedId()
     FreezeEntityPosition(ped, true)
-    SetEntityVisible(ped, false, false)
+    SetLocalPedHidden(true)
     active = { model = prop.model, ent = ent, rid = rid }
 
     rebindAfterPaint(prop.model)
@@ -470,7 +484,7 @@ AddEventHandler("onResourceStop", function(res)
         RenderScriptCams(false, false, 0, true, true)
         if kioskCam then DestroyCam(kioskCam, false) end
         local ped = PlayerPedId()
-        SetEntityVisible(ped, true, false)
+        SetLocalPedHidden(false)
         FreezeEntityPosition(ped, false)
     end
     removeOrderScreen()

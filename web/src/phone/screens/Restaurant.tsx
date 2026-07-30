@@ -10,6 +10,7 @@ import {
   Clock,
   Ticket,
   ChevronRight,
+  CalendarClock,
 } from "lucide-react";
 import { fetchNui } from "../../lib/nui";
 import { cn } from "../../lib/utils";
@@ -267,6 +268,34 @@ export function Restaurant({ params }: { params: any }) {
           <PunchCard punches={data.loyalty.punches} goal={data.loyalty.goal} />
         </div>
       )}
+
+      {/* reserve a table — lives on the storefront, not the rewards hub: booking is a
+          thing you do TO a restaurant, so it belongs where you're already looking at
+          one. Always PRESENT: a place with no seat anchors placed shows it greyed with
+          the reason, rather than the row silently not existing (which reads exactly
+          like the feature being missing). `seats` is only 0 when the server really
+          says so — undefined means an older server payload, so the row still works. */}
+      <button
+        onClick={data.seats === 0 ? undefined : () => go("reserve", { rid, label: data.label })}
+        disabled={data.seats === 0}
+        className={cn(
+          "mx-4 mt-3 flex w-[calc(100%-2rem)] items-center gap-3 rounded-2xl border border-border bg-card p-3 text-left",
+          data.seats === 0 ? "opacity-60" : "active:scale-[0.99]"
+        )}
+      >
+        <span className="grid h-10 w-10 place-items-center rounded-full bg-brand/10 text-primary">
+          <CalendarClock className="h-5 w-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="font-semibold leading-tight">{_L("phone.reserve.title")}</div>
+          <div className="text-[0.7rem] text-muted-foreground">
+            {/* A reservation HOLDS SEATS now — there is no private booth to enter, so
+                the copy promises what it actually does. */}
+            {data.seats === 0 ? _L("phone.reserve.no_seats") : _L("phone.reserve.storefront_hint")}
+          </div>
+        </div>
+        {data.seats !== 0 && <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+      </button>
 
       {/* menu sections */}
       {Object.entries(groups).map(([g, list]) => (

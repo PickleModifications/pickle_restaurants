@@ -324,6 +324,27 @@ local function stackSink(model)
     return (t and t.sink) or 0.0
 end
 
+-- Half the visible height of a spawned entity's model, for CURSOR HIT-TESTING against
+-- the middle of an item rather than the floor of it (these models are bottom-origin).
+-- Memoized per model: the hover loop runs every frame over every item on a station, and
+-- a model's dimensions never change.
+-- The cache is a CLOSURE upvalue, not a file-local: this chunk is already at Lua's
+-- 200-local ceiling for a main function, so one more `local` at the top level stops the
+-- file compiling. (That is also why the helpers around here are globals.)
+hoverHalfHeight = (function()
+    local cache = {}
+    return function(ent)
+        if not ent or not DoesEntityExist(ent) then return 0.0 end
+        local model = GetEntityModel(ent)
+        local h = cache[model]
+        if not h then
+            h = modelHeight(model) * 0.5
+            cache[model] = h
+        end
+        return h
+    end
+end)()
+
 local function stackLayerHeight(model)
     local t = tweakFor(model)
     if t and t.rise then return t.rise end
@@ -332,6 +353,29 @@ local function stackLayerHeight(model)
     -- it. Zero stacking height means the next layer keeps the same base Z.
     if SideContainerModel and SideContainerModel ~= "" and model == SideContainerModel then return 0.03 end
     return math.max(modelHeight(model), STACK_MIN_GAP)
+end
+
+-- The seat of each layer of a build stack HELD IN A HAND (modules/consume attaches
+-- every layer to the entity below it, never to the bone), measured with the exact
+-- maths the kitchen stacks props with — modelHeight's margin cancellation, the
+-- STACK_MIN_GAP floor, the model's own STACK_TWEAKS sink and layoutParts' clamp.
+-- Entry [1] is 0 (the bottom layer IS what the hand holds); every later entry is
+-- relative to the layer below it.
+--
+-- Global because the alternative was a second, wronger measurement: consume's own
+-- `mx.z - mn.z` double-counted the physics box's ~0.04 collision margin on both
+-- ends, which is a small error on a burger layer and a wild one on a drink lid —
+-- the cup's whole margin-inflated height lifted the lid clear off it.
+function HeldStackOffsets(models)
+    local out = {}
+    for i, m in ipairs(models or {}) do
+        if i == 1 then
+            out[1] = 0.0
+        else
+            out[i] = math.max(stackLayerHeight(models[i - 1]) + stackSink(m), 0.001)
+        end
+    end
+    return out
 end
 
 -- ─── synced ingredient config lookups ─────────────────────────────────────────
@@ -421,18 +465,30 @@ local function batchGridOffsets(n, hx, hy)
     return offs
 end
 
--- Grid half-extents for a containered BATCH bake (the six-cookie tray) shown in the
--- oven: start from the container prop's own footprint, but never let the span get so
--- tight that the servings overlap. A container model that reports small bounds — or
--- hasn't finished streaming when the slot spawns — would otherwise clamp the grid to a
--- few centimetres and pile every cookie onto the same point ("all in the middle / one
--- prop"). Flooring each column/row pitch by the serving prop's measured footprint keeps
--- them spread out on the tray the same way the prep baking tray lays them.
-local function bakeGridExtents(n, containerModel, servingModel)
+-- THE grid for a containered BATCH bake (the six-cookie tray) — the ONE place the
+-- (dx, dy) of each serving comes from, wherever it is drawn: the prep tray as the
+-- mix is rubbed in, that same tray picked up and moved, and the batch baking inside
+-- the oven. There used to be TWO of these — the prep tray insetting the container's
+-- bounds by its own rim setting, this one insetting by a flat 3cm and flooring the
+-- pitch by the serving's footprint — so the same six cookies sat at visibly
+-- different offsets depending on which surface happened to draw them.
+--
+-- Start from the container prop's own footprint, but never let the span get so tight
+-- that the servings overlap. A container model that reports small bounds — or hasn't
+-- finished streaming when the slot spawns — would otherwise clamp the grid to a few
+-- centimetres and pile every cookie onto the same point ("all in the middle / one
+-- prop"). Flooring each column/row pitch by the serving prop's measured footprint is
+-- what keeps them spread out. Models may be names or hashes (a placed tray measures
+-- its serving off the spawned entity).
+local function bakeGridOffsets(n, containerModel, servingModel)
+    n = math.max(math.floor(tonumber(n) or 1), 1)
+    if n <= 1 then return { { dx = 0.0, dy = 0.0 } } end
     local cn, cx = GetModelDimensions(EnsureModel(containerModel))
     local hx = (cn and cx) and math.max((cx.x - cn.x) * 0.5 - 0.03, 0.05) or 0.12
     local hy = (cn and cx) and math.max((cx.y - cn.y) * 0.5 - 0.03, 0.05) or 0.08
-    local sn, sx = GetModelDimensions(EnsureModel(servingModel))
+    -- a tray with nothing in it yet has no serving to measure (nil is fine)
+    local sn, sx
+    if servingModel then sn, sx = GetModelDimensions(EnsureModel(servingModel)) end
     local sw = (sn and sx) and math.max(sx.x - sn.x, 0.03) or 0.05
     local sd = (sn and sx) and math.max(sx.y - sn.y, 0.03) or 0.05
     local cols = math.min(math.max(n, 1), 3)
@@ -441,7 +497,7 @@ local function bakeGridExtents(n, containerModel, servingModel)
     -- 2*hx*0.7/(cols-1)); require each gap >= a serving width plus a hair of clearance
     if cols > 1 then hx = math.max(hx, (sw * 1.1 * (cols - 1)) / (2 * 0.7)) end
     if rows > 1 then hy = math.max(hy, (sd * 1.1 * (rows - 1)) / (2 * 0.7)) end
-    return hx, hy
+    return batchGridOffsets(n, hx, hy)
 end
 
 -- A stacked topping (pizza cheese/pepperoni) that has a cooked look follows the
@@ -683,35 +739,52 @@ local function sodaDispenseWorld(propId, slot)
     return GetOffsetFromEntityInWorldCoords(station, x, SODA.cup_y + SODA.pour_dy, SODA.cup_z + SODA.pour_dz)
 end
 
--- Loose ice cubes shown at the cup's rim while it has ice (the vanilla bar-cube
--- props — visual only, like the fryer baskets / cheese slices). A small cluster
--- of the three cube variants at per-cube offsets/yaws so it reads as scooped
--- ice, not a stacked tower; each dz is relative to the cup's measured TOP and
--- slightly negative so the cubes sit sunk into the rim. Hidden again once the
--- lid goes on (the ice is inside). TUNE IN-GAME.
+-- Loose ice cubes shown in the cup while it has ice (the vanilla bar-cube props —
+-- visual only, like the fryer baskets / cheese slices). The cubes share ONE xy —
+-- `dx`/`dy` off the cup's seat point, i.e. the cup's CENTRE — and stack upward in
+-- Z (`base_dz` for the first, `step` for each one after), so filling a cup reads
+-- as ice piling up in it rather than cubes scattered around the rim. `base_dz` is
+-- relative to the cup's measured TOP and negative so the bottom cube sits sunk
+-- inside. Each cube keeps its own yaw so the stack isn't one extruded shape.
+-- Hidden again once the lid goes on (the ice is inside). TUNE IN-GAME.
 local ICE = {
+    dx = 0.0, dy = 0.0,   -- the cup's centre (its seat point IS its centre)
+    base_dz = -0.030,     -- first cube, off the cup's measured top
+    step    =  0.022,     -- each further cube sits this much higher
+    -- TWO cubes: the third sat proud of the rim (base_dz + 2*step) and read as
+    -- overfilled. The two kept are the first two entries, so their Z is unchanged —
+    -- the ladder is computed from the index (ICE.seat), not listed per cube.
     cubes = {
-        { model = "prop_ice_cube_01", dx =  0.016, dy =  0.010, dz = -0.020, yaw = 0.0 },
-        { model = "prop_ice_cube_02", dx = -0.018, dy = -0.008, dz = -0.025, yaw = 55.0 },
-        { model = "prop_ice_cube_03", dx =  0.000, dy = -0.017, dz = -0.012, yaw = 110.0 },
+        { model = "prop_ice_cube_01", yaw = 0.0 },
+        { model = "prop_ice_cube_02", yaw = 55.0 },
     },
 }
-local SodaIce = {} -- [uid] = { ents = { {ent, c}, … }, topZ } rim cubes on a cup
+local SodaIce = {} -- [uid] = { ents = { {ent, c, i}, … }, topZ } ice cubes in a cup
 
--- Seat a cup's ice cubes around its rim: (x, y, z) is the cup's seat point,
--- each cube's local (dx, dy) rotated by the station heading, dz off the cup top.
+-- Where the Nth cube sits in the cup's local space: one shared xy, stacked in Z.
+-- The dz is still relative to the cup's measured top (added by the callers), so
+-- the pile hugs whatever cup prop the drink is configured with. A FIELD on ICE,
+-- not a `local function`: this file sits at Lua's 200-locals-per-function ceiling,
+-- so one more main-scope local stops the whole module from loading.
+function ICE.seat(i)
+    return ICE.dx, ICE.dy, ICE.base_dz + ((i or 1) - 1) * ICE.step
+end
+
+-- Seat a cup's ice cubes: (x, y, z) is the cup's seat point, the shared local
+-- (dx, dy) rotated by the station heading, each cube's dz off the cup top.
 local function seatSodaIce(uid, x, y, z, headingZ)
     local rec = SodaIce[uid]; if not rec then return end
     local h = math.rad(headingZ or 0.0)
     local cosH, sinH = math.cos(h), math.sin(h)
-    for _, it in ipairs(rec.ents) do
+    for idx, it in ipairs(rec.ents) do
         local e, c = it.ent, it.c
         -- a cube still mid-fall owns its own position until it lands
         if e and DoesEntityExist(e) and not it.falling then
+            local dx, dy, dz = ICE.seat(it.i or idx)
             SetEntityCoordsNoOffset(e,
-                x + c.dx * cosH - c.dy * sinH,
-                y + c.dx * sinH + c.dy * cosH,
-                z + rec.topZ + c.dz, false, false, false)
+                x + dx * cosH - dy * sinH,
+                y + dx * sinH + dy * cosH,
+                z + rec.topZ + dz, false, false, false)
             SetEntityRotation(e, 0.0, 0.0, (headingZ or 0.0) + (c.yaw or 0.0), 2, true)
         end
     end
@@ -800,9 +873,9 @@ local function updateSodaIce(uid, hasIce, state)
     local cup = CookObjects[uid]
     local topZ = (cup and DoesEntityExist(cup)) and modelHeight(GetEntityModel(cup)) or 0.12
     local ents = {}
-    for _, c in ipairs(ICE.cubes) do
+    for i, c in ipairs(ICE.cubes) do
         local e = SpawnProp(c.model, 0.0, 0.0, 0.0)
-        if e then ents[#ents + 1] = { ent = e, c = c } end
+        if e then ents[#ents + 1] = { ent = e, c = c, i = i } end
     end
     if #ents == 0 then return end
     SodaIce[uid] = { ents = ents, topZ = topZ }
@@ -823,7 +896,7 @@ local function dropSodaIce(uid)
     local rec = { ents = {}, topZ = topZ }
     SodaIce[uid] = rec
     CreateThread(function()
-        for _, c in ipairs(ICE.cubes) do
+        for i, c in ipairs(ICE.cubes) do
             if SodaIce[uid] ~= rec then return end -- cup removed mid-pour
             local nozzle = sodaDispenseWorld(s.propId, s.slot)
             local seat   = sodaSlotWorld(s.propId, s.slot)
@@ -832,12 +905,15 @@ local function dropSodaIce(uid)
             local headingZ = (station and DoesEntityExist(station)) and GetEntityRotation(station, 2).z or 0.0
             local h = math.rad(headingZ)
             local cosH, sinH = math.cos(h), math.sin(h)
-            local tx = seat.x + c.dx * cosH - c.dy * sinH
-            local ty = seat.y + c.dx * sinH + c.dy * cosH
-            local tz = seat.z + topZ + c.dz
+            -- Same seat the settled cluster uses: one xy (the cup's centre), each
+            -- cube landing on top of the one before it — they fall in stack order.
+            local dx, dy, dz = ICE.seat(i)
+            local tx = seat.x + dx * cosH - dy * sinH
+            local ty = seat.y + dx * sinH + dy * cosH
+            local tz = seat.z + topZ + dz
             local e = SpawnProp(c.model, tx, ty, nozzle.z)
             if e then
-                local entry = { ent = e, c = c, falling = true }
+                local entry = { ent = e, c = c, i = i, falling = true }
                 rec.ents[#rec.ents + 1] = entry
                 SetEntityRotation(e, 0.0, 0.0, headingZ + (c.yaw or 0.0), 2, true)
                 CreateThread(function()
@@ -1033,8 +1109,7 @@ local function SpawnSlotObject(uid, model, propId, method, door, slot, state, st
             local same = true
             for i = 3, #mdls do if mdls[i] ~= mdls[2] then same = false break end end
             if same then
-                local hx, hy = bakeGridExtents(#mdls - 1, mdls[1], mdls[2])
-                local grid = batchGridOffsets(#mdls - 1, hx, hy)
+                local grid = bakeGridOffsets(#mdls - 1, mdls[1], mdls[2])
                 offs = { { dx = 0.0, dy = 0.0 } } -- container centred
                 for i = 1, #grid do offs[#offs + 1] = grid[i] end
                 for i = 2, #heights do heights[i] = 0.0 end -- servings share the tray-top z
@@ -1987,10 +2062,13 @@ local function layoutParts(parts, x, y, z0, lone)
         z = z + (part.height or 0.0)
     end
 end
--- A pile released INSIDE a TAKEOUT BOX is CONCEALED. The takeout box is a packed
--- container of loose food (a soup, a salad), not an open tray you arrange things on:
--- once components are in, they read from the box's tooltip contents list, never as
--- props sitting in the open box.
+-- A pile released INSIDE a TAKEOUT BOX or a RESTAURANT BAG is CONCEALED. Both are
+-- packed containers of loose food (a soup, a salad, a takeaway order), not open
+-- trays you arrange things on: once things are in, they read from the container's
+-- tooltip contents list, never as props sitting in/behind it. A bag used to leave
+-- every prop dropped into it standing in the open, which read as the drop having
+-- failed. The SERVING TRAY and the PIZZA BOX are untouched — arranging food you
+-- can see IS the point of those two.
 --
 -- The props are DELETED, not merely made invisible. An invisible entity still draws
 -- its hover/selection OUTLINE, so hiding left a glowing ghost of the food floating in
@@ -2004,7 +2082,7 @@ end
 -- A resource GLOBAL, not a file-local: this chunk sits at Lua's 200-local ceiling.
 function ApplyStackConceal(stack)
     local t = stack.tid and PrepTrays[stack.tid]
-    local hide = (t and IsTakeoutKind(t.kind)) and true or false
+    local hide = (t and (IsTakeoutKind(t.kind) or t.kind == "bag")) and true or false
     stack.concealed = hide or nil
     -- per PART, not per stack: a stack can gain parts while already concealed, and a
     -- rebuild has to be driven off what each part is actually holding right now
@@ -2197,7 +2275,17 @@ local function trayFoodDz(kind)
     local lc = LidCfg(kind)
     if lc then return lc.food_dz end
     if isBagKind(kind) then return BAGP.food_dz end
-    if isBakeKind(kind) then return BAKEP.food_dz end
+    if isBakeKind(kind) then
+        -- A serving sits ON the container, not at the table: a tin/tray has a floor
+        -- and walls of its own, so the container's height is part of the offset. The
+        -- oven's batch render already worked this way (the container is the stack's
+        -- base layer and the servings sit a container-height above it) while the prep
+        -- tray seated them at the bare surface — which sank the cake batter inside
+        -- the tin (it "filled" and showed nothing) and the cookies into the tray.
+        -- `BAKEP.food_dz` stays the in-game trim on top of the measurement.
+        local m = trayBaseModel(kind)
+        return modelBaseLift(m) + modelHeight(m) + BAKEP.food_dz
+    end
     return TRAYP.paper_dz + 0.002
 end
 
@@ -2210,6 +2298,33 @@ local function trayHalfExtents(kind)
     local inset = trayCfg(kind).rim_inset
     return math.max((mx.x - mn.x) * 0.5 - inset, 0.05),
            math.max((mx.y - mn.y) * 0.5 - inset, 0.05)
+end
+
+-- A pile's (dx, dy) on a tray is TRAY-LOCAL, and this turns it into world space
+-- around the tray's own heading. It used to be recorded and applied in WORLD axes,
+-- which worked by accident everywhere it was authored — a prep tray always sits at
+-- the station's heading, so the frame never changed — and broke the moment the same
+-- arrangement was drawn on another surface at another heading. Eating in was exactly
+-- that: the meal was laid out on the diner's table in the PREP STATION's frame, so
+-- the whole arrangement came out rotated by (diner - station), i.e. usually back to
+-- front — the drink the cook set at the near-left showing up at the far-right.
+-- A GLOBAL, not a `local function`: this chunk sits at Lua's 200-locals ceiling
+-- (see ICE.seat), and modules/dining reads the pile anchors through here too.
+-- `kind` (optional) CLAMPS the offset inside that tray's rim first. Pass it wherever
+-- the numbers come from stored metadata rather than from a live drag: a meal crafted
+-- before offsets became tray-local holds world-axis deltas, and read in the new frame
+-- those can land a pile off the edge of the tray entirely. Clamping can't un-rotate
+-- them, but it keeps every serving on the surface it belongs to.
+function TrayOffsetWorld(x, y, dx, dy, yaw, kind)
+    local hr = math.rad(yaw or 0.0)
+    local cosH, sinH = math.cos(hr), math.sin(hr)
+    dx, dy = dx or 0.0, dy or 0.0
+    if kind then
+        local hx, hy = trayHalfExtents(kind)
+        dx = math.min(math.max(dx, -hx), hx)
+        dy = math.min(math.max(dy, -hy), hy)
+    end
+    return x + dx * cosH - dy * sinH, y + dx * sinH + dy * cosH
 end
 
 -- Seat a hinged lid's ORIGIN (authored on its hinge edge): a fixed step forward
@@ -2275,8 +2390,11 @@ local function layoutTrayAt(ents, x, y, z, kind, openT, storedOffs)
             SetEntityCoordsNoOffset(base, x, y, z + modelBaseLift(trayBaseModel(kind)), false, false, false)
             SetEntityRotation(base, 0.0, 0.0, yaw, 2, true)
         end
-        local hx, hy = trayHalfExtents(kind)
-        local offs = storedOffs or batchGridOffsets(bakeSlotCount(kind), hx, hy)
+        -- The stored offsets are the ones captured when the tray was filled; with
+        -- none, derive them from the SAME function every other surface uses, measuring
+        -- the serving off the prop actually being laid out.
+        local offs = storedOffs or bakeGridOffsets(bakeSlotCount(kind), trayBaseModel(kind),
+            (ents and ents[2] and DoesEntityExist(ents[2])) and GetEntityModel(ents[2]) or nil)
         local hr, fz = math.rad(yaw), z + trayFoodDz(kind)
         for i = 2, #(ents or {}) do
             local e = ents[i]
@@ -2637,7 +2755,8 @@ local function layoutTrayGroup(drag, x, y, z)
     layoutTrayAt(drag.tray, x, y, z, drag.trayKind, drag.openT, drag.trayOffs)
     local fz = z + trayFoodDz(drag.trayKind)
     for _, pile in ipairs(drag.piles or {}) do
-        layoutParts(pile.parts, x + pile.dx, y + pile.dy, fz, false)
+        local px, py = TrayOffsetWorld(x, y, pile.dx, pile.dy, curYaw())
+        layoutParts(pile.parts, px, py, fz, false)
     end
 end
 
@@ -2665,7 +2784,8 @@ local function commitTrayGroup(x, y, z, ents, piles, kind, open, extra)
     local fz = z + trayFoodDz(kind)
     for _, pile in ipairs(piles or {}) do
         prepSid = prepSid + 1
-        local stack = { x = x + pile.dx, y = y + pile.dy, z0 = fz,
+        local sx, sy = TrayOffsetWorld(x, y, pile.dx, pile.dy, curYaw(), kind)
+        local stack = { x = sx, y = sy, z0 = fz,
                         tid = tid, dx = pile.dx, dy = pile.dy, parts = pile.parts }
         PrepStacks[prepSid] = stack
         relayout(stack)
@@ -2742,6 +2862,23 @@ end
 -- A tray drag (drag.tray: a grabbed tray or a meal being set down) is free
 -- placement only: trays never stack onto piles or other trays.
 local function runDragThread(drag)
+    -- A DRINK is a finished serving, not a build layer: it never stacks onto a pile
+    -- and nothing ever stacks onto it. Without this a capped cup could be dropped
+    -- on top of a burger and be recorded as one of ITS layers when the meal was
+    -- made — a burger "containing" a cola. Blocked here, in the ONE place the drop
+    -- target is decided, so every release path (place / decompose / restack) reads
+    -- an already-refused target rather than each re-checking. Drinks still go down
+    -- beside a build, and onto a tray or into a bag, as their own pile.
+    local carryDrink = false
+    for _, p in ipairs(drag.parts or {}) do
+        if p.item == DrinkItem then carryDrink = true break end
+    end
+    local function stackHasDrink(stack)
+        for _, p in ipairs((stack and stack.parts) or {}) do
+            if p.item == DrinkItem then return true end
+        end
+        return false
+    end
     CreateThread(function()
         while prepDrag == drag do
             local hit, coords = CursorToWorld()
@@ -2767,6 +2904,8 @@ local function runDragThread(drag)
                 local loose = overTid and PrepTrays[overTid]
                     and (PrepTrays[overTid].kind == "tray" or PrepTrays[overTid].kind == "bag")
                 local sid = (not loose) and pickPart(nil) or nil
+                -- a drink in either hand kills the stack target (see carryDrink above)
+                if sid and (carryDrink or stackHasDrink(PrepStacks[sid])) then sid = nil end
                 local tid = (not sid) and overTid or nil
                 drag.boxBlock = nil
                 if sid then
@@ -2820,12 +2959,19 @@ local function runDragThread(drag)
                         setTrayOutline(tid, 230, 70, 70)
                         layoutParts(drag.parts, coords.x, coords.y, coords.z, false)
                     else
+                        -- Offsets are TRAY-LOCAL (see TrayOffsetWorld): rotate the
+                        -- cursor's world delta into the tray's frame, clamp it against
+                        -- the tray's own half-extents there (which is what those
+                        -- extents describe), then rotate back for the world position.
                         local hx, hy = trayHalfExtents(t.kind)
-                        local dx = math.min(math.max(coords.x - t.x, -hx), hx)
-                        local dy = math.min(math.max(coords.y - t.y, -hy), hy)
+                        local hr = math.rad(curYaw())
+                        local wx, wy = coords.x - t.x, coords.y - t.y
+                        local dx = math.min(math.max(wx * math.cos(hr) + wy * math.sin(hr), -hx), hx)
+                        local dy = math.min(math.max(-wx * math.sin(hr) + wy * math.cos(hr), -hy), hy)
                         local fz = t.z + trayFoodDz(t.kind)
+                        local px, py = TrayOffsetWorld(t.x, t.y, dx, dy, curYaw())
                         drag.hit, drag.targetSid, drag.targetTid = true, nil, tid
-                        drag.coords = { x = t.x + dx, y = t.y + dy, z = fz, dx = dx, dy = dy }
+                        drag.coords = { x = px, y = py, z = fz, dx = dx, dy = dy }
                         setOutline(nil)
                         setTrayOutline(tid, 80, 200, 120)
                         layoutParts(drag.parts, drag.coords.x, drag.coords.y, fz, false)
@@ -3030,8 +3176,17 @@ function OpenCookingStation(prop)
                     end
                     -- props have collision off, so a shape-test ray can't hit them;
                     -- pick the item nearest the cursor on screen.
-                    if onScreen then
-                        local dx, dy = sx - cnx, sy - cny
+                    --
+                    -- HIT-TEST THE ITEM'S MIDDLE, not its origin. These models are
+                    -- bottom-origin, so projecting `coords` puts the target on the FLOOR
+                    -- of the item: fine for a flat patty, wrong for anything tall — a
+                    -- fountain cup only answered the cursor down at its base while the
+                    -- body of it read as empty space. The chip anchor below deliberately
+                    -- keeps the origin projection (`sx`,`sy`); only the pick moves.
+                    local hz = coords.z + hoverHalfHeight(ent)
+                    local onHit, hx, hy = GetScreenCoordFromWorldCoord(coords.x, coords.y, hz)
+                    if onHit then
+                        local dx, dy = hx - cnx, hy - cny
                         local d2 = dx * dx + dy * dy
                         if not nearDist or d2 < nearDist then nearDist, nearUid = d2, uid end
                     end
@@ -3435,15 +3590,37 @@ DragGate.callback("cooking:endMove", function(d, cb)
 end)
 
 -- chip dragged back onto the bar -> collect into the Cooked Items tray
+--
+-- EITHER THE WITHDRAWAL LANDS OR THE ITEM GOES BACK. Every refusal here is something
+-- the cook can then fix — open the oven door, raise the basket, press the lid onto a
+-- poured cup — so the item has to stay exactly as reachable as it was. The drag thread
+-- is stopped BEFORE the round-trip (the server deletes the prop on success, and a live
+-- drag would fight that), which used to mean a refused collect left the prop wherever
+-- the cursor let go of it: a filled cup dragged at the hotbar ended up floating off the
+-- fountain, outside the station camera, where it could no longer be hovered, lidded or
+-- dragged back — the drink was stuck, with the slot still claimed for it.
 RegisterNUICallback("cooking:collect", function(d, cb)
     cancelMove() -- stop the live drag; the server will remove the prop
-    local res = lib.callback.await("pickle_restaurants:cooking:collect", false, { uid = d.uid })
+    local uid = d and d.uid
+    local res = lib.callback.await("pickle_restaurants:cooking:collect", false, { uid = uid })
     if res and res.ok then
         if res.label then ShowNotification(_L("cook_collected", res.label)) end
         RefreshBar()
         RefreshTray()
-    elseif res and res.error then
-        ShowNotification(res.error)
+    else
+        -- Refused (or the callback failed): put it back where it lives — its slot seat
+        -- for a slotted item (oven/fryer/soda), its last committed spot for a
+        -- free-placed one. Same restore endMove does when a reslot is rejected, and a
+        -- no-op when collect was pressed from the tooltip rather than dragged.
+        if uid and CookObjects[uid] then
+            if CookSlot[uid] then
+                seatSlotItem(uid)
+            else
+                local c = CookCoords[uid]
+                if c then MoveCookObjectLocal(uid, c.x, c.y, c.z) end
+            end
+        end
+        if res and res.error then ShowNotification(res.error) end
     end
     cb(res or { ok = false })
 end)
@@ -3960,7 +4137,8 @@ RegisterNUICallback("cooking:prepMakeStack", function(d, cb)
                     local t = tid and PrepTrays[tid]
                     local s
                     if t then
-                        s = { x = t.x + (dx or 0.0), y = t.y + (dy or 0.0), z0 = t.z + trayFoodDz(t.kind),
+                        local rx, ry = TrayOffsetWorld(t.x, t.y, dx, dy, curYaw())
+                        s = { x = rx, y = ry, z0 = t.z + trayFoodDz(t.kind),
                               tid = tid, dx = dx, dy = dy, parts = parts }
                     else
                         s = { x = hx, y = hy, z0 = hz, parts = parts }
@@ -4174,7 +4352,9 @@ end)
 RegisterNUICallback("cooking:boxTakeOut", function(d, cb)
     local tid = tonumber(d and d.tid)
     local t = tid and PrepTrays[tid]
-    if not t or not LidCfg(t.kind) or t.boxing then return cb({ ok = false }) end
+    -- The RESTAURANT BAG conceals its contents the same way, so it needs the same way
+    -- back out — it just has no lid to swing first (every `cfg` step below is guarded).
+    if not t or not (LidCfg(t.kind) or t.kind == "bag") or t.boxing then return cb({ ok = false }) end
     local piles = {}
     for id2, s in pairs(PrepStacks) do
         if s.tid == tid and #s.parts > 0 then piles[#piles + 1] = { sid = id2, stack = s } end
@@ -4187,9 +4367,9 @@ RegisterNUICallback("cooking:boxTakeOut", function(d, cb)
         end
         return (a.stack.dy or 0.0) < (b.stack.dy or 0.0)
     end)
-    local wasClosed = not t.open
-    if wasClosed then setBoxOpen(tid, true) end -- can't reach through the lid
     local cfg = LidCfg(t.kind)
+    local wasClosed = cfg and not t.open
+    if wasClosed then setBoxOpen(tid, true) end -- can't reach through the lid
     -- start clear of the box's own footprint, then step out by each pile's size
     -- (trayHalfExtents resolves the SYNCED base model for either box kind)
     local hx = trayHalfExtents(t.kind)
@@ -4209,7 +4389,7 @@ RegisterNUICallback("cooking:boxTakeOut", function(d, cb)
         off = off + r
         stack.x, stack.y, stack.z0 = tx, ty, tz
         CreateThread(function()
-            if wasClosed then Wait(cfg.open_ms) end -- let the lid clear the opening
+            if wasClosed and cfg then Wait(cfg.open_ms) end -- let the lid clear the opening
             local t0, dur = GetGameTimer(), 250
             while true do
                 local k = math.min((GetGameTimer() - t0) / dur, 1.0)
@@ -4845,19 +5025,26 @@ DragGate.callback("cooking:beginBakeMix", function(d, cb)
                 if not g and t.rawModel then
                     -- one serving prop per slot, gridded on the tray (a cookie tray fades
                     -- in six dough balls); all rise together as the mix is rubbed in
-                    local hx, hy = trayHalfExtents(t.kind)
-                    local offs = batchGridOffsets(bakeSlotCount(t.kind), hx, hy)
+                    local offs = bakeGridOffsets(bakeSlotCount(t.kind), trayBaseModel(t.kind), t.rawModel)
                     local hr, fz = math.rad(curYaw()), t.z + trayFoodDz(t.kind)
                     -- keep each serving prop's (dx, dy) PARALLEL to `ents` (a SpawnProp
                     -- can fail, so grid index ≠ ents index) — this list becomes the
                     -- tray's persistent offsets so the cookies never re-grid on a move
                     local ents, entOffs = {}, {}
                     for _, ofs in ipairs(offs) do
-                        local ent = SpawnProp(t.rawModel,
-                            t.x + ofs.dx * math.cos(hr) - ofs.dy * math.sin(hr),
-                            t.y + ofs.dx * math.sin(hr) + ofs.dy * math.cos(hr),
-                            fz)
+                        local sx = t.x + ofs.dx * math.cos(hr) - ofs.dy * math.sin(hr)
+                        local sy = t.y + ofs.dx * math.sin(hr) + ofs.dy * math.cos(hr)
+                        local ent = SpawnProp(t.rawModel, sx, sy, fz)
                         if ent then
+                            -- CreateProp seats the model's BOUNDS at z, while every
+                            -- later layout of these same props (layoutTrayAt, on the
+                            -- first drag or move) sets the raw ORIGIN. For a prop whose
+                            -- origin isn't its mesh bottom — the cake batter sheet — the
+                            -- two differ by that offset, so the sheet visibly jumped in Z
+                            -- the moment the tin was picked up. Re-seat on the origin now,
+                            -- the same correction SpawnCookObject makes, so the fill and
+                            -- every render after it are the same placement.
+                            SetEntityCoordsNoOffset(ent, sx, sy, fz, false, false, false)
                             SetEntityRotation(ent, 0.0, 0.0, curYaw(), 2, true)
                             SetEntityAlpha(ent, 0, false)
                             ents[#ents + 1] = ent
@@ -4967,7 +5154,8 @@ function SpawnMealRender(specs, trayKind, x, y, z, yaw)
     local piles = groupPiles(parts)
     local fz = z + trayFoodDz(trayKind)
     for _, pile in ipairs(piles) do
-        layoutParts(pile.parts, x + pile.dx, y + pile.dy, fz, #pile.parts == 1)
+        local px, py = TrayOffsetWorld(x, y, pile.dx, pile.dy, yaw, trayKind)
+        layoutParts(pile.parts, px, py, fz, #pile.parts == 1)
     end
     extAnchor = nil
     return { ents = ents, piles = piles, kind = trayKind, x = x, y = y, z = z, yaw = yaw }
@@ -4987,7 +5175,32 @@ function MealRenderPileAnchor(h, i)
     if not pile then return nil end
     local z = h.z + trayFoodDz(h.kind)
     for _, p in ipairs(pile.parts) do z = z + (p.height or 0.0) end
-    return h.x + pile.dx, h.y + pile.dy, z
+    -- the handle's OWN yaw: this runs from the dining hover loop, outside the
+    -- extAnchor window, so curYaw() would answer for whatever station is open
+    local x, y = TrayOffsetWorld(h.x, h.y, pile.dx, pile.dy, h.yaw, h.kind)
+    return x, y, z
+end
+
+-- The SIZE of one rendered pile, for picking it with the cursor: its base z, the
+-- full height of the tower, and the widest half-extent of its props (the same
+-- measurement the prep table's part pick uses). Returns nil for an unknown pile.
+--
+-- The anchor above is the pile's TOP, which is the right place to hang a tooltip
+-- and the WRONG place to hover from: a capped drink is nearly all cup with a thin
+-- lid on it, so a target centred at the top of the stack sat on the lid and the
+-- cup itself read as un-clickable. Hovering goes by the pile's CENTRE and its own
+-- projected size instead — a tall drink and a flat burger both pick where they
+-- actually are.
+function MealRenderPileSpan(h, i)
+    local pile = h and h.piles and h.piles[i]
+    if not pile then return nil end
+    local z0 = h.z + trayFoodDz(h.kind)
+    local total, r = 0.0, 0.0
+    for _, p in ipairs(pile.parts) do
+        total = total + (p.height or 0.0)
+        r = math.max(r, partHalfXY(p) or 0.0)
+    end
+    return z0, total, math.max(r, 0.03)
 end
 
 -- Outline one rendered pile (nil clears every pile) — the same amber hover the
@@ -5000,6 +5213,31 @@ function OutlineMealPile(h, idx)
                     SetEntityDrawOutline(e, i == idx)
                     if i == idx then SetEntityDrawOutlineColor(255, 180, 40, 255) end
                 end
+            end
+        end
+    end
+end
+
+-- Hide (or bring back) ONE rendered pile. A mouthful puts that serving in the
+-- diner's hand — the branded cup, the burger, whatever it is — so the copy standing
+-- on the tray has to go for the length of the clip, or the same drink is in two
+-- places at once. Visibility only: the props are still laid out, still measured, and
+-- still holding their pooled box-quad textures, so nothing flashes when they return
+-- (a delete/respawn is exactly the flicker RefreshMealView avoids mid-serving).
+function SetMealPileVisible(h, idx, vis)
+    local pile = h and h.piles and h.piles[idx]
+    if not pile then return end
+    for _, part in ipairs(pile.parts) do
+        for _, e in ipairs(part.ents or {}) do
+            if DoesEntityExist(e) then
+                SetEntityVisible(e, vis and true or false, false)
+                -- a hidden prop must not keep its outline: the amber edge would
+                -- still draw around thin air
+                if not vis then SetEntityDrawOutline(e, false) end
+                -- A takeout box's food PICTURE is a quad drawn from the entity's
+                -- matrix, not part of its model, so SetEntityVisible can't reach it —
+                -- hiding the box alone would leave a soup's image hanging in the air.
+                if QuadSetVisible then QuadSetVisible(e, vis) end
             end
         end
     end

@@ -81,6 +81,9 @@
                  font-size: calc(var(--u) * 2.1); color: rgb(var(--ink-mute)); }
     .card .price { font-family: "Spline Sans Mono", monospace; font-weight: 700; font-size: calc(var(--u) * 4.6);
                    color: rgb(var(--brand)); flex: 0 0 auto; white-space: nowrap; }
+    /* An empty cell on a short page: it holds its grid track (so the real cards
+       stay the size they are on a full page) without reading as a missing item. */
+    .card.slot { background: none; border-color: rgb(var(--line) / 0.22); }
 
     /* ── orders list ── */
     .orders { position: absolute; inset: 0; display: flex; flex-direction: column; gap: calc(var(--u) * 2.2);
@@ -284,21 +287,23 @@
       return out.length ? out : [[]];
     }
 
-    // Decide how many items fit one menu page from the stage aspect: wider boards get
-    // two columns, taller boards a single column; enough rows to stay large + readable.
+    // The menu board is a FIXED 2 x 4 grid — 8 items a page, whatever the stage
+    // aspect. It used to be derived (1 x 6 on a portrait board, 2 x 4 on a wide one)
+    // with auto rows, which meant a short last page stretched its cards to fill the
+    // stage: every flip changed the card size and the board read as broken. Fixed
+    // rows + blank filler cells keep every page laid out identically.
     function menuLayout() {
-      var w = root.offsetWidth, h = root.offsetHeight;
-      var cols = (w / h >= 1.15) ? 2 : 1;
-      var rows = (w / h >= 1.15) ? 4 : 6;
-      return { cols: cols, per: cols * rows };
+      return { cols: 2, rows: 4, per: 8 };
     }
 
-    function itemPage(chunk, cols) {
+    function itemPage(chunk, cols, rows) {
       return function () {
         eyebrowEl.textContent = "MENU";
         var g = el("grid");
         g.style.gridTemplateColumns = "repeat(" + cols + ", 1fr)";
-        g.style.gridAutoRows = "1fr";
+        // TEMPLATE rows, not auto rows: the page always reserves all `rows` tracks,
+        // so a page with 3 items sits its cards at the same size as a full one.
+        g.style.gridTemplateRows = "repeat(" + rows + ", 1fr)";
         chunk.forEach(function (it) {
           var card = el("card");
           card.appendChild(thumb(it.image, it.label));
@@ -309,6 +314,9 @@
           card.appendChild(el("price", money(it.price)));
           g.appendChild(card);
         });
+        // Pad the short last page with empty cells so the filled cards keep their
+        // place in the grid instead of spreading across it.
+        for (var i = chunk.length; i < cols * rows; i++) g.appendChild(el("card slot"));
         return g;
       };
     }
@@ -322,7 +330,7 @@
       pages = [];
       if (items.length) {
         var lay = menuLayout();
-        paginate(items, lay.per).forEach(function (chunk) { pages.push(itemPage(chunk, lay.cols)); });
+        paginate(items, lay.per).forEach(function (chunk) { pages.push(itemPage(chunk, lay.cols, lay.rows)); });
       }
       showPages();
     }

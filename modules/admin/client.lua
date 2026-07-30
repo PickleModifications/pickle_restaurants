@@ -95,6 +95,9 @@ end)
 RegisterNUICallback("admin:create",       relay("pickle_restaurants:admin:create"))
 RegisterNUICallback("admin:delete",       relay("pickle_restaurants:admin:delete"))
 RegisterNUICallback("admin:setOwner",     relay("pickle_restaurants:admin:setOwner"))
+-- The JOB a restaurant employs through. Every restaurant needs one: employment,
+-- permissions, commission and wages all hang off the grade a player holds in it.
+RegisterNUICallback("admin:setJob",       relay("pickle_restaurants:admin:setJob"))
 RegisterNUICallback("admin:setGroups",    relay("pickle_restaurants:admin:setGroups"))
 RegisterNUICallback("admin:setBrandImage", relay("pickle_restaurants:admin:setBrandImage"))
 RegisterNUICallback("admin:setTheme",     relay("pickle_restaurants:admin:setTheme"))

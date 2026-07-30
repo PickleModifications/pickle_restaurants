@@ -6,8 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `pickle_restaurants` is a FiveM (FXServer, `fx_version 'cerulean'`, Lua 5.4) resource
 implementing a fully in-game-configurable restaurant/cooking job. Servers create and
-configure restaurants, props, recipes, menus, and employees entirely from an in-game
-admin panel — **there is intentionally no `config.lua`**. All gameplay configuration
+configure restaurants, props, recipes, menus and staff ranks entirely from an in-game
+admin panel — **there is intentionally no `config.lua`**. (WHO works where is the one
+thing this resource does not own: a restaurant is staffed by a framework JOB, so hiring
+happens in the boss panel but lands in the framework. See "Jobs, ranks & permissions".) All gameplay configuration
 lives in the database; `core/shared.lua`'s `Config` table holds only engine constants
 and runtime-detected values (framework / target / inventory). Admin-tunable values live
 in the `pickle_restaurant_settings` DB table, edited via the NUI.
@@ -82,8 +84,11 @@ recipes, then loads everything into module-global
 caches and sets `RestaurantsReady`. Tables are prefixed `pickle_restaurant*`.
 
 **Caches (server, module-global, defined at the top of `core/server.lua`):**
-`RestaurantCache`, `PropCache`, `RecipeCache`/`RecipeByInput`, `EmployeeCache`,
-`StockCache`, `TrayCache`, `SettingsCache`. Mutators (`AddStock`, `AddTray`,
+`RestaurantCache`, `PropCache`, `RecipeCache`/`RecipeByInput`, `StockCache`, `TrayCache`,
+`SettingsCache`, `TipCache` (the unpaid tip pool's running sum). (`EmployeeCache` went with
+the employee model — employment is the framework's job now; a booking's held seats and
+guests are cached by `modules/phone` on the booking row, deliberately not a second time
+here.) Mutators (`AddStock`, `AddTray`,
 `AdjustBalance`, `SetSetting`, …) write-through to both the cache and MySQL. Read the
 cache; never re-query for data already cached.
 
@@ -139,9 +144,35 @@ Each module is a self-contained feature loaded by the `modules/**` glob. Key one
   cancelling a pass means "not placed" and each consumer falls back. Because editing
   a seat always re-asks, a cancelled edit CLEARS that point — the only way to take
   one back off.
-- `seating` — players sit on the placed seat anchors. `main`'s `SpawnProp` gives a
-  `seat` prop a "Sit" interaction (no world prop) → `SitOnSeat`; `E` stands up
-  (`EnableInteraction` is toggled off while seated). Server tracks per-anchor
+- `seating` — players sit on the placed seat anchors. `seating:sit` is the **ONE door**: it
+  tracks per-anchor occupancy so two players can't share one seat, AND it enforces
+  **reserved-seat access** — an anchor held by an active reservation admits only the holder
+  and that reservation's granted guests, and answers everyone else
+  `{ ok = false, reserved = true }`. Anything new that seats a player goes through that
+  callback rather than growing its own copy of the rule. On a `reserved` refusal the client
+  offers "Ask to sit here" (`seating:requestSeat`) — the server pages the HOLDER with both a
+  phone notification and an ox_lib prompt (one request in flight per asker, expiring after
+  60s; holder offline = `seat_holder_away`), and an accept adds the asker as a guest of the
+  RESERVATION, so all of its seats. A revoked guest already sitting is deliberately NOT
+  stood up: the gate is checked on sit, and standing a player up from another player's phone
+  is a grief vector — they simply can't sit back down. See "Reserved seats".
+  `main`'s `SpawnProp` gives a
+  `seat` prop a "Sit" interaction (no world prop) → `SitOnSeat`; `E` sits and **ESC
+  stands up** (`STAND_KEYS` — the same step-out set `modules/interactive` uses,
+  read with the `Disabled*` variants + the frontend shove so the press can't also
+  open the pause menu; `EnableInteraction` is toggled off while seated). ONE key
+  backs out of everything, innermost first: while the eat-in meal is laid out the
+  view owns ESC (the seat loop doesn't read it at all while `NUIView ~= "none"`, or
+  one press would both close the meal and stand the diner up), and the help prompt
+  names whichever the next press does (`seat_meal_prompt` / `seat_stand_prompt`,
+  which draw the key as the `~INPUT_FRONTEND_PAUSE_ALTERNATE~` glyph — control 200,
+  the input that MEANS Esc and one of `STAND_KEYS`, so the glyph follows a rebind.
+  NOT 322, which is `INPUT_REPLAY_TOGGLE_TIMELINE` and merely sits on Esc).
+  **Neither works mid-mouthful** — `IsConsuming()` (`modules/consume`) /
+  `IsMealBusy()` (`modules/dining`): the bite is already committed server-side, so
+  cancelling would put the vessel away with the food gone and leave the ped eating
+  in the middle of the room. The dining page therefore has NO bottom hint line;
+  the seated prompt is the one place that instruction lives. Server tracks per-anchor
   occupancy so two players can't share one seat.
   **A player sits EXACTLY on the anchor — nothing else gets a vote.** We
   `SetEntityCoords` + `FreezeEntityPosition` and play a looping clip. The freeze is
@@ -180,8 +211,16 @@ Each module is a self-contained feature loaded by the `modules/**` glob. Key one
   the doorway → the `mp_common givetake1_a/_b` exchange pair) and only then calls
   `sales:completeOrder`. Return contract: nil = no door, complete normally; false =
   there was one and the scene didn't happen (too far / interrupted), leave it open;
-  true = go. The resident is client-local on purpose — no ped netcode, and nothing
-  is left standing in the street for other players if the driver crashes mid-scene.
+  true = go. **The scene is NETWORKED** — the resident and the branded bag are real
+  networked entities, because client-local ones (what this shipped with) made a delivery
+  look to everyone else like a man miming at a door. The hazard the local version avoided
+  is real, so it is answered rather than accepted: a networked entity outlives the client
+  that spawned it, so both net ids are reported to `doorstep/server.lua`
+  (`doorstep:sceneEntities`) the moment they exist, and it deletes them on
+  `playerDropped` or a deadline if the driver crashes mid-scene. Normal endings clean up
+  client-side first (and `onResourceStop` too — a restart is the one ending neither of
+  the scene's own paths reaches); `sceneDone` releases the server's hold. Deleting an
+  already-deleted entity is a no-op, so the two racing is harmless.
   `doorstep:point` grants nothing; it only answers where the door is, for the
   assigned driver of that open delivery. The scene's timings are the `DOOR` table
   in `modules/doorstep/client.lua` (TUNE IN-GAME).
@@ -198,8 +237,22 @@ Each module is a self-contained feature loaded by the `modules/**` glob. Key one
   lb-phone's `ToggleOpen(false)`, candidate exports + a close event elsewhere via
   `PhoneCloseVia`): served from the app the phone is open and in the ped's hand, and
   its put-away animation fights every clip in the hand-off.
-- `management` / `admin` — the boss/owner and admin panels (employees, roles, finances,
-  settings, recipes).
+- `management` / `admin` — the boss/owner and admin panels. **Employment is the
+  FRAMEWORK'S JOB, not a table of ours** — see "Jobs, ranks & permissions". The admin
+  panel assigns each restaurant its job (`admin:setJob`; a restaurant REQUIRES one), and
+  the boss panel holds the job roster (hire/fire/promote by grade), the **Ranks** editor
+  (per-grade permissions + commission + salary, boss-gated) and **Payroll** (pay the tip
+  pool out, run the wage bill, payslip history), plus the menu/supplies/finances/branding
+  tabs it always had. The management payload ships `job` / `jobMissing`, the framework's
+  `roster`, a per-grade `ranks` ARRAY (sorted; never a 0-based numeric map, which
+  `json.encode` can't be trusted with), `tipPool`, the payslip history, and the
+  `PERMISSIONS` array ITSELF — the rank editor renders that rather than a copy, so a new
+  permission key appears in the panel the moment it appears in core. `setRank`'s reply
+  carries the sanitized array and its relay deliberately does NOT refresh the panel (an
+  auto-saving editor must not remount mid-typing), so `Management.tsx` mirrors the array
+  and the Payroll tab prices the next run off live numbers. A restaurant with
+  `jobMissing` says so prominently and disables all three tabs: a hire form that can
+  only fail is worse than none, and the fix is an admin's.
 - `sales` / `npc_customers` — selling to players and NPC customers.
 **Render-target registry (ONE source of truth).** Every DUI-painted texture — food
 packaging brands, the kiosk brand/order screen, the menu/orders boards, and the register
@@ -236,12 +289,24 @@ derived surface, so the DUI is rebuilt from it.
   the order page lands upright exactly like the brand image), takes over
   `kiosk_large_brand` on that model with a DUI running the built React app in `#kiosk`
   mode (`web/src/views/KioskDui.tsx`, selected in `main.tsx` by the URL hash), frames a
-  scripted camera on the screen, and **hides the player ped** (`SetEntityVisible`, like
-  entering an interactive entity) for the duration. A VIRTUAL CURSOR (mouse-look deltas →
+  scripted camera on the screen, and **hides the player ped for the duration —
+  `SetLocalPedHidden` (`modules/interactive`), NEVER `SetEntityVisible`**. Hiding your own
+  body is a statement about YOUR shot, but `SetEntityVisible` on a player ped propagates:
+  the whole server watched the cashier vanish from behind the counter. The native that is
+  actually local is `SetEntityLocallyInvisible` ("not visible for yourself"), which lasts
+  ONE FRAME — so the helper owns a re-assert loop and one flag, and every view (station
+  camera, kiosk, register) goes through it rather than reaching for either native. A VIRTUAL CURSOR (mouse-look deltas →
   `SendDuiMouseMove` at the surface pixel) drives the page; CEF renders its OWN cursor
   onto the surface (never a world-drawn sprite — that lives in a different projection and
   clicks would miss it). The order still becomes a normal ticket (`sales:kioskOrder`).
   Camera framing / cursor speed / DUI aspect are `KIOSK` tunables (TUNE IN-GAME).
+  **AN EXIT HINT IS DRAWN PER FRAME AND CLEARED ON CLOSE** (`helpThisFrame` +
+  `ClearAllHelpMessages()` in both `kiosk` and `register`). A GTA help bubble lives
+  ~7s of its own accord, so the old "re-arm once the last one expired" guard left the
+  hint on screen for seconds after the player had walked away from the kiosk. The
+  guard existed to stop the BEEP repeating — so the beep is now first-frame only
+  (`not helpBeeped`), which is the actual fix. `modules/seating` / `modules/cookfx`
+  already draw theirs per frame; match them.
 - `register` — the STAFF POS register painted on the counter's `register_brand`
   screen. It is an **ALWAYS-ON board** (like the `screens` menu/orders boards): an idle
   driver picks the nearest counter's restaurant, keeps the `register_brand` texture
@@ -344,13 +409,71 @@ restriction). `admin:setGroups` must `SyncToClient(-1)` — the synced payload i
 group-filtered per restaurant, so without it the boards/kiosk/register/cooking bar
 keep offering the old set.
 
-### Permissions
+### Jobs, ranks & permissions
 
-Server-side authority only. `ResolvePerms(restaurantId, source)` returns
-`(permsTable, isOwnerOrAdmin, employeeRow)`; admins and the owner get `ALL_PERMS`, otherwise
-the employee's role (`r.roles` or the `default_roles` setting, keyed by grade) supplies the
-permission set. Gate every mutating callback with `HasPerm(...)` / `IsPlayerAdmin(...)` —
-the NUI is untrusted.
+**A restaurant is STAFFED BY A FRAMEWORK JOB.** `r.metadata.job` names it and
+`r.metadata.ranks = { ["<grade>"] = { permissions, commission, salary, boss } }` says what
+each GRADE of that job may do *at this restaurant*. There is no private employee roster
+any more — hiring, firing and promoting are the framework's own job actions, so the two
+can never drift apart. `pickle_restaurant_employees` is LEGACY: still declared (the schema
+is declared, never migrated, and it is an upgrading server's only record of who used to
+work where), never read or written. Do not add reads back.
+
+**A restaurant REQUIRES a job.** With none assigned, nobody but an admin or the owner can
+work there and every employment callback refuses (`mgmt_no_job`); the admin payload reports
+`jobMissing` per restaurant and the management payload reports `job = nil` + `jobMissing`,
+so a panel says why instead of offering a form that can only fail. An admin assigns it
+(`admin:setJob` → `SetRestaurantJob`, which seeds a rank per grade: boss grades get
+everything, the rest `default_rank_permissions`, and an already-authored rank is never
+clobbered).
+
+The framework is reached ONLY through the bridge job API, which every variant defines:
+`JobsAvailable`, `GetJobList`, `GetJobGradeList`, `GetJobLabel`, `GetPlayerJobInfo`,
+`SetPlayerJobGrade`, `IsJobBossGrade`, `GetJobEmployees(jobName, cb)` (cb ALWAYS fires —
+`modules/management` blocks a panel open on it). ESX has no per-grade boss flag, so the
+grade named `boss` (else the highest) is the heuristic. QB **and QBox** run through
+`bridge/qb`: QBox ships as `qbx_core` with no `qb-core` resource but registers the
+`qb-core` EXPORTS, so that bridge's guard accepts either and `bridge/custom`'s negative
+guard is its exact mirror (both decide independently; custom loads first alphabetically and
+cannot ask). On a frameworkless server WE are the job system — the `jobs` setting is the
+job list (validated on read by `StandaloneJobs()`) and `pickle_restaurant_job_players` is
+who holds what. Each bridge funnels its framework's own job event into ONE resource event
+`pickle_restaurants:jobChanged(src)` (src nil = a job DEFINITION changed, so it applies to
+every holder); core relays it to clients, since nothing is cached per player.
+
+Server-side authority only. `ResolvePerms(restaurantId, source)` → `perms, isBoss, jobInfo`
+is still the ONE authority: admin → owner → holds the restaurant's job (a boss grade, by
+the framework's `isboss` OR the rank's own `boss`, gets `ALL_PERMS`; otherwise the rank's
+permissions) → nothing. `isBoss` means "holds everything here". The 3rd return is the
+player's JOB INFO (nil for an admin/owner who doesn't hold the job) — it used to be an
+employee row, and consumers now read `.grade` off it rather than a per-person rate. DUTY is
+deliberately NOT consulted: plenty of servers never toggle it, and a restaurant nobody can
+work because a flag defaults to off is indistinguishable from broken. Core helpers:
+`RestaurantJob`, `SetRestaurantJob`, `RestaurantRanks` (complete: framework grades ∪
+authored ranks, keyed by grade NUMBER, stored under string keys because it lives in a JSON
+column), `SetRestaurantRank`, `RankFor` (never nil — an undeclared grade still holds the
+job, so it resolves to a basic employee, never a boss), `RestaurantRoster(rid, cb)` /
+`RosterNow`. Gate every mutating callback with `HasPerm(...)` / `IsPlayerAdmin(...)` — the
+NUI is untrusted. `PERMISSIONS` gained **`manage_payroll`** (paying the pool out and
+running the wage bill), which a boss holds implicitly through `ALL_PERMS`.
+
+**Pay is per RANK, never per person** (`management:setRank`, boss-gated): everyone on a
+grade shares its `commission` and `salary`. `management:setCommission`, the per-employee
+`commission_rate` column and Settings → Roles (`default_roles`) are all GONE — the boss
+panel's Ranks tab replaces them. Hire/fire/setGrade validate the grade against the job's
+REAL ladder and first check the target actually holds THIS restaurant's job (without that,
+the callback could be pointed at any player in the server and strip an unrelated job);
+hiring onto, promoting into or dismissing out of a boss grade is boss-only, because
+`manage_employees` moves staff and must not be a route to handing out every permission.
+
+Settings → Roles is gone with `default_roles`. What remains SERVER-WIDE is Settings →
+Jobs (the standalone job list + the `default_rank_permissions` a fresh non-boss grade is
+seeded with) and Settings → Reservations (`reservation_slots`, `reservation_hold_minutes`),
+alongside Economy's `payroll_interval_minutes` and `tip_split`. `jobs`, `reservation_slots`
+and `tip_split` are sanitized on the way in (`PLAIN_SANITIZERS` in `modules/admin/server.lua`
+— sanitized but NOT menu content, so writing one doesn't drag `RebuildDerived()` along):
+with no framework installed the job list IS the job system, a malformed slot id would create
+a hold that never starts and never expires, and `tip_split` is an enum PayTips branches on.
 
 ### The register: DUI (physical) vs NUI (virtual)
 
@@ -379,6 +502,35 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
 
 - All money crossing a boundary goes through `RoundMoney()` (whole dollars) so commissions
   never leave fractional cents.
+- **A TIP IS STAFF MONEY, NOT HOUSE MONEY.** Tips used to be added to the restaurant
+  balance, which quietly made every gratuity the owner's. They now land in
+  `pickle_restaurant_tips` as unpaid rows and never touch the balance in either direction:
+  `AddTip(rid, amount, identifier, source)`, the pool is `TipPool(rid)` (the unpaid rows
+  are the truth; `TipCache` is the running sum), and `PayTips(rid)` splits it across the
+  current roster per the `tip_split` setting (`"even"` | `"grade"`, weight = grade + 1 so a
+  trainee still earns a share), CLAIMING the pool before any payout exactly as
+  `RefundOrder` does. The rounding remainder goes to the first recipient — the pool is
+  emptied, so every cent has to land somewhere.
+- **Salaries DO come out of the balance, all or nothing.** `RunPayroll(rid)` pays each
+  roster member their rank's `salary`, writes one `pickle_restaurant_payroll` row per
+  recipient (`kind = "salary"`; tips write `"tips"`) plus ONE ledger line, and refuses the
+  whole run when the balance can't cover the total (`payroll_insufficient`) — paying three
+  of five staff is the failure a boss can't unpick. `payroll_interval_minutes > 0` runs it
+  on a cadence from one core thread; every skip is silent, because "nobody owed" and "funds
+  short" are ordinary states. Both paths pay ONLINE staff only: the one deferral mechanism
+  here (pending refunds) exists so a CUSTOMER never loses money they already spent, and a
+  wage nobody was present to earn is better caught by the next run than parked forever.
+  Both return `(paid, recipientRows, errKey)` — the refusal is the THIRD value and the
+  second is rows, not a count; `PAYOUT_ERRORS` in `modules/management/server.lua` maps each
+  key to the boss-facing string, because the engine has no business wording a refusal.
+- Commission is per RANK (`RankFor(rid, grade).commission`), not per employee row; an
+  admin/owner with no job earns 0, as before. **It is NOT paid when the cashier is also
+  the customer**: ringing up your own $8 burger charged $8, printed a receipt and handed
+  back $1 (10%, rounded), which reads exactly like the POS giving change it has no
+  business giving — and becomes a faucet once a rank's rate passes the rounding
+  threshold. `payCommission` takes the ticket's customer identifier and skips itself on a
+  match; commission is a cut for SERVING SOMEONE, and there is no service in a
+  self-purchase.
 - The **cooked-items tray** (`pickle_restaurant_cooked_items`, `TrayCache`) is a per-player,
   per-restaurant holding area between the grill and prep station. Its `cheese` column is
   `TINYINT UNSIGNED` (not `TINYINT(1)`) on purpose: oxmysql boolean-casts `TINYINT(1)`,
@@ -439,6 +591,25 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   (`TraySig` appends `^box`), so a boxed pizza is its own variation and sets back
   down as its box, lid open (`prepDecompose`/`Peek` return `box`; `getTray` flags
   `boxed`).
+- **A FINISH's render replaces the container stack.** `getTray` builds a containered
+  bake's stack (`{ tin, cake_sheet }`) BEFORE it applies a finish, and a stack always beats
+  a model client-side — so a frosted cake dragged out of the tray still rendered as a plain
+  sheet sitting in its tin. Replace-mode now clears `stack`/`stackState` when it sets the
+  flavor model: a decorated cake is a whole cake and it is out of the tin (applying the
+  finish deletes both those props), so the flavor model is the ENTIRE render. Both stores
+  do it — the tray branch and the inventory branch (see "Both of `getTray`'s stores must
+  describe a vessel the SAME way"). `compSpec` was always right because it resolves the
+  finish FIRST and returns early.
+- **Cursor hit-testing goes through an item's MIDDLE.** These models are bottom-origin, so
+  projecting an entity's own coords targets the FLOOR of it — fine for a flat patty, wrong
+  for anything tall: a fountain cup only answered the cursor at its base while the body of
+  it read as empty space. The station hover loop projects `coords.z + hoverHalfHeight(ent)`
+  (memoized in a closure — that file is at Lua's 200-local ceiling, which is why its
+  helpers are globals); the chip anchor deliberately keeps the origin projection. Same
+  reasoning as `MealRenderPileSpan` in the dining view. A station's INTERACTION zone has
+  the matching per-type lift (`STATION_TARGET_Z` in `modules/main/client.lua`): the soda
+  fountain's whole working face is a metre up, so a zone at its feet read as "too far"
+  while you stood at the nozzles.
 - **Containered bakes.** A recipe's nullable `container_model` column (cake tin
   `pickle_cake_container_01`, future cookie trays) renders the food inside a container
   prop EVERYWHERE — oven slot, drag preview, prep table — by prepending it to the
@@ -529,6 +700,60 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   New Condiment; `CondimentFields` edits item/container_model/applied_model + ingredient cost),
   fed by `AnnotateCondiments()` and saved whole via `admin:saveSettings`, like finishes.
 
+## Reserved seats
+
+A reservation is **ACCESS CONTROL over real seat anchors for one timeslot** — never an
+instance and never a private room. Booking used to put the party in a routing bucket
+(`6000 + id`) and teleport them into a single global "dining booth". That is gone, and with
+it the `playerDropped` handler that reset the dropping player's bucket to 0 and in doing so
+CLOBBERED every other resource's bucket assignment (jails, apartments, instanced jobs).
+
+`phone:reserve` allocates N of the restaurant's own placed seat anchors and records them in
+`pickle_restaurant_reservation_seats`; who else may share them lives in
+`pickle_restaurant_reservation_guests`, granted per RESERVATION because a party that has
+been let in is let in. **`modules/phone` owns both tables and the cache**: the cached row
+(`ReservationCache[rid][id]`) carries `seats` (prop ids) and `guests`, and that cache — not
+the tables — is what the sit gate, the `reservedSeats` sync map and the phone screens read.
+Core deliberately keeps NO second cache of the same rows (it briefly did; two caches over
+two tables is not a speed-up, it is a second truth): what core owns is the part that needs
+no row at all — the slot vocabulary, the hold window, whether a row is live, and the sweep.
+The phone's side is `ReservationForSeat(propId)`, `ReservationAdmits(res, ident)`,
+`ReservationAddGuest`, `ReleaseReservation(res)`, `ReservedSeatMap(rid)`.
+
+**ONE active reservation per person, anywhere.** More seats in the SAME slot at the SAME
+restaurant EXTEND it (`party` is the desired TOTAL, 1..12); a different slot or restaurant is
+refused. That is what "many seats, one timeslot" means in practice. The slot must be a
+canonical id from the `reservation_slots` setting (`ReservationSlots()` validates on read:
+`"now"` or `HH:MM`, and `"now"` always survives an emptied list) — it used to accept any
+string ≤20 chars, so a hand-made payload could book a slot no capacity check and no expiry
+would ever match. A hold runs from its slot time today for `reservation_hold_minutes`;
+`ReservationActive(row)` decides. A **one-minute sweep** in core marks lapsed rows `expired`
+and frees them through `ReleaseReservation` — the same path a cancellation takes, because an
+expiry IS a cancellation the clock performed, and two ways to end a booking is how one of
+them forgets the guest rows. Nothing else ends a booking: without the sweep one `"now"`
+booking would hold a table until the next restart. `LoadReservations` additionally prunes
+seat/guest rows orphaned by a crash.
+
+`BuildClientRestaurant` carries `reservedSeats = { [propId] = true }` — holder-AGNOSTIC,
+purely so the seat interaction reads "Reserved" instead of promising a chair the server will
+refuse; whether THIS player may sit is still decided on `seating:sit`. The resolver lives in
+the phone module, so core's call is guarded: core's first sync runs before that module has
+loaded its bookings, and the sweep re-syncs once it can see them.
+
+On the PHONE, the Reserve screen renders the server's canonical `slots[]` with `remaining`
+straight off the payload — no client-side capacity arithmetic and no hardcoded slot array,
+since a copy here could offer a time the server would refuse. The party stepper is a TOTAL
+capped at `min(maxParty, remaining)`: `remaining` already excludes the caller's own held
+seats, so adding them back would over-cap and hand the server a party it must reject.
+`mine` is an OBJECT, not a list (one reservation per person), and a refusal says WHICH
+mismatch it is. Guests are granted by SERVER ID through the CEF-safe `ask()` modal — a
+customer's phone has no nearby-player list, and a server id is the only handle one player
+can read off another. The phone's work screens follow the same job model as the panel
+(Manage → Staff is the roster, Manage → Payroll pays tips and wages); rank PAY is editable
+there but the permission MATRIX deliberately is not — a nine-checkbox grid per grade doesn't
+fit a phone, so every phone-side `setRank` resends the rank's existing `permissions` so
+editing a salary can never blank them.
+
 ## Eat-in vs takeaway (the two vessels + eating)
 
 Food leaves the kitchen two ways, and BOTH are multi-item vessels whose contents
@@ -545,18 +770,66 @@ ride as build-stack metadata:
   renderer against an external anchor (`extAnchor`) instead of a station — so a meal
   on a diner's table is identical to the one the cook built. TUNE IN-GAME: `DINE` in
   `modules/dining/client.lua`.
+  A mouthful BORROWS the seated ped: the eat/drink clip is a task, so it replaces
+  the sit pose, which `modules/seating`'s repair loop cannot tell from a broken
+  pose — it re-tasked the sit within `REPAIR_MS` and snapped the clip away, leaving
+  the branded cup attached to a hand still in the diner's lap. `ConsumeAnim` now
+  brackets every mouthful with `HoldSeatPose(true/false)` + `ReassertSeatPose()`
+  (`modules/seating`), so the clip runs to the end and the pose comes back instantly
+  instead of after the repair notices. The eaten pile is HIDDEN for the length of the
+  clip (`SetMealPileVisible`) — the serving is in the diner's hand, so the copy on the
+  tray has to go, or the same drink is in two places at once. Hidden, never deleted
+  (a delete/respawn is the box-quad flash `RefreshMealView` avoids mid-serving), and
+  `QuadSetVisible` (`modules/quad`) goes with it: a box's food picture is drawn from
+  the entity matrix, so `SetEntityVisible` can't reach it.
   Eating one pile hands the view back to the GAMEPLAY camera for the mouthful
   (`stopCam()` before `ConsumeAnim`, re-framed by `RefreshMealView` after) — the
   tray camera looks down at the table, so eating under it frames food with the
   diner out of shot. `OpenMealView` also calls `RefreshBrands()`: packaging and
   cups are painted for the restaurant you are NEAREST, so a meal carried across
   town is eaten out of the local restaurant's branding, correct on the first frame.
+  **A mouthful is eaten with the FOOD'S OWN PROPS, not the clip's.** An authored
+  `consume_anims` entry carries whatever prop suited the clip, so every serving was
+  eaten as a doughnut. `consume:eat` resolves `props` per mouthful: `LayerDisplay`
+  answers for the things whose prop IS their identity (a drink's capped cup, a toy),
+  and everything else goes through `LayerHeldProps` (`modules/cooking/server.lua`) —
+  deliberately `compSpec`'s answer, the same resolver the kitchen and the diner's
+  table render with, so the tower raised to a mouth is the one that stood on the
+  tray (cook state, finish flavor, nested products, a side in its box). A MEAL PILE
+  of several layers is rebuilt in the hand bottom-to-top. Only a layer that resolves
+  to no prop at all falls back to the animation's own. A takeout box hands back its
+  BASE only — its lid is a hinge-origin model and `attachHeldStack` stacks by
+  measured height.
   A DRINK is drunk from the restaurant's own capped cup, not the animation
   catalogue's generic bottle: `LayerDisplay` returns the flavor's `drinkRender`
   (cup + lid) as `props`, and `ConsumeAnim`'s `attachHeldStack` puts the cup in the
   hand and the lid ON THE CUP ENTITY (never at a bigger bone offset — the hand
   frame is rotated, so a bone-space lid drifts off as the wrist turns). Branding
   needs no code: the cup's texture is a render target.
+  **A held stack seats with the KITCHEN's maths, `HeldStackOffsets`** (bottom of the
+  shared-prop primitives in `modules/cooking/client.lua`): `modelHeight`'s margin
+  cancellation, the `STACK_MIN_GAP` floor, the model's `STACK_TWEAKS` sink and
+  `layoutParts`' clamp. `attachHeldStack` measuring for itself is what floated the
+  lid off the cup — `mx.z - mn.z` counts the physics box's ~0.04 collision margin
+  twice (it dips below the origin by the same margin it overshoots the mesh top by,
+  so the two only cancel when ADDED), a rounding error on a burger layer and a
+  visible mistake on a drink.
+  **WHICH HAND IS A PROPERTY OF THE CLIP, not of the food or the catalogue entry**
+  (`HOLD` / `HOLD_BY_DICT` / `holdFor` in `modules/consume/client.lua`, keyed by
+  DICT — an admin can rename an entry, but a dict's authored hand can't change). The
+  DEFAULT is `PH_R_Hand` (28422) at 0,0,0: the scenario-library idles the drinks and
+  snacks use (coffee, doughnut) bring the RIGHT hand to the mouth and are authored
+  around that prop bone, so a zero offset lands the cup where the hand is shaped for
+  it. Only the two `mp_player_int*` clips are left-handed (`SKEL_L_Hand` + the
+  offsets every ESX/QB consumable uses) — the old single left-hand default came from
+  that lineage and put every drink in the wrong hand. `drinkRender` BUILDS its list
+  by appending: as a literal `{ dd.model, lid }` a flavor with no model left a hole
+  at index 1, and `ipairs` stops there — the hand came out empty.
+  **`ConsumeAnim` times the clip itself (`Wait(ms)`), never on `lib.progressBar`'s
+  return.** A progress bar refuses to run in some states — notably while another
+  resource holds NUI focus, i.e. the eat-in view — and returns instantly, which
+  deleted the held props a frame after they were attached: the drink never appeared
+  in the diner's hand at all. The bar is cosmetic, so it is fired alongside.
 - **Takeout box → `box_item` when EATEN.** A third vessel kind (`vesselKind`
   returns `"box"`). SEATED it lays out on the table through `modules/dining` exactly
   like a meal; standing it's eaten where you are, with no contents menu — a box
@@ -585,12 +858,13 @@ with the vessels the restaurant's STAFF are carrying (`vesselHolders`). Who coun
 staff is `vesselSources` → **`ResolvePerms`**, never an enumeration of stores: it was
 `EmployeeCache` + `owner_identifier`, which missed everyone who works a restaurant
 without being on its payroll. An ADMIN is the case that bites — they have every
-permission, so they cook, bag and ring up like an employee, but they hold no employee
-row and own nothing, so a bag in their hands was invisible and the ticket read "bag it
-or plate it up" while they stood at the till holding it. (The owner had the identical
-bug before being special-cased — management refuses to hire them, so they have no
-employee row either.) Asking the permission system is what stops the next such role
-needing its own special case. That is the same
+permission, so they cook, bag and ring up like an employee, but they hold neither the
+restaurant's job nor the restaurant, so a bag in their hands was invisible and the ticket
+read "bag it or plate it up" while they stood at the till holding it. (The owner had the
+identical bug before being special-cased.) Asking the permission system is what stops the
+next such role needing its own special case — which is exactly why moving employment to the
+framework's job cost this code nothing: `isBoss or jobInfo or perms.cook/sell` reads the new
+model through the same door. That is the same
 restaurant-wide pool by a different storage — the tray pool already spans every
 cook's tray — and without it, crafting a bag would quietly remove it from the POS.
 

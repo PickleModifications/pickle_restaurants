@@ -6,8 +6,16 @@
 --  player, the normal station camera/NUI runs against the point's station, and
 --  the whole environment is removed behind another fade on the way out.
 --
---  The player never teleports — only the scripted camera moves. Cooking state is
---  server-authoritative and keyed by the POINT's prop id, so every point is its
+--  THE PLAYER NEVER LEAVES THE ROOM. Only the scripted camera moves: the ped stays
+--  where it stood, visible (modules/camera skips its ped hide for a virtual session),
+--  and the streaming FOCUS stays on the player too — it is parked at the shell only
+--  long enough to load the scene behind the fade, then handed straight back. A focus
+--  left at the shell is what turned this into an instance: the world is culled around
+--  the focus, so the players standing next to the cook fell out of scope and a
+--  proximity voice system had nobody to hear. Hearing, and being heard, must follow
+--  the body, not the camera.
+--
+--  Cooking state is server-authoritative and keyed by the POINT's prop id, so every point is its
 --  own kitchen: two points for the same station type share nothing, and items
 --  left cooking keep cooking (and are re-rendered on the next session there).
 -- =============================================
@@ -19,10 +27,10 @@ local SHELL_MODEL = "pickle_restaurant_shell_01"
 -- every session so the kitchen reads as a kitchen, whichever one is in use.
 -- TUNE IN-GAME against the shell interior.
 local SHELL_STATIONS = {
-    stovetop     = { offset = vector3(1.00, 0.92, 0.00), heading = -90.0 },
-    fryer        = { offset = vector3(1.00, 2.00, 0.00), heading = -90.0 },
-    soda_machine = { offset = vector3(1.00, -1.84, 0.00), heading = -90.0 },
-    kitchen_prep = { offset = vector3(1.00, -0.68, 0.00), heading = -90.0 },
+    stovetop     = { offset = vector3(4.00, 0.92, 0.00), heading = -90.0 },
+    fryer        = { offset = vector3(4.00, 2.00, 0.00), heading = -90.0 },
+    soda_machine = { offset = vector3(4.00, -1.84, 0.00), heading = -90.0 },
+    kitchen_prep = { offset = vector3(4.00, -0.68, 0.00), heading = -90.0 },
 }
 
 local FADE_MS = 400
@@ -146,18 +154,75 @@ local function buildEnv(rest, vp, liveMeta)
     if target == "stovetop" and SpawnOvenDoors then SpawnOvenDoors(sessionProp, stationEnt) end
     if OnStationSpawned then OnStationSpawned(sessionProp) end
 
-    -- keep the world streamed around the shell while the camera lives there
-    SetFocusPosAndVel(anchor.x, anchor.y, anchor.z, 0.0, 0.0, 0.0)
     -- The shell can sit far from the player (underground / in the sky). We're
     -- behind a black fade here, so force-load the scene at the shell before the
     -- camera reveals it — otherwise the first frame is an unstreamed/unlit void.
+    -- The shell and its stations are LOCAL props, so they exist and render wherever
+    -- the anchor is once this has run; this is only about the frame being lit and
+    -- collidable (the cursor raycast needs surfaces).
     RequestCollisionAtCoord(anchor.x, anchor.y, anchor.z)
     NewLoadSceneStartSphere(anchor.x, anchor.y, anchor.z, 60.0, 0)
     local t0 = GetGameTimer()
     while not IsNewLoadSceneLoaded() and GetGameTimer() - t0 < 1500 do Wait(0) end
-    local loaded = IsNewLoadSceneLoaded()
     NewLoadSceneStop()
+    -- THE FOCUS STAYS ON THE PLAYER. It used to be parked at the shell
+    -- (SetFocusPosAndVel) for the length of the session, and that is what made a
+    -- virtual kitchen behave like an instance: the focus is the point the world is
+    -- streamed and CULLED around, so everything at the cook's REAL position —
+    -- including the players standing next to them — fell out of scope. A proximity
+    -- voice system can only hear who is in scope, so the cook went deaf to the room
+    -- they were physically standing in, and to anyone watching they had vanished
+    -- into a hole in the map. The player never moves in a virtual session, so their
+    -- scope must not move either: they hear, and are heard by, the room they are in.
+    ClearFocus()
     return sessionProp
+end
+
+-- ─── keeping VOICE with the body ──────────────────────────────────────────────
+-- Clearing the streaming focus fixed SCOPE (who exists around the player) but not
+-- HEARING, because proximity voice doesn't listen from the ped — it listens from the
+-- game's audio microphone, and that follows the RENDERING CAMERA. Ours is parked at a
+-- shell that can be a kilometre away, so the player was listening from inside the
+-- shell: everyone in the room they were standing in was out of earshot.
+--
+-- FiveM's mumble bridge (code/components/gta-net-five/src/MumbleVoice.cpp) is explicit
+-- about it — it feeds the mumble listener the audio actor position, EXCEPT that
+--     if (isInFirstPerson) { actorPos = cameraPos; }
+-- where `isInFirstPerson` is `GetFollowPedCamViewMode() == 4`. That check reads the
+-- player's VIEW MODE PREFERENCE, which a scripted camera does not change — so a
+-- first-person player's voice listener was pinned to the shell camera outright. Hence
+-- both halves below:
+--   • the view mode is forced to third person for the session (restored after), which
+--     takes that branch out of play;
+--   • SET_MICROPHONE_POSITION pins the audio microphone to the ped every frame, so the
+--     third-person listener can't drift toward the camera either.
+-- Both are per-session and undone on the way out — nothing here outlives the shell.
+local voiceAnchored = false
+local savedViewMode = nil
+
+local function releaseVoiceAnchor()
+    SetMicrophonePosition(false, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    if savedViewMode then SetFollowPedCamViewMode(savedViewMode) end
+    savedViewMode = nil
+    voiceAnchored = false
+end
+
+local function anchorVoiceToBody()
+    if voiceAnchored then return end
+    voiceAnchored = true
+    local mode = GetFollowPedCamViewMode()
+    if mode == 4 then -- first person: the one mode that hands the listener to the camera
+        savedViewMode = mode
+        SetFollowPedCamViewMode(0)
+    end
+    CreateThread(function()
+        while Session and voiceAnchored do
+            local c = GetEntityCoords(PlayerPedId())
+            SetMicrophonePosition(true, c.x, c.y, c.z, c.x, c.y, c.z, c.x, c.y, c.z)
+            Wait(0)
+        end
+        releaseVoiceAnchor()
+    end)
 end
 
 -- ─── session flow ─────────────────────────────────────────────────────────────
@@ -231,6 +296,10 @@ function OpenVirtualStation(vp)
         return
     end
 
+    -- The camera is now at the shell, so pin the ears to the body before the fade
+    -- lifts: the player is standing in a real room with real people in it.
+    anchorVoiceToBody()
+
     -- render THIS point's in-progress items inside the fresh shell. Must come
     -- AFTER the session opens: the render gate only admits a virtual point's
     -- items once currentCookProp is this point.
@@ -282,6 +351,8 @@ AddEventHandler("onResourceStop", function(res)
     if res ~= GetCurrentResourceName() then return end
     if not Session then return end
     teardownEnv()
+    -- the anchor thread won't get another frame to unwind itself
+    releaseVoiceAnchor()
     if not IsScreenFadedIn() then DoScreenFadeIn(0) end
 end)
 

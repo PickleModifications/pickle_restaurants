@@ -548,7 +548,7 @@ function FoodIdentity({ food, onChange, anims, boxQuad }: {
       )}
       <div className="min-w-[16rem] flex-1">
         <div className="mb-1.5 text-xs font-medium text-muted-foreground">{_L("menu.when_eaten")}</div>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-4 gap-3">
           <Select label={_L("menu.consume_anim")} value={c.anim || ""} onChange={(v) => setConsume({ anim: v })}
             options={[{ value: "", label: _L("menu.consume_anim_default") },
                       ...anims.map((a) => ({ value: a.id, label: a.label || a.id }))]} />
@@ -557,6 +557,13 @@ function FoodIdentity({ food, onChange, anims, boxQuad }: {
             onChange={(v) => setConsume({ hunger: Math.max(0, Math.min(100, v)) })} />
           <NumberField label={_L("menu.consume_thirst")} value={Number(c.thirst ?? 0)} min={0}
             onChange={(v) => setConsume({ thirst: Math.max(0, Math.min(100, v)) })} />
+          {/* How many mouthfuls ONE serving takes — nuggets go in one, a burger in
+              three. The serving is SPLIT across them (each bite restores its share,
+              the last settles the remainder), so this changes the pace of eating,
+              never how much a food feeds. 0 = follow Settings → Eating; the field
+              stores null for that, because a stored 0 would clamp to a 1-bite food. */}
+          <NumberField label={_L("menu.consume_bites")} value={Number(c.bites ?? 0)} min={0}
+            onChange={(v) => setConsume({ bites: v > 0 ? Math.min(20, Math.floor(v)) : null })} />
         </div>
         <div className="mt-1.5 text-[11px] text-muted-foreground">{_L("menu.when_eaten_hint")}</div>
       </div>

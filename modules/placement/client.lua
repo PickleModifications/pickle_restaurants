@@ -98,6 +98,36 @@ local function PickSeatStyle(current)
     return input and input[1] or nil
 end
 
+-- WHICH PARTS of an existing seat this edit touches. A seat is four separate
+-- answers (style, the seat point, the stand-up point, the tray patch), and
+-- editing one used to mean re-confirming all four gizmos in a row — three of them
+-- just to get back what was already there. So an edit ASKS first and only runs the
+-- passes that were ticked; everything unticked is carried through untouched.
+-- Returns nil if the dialog is cancelled (the whole edit is off).
+-- NOTE: this makes cancelling a pass mean "clear that point" ONLY for a point you
+-- chose to edit — which is still the one way to take an exit/tray point back off.
+local function PickSeatEditParts(prop)
+    local meta = prop.metadata or {}
+    -- Whether each OPTIONAL point exists rides in its label: a checkbox row can't
+    -- carry a description, and "not set" is exactly what you need to know before
+    -- deciding to tick it (ticking then cancelling the gizmo is how one is removed).
+    local function state(v) return v and _L("place_seat_edit_has") or _L("place_seat_edit_none") end
+    local input = lib.inputDialog(_L("place_seat_edit_title"), {
+        { type = "checkbox", label = _L("place_seat_edit_style") },
+        { type = "checkbox", label = _L("place_seat_edit_point") },
+        { type = "checkbox", label = _L("place_seat_edit_exit", state(meta.exit)) },
+        { type = "checkbox", label = _L("place_seat_edit_tray", state(meta.tray)) },
+    })
+    if not input then return nil end
+    local parts = { style = input[1] == true, point = input[2] == true,
+                    exit = input[3] == true, tray = input[4] == true }
+    if not (parts.style or parts.point or parts.exit or parts.tray) then
+        ShowNotification(_L("place_seat_edit_nothing"))
+        return nil
+    end
+    return parts
+end
+
 -- Where a player is put down when they STAND UP from this seat — a second anchor,
 -- placed right after the seat itself with a STANDING ghost. Without one a diner
 -- stands up exactly where they were sitting, which on a booth or a bar means
@@ -347,6 +377,19 @@ function StartShellPlacement(restaurantId)
     if not shell or not DoesEntityExist(shell) then return end
     FreezeEntityPosition(shell, true)
     SetEntityCollision(shell, false, false)
+    SetEntityLodDist(shell, 0xFFFF) -- it's viewed from 18m back, high over the counter
+
+    -- The shell sits well above the counter, and the camera goes with it — out of
+    -- the bubble streamed around the PED. Without pinning the focus there the first
+    -- frames render an unstreamed void (the shell itself unlit / not yet drawn), and
+    -- it only came right once a scroll happened to move it back into loaded space.
+    -- Same treatment modules/virtual gives the session build, minus the fade.
+    SetFocusPosAndVel(c.x, c.y, z, 0.0, 0.0, 0.0)
+    RequestCollisionAtCoord(c.x, c.y, z)
+    NewLoadSceneStartSphere(c.x, c.y, z, 60.0, 0)
+    local t0 = GetGameTimer()
+    while not IsNewLoadSceneLoaded() and GetGameTimer() - t0 < 1500 do Wait(0) end
+    NewLoadSceneStop()
 
     local cam = CreateCamWithParams("DEFAULT_SCRIPTED_CAMERA",
         c.x, c.y - SHELL_CAM.back, z + SHELL_CAM.up, 0.0, 0.0, 0.0, SHELL_CAM.fov, false, 2)
@@ -360,6 +403,14 @@ function StartShellPlacement(restaurantId)
 
     local saved = false
     local dirty = true -- (re)seat the shell + camera only when z/heading change
+    -- ...EXCEPT for the first second, where it re-seats every frame. The shell is
+    -- created 20m up, outside the bubble streamed around the ped, and a fresh object
+    -- out there doesn't render (or renders unlit) until something MOVES it once the
+    -- streamer has caught up — which is why the view only came right after the first
+    -- scroll notch. A single seat on frame 1 lands before the object/camera exist
+    -- properly, so it can't be that something: this window replays the exact scroll
+    -- path (the `dirty` block below) across the camera's 650ms ease-in instead.
+    local settleUntil = GetGameTimer() + 1000 -- TUNE IN-GAME
     while true do
         DisableAllControlActions(0)
         local speedMode = IsDisabledControlPressed(0, 21) and 4 or 1
@@ -369,13 +420,16 @@ function StartShellPlacement(restaurantId)
         if IsDisabledControlJustPressed(0, 14) then z = z - SHELL_Z_STEP * speedMode dirty = true end
         if IsDisabledControlPressed(0, 174) then heading = (heading - 1.0 * speedMode) % 360.0 dirty = true end
         if IsDisabledControlPressed(0, 175) then heading = (heading + 1.0 * speedMode) % 360.0 dirty = true end
-        if dirty then
+        if dirty or GetGameTimer() < settleUntil then
+            -- a scroll notch's own work: move it, re-aim the camera, move the focus
             SetEntityCoordsNoOffset(shell, c.x, c.y, z, false, false, false)
             SetEntityHeading(shell, heading)
             -- track the shell from behind its facing so rotation reads naturally
             local camPos = GetOffsetFromEntityInWorldCoords(shell, 0.0, SHELL_CAM.back, SHELL_CAM.up)
             SetCamCoord(cam, camPos.x, camPos.y, camPos.z)
             PointCamAtCoord(cam, c.x, c.y, z + SHELL_CAM.lookUp)
+            -- keep the streamed bubble on the shell as it moves, not on the parked ped
+            SetFocusPosAndVel(c.x, c.y, z, 0.0, 0.0, 0.0)
             dirty = false
         end
 
@@ -406,6 +460,7 @@ function StartShellPlacement(restaurantId)
         Wait(0)
     end
 
+    ClearFocus() -- hand streaming back to the ped
     FreezeEntityPosition(ped, false)
     RenderScriptCams(false, true, 650, true, true)
     CreateThread(function()
@@ -498,11 +553,20 @@ function StartPropReposition(propId)
     }
     local ptype = prop.prop_type
     local seatStyle -- carried to updateProp below (seats only)
+    local parts     -- which parts of a seat this edit touches (seats only)
     if ptype == "seat" then
-        -- Re-picking the style is part of editing a seat: it's the one property of an
-        -- anchor you can't see, and it decides the ghost you're about to drag.
-        seatStyle = PickSeatStyle(prop.metadata and prop.metadata.style)
-        if not seatStyle then restoreLive(); return end
+        -- Ask what's being edited FIRST — a seat is four answers and this edit only
+        -- runs the ones ticked (the rest are re-submitted exactly as they are).
+        parts = PickSeatEditParts(prop)
+        if not parts then restoreLive(); return end
+        -- The style decides the ghost's pose, so it's still asked before the gizmo —
+        -- but only when it's part of the edit. Untouched keeps the stored one, which
+        -- is also what the seat-point ghost previews.
+        seatStyle = (prop.metadata and prop.metadata.style) or Config.DefaultSeatStyle
+        if parts.style then
+            seatStyle = PickSeatStyle(seatStyle)
+            if not seatStyle then restoreLive(); return end
+        end
         local sitDict, sitAnim = SeatPreviewAnim(seatStyle)
         seed.isPed        = true
         seed.model        = SEAT_PREVIEW_PED
@@ -524,7 +588,16 @@ function StartPropReposition(propId)
         end
     end
 
-    local result = StartGizmoEditor(seed)
+    -- A seat edit that doesn't touch the seat POINT skips the gizmo entirely and
+    -- keeps the stored transform — editing the style or the tray patch shouldn't
+    -- make you re-place the diner.
+    local result
+    if parts and not parts.point then
+        result = { position = vector3(prop.x + 0.0, prop.y + 0.0, prop.z + 0.0),
+                   rotation = vector3(0.0, 0.0, (prop.heading or 0.0) + 0.0) }
+    else
+        result = StartGizmoEditor(seed)
+    end
     if not result or not result.position then restoreLive(); return end -- cancelled: put it back
     local heading = (result.rotation and result.rotation.z) or 0.0
     -- Re-place the stand-up point with the seat. Its ghost starts on the seat's
@@ -533,15 +606,23 @@ function StartPropReposition(propId)
     local seatExit, seatTray
     if ptype == "seat" then
         local cur = prop.metadata and prop.metadata.exit
-        seatExit = PickSeatExit(
-            cur and vector3(cur.x + 0.0, cur.y + 0.0, cur.z + 0.0)
-                 or SeatExitSeed(result.position.x, result.position.y, result.position.z, heading),
-            (cur and cur.heading) or heading)
+        if parts.exit then
+            seatExit = PickSeatExit(
+                cur and vector3(cur.x + 0.0, cur.y + 0.0, cur.z + 0.0)
+                     or SeatExitSeed(result.position.x, result.position.y, result.position.z, heading),
+                (cur and cur.heading) or heading)
+        else
+            seatExit = cur -- not part of this edit: re-submit it unchanged
+        end
         local curT = prop.metadata and prop.metadata.tray
-        seatTray = PickSeatTray(
-            curT and vector3(curT.x + 0.0, curT.y + 0.0, curT.z + 0.0)
-                  or SeatTraySeed(result.position.x, result.position.y, result.position.z, heading),
-            (curT and curT.heading) or heading)
+        if parts.tray then
+            seatTray = PickSeatTray(
+                curT and vector3(curT.x + 0.0, curT.y + 0.0, curT.z + 0.0)
+                      or SeatTraySeed(result.position.x, result.position.y, result.position.z, heading),
+                (curT and curT.heading) or heading)
+        else
+            seatTray = curT
+        end
     end
     local res = lib.callback.await("pickle_restaurants:placement:updateProp", false, {
         id = propId,

@@ -10,9 +10,17 @@
 --  means the order is not completed. The server grants nothing here (see
 --  doorstep/server.lua): it only says whether this order has a door and where.
 --
---  The resident is a LOCAL ped. Only the driver is party to the scene, so there is
---  no ped netcode, no ownership to migrate and nothing left behind for other
---  players if this client crashes mid-hand-off.
+--  THE SCENE IS NETWORKED. The resident and the bag used to be client-LOCAL, on the
+--  reasoning that only the driver is party to the hand-off — but that made a delivery
+--  look, to everyone else in the street, like a man miming at a door. They are real
+--  networked entities now, so the resident answering and the branded bag changing hands
+--  are part of the scene everybody sees.
+--
+--  What the local version was avoiding is real, though: a networked entity outlives the
+--  client that spawned it, so a driver who crashes mid-scene would strand a ped on a
+--  stranger's doorstep. Both ids are therefore reported to doorstep/server.lua the moment
+--  they exist, and it deletes them if this client stops speaking for itself (drop, or a
+--  deadline). Normal endings still clean up here, first.
 -- =============================================
 
 -- TUNE IN-GAME. Every dict/clip below is a shipped GTA one.
@@ -58,6 +66,10 @@ local DOOR = {
 }
 
 local running = false
+-- The scene's two NETWORKED entities, mirrored at module scope purely so
+-- `onResourceStop` can delete them: a restart mid-scene is the one ending that reaches
+-- neither cleanup path, and a networked entity nobody deletes stays on every screen.
+local residentEnt, bagEnt = nil, nil
 
 local function loadDict(dict)
     if HasAnimDictLoaded(dict) then return true end
@@ -97,6 +109,25 @@ local function despawn(ped)
     end
 end
 
+-- Hand the server the NET IDS of what this scene spawned, so it can delete them if we
+-- stop being able to (see the header). Net id, not entity handle: a handle means nothing
+-- on the other side. Silently skips anything that failed to spawn or isn't networked yet.
+local function reportSceneEntities(...)
+    local ids = {}
+    for _, ent in ipairs({ ... }) do
+        if ent and DoesEntityExist(ent) then
+            local net = NetworkGetNetworkIdFromEntity(ent)
+            if net and net ~= 0 then
+                -- the scene is short and ours; keeping control of the entity is what
+                -- makes the local cleanup below authoritative in the normal case
+                SetNetworkIdCanMigrate(net, false)
+                ids[#ids + 1] = net
+            end
+        end
+    end
+    if #ids > 0 then TriggerServerEvent("pickle_restaurants:doorstep:sceneEntities", ids) end
+end
+
 -- The bag being handed over: our own Restaurant Bag prop, wearing `rid`'s brand.
 -- The pin is what makes it the DELIVERING restaurant's bag rather than whichever
 -- branded restaurant the customer's house happens to sit next to, and it has to be
@@ -106,7 +137,9 @@ local function spawnBag(rid, ped)
     if rid and PinBrandRestaurant then PinBrandRestaurant(rid) end
     local hash = loadModel(model)
     if not hash then return nil end
-    local bag = CreateObject(hash, GetEntityCoords(ped), false, false, false)
+    -- networked (2nd arg) so the bag is in the driver's hand on every screen, not just
+    -- theirs; the server holds its net id as a dead-man's switch (see the header).
+    local bag = CreateObject(hash, GetEntityCoords(ped), true, true, false)
     SetModelAsNoLongerNeeded(hash)
     if not (bag and DoesEntityExist(bag)) then return nil end
     if ReassertBrandFor then ReassertBrandFor(model) end -- the prop exists now: re-bind
@@ -163,7 +196,10 @@ local function runDoorstepScene(door, rid)
         local model = DOOR.peds[math.random(#DOOR.peds)]
         local hash  = loadModel(model)
         if not hash then error("model", 0) end
-        resident = CreatePed(4, hash, at.x, at.y, at.z, outward, false, false)
+        -- networked + script-host, for the same reason as the bag: a resident only the
+        -- driver can see is the whole bug this fixes.
+        resident = CreatePed(4, hash, at.x, at.y, at.z, outward, true, true)
+        residentEnt = resident
         SetModelAsNoLongerNeeded(hash)
         if not (resident and DoesEntityExist(resident)) then error("ped", 0) end
         SetEntityInvincible(resident, true)
@@ -179,6 +215,10 @@ local function runDoorstepScene(door, rid)
                         at.z, false, false, false, false)
         SetEntityHeading(ped, outward + 180.0)
         bag = spawnBag(rid, ped)
+        bagEnt = bag
+        -- Hand the server the dead-man's switch NOW, while both exist: if this client
+        -- never gets to the cleanup below, that is what removes them for everyone else.
+        reportSceneEntities(resident, bag)
         Wait(DOOR.settle_ms)
 
         -- 4. the exchange: two halves of one clip, started on the same frame so the
@@ -215,10 +255,15 @@ local function runDoorstepScene(door, rid)
                 DeleteEntity(carried)
             end
             despawn(body)
+            residentEnt, bagEnt = nil, nil
+            -- both gone: release the server's hold rather than leaving it to a deadline
+            TriggerServerEvent("pickle_restaurants:doorstep:sceneDone")
         end)
     elseif bag and DoesEntityExist(bag) then
         DetachEntity(bag, false, false)
         DeleteEntity(bag)
+        residentEnt, bagEnt = nil, nil
+        TriggerServerEvent("pickle_restaurants:doorstep:sceneDone")
     end
     if UnpinBrandRestaurant then UnpinBrandRestaurant() end
     running = false
@@ -296,4 +341,12 @@ end
 AddEventHandler("onResourceStop", function(res)
     if res ~= GetCurrentResourceName() then return end
     if running then ClearPedTasks(PlayerPedId()) end
+    -- A restart mid-scene is the one ending that reaches neither cleanup path above, and
+    -- the entities are NETWORKED now — so everyone else would keep the resident and the
+    -- bag. Delete what we still hold; the server's deadline covers whatever we don't.
+    if bagEnt and DoesEntityExist(bagEnt) then
+        DetachEntity(bagEnt, false, false)
+        DeleteEntity(bagEnt)
+    end
+    if residentEnt and DoesEntityExist(residentEnt) then despawn(residentEnt) end
 end)

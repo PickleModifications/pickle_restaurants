@@ -343,14 +343,33 @@ end
 
 -- ─── shared money bits ───────────────────────────────────────────────────────
 
+-- What cut of a sale the player ringing it up takes, as a percentage. Commission is a
+-- property of the RANK, not of a person: a boss sets one rate per grade and everyone
+-- on that grade earns it, so there is no per-employee rate to look up any more.
+-- ResolvePerms' 3rd return is the JOB INFO of the player at this restaurant — nil for
+-- an admin or an owner who doesn't hold the job, so they still earn nothing, exactly
+-- as they did when they had no employee row.
+local function commissionRate(rid, src)
+    local _, _, jobInfo = ResolvePerms(rid, src)
+    if not jobInfo then return 0 end
+    return math.max(0, math.min(100, tonumber(RankFor(rid, jobInfo.grade).commission) or 0))
+end
+
 -- Pay the serving employee's commission out of the restaurant's take (the same
--- flow the old per-item sale used, now per ORDER). Owners/admins have no
--- employee row, so they simply earn no commission.
-local function payCommission(rid, src, amount, ticket)
+-- flow the old per-item sale used, now per ORDER).
+--
+-- NOT WHEN THEY SERVED THEMSELVES. A cashier who rings up their own burger is the
+-- customer AND the server, so a commission hands them part of their own payment straight
+-- back: an $8 burger charged $8, printed a receipt, and returned $1 (10% of 8, rounded),
+-- which reads exactly like the POS giving change it has no business giving. It is also a
+-- money faucet the moment a rank's commission passes the rounding threshold. Commission
+-- is a cut for SERVING SOMEONE; there is no service in a self-purchase.
+-- `customerIdent` is the identifier the ticket was rung up for (an NPC's is prefixed, so
+-- it can never collide with a real one).
+local function payCommission(rid, src, amount, ticket, customerIdent)
     local id = GetIdentifier(src)
-    local emp = EmployeeCache[rid] and EmployeeCache[rid][id]
-    local rate = emp and tonumber(emp.commission_rate) or 0
-    local commission = RoundMoney(amount * rate / 100)
+    if customerIdent and id and customerIdent == id then return 0 end
+    local commission = RoundMoney(amount * commissionRate(rid, src) / 100)
     if commission > 0 then
         AdjustBalance(rid, -commission)
         AddMoney(src, commission, "money")
@@ -768,15 +787,15 @@ local findPlayerByIdentifier
 -- ResolvePerms so there is ONE definition of who staffs a restaurant and it can never
 -- drift from the one gating the callbacks.
 --
--- This was an identifier list built from EmployeeCache + `owner_identifier`, and it
--- missed anyone who works a restaurant WITHOUT being on its payroll — an admin most
+-- This was an identifier list built from an employee table + `owner_identifier`, and
+-- it missed anyone who works a restaurant WITHOUT being on its payroll — an admin most
 -- of all. An admin has every permission here: they can cook, bag and ring up like any
--- employee, but they hold no employee row and own nothing, so a bag in their hands was
+-- employee, but they hold no job here and own nothing, so a bag in their hands was
 -- invisible to fulfillment and the ticket read "bag it or plate it up" while they were
 -- standing at the till holding the bag. (The owner had the same bug for the same
--- reason before they were special-cased: management refuses to hire them, so they have
--- no employee row either. Asking the permission system instead of enumerating stores
--- is what stops the next such role needing its own special case.)
+-- reason before they were special-cased: they are never hired, so they hold no job
+-- either. Asking the permission system instead of enumerating stores is what stops the
+-- next such role needing its own special case.)
 --
 -- Sources, not identifiers: every consumer immediately wanted the player anyway, and
 -- the old shape paid a full GetPlayers() scan per identifier to find them.
@@ -785,11 +804,12 @@ local function vesselSources(rid)
     for _, p in ipairs(GetPlayers()) do
         local src = tonumber(p)
         if src then
-            -- STRICT SUPERSET of the old employees+owner set: any employee row at all
-            -- (whatever its role — they could always bag food before), the owner and
-            -- admins (both `isBoss`), plus anyone else granted cook/sell.
-            local perms, isBoss, emp = ResolvePerms(rid, src)
-            if isBoss or emp or (perms and (perms.cook or perms.sell)) then
+            -- Anyone the restaurant grants standing to: the owner and admins (both
+            -- `isBoss`), ANYONE holding the restaurant's job whatever their rank
+            -- (ResolvePerms' 3rd return, `jobInfo` — a fry cook on the lowest grade
+            -- could always bag food), plus anyone else granted cook/sell.
+            local perms, isBoss, jobInfo = ResolvePerms(rid, src)
+            if isBoss or jobInfo or (perms and (perms.cook or perms.sell)) then
                 out[#out + 1] = src
             end
         end
@@ -1020,14 +1040,14 @@ end
 -- ─── register payload ────────────────────────────────────────────────────────
 
 local function buildRegister(src, id)
-    local emp = EmployeeCache[id] and EmployeeCache[id][GetIdentifier(src)]
     local r = GetRestaurant(id)
     return {
         ok           = true,
         restaurantId = id,
         label        = r.label,
         balance      = r.balance,
-        commission   = emp and emp.commission_rate or 0,
+        -- the cashier's own cut, read off their RANK (the POS prints it as a subtitle)
+        commission   = commissionRate(id, src),
         catalog      = (BuildPricedCatalog(id, true)),
         tickets      = AnnotateOrders(id, GetOpenOrders(id)), -- initial list; kept live thereafter by SyncOrders
         nearby       = NearbyPlayers(src, 6.0),
@@ -1290,7 +1310,7 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
 
         local summary = orderSummary(lines)
         AddLedger(id, "sale", total, _L("ledger_sale", order.ticket, summary):sub(1, 255), customerId)
-        payCommission(id, src, total, order.ticket)
+        payCommission(id, src, total, order.ticket, customerId)
 
         -- Hand the customer their receipt (metadata carries the ticket, so the same
         -- item verifies the right order at completion). Skipped gracefully when the
@@ -1913,10 +1933,18 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
         AddLedger(id, "sale", o.total, _L("ledger_sale", o.ticket, summary):sub(1, 255), o.customer_identifier)
         local tip = (NpcRollTip and NpcRollTip(o.total)) or 0
         if tip > 0 then
-            AdjustBalance(id, tip)
-            AddLedger(id, "sale", tip, _L("ledger_tip", o.ticket), o.customer_identifier)
+            -- A TIP IS STAFF MONEY, not the house's. It used to be added to the
+            -- restaurant BALANCE, which quietly made every gratuity the owner's; it now
+            -- goes into the tip pool (an unpaid `pickle_restaurant_tips` row) for a
+            -- manager to pay out, and the ledger records it as the tip line it always
+            -- was so the books still show it arriving.
+            AddTip(id, tip, nil, "npc")
+            AddLedger(id, "tip", tip, _L("ledger_tip", o.ticket), o.customer_identifier)
         end
-        payCommission(id, src, o.total + tip, o.ticket)
+        -- Commission is a cut of the SALE only. Paying it on the tip as well would take
+        -- it out of a balance the tip never entered — the house would be funding the
+        -- server's cut of their own gratuity.
+        payCommission(id, src, o.total, o.ticket, o.customer_identifier)
 
         CloseOrder(id, o.id, "completed")
         -- Phone companion seam: cook stats / achievements / leaderboard / tip pool.

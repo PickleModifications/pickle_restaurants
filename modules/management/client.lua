@@ -31,10 +31,16 @@ local function relayThenRefresh(callbackName)
     end
 end
 
+-- Employment moves players between grades of the restaurant's JOB (there is no
+-- employee row any more), and pay is per RANK — so `management:setCommission` is
+-- gone with the per-employee rate it used to write, replaced by setRank.
 RegisterNUICallback("management:hire",           relayThenRefresh("pickle_restaurants:management:hire"))
 RegisterNUICallback("management:fire",           relayThenRefresh("pickle_restaurants:management:fire"))
 RegisterNUICallback("management:setGrade",       relayThenRefresh("pickle_restaurants:management:setGrade"))
-RegisterNUICallback("management:setCommission",  relayThenRefresh("pickle_restaurants:management:setCommission"))
+-- Paying tips out / running the wage bill: both refresh, since both change the
+-- numbers the Payroll tab is looking at (the pool, the balance, the payslip list).
+RegisterNUICallback("management:payTips",        relayThenRefresh("pickle_restaurants:management:payTips"))
+RegisterNUICallback("management:runPayroll",     relayThenRefresh("pickle_restaurants:management:runPayroll"))
 RegisterNUICallback("management:saveMenuItem",   relayThenRefresh("pickle_restaurants:management:saveMenuItem"))
 RegisterNUICallback("management:deleteMenuItem", relayThenRefresh("pickle_restaurants:management:deleteMenuItem"))
 RegisterNUICallback("management:deposit",        relayThenRefresh("pickle_restaurants:management:deposit"))
@@ -73,6 +79,16 @@ end)
 -- Theme saves also skip the refresh — the NUI already applied the theme live.
 RegisterNUICallback("management:setTheme", function(d, cb)
     local res = lib.callback.await("pickle_restaurants:management:setTheme", false, d)
+    if res and res.error then ShowNotification(res.error) end
+    cb(res or {})
+end)
+
+-- Rank edits skip the refresh for the same reason the rename does: they auto-save as
+-- the boss types a salary or ticks a permission, and re-fetching getData would remount
+-- the Ranks editor and yank the cursor out of the field mid-edit. The reply carries the
+-- sanitized `ranks` array so the panel can reconcile without a full refetch.
+RegisterNUICallback("management:setRank", function(d, cb)
+    local res = lib.callback.await("pickle_restaurants:management:setRank", false, d)
     if res and res.error then ShowNotification(res.error) end
     cb(res or {})
 end)

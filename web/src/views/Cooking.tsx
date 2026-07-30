@@ -686,7 +686,10 @@ function MealTooltip({
         >
           {bag ? _L("cook.bag_it_up") : box ? (boxing ? _L("cook.box_closing") : _L("cook.box_it_up")) : _L("cook.make_meal")}
         </button>
-        {box && count > 0 && (
+        {/* The BAG conceals what's dropped in it exactly like the takeout box, so it
+            needs the same way back out — without this, a wrong item dropped into a bag
+            could only be recovered by bagging it up and taking the bag apart. */}
+        {(box || bag) && count > 0 && (
           <button
             disabled={!canAct}
             onClick={onTakeOut}

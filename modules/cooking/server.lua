@@ -834,6 +834,21 @@ local function drinkFlavor(meta)
     end
 end
 
+-- A drink is a finished SERVING, never a layer of something else. The client
+-- refuses to stack one either way, but the NUI is untrusted: a pile that mixes a
+-- drink with anything else is rejected here rather than recorded as a burger whose
+-- build stack "contains" a cola (which would then be its POS variation, its
+-- contents list and its take-apart). A pile that IS just a drink is fine — that's
+-- a drink standing on a meal tray.
+local function pileMixesDrink(layers)
+    if type(layers) ~= "table" or #layers < 2 then return false end
+    local di = DrinkItem()
+    for _, l in ipairs(layers) do
+        if l.item == di then return true end
+    end
+    return false
+end
+
 -- The VARIANT one instance of a multi-faced ingredient is (which of the five toys
 -- this `restaurant_toy` is), read off its build-stack metadata. Structurally the
 -- same trick as drinkFlavor above — one generic item, the identity in the meta —
@@ -842,9 +857,21 @@ local function ingVariant(item, meta)
     return IngredientVariantOf and IngredientVariantOf(item, meta) or nil
 end
 
--- A flavor's capped-cup render (drinks always collect capped).
+-- A flavor's capped-cup render (drinks always collect capped). Built by APPENDING,
+-- never as a literal with a possible nil first element: a flavor with no model would
+-- otherwise return { nil, lid }, and an ipairs over that stops on the hole — so the
+-- consumer's hand ended up empty instead of holding at least the lidded cup.
 local function drinkRender(dd)
-    return { dd.model, GetSetting("drink_lid_model", "pickle_drink_lid_01") }
+    local out = {}
+    -- The poured cup's own model, or failing that the CUP ITEM it was poured into
+    -- (a flavor authored with no model still has a cup to show — an empty-looking
+    -- one beats a lid floating on nothing).
+    local cup = dd and dd.model
+    if (not cup or cup == "") and dd and dd.input then cup = itemModel(dd.input) end
+    if cup and cup ~= "" then out[#out + 1] = cup end
+    local lid = GetSetting("drink_lid_model", "pickle_drink_lid_01")
+    if lid and lid ~= "" then out[#out + 1] = lid end
+    return out
 end
 
 -- How a finished (frosted…) item renders: replace-mode = the recorded flavor's
@@ -1107,6 +1134,36 @@ local function compSpec(c)
         spec.stack = servedStack(c.item, spec.model)
     end
     return spec
+end
+
+-- What one build-stack layer looks like IN A HAND: the very models the kitchen and
+-- the diner's table render it with, bottom-to-top, for the client to hang off the
+-- eat animation instead of that clip's catalogue prop. A mouthful used to be taken
+-- out of `consume_anims`' generic prop — everyone ate a doughnut, whatever was
+-- actually on the tray.
+--
+-- Deliberately compSpec's answer and not a second resolver: it is what already
+-- decides a food's props everywhere else (cook state swapped in, a finish's flavor
+-- model, a nested product's whole tower, a side in its box), so the thing raised to
+-- a mouth is the thing that was sitting on the tray, down to the melted cheese.
+--
+-- A TAKEOUT BOX is the one layer that hands back its base only: its render is a
+-- HINGED PAIR whose lid model is authored on its hinge edge, and attachHeldStack
+-- stacks by measured height — the lid would seat itself somewhere the hinge isn't.
+function LayerHeldProps(l)
+    if type(l) ~= "table" or not l.item then return nil end
+    local spec = compSpec({ item = l.item, stack = l.stack, half = l.half })
+    if not spec then return nil end
+    local out = {}
+    if not spec.takeout and type(spec.stack) == "table" then
+        for _, m in ipairs(spec.stack) do
+            if type(m) == "string" and m ~= "" then out[#out + 1] = m end
+        end
+    end
+    if #out == 0 and type(spec.model) == "string" and spec.model ~= "" then
+        out[1] = spec.model
+    end
+    return (#out > 0) and out or nil
 end
 
 -- A readable component list for an item's build stack (half layers collapse to one
@@ -2198,7 +2255,14 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
             -- shows a flavor badge instead of a parts/toppings breakdown
             if ftarget then
                 local model, stack = finishRender(e.item, e.meta)
-                if model then e.model = model end
+                -- REPLACE-MODE WINS OUTRIGHT, stack included. `withContainer` above may
+                -- already have built `{ tin, cake_sheet }` for the bake this was finished
+                -- FROM, and a stack always beats a model client-side — so a frosted cake
+                -- dragged out of the tray still rendered as a plain sheet sitting in its
+                -- tin. A decorated cake is a whole cake and it is out of the tin (applying
+                -- the finish deletes both those props), so the flavor model is the ENTIRE
+                -- render.
+                if model then e.model, e.stack, e.stackState = model, nil, nil end
                 if stack then e.stack = stack end
                 if ftfl then e.flavorLabel = ftfl.label or ftfl.id end
                 e.finishTool = ftcfg and ftcfg.tool
@@ -2318,7 +2382,8 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 local ftarget, ftcfg, ftfl = finishFor(item, v.meta)
                 if ftarget then
                     local model, stack = finishRender(item, v.meta)
-                    if model then entry.model = model end
+                    -- replace-mode drops the container stack too — see the tray branch
+                    if model then entry.model, entry.stack, entry.stackState = model, nil, nil end
                     if stack then entry.stack = stack end
                     if ftfl then entry.flavorLabel = ftfl.label or ftfl.id end
                     entry.finishTool = ftcfg and ftcfg.tool
@@ -3022,6 +3087,7 @@ lib.callback.register("pickle_restaurants:cooking:prepMakeMeal", function(src, d
         if boxed and not boxBaseLayer(ordered[1]) then
             return { ok = false, error = _L("cook_only_boxable_in_box") }
         end
+        if pileMixesDrink(ordered) then return { ok = false, error = _L("cook_drink_not_a_layer") } end
         piles[#piles + 1] = { ordered = ordered, dx = dx, dy = dy,
                               asm = bestAssemblyForLayers(ordered, b.rid) }
         for _, l in ipairs(ordered) do layers[#layers + 1] = l end
@@ -3151,6 +3217,7 @@ lib.callback.register("pickle_restaurants:cooking:prepMakeStack", function(src, 
     if not RestaurantHasAccess(b.rid, asm.group) then return { ok = false, error = _L("cook_unknown_recipe") } end
     local layers = orderedLayers(b, d.ids)
     if #layers == 0 then return { ok = false, error = _L("cook_nothing_to_build") } end
+    if pileMixesDrink(layers) then return { ok = false, error = _L("cook_drink_not_a_layer") } end
     if not stackSatisfies(buildProvides(layers), asm) then return { ok = false, error = _L("cook_missing_components") } end
     return makeStack(src, b, GetIdentifier(src), d.ids, asm)
 end)

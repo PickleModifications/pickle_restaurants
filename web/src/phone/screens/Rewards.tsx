@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
 import {
   Trophy,
-  CalendarClock,
   ChevronRight,
   Award,
   Lock,
-  DoorOpen,
   X,
   Medal,
   Briefcase,
+  Armchair,
+  UserPlus,
+  Users,
 } from "lucide-react";
 import { fetchNui } from "../../lib/nui";
 import { cn } from "../../lib/utils";
@@ -27,24 +28,22 @@ export function Rewards() {
     <Screen className="pb-20">
       <TopBar title={_L("phone.rewards.title")} />
       <div className="space-y-4 p-4">
-        <div className="grid grid-cols-2 gap-2">
-          <button
-            onClick={() => go("reserve")}
-            className="flex flex-col items-start gap-1 rounded-2xl border border-border bg-card p-3 text-left active:scale-[0.98]"
-          >
-            <CalendarClock className="h-5 w-5 text-primary" />
-            <div className="font-semibold">{_L("phone.reserve.title")}</div>
-            <div className="text-[0.7rem] text-muted-foreground">{_L("phone.rewards.reserve_hint")}</div>
-          </button>
-          <button
-            onClick={() => go("leaderboard")}
-            className="flex flex-col items-start gap-1 rounded-2xl border border-border bg-card p-3 text-left active:scale-[0.98]"
-          >
-            <Trophy className="h-5 w-5 text-warn" />
-            <div className="font-semibold">{_L("phone.leaderboard.title")}</div>
+        {/* Booking a table used to sit beside this as a second card; it moved onto the
+            restaurant's own storefront (screens/Restaurant.tsx), where the restaurant
+            being booked is already the thing on screen. */}
+        <button
+          onClick={() => go("leaderboard")}
+          className="flex w-full items-center gap-3 rounded-2xl border border-border bg-card p-3 text-left active:scale-[0.98]"
+        >
+          <span className="grid h-10 w-10 place-items-center rounded-full bg-warn/10 text-warn">
+            <Trophy className="h-5 w-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="font-semibold leading-tight">{_L("phone.leaderboard.title")}</div>
             <div className="text-[0.7rem] text-muted-foreground">{_L("phone.rewards.leaderboard_hint")}</div>
-          </button>
-        </div>
+          </div>
+          <ChevronRight className="h-4 w-4 text-muted-foreground" />
+        </button>
 
         {/* punch cards */}
         <section>
@@ -119,40 +118,85 @@ export function Rewards() {
 }
 
 // ─── reservations ─────────────────────────────────────────────────────────────
-// The slot ID is what the server stores, so it must stay stable; only its DISPLAY
-// is localized (the clock times read the same in any language).
-const SLOTS = ["Now", "6:00 PM", "7:00 PM", "8:00 PM", "9:00 PM"];
-const slotLabel = (s?: string) => (!s || s === "Now" ? _L("phone.reserve.slot_now") : s);
+// A RESERVATION HOLDS SPECIFIC SEATS. There is no booth and no instance any more: the
+// server allocates real seat anchors for a timeslot, and only the holder plus the
+// guests they grant may sit on them. So this screen books seats, shows which ones it
+// holds, and manages the guest list — there is nothing to "enter".
+//
+// The slot list is CANONICAL SERVER DATA (`reservation_slots`), never a copy here: the
+// server validates a booking against it, so a hardcoded array could offer a time that
+// can't be booked. Only the DISPLAY of "now" is localized — a clock time reads the same
+// in any language.
+const slotLabel = (s?: string) => (!s || s === "now" || s === "Now" ? _L("phone.reserve.slot_now") : s);
 
-export function Reserve(_props: { params?: any }) {
+export function Reserve({ params }: { params?: any }) {
   const { home, back, toast } = usePhone();
   const restaurants: any[] = home?.restaurants || [];
-  const [rid, setRid] = useState<number | null>(restaurants[0]?.id ?? null);
+  // Opened FROM a storefront (the only way in now), so the restaurant is already
+  // chosen — the picker rail would only offer a way to book somewhere else than the
+  // page you came from. It stays as the fallback for a params-less open.
+  const pinned: number | null = params?.rid ?? null;
+  const [rid, setRid] = useState<number | null>(pinned ?? restaurants[0]?.id ?? null);
   const [party, setParty] = useState(2);
-  const [slot, setSlot] = useState(SLOTS[0]);
-  const [mine, setMine] = useState<any[]>([]);
+  const [slot, setSlot] = useState<string>("");
   const [avail, setAvail] = useState<any>(null);
+  // Only used when there is no restaurant to ask about (a params-less open on a phone
+  // whose feed is empty): the caller's booking still has to be visible and cancellable.
+  const [loose, setLoose] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
 
-  const load = () => fetchNui("phone:myReservations", {}).then((d) => d?.ok && setMine(d.reservations || []));
   const loadAvail = (r: number | null) => {
     setAvail(null);
     if (r != null) fetchNui("phone:reserveAvailability", { id: r }).then((d) => d?.ok && setAvail(d));
   };
-  useEffect(() => {
-    load();
-  }, []);
-  useEffect(() => {
-    loadAvail(rid);
-  }, [rid]);
+  const loadLoose = () => fetchNui("phone:myReservations", {}).then((d) => d?.ok && setLoose(d.reservations || []));
+  useEffect(() => { loadLoose(); }, []);
+  useEffect(() => { loadAvail(rid); }, [rid]);
 
-  // Seats left in a slot, given capacity − already-booked parties.
   const capacity: number = avail?.capacity ?? 0;
-  const remaining = (s: string) => capacity - (avail?.usage?.[s] || 0);
-  const slotFull = (s: string) => avail != null && remaining(s) < party;
-  const alreadyBooked = !!avail?.hasReservation;
-  // A restaurant with no seat anchors placed can't take reservations at all.
+  const maxParty: number = avail?.maxParty ?? 12;
+  const slots: { id: string; taken: number; remaining: number }[] = avail?.slots || [];
+  // ONE active reservation per person, anywhere — the server enforces it, so this is a
+  // single object, not a list. `avail` carries it even when it belongs to another
+  // restaurant, because that is exactly what makes booking here impossible.
+  const mine = avail ? avail.mine : (loose[0] || null);
+  const mineHere = !!mine && mine.restaurantId === rid;
+
+  // The first render has no slot chosen; land on the server's first slot ("now") once
+  // the canonical list arrives, or on the slot the caller is already booked into.
+  useEffect(() => {
+    if (!slots.length) return;
+    const want = mineHere ? mine.slot : slot;
+    if (!slots.some((s) => s.id === want)) setSlot(mineHere ? mine.slot : slots[0].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [avail]);
+
+  const cur = slots.find((s) => s.id === slot);
+  // `remaining` comes STRAIGHT from the server — no capacity arithmetic here. It is
+  // already "how many seats this player could hold in this slot": the server excludes
+  // the caller's OWN held seats from the taken count, so for the slot they're booked
+  // into it counts their seats as still theirs to keep. That makes it the cap for a
+  // party TOTAL directly, with no seatCount to add back on.
+  const cap = Math.max(1, Math.min(maxParty, cur ? cur.remaining : maxParty));
   const noSeats = avail != null && capacity <= 0;
+  // Booking elsewhere / at another time is refused server-side (one reservation per
+  // person), so say WHICH mismatch it is instead of letting the button just fail.
+  const blockedOther = !!mine && !mineHere;
+  const blockedSlot = mineHere && mine.slot !== slot;
+  const held: number = mineHere ? (mine.seatCount || 0) : 0;
+  // Asking for what you already hold is a no-op the server reports as success; the
+  // button should say so rather than inviting a pointless round trip.
+  const nothingToAdd = mineHere && party <= held;
+
+  useEffect(() => {
+    // Keep the stepper inside what the chosen slot can actually give, and never below
+    // the seats already held (a reservation is only ever grown here — giving seats back
+    // is what cancelling is).
+    setParty((p) => Math.max(Math.max(1, held), Math.min(cap, p)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cap, held]);
+
+  const reload = () => { loadAvail(rid); loadLoose(); };
 
   const book = async () => {
     if (!rid) return;
@@ -161,19 +205,15 @@ export function Reserve(_props: { params?: any }) {
     setBusy(false);
     if (res?.ok) {
       toast(_L("phone.reserve.booked"));
-      load();
-      loadAvail(rid);
+      reload();
     } else toast(res?.error || _L("phone.reserve.book_failed"), "err");
   };
 
-  const enter = async (r: any) => {
-    const res = await fetchNui("phone:enterBooth", { id: r.id, rid: r.restaurant_id });
-    if (!res?.ok) toast(res?.error || _L("phone.reserve.enter_failed"), "err");
-  };
   const cancel = async (r: any) => {
-    await fetchNui("phone:cancelReservation", { id: r.id });
-    load();
-    loadAvail(rid);
+    const res = await fetchNui("phone:cancelReservation", { id: r.id });
+    if (res?.ok) toast(_L("phone.reserve.cancelled"));
+    else toast(res?.error || _L("phone.reserve.book_failed"), "err");
+    reload();
   };
 
   return (
@@ -182,32 +222,46 @@ export function Reserve(_props: { params?: any }) {
       <div className="space-y-4 p-4">
         <div>
           <div className="tape mb-1.5 text-muted-foreground">{_L("phone.reserve.restaurant")}</div>
-          <div className="pf-rail">
-            {restaurants.map((r) => (
-              <button
-                key={r.id}
-                onClick={() => setRid(r.id)}
-                className={cn(
-                  "rounded-full border px-3 py-1.5 text-sm font-semibold",
-                  rid === r.id ? "border-brand bg-brand text-brand-ink" : "border-border bg-card"
-                )}
-              >
-                {r.label}
-              </button>
-            ))}
-          </div>
+          {pinned != null ? (
+            <div className="rounded-2xl border border-border bg-card px-3 py-2 font-semibold">
+              {params?.label || restaurants.find((r) => r.id === pinned)?.label || ""}
+            </div>
+          ) : (
+            <div className="pf-rail">
+              {restaurants.map((r) => (
+                <button
+                  key={r.id}
+                  onClick={() => setRid(r.id)}
+                  className={cn(
+                    "rounded-full border px-3 py-1.5 text-sm font-semibold",
+                    rid === r.id ? "border-brand bg-brand text-brand-ink" : "border-border bg-card"
+                  )}
+                >
+                  {r.label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div>
-          <div className="tape mb-1.5 text-muted-foreground">{_L("phone.reserve.party_size")}</div>
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="tape text-muted-foreground">{_L("phone.reserve.party_size")}</span>
+            <span className="text-[0.66rem] text-muted-foreground">{_L("phone.reserve.party_cap", cap)}</span>
+          </div>
           <div className="flex items-center gap-3">
-            <button onClick={() => setParty((p) => Math.max(1, p - 1))} className="grid h-9 w-9 place-items-center rounded-full bg-muted">
+            <button onClick={() => setParty((p) => Math.max(Math.max(1, held), p - 1))} className="grid h-9 w-9 place-items-center rounded-full bg-muted">
               −
             </button>
-            <span className="w-8 text-center font-mono text-lg font-bold">{party}</span>
-            <button onClick={() => setParty((p) => Math.min(12, p + 1))} className="grid h-9 w-9 place-items-center rounded-full bg-muted">
+            <span className="w-8 text-center font-mono text-lg font-bold tabular-nums">{party}</span>
+            <button onClick={() => setParty((p) => Math.min(cap, p + 1))} className="grid h-9 w-9 place-items-center rounded-full bg-muted">
               +
             </button>
+            {/* A party is a TOTAL, so an existing booking's seats count towards it —
+                the stepper can't go below what's already held. */}
+            {held > 0 && (
+              <span className="text-[0.66rem] text-muted-foreground">{_L("phone.reserve.already_hold", held)}</span>
+            )}
           </div>
         </div>
 
@@ -222,39 +276,37 @@ export function Reserve(_props: { params?: any }) {
               </span>
             )}
           </div>
-          {/* The slot picker WRAPS, it does not scroll. The slots are a short fixed
-              list, and five chips carrying a clock time plus a "N left" line need
-              ~440px against a phone screen's ~360 — so as a `pf-rail` (overflow-x
-              with a hidden scrollbar) the last time sat half past the edge and read
-              as clipped rather than as scrollable. A rail is right for the
-              restaurant list above, which is genuinely open-ended; a time picker
-              should show every option at once. */}
+          {/* The slot picker WRAPS, it does not scroll. The slots are a short authored
+              list, and chips carrying a clock time plus a "N left" line need ~440px
+              against a phone screen's ~360 — so as a `pf-rail` (overflow-x with a
+              hidden scrollbar) the last time sat half past the edge and read as
+              clipped rather than as scrollable. A rail is right for the restaurant
+              list above, which is genuinely open-ended; a time picker should show
+              every option at once. */}
           {noSeats ? (
             <p className="rounded-xl border border-border bg-card px-3 py-2 text-[0.74rem] text-muted-foreground">
               {_L("phone.reserve.no_seats")}
             </p>
           ) : (
           <div className="flex flex-wrap gap-2">
-            {SLOTS.map((s) => {
-              const full = slotFull(s);
+            {slots.map((s) => {
+              const full = s.remaining <= 0;
               return (
                 <button
-                  key={s}
+                  key={s.id}
                   disabled={full}
-                  onClick={() => setSlot(s)}
+                  onClick={() => setSlot(s.id)}
                   className={cn(
                     // whitespace-nowrap: never break a clock across lines ("6:00" / "PM")
                     "flex flex-col items-center whitespace-nowrap rounded-2xl border px-3 py-1.5 text-sm font-semibold",
-                    slot === s ? "border-brand bg-brand text-brand-ink" : "border-border bg-card",
+                    slot === s.id ? "border-brand bg-brand text-brand-ink" : "border-border bg-card",
                     full && "opacity-40"
                   )}
                 >
-                  {slotLabel(s)}
-                  {avail && (
-                    <span className={cn("text-[0.6rem] font-medium", slot === s ? "text-brand-ink/80" : "text-muted-foreground")}>
-                      {full ? _L("phone.reserve.full") : _L("phone.reserve.left", remaining(s))}
-                    </span>
-                  )}
+                  {slotLabel(s.id)}
+                  <span className={cn("font-mono text-[0.6rem] font-medium tabular-nums", slot === s.id ? "text-brand-ink/80" : "text-muted-foreground")}>
+                    {full ? _L("phone.reserve.full") : _L("phone.reserve.left", s.remaining)}
+                  </span>
                 </button>
               );
             })}
@@ -262,14 +314,16 @@ export function Reserve(_props: { params?: any }) {
           )}
         </div>
 
-        {alreadyBooked && (
+        {(blockedOther || blockedSlot) && (
           <p className="rounded-xl border border-border bg-card px-3 py-2 text-[0.74rem] text-muted-foreground">
-            {_L("phone.reserve.already_booked_note")}
+            {blockedOther
+              ? _L("phone.reserve.other_restaurant", mine.restaurant)
+              : _L("phone.reserve.other_slot", slotLabel(mine.slot))}
           </p>
         )}
 
         <button
-          disabled={busy || !rid || alreadyBooked || noSeats || slotFull(slot)}
+          disabled={busy || !rid || noSeats || blockedOther || blockedSlot || nothingToAdd || (cur ? cur.remaining <= 0 : false)}
           onClick={book}
           className="w-full rounded-full bg-brand px-4 py-3 font-bold text-brand-ink disabled:opacity-60"
         >
@@ -277,41 +331,136 @@ export function Reserve(_props: { params?: any }) {
             ? _L("phone.reserve.booking")
             : noSeats
             ? _L("phone.reserve.btn_no_seats")
-            : alreadyBooked
-            ? _L("phone.reserve.btn_booked")
-            : slotFull(slot)
+            : cur && cur.remaining <= 0
             ? _L("phone.reserve.btn_full")
+            : nothingToAdd
+            ? _L("phone.reserve.btn_booked")
+            : held > 0
+            ? _L("phone.reserve.btn_add_seats", party - held)
             : _L("phone.reserve.btn_book")}
         </button>
 
-        {mine.length > 0 && (
+        {mine && (
           <section>
             <h2 className="mb-2 font-display text-base font-bold">{_L("phone.reserve.mine")}</h2>
-            <div className="space-y-2">
-              {mine.map((r) => (
-                <div key={r.id} className="flex items-center gap-3 rounded-2xl border border-border bg-card p-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="font-semibold">{r.restaurant}</div>
-                    <div className="text-[0.72rem] text-muted-foreground">
-                      {_L("phone.reserve.party_of", r.party)} · {slotLabel(r.slot)}
-                    </div>
-                  </div>
-                  <button onClick={() => enter(r)} className="flex items-center gap-1 rounded-full bg-brand px-3 py-1.5 text-sm font-bold text-brand-ink">
-                    <DoorOpen className="h-4 w-4" /> {_L("phone.reserve.enter")}
-                  </button>
-                  <button onClick={() => cancel(r)} className="grid h-8 w-8 place-items-center rounded-full bg-muted">
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
-              ))}
-            </div>
-            <p className="mt-2 text-[0.68rem] text-muted-foreground">
-              {_L("phone.reserve.booth_hint")}
-            </p>
+            <MyReservation res={mine} onCancel={() => cancel(mine)} />
           </section>
         )}
       </div>
     </Screen>
+  );
+}
+
+// The booking itself: which restaurant and time, the SEATS it holds (that's what a
+// reservation is now), and who else may use them.
+function MyReservation({ res, onCancel }: { res: any; onCancel: () => void }) {
+  const { toast, ask } = usePhone();
+  const [guests, setGuests] = useState<any[]>(res.guests || []);
+  const [maxGuests, setMaxGuests] = useState<number>(res.maxGuests ?? 12);
+
+  const load = () =>
+    fetchNui("phone:reservationGuests", { id: res.id }).then((d) => {
+      if (!d?.ok) return;
+      setGuests(d.guests || []);
+      if (typeof d.maxGuests === "number") setMaxGuests(d.maxGuests);
+    });
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [res.id]);
+
+  // Granting takes a SERVER ID on purpose: you're inviting somebody standing in front
+  // of you, and their player id is the only handle one player can read off another.
+  // There's no nearby-player list on a customer's phone, so it's typed — through the
+  // CEF-safe ask() modal, since FiveM's CEF suppresses window.prompt().
+  const grant = async () => {
+    const raw = await ask({
+      title: _L("phone.reserve.guest_add_title"),
+      label: _L("phone.reserve.guest_add_label", guests.length, maxGuests),
+      kind: "number",
+      placeholder: "1",
+      confirm: _L("phone.reserve.guest_add_confirm"),
+    });
+    const serverId = Math.floor(Number(raw));
+    if (!serverId || serverId <= 0) return;
+    const d = await fetchNui<any>("phone:grantGuest", { id: res.id, serverId });
+    if (d?.ok) {
+      toast(_L("phone.reserve.guest_added"));
+      setGuests(d.guests || []);
+    } else toast(d?.error || _L("phone.reserve.guest_failed"), "err");
+  };
+
+  const revoke = async (g: any) => {
+    const d = await fetchNui<any>("phone:revokeGuest", { id: res.id, identifier: g.identifier });
+    if (d?.ok) {
+      toast(_L("phone.reserve.guest_removed"));
+      setGuests(d.guests || []);
+    } else toast(d?.error || _L("phone.reserve.guest_failed"), "err");
+  };
+
+  const seats: number[] = res.seats || [];
+
+  return (
+    <div className="space-y-2 rounded-2xl border border-border bg-card p-3">
+      <div className="flex items-center gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="font-semibold">{res.restaurant}</div>
+          <div className="text-[0.72rem] text-muted-foreground">
+            {_L("phone.reserve.party_of", res.party)} · {slotLabel(res.slot)}
+          </div>
+        </div>
+        <button onClick={onCancel} className="grid h-8 w-8 place-items-center rounded-full bg-muted" title={_L("phone.reserve.cancel")}>
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+
+      {/* the actual anchors — a party of four that only got three seats must not read
+          as four, which is why the server sends the real list */}
+      <div>
+        <div className="tape mb-1 text-muted-foreground">{_L("phone.reserve.seats_held", seats.length)}</div>
+        <div className="flex flex-wrap gap-1.5">
+          {seats.map((pid) => (
+            <span key={pid} className="flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[0.66rem]">
+              <Armchair className="h-3 w-3 text-brand" />
+              <span className="font-mono tabular-nums">#{pid}</span>
+            </span>
+          ))}
+        </div>
+        <p className="mt-1 text-[0.66rem] text-muted-foreground">{_L("phone.reserve.seats_hint")}</p>
+      </div>
+
+      {/* guests — per RESERVATION, so a granted guest may use any of its seats */}
+      <div>
+        <div className="mb-1 flex items-center justify-between">
+          <span className="tape text-muted-foreground">{_L("phone.reserve.guests", guests.length, maxGuests)}</span>
+          <button
+            onClick={grant}
+            disabled={guests.length >= maxGuests}
+            className="flex items-center gap-1 rounded-full bg-brand px-2.5 py-1 text-[0.68rem] font-bold text-brand-ink disabled:opacity-50"
+          >
+            <UserPlus className="h-3.5 w-3.5" /> {_L("phone.reserve.guest_add")}
+          </button>
+        </div>
+        {guests.length === 0 ? (
+          <p className="text-[0.68rem] text-muted-foreground">{_L("phone.reserve.no_guests")}</p>
+        ) : (
+          <div className="space-y-1.5">
+            {guests.map((g) => (
+              <div key={g.identifier} className="flex items-center gap-2 rounded-xl border border-border px-2.5 py-1.5">
+                <Users className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate text-sm">{g.name || g.identifier}</span>
+                {/* online-ness says whether revoking has any effect right now — a
+                    seated guest isn't thrown out, they just can't sit back down */}
+                {g.online && <span className="text-[0.62rem] font-bold text-ok">{_L("phone.reserve.guest_online")}</span>}
+                <button onClick={() => revoke(g)} className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-muted">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -439,8 +588,10 @@ export function Profile() {
                   <Briefcase className="h-5 w-5 text-primary" />
                   <div className="flex-1">
                     <div className="font-semibold">{e.label}</div>
+                    {/* Employment is a JOB now, so the line names the GRADE you hold
+                        there — a boss grade is not the owner but reads the same way. */}
                     <div className="text-[0.7rem] text-muted-foreground">
-                      {e.isOwner ? _L("phone.profile.owner") : _L("phone.profile.staff")}
+                      {e.gradeLabel || (e.isBoss || e.isOwner ? _L("phone.profile.owner") : _L("phone.profile.staff"))}
                       {e.clockedIn && <span className="ml-1 text-ok">{_L("phone.profile.on_shift")}</span>}
                     </div>
                   </div>

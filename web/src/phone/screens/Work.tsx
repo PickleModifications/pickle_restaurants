@@ -25,6 +25,7 @@ import {
   CalendarClock,
   ChevronRight,
   Footprints,
+  Briefcase,
 } from "lucide-react";
 import { fetchNui, useNuiEvent, usePushFallback } from "../../lib/nui";
 import { ChatSheet, ChatButton, useChatUnreadSet } from "../DeliveryChat";
@@ -350,7 +351,8 @@ export function Kitchen({ params }: { params?: any }) {
   // a claimed delivery is recognised as OURS (see DeliveryAction).
   const [me, setMe] = useState<number | undefined>(undefined);
   const canManage =
-    active && (active.isOwner || ["manage_menu", "view_finances", "manage_employees", "manage_stock"].some((p) => active.perms?.[p]));
+    active && (active.isBoss || active.isOwner
+      || ["manage_menu", "view_finances", "manage_employees", "manage_stock", "manage_payroll"].some((p) => active.perms?.[p]));
 
   const loadTickets = () =>
     rid &&
@@ -691,6 +693,9 @@ const MANAGE_TABS = [
   { id: "sales", key: "phone.manage.tab_sales", hint: "phone.manage.hint_sales", icon: TrendingUp, perm: "view_finances" },
   { id: "menu", key: "phone.manage.tab_menu", hint: "phone.manage.hint_menu", icon: Utensils, perm: "manage_menu" },
   { id: "staff", key: "phone.manage.tab_staff", hint: "phone.manage.hint_staff", icon: Users, perm: "manage_employees" },
+  // Paying the staff: the tip pool goes out to the roster, the wage bill comes out of
+  // the balance. One permission, `manage_payroll`, which a boss holds implicitly.
+  { id: "payroll", key: "phone.manage.tab_payroll", hint: "phone.manage.hint_payroll", icon: DollarSign, perm: "manage_payroll" },
   { id: "stock", key: "phone.manage.tab_stock", hint: "phone.manage.hint_stock", icon: Boxes, perm: "manage_stock" },
   { id: "promos", key: "phone.manage.tab_promos", hint: "phone.manage.hint_promos", icon: Megaphone, perm: "manage_menu" },
 ];
@@ -699,7 +704,9 @@ export function Manage({ params }: { params: any }) {
   const { back, home, currency } = usePhone();
   const rid = params.rid;
   const emp = (home?.employment || []).find((e: any) => e.id === rid);
-  const allowed = MANAGE_TABS.filter((t) => emp?.isOwner || emp?.perms?.[t.perm]);
+  // A BOSS GRADE holds everything here, exactly like the owner or an admin — the
+  // server's ResolvePerms says so, and `isOwner` is kept as an alias of it.
+  const allowed = MANAGE_TABS.filter((t) => emp?.isBoss || emp?.isOwner || emp?.perms?.[t.perm]);
   // null = the hub. A section is pushed over it, never squeezed alongside it.
   const [section, setSection] = useState<string | null>(null);
   const [mgmt, setMgmt] = useState<any>(null);
@@ -717,7 +724,13 @@ export function Manage({ params }: { params: any }) {
     switch (id) {
       case "sales": return _L("phone.manage.sum_sales", money(currency, mgmt.restaurant?.balance || 0));
       case "menu": return _L("phone.manage.sum_menu", (mgmt.priceList || []).length);
-      case "staff": return _L("phone.manage.sum_staff", (mgmt.employees || []).length);
+      // Headcount is the JOB's roster now (there are no employee rows), and an
+      // unassigned restaurant can employ nobody at all — say that, since it's the one
+      // state where every control on the Staff screen is dead.
+      case "staff": return mgmt.jobMissing
+        ? _L("phone.manage.sum_no_job")
+        : _L("phone.manage.sum_staff", (mgmt.roster || []).length);
+      case "payroll": return _L("phone.manage.sum_payroll", money(currency, mgmt.tipPool || 0));
       case "stock": {
         const out = (mgmt.supplies || []).filter((s: any) => s.installed && s.stock <= 0).length;
         return out > 0 ? _L("phone.manage.sum_stock_out", out) : _L("phone.manage.sum_stock_ok");
@@ -736,6 +749,7 @@ export function Manage({ params }: { params: any }) {
           {section === "sales" && <SalesTab rid={rid} onChange={loadMgmt} />}
           {section === "menu" && <MenuTab rid={rid} mgmt={mgmt} reload={loadMgmt} />}
           {section === "staff" && <StaffTab rid={rid} mgmt={mgmt} reload={loadMgmt} />}
+          {section === "payroll" && <PayrollTab rid={rid} mgmt={mgmt} reload={loadMgmt} />}
           {section === "stock" && <StockTab rid={rid} mgmt={mgmt} reload={loadMgmt} />}
           {section === "promos" && <PromosTab rid={rid} />}
         </div>
@@ -940,15 +954,38 @@ function MenuTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () => 
   );
 }
 
+// A restaurant with no JOB assigned can employ nobody: there is no grade ladder to hire
+// into and no rank to pay. Both staff screens lead with this instead of offering
+// controls that can only fail — and the fix is an admin's, not the boss's.
+function NoJob() {
+  return (
+    <Empty
+      icon={<Briefcase className="h-8 w-8" />}
+      title={_L("phone.staff.no_job")}
+      hint={_L("phone.staff.no_job_hint")}
+    />
+  );
+}
+
+// THE JOB ROSTER. Employment is the framework's job now: staff are whoever holds it, at
+// the rank their grade names. So this lists `roster` (not employee rows of ours), moves
+// people between the JOB's grades, and shows each one's pay from the RANK — there is no
+// per-person commission left to edit.
 function StaffTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () => void }) {
   const { toast } = usePhone();
   if (!mgmt) return <Spinner />;
-  const employees: any[] = mgmt.employees || [];
+  if (mgmt.jobMissing) return <NoJob />;
+  const roster: any[] = mgmt.roster || [];
   const nearby: any[] = mgmt.nearby || [];
-  const roles: any[] = mgmt.roles || [];
+  const grades: any[] = mgmt.job?.grades || [];
+  const ranks: any[] = mgmt.ranks || [];
+  const rankFor = (grade: number) => ranks.find((r) => Number(r.grade) === Number(grade));
 
+  // Hiring writes a JOB onto a loaded player, so the target is a server id — never a
+  // row of ours. The lowest grade in the ladder is the entry rank.
+  const entryGrade = grades.length ? Math.min(...grades.map((g) => Number(g.grade) || 0)) : 0;
   const hire = async (p: any) => {
-    const res = await fetchNui("phone:hire", { id: rid, target: p.id, grade: 0 });
+    const res = await fetchNui("phone:hire", { id: rid, serverId: p.id, grade: entryGrade });
     if (res?.ok) {
       toast(_L("phone.staff.hired", p.name));
       reload();
@@ -960,42 +997,54 @@ function StaffTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () =>
     else toast(res?.error || _L("phone.work.failed"), "err");
   };
   const setGrade = async (e: any, grade: number) => {
-    await fetchNui("phone:setGrade", { id: rid, identifier: e.identifier, grade });
+    const res = await fetchNui("phone:setGrade", { id: rid, identifier: e.identifier, grade });
+    if (!res?.ok) toast(res?.error || _L("phone.work.failed"), "err");
     reload();
   };
 
   return (
     <div className="space-y-4">
+      <p className="flex items-center gap-1.5 text-[0.7rem] text-muted-foreground">
+        <Briefcase className="h-3.5 w-3.5" /> {_L("phone.staff.job_is", mgmt.job?.label || mgmt.job?.name || "")}
+      </p>
+
       <section>
         <h3 className="mb-2 font-display font-bold">{_L("phone.staff.team")}</h3>
-        {employees.length === 0 ? (
-          <div className="text-[0.72rem] text-muted-foreground">{_L("phone.staff.no_employees")}</div>
+        {roster.length === 0 ? (
+          <div className="text-[0.72rem] text-muted-foreground">{_L("phone.staff.no_roster")}</div>
         ) : (
           <div className="space-y-1.5">
-            {employees.map((e) => (
-              <div key={e.identifier} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2">
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-semibold">{e.name}</div>
-                  <div className="text-[0.7rem] text-muted-foreground">
-                    {_L("phone.staff.emp_meta", e.gradeLabel, e.commission)}
+            {roster.map((e) => {
+              const rank = rankFor(e.grade ?? 0);
+              return (
+                <div key={e.identifier} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-semibold">
+                      {e.name}
+                      {e.boss && <span className="ml-1.5 text-[0.62rem] font-bold text-brand">{_L("phone.staff.boss")}</span>}
+                    </div>
+                    {/* pay is the RANK's, shared by everyone on that grade */}
+                    <div className="text-[0.7rem] text-muted-foreground">
+                      {_L("phone.staff.rank_meta", e.gradeLabel || String(e.grade ?? 0), rank?.commission ?? 0)}
+                    </div>
                   </div>
+                  <select
+                    value={Number(e.grade ?? 0)}
+                    onChange={(ev) => setGrade(e, Number(ev.target.value))}
+                    className="rounded-lg border border-border bg-background px-1 py-1 text-xs"
+                  >
+                    {grades.map((g) => (
+                      <option key={g.grade} value={g.grade}>
+                        {g.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button onClick={() => fire(e)} className="grid h-8 w-8 place-items-center rounded-full bg-muted text-destructive">
+                    <Trash2 className="h-4 w-4" />
+                  </button>
                 </div>
-                <select
-                  value={e.grade}
-                  onChange={(ev) => setGrade(e, Number(ev.target.value))}
-                  className="rounded-lg border border-border bg-background px-1 py-1 text-xs"
-                >
-                  {roles.map((r) => (
-                    <option key={r.grade} value={r.grade}>
-                      {r.label}
-                    </option>
-                  ))}
-                </select>
-                <button onClick={() => fire(e)} className="grid h-8 w-8 place-items-center rounded-full bg-muted text-destructive">
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>
@@ -1016,6 +1065,156 @@ function StaffTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () =>
                 <span className="flex-1 text-sm font-medium">{p.name}</span>
                 <span className="text-[0.7rem] font-bold text-primary">{_L("phone.staff.hire")}</span>
               </button>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+// PAYING THE STAFF. Two pots, one permission: TIPS are staff money the restaurant only
+// holds (unpaid rows — the balance never sees them), split among the roster on payout;
+// SALARIES come out of the balance, per rank, and a run is atomic (the server refuses
+// the whole thing if the balance can't cover it), which is why the bill is shown first.
+//
+// Rank PAY is editable here (a boss on the move needs it), but the permission MATRIX is
+// deliberately not: a nine-checkbox grid per grade doesn't fit a phone, and the
+// fullscreen management panel's Ranks tab owns it. The existing permissions ride back
+// with every save so editing pay can never blank them.
+function PayrollTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () => void }) {
+  const { currency, toast, ask } = usePhone();
+  const [busy, setBusy] = useState(false);
+  if (!mgmt) return <Spinner />;
+  if (mgmt.jobMissing) return <NoJob />;
+
+  const ranks: any[] = mgmt.ranks || [];
+  const roster: any[] = mgmt.roster || [];
+  const history: any[] = mgmt.payroll || [];
+  const balance: number = mgmt.restaurant?.balance || 0;
+  const tipPool: number = mgmt.tipPool || 0;
+  const isBoss = !!mgmt.isBoss;
+
+  const salaryFor = (grade: number) =>
+    Math.max(0, Math.floor(Number(ranks.find((r) => Number(r.grade) === Number(grade))?.salary) || 0));
+  const bill = roster.reduce((sum, m) => sum + salaryFor(m.grade ?? 0), 0);
+
+  const run = async (event: "phone:payTips" | "phone:runPayroll") => {
+    if (busy) return;
+    setBusy(true);
+    const res = await fetchNui<any>(event, { id: rid });
+    setBusy(false);
+    if (res?.ok) toast(_L("phone.payroll.paid", money(currency, res.paid || 0), res.recipients || 0));
+    else toast(res?.error || _L("phone.work.failed"), "err");
+    reload();
+  };
+
+  const editRank = async (rank: any, field: "commission" | "salary") => {
+    const raw = await ask({
+      title: field === "commission" ? _L("phone.payroll.commission_title", rank.label) : _L("phone.payroll.salary_title", rank.label),
+      label: field === "commission" ? _L("phone.payroll.commission_hint") : _L("phone.payroll.salary_hint"),
+      kind: "number",
+      prefix: field === "salary" ? currency : undefined,
+      initial: field === "commission" ? rank.commission : rank.salary,
+      confirm: _L("phone.payroll.save"),
+    });
+    if (raw == null || raw === "") return;
+    const v = Math.max(0, Math.floor(Number(raw) || 0));
+    const res = await fetchNui<any>("phone:setRank", {
+      id: rid, grade: rank.grade,
+      // ALWAYS resend the permission set: setRank writes the submitted one whole, so
+      // omitting it would strip the rank of everything it may do.
+      permissions: rank.permissions || {},
+      commission: field === "commission" ? Math.min(100, v) : rank.commission,
+      salary: field === "salary" ? v : rank.salary,
+    });
+    if (!res?.ok) toast(res?.error || _L("phone.work.failed"), "err");
+    reload();
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* the tip pool */}
+      <div className="rounded-2xl border border-border bg-card p-4">
+        <div className="text-[0.66rem] font-bold uppercase tracking-wider text-muted-foreground">
+          {_L("phone.payroll.tip_pool")}
+        </div>
+        <div className="font-mono text-3xl font-extrabold tabular-nums">{money(currency, tipPool)}</div>
+        <p className="mt-1 text-[0.7rem] text-muted-foreground">{_L("phone.payroll.tip_pool_hint")}</p>
+        <button
+          disabled={busy || tipPool <= 0}
+          onClick={() => run("phone:payTips")}
+          className="mt-2 w-full rounded-full bg-brand py-2.5 font-bold text-brand-ink disabled:opacity-50"
+        >
+          {_L("phone.payroll.pay_tips")}
+        </button>
+      </div>
+
+      {/* the wage bill */}
+      <div className="rounded-2xl border border-border bg-card p-4">
+        <div className="text-[0.66rem] font-bold uppercase tracking-wider text-muted-foreground">
+          {_L("phone.payroll.bill")}
+        </div>
+        <div className="font-mono text-3xl font-extrabold tabular-nums">{money(currency, bill)}</div>
+        <p className="mt-1 text-[0.7rem] text-muted-foreground">
+          {bill <= 0
+            ? _L("phone.payroll.nobody_owed")
+            : bill > balance
+            ? _L("phone.payroll.short", money(currency, balance))
+            : _L("phone.payroll.bill_hint", roster.length, money(currency, balance))}
+        </p>
+        <button
+          disabled={busy || bill <= 0 || bill > balance}
+          onClick={() => run("phone:runPayroll")}
+          className="mt-2 w-full rounded-full bg-brand py-2.5 font-bold text-brand-ink disabled:opacity-50"
+        >
+          {_L("phone.payroll.run")}
+        </button>
+      </div>
+
+      {/* pay by rank — boss-only, exactly like the server's gate on setRank */}
+      {isBoss && (
+        <section>
+          <h3 className="mb-2 font-display font-bold">{_L("phone.payroll.ranks")}</h3>
+          <p className="mb-2 text-[0.7rem] text-muted-foreground">{_L("phone.payroll.ranks_hint")}</p>
+          <div className="space-y-1.5">
+            {ranks.map((r) => (
+              <div key={r.grade} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-semibold">
+                    <span className="font-mono text-muted-foreground tabular-nums">{r.grade}</span> {r.label}
+                    {r.boss && <span className="ml-1.5 text-[0.62rem] font-bold text-brand">{_L("phone.staff.boss")}</span>}
+                  </div>
+                </div>
+                <button onClick={() => editRank(r, "commission")} className="rounded-full bg-muted px-2.5 py-1 font-mono text-[0.7rem] font-bold tabular-nums">
+                  {r.commission}%
+                </button>
+                <button onClick={() => editRank(r, "salary")} className="rounded-full bg-muted px-2.5 py-1 font-mono text-[0.7rem] font-bold tabular-nums">
+                  {money(currency, r.salary)}
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* what has already gone out, so nobody pays the same wages twice */}
+      <section>
+        <h3 className="mb-2 font-display font-bold">{_L("phone.payroll.history")}</h3>
+        {history.length === 0 ? (
+          <div className="text-[0.72rem] text-muted-foreground">{_L("phone.payroll.no_history")}</div>
+        ) : (
+          <div className="space-y-1.5">
+            {history.map((p, i) => (
+              <div key={i} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium">{p.name || p.identifier}</div>
+                  <div className="font-mono text-[0.66rem] text-muted-foreground">
+                    {(p.kind === "tips" ? _L("phone.payroll.kind_tips") : _L("phone.payroll.kind_salary"))} · {p.paid_at || ""}
+                  </div>
+                </div>
+                <span className="font-mono text-sm font-bold tabular-nums text-ok">{money(currency, p.amount)}</span>
+              </div>
             ))}
           </div>
         )}

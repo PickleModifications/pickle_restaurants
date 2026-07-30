@@ -52,7 +52,11 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
         )}
 
         <TabsContent value="restaurants" className="flex min-h-0 flex-1 flex-col">
-          <Restaurants restaurants={restaurants} players={players} groups={groups} refresh={refresh} focus={focus} appTheme={appTheme} onDetailChange={setRestDetail} renderTargets={data?.renderTargets} />
+          {/* `jobs` is every job the framework knows (with its grade ladder) and
+              `jobsAvailable` says whether there IS a framework job system — on a
+              standalone server the list is the admin's own `jobs` setting, and the Job
+              card has to say so rather than showing an empty picker. */}
+          <Restaurants restaurants={restaurants} players={players} groups={groups} refresh={refresh} focus={focus} appTheme={appTheme} onDetailChange={setRestDetail} renderTargets={data?.renderTargets} defaultBlip={data?.settings?.blip} jobs={data?.jobs} jobsAvailable={data?.jobsAvailable} />
         </TabsContent>
 
         {/* The unified menu is split across two tabs: FOODS (the sellable dishes &
@@ -68,7 +72,7 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
         </TabsContent>
 
         <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">
-          <Settings settings={settings} items={items} groups={groups} dlcs={data?.dlcs} ingredients={menuIngredients} dlcCosts={data?.dlcCosts} onSaved={refresh} appTheme={appTheme} onAppTheme={setAppTheme} phoneTheme={phoneTheme} onPhoneTheme={setPhoneTheme} />
+          <Settings settings={settings} items={items} groups={groups} dlcs={data?.dlcs} ingredients={menuIngredients} dlcCosts={data?.dlcCosts} onSaved={refresh} appTheme={appTheme} onAppTheme={setAppTheme} phoneTheme={phoneTheme} onPhoneTheme={setPhoneTheme} jobsAvailable={data?.jobsAvailable} />
         </TabsContent>
       </Tabs>
     </Panel>

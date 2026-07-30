@@ -61,11 +61,13 @@ local resolved = nil   -- nil = untried, false = no candidate works
 function PhoneApp.Send(payload)
     if resolved == false then return end
     if resolved then
-        pcall(exports[RESOURCE][resolved], nil, PhoneAppMeta.id, payload)
+        PhoneCallExport(RESOURCE, resolved, PhoneAppMeta.id, payload)
         return
     end
+    -- PhoneCallExport, not a bare pcall: indexing a missing export RAISES, and as an
+    -- argument to pcall that raise happens before pcall runs (bridge/phone/shared.lua)
     for _, name in ipairs(PUSH_EXPORTS) do
-        if pcall(exports[RESOURCE][name], nil, PhoneAppMeta.id, payload) then
+        if PhoneCallExport(RESOURCE, name, PhoneAppMeta.id, payload) then
             resolved = name
             print(("[pickle_restaurants] %s: live app push via %s"):format(RESOURCE, name))
             return

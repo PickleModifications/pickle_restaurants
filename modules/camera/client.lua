@@ -71,18 +71,29 @@ function StartStationCamera(prop)
     StationCam = cam
     StationActive = true
 
-    -- Hide the player's own ped (local-only — visibility isn't networked, so
-    -- others still see them) ~200ms before the entry ease finishes, so the prop
-    -- view settles without the ped popping out of frame. Virtual sessions cut
-    -- instantly (no ease window) and the ped is nowhere near the shot, so hide
-    -- immediately. Guarded on the session flag (not cam identity) so a
-    -- mid-transition view swap doesn't cancel it.
-    CreateThread(function()
-        Wait(prop.virtual and 0 or (EASE_MS - 200))
-        if StationActive then
-            SetEntityVisible(PlayerPedId(), false, false)
-        end
-    end)
+    -- Hide the player's own ped ~200ms before the entry ease finishes, so the prop
+    -- view settles without the ped popping out of frame. Guarded on the session
+    -- flag (not cam identity) so a mid-transition view swap doesn't cancel it.
+    --
+    -- `SetLocalPedHidden` (modules/interactive), NEVER `SetEntityVisible`: this is a
+    -- presentation choice about OUR OWN shot, and on a player ped `SetEntityVisible`
+    -- propagates — the whole server watched the cook vanish. The comment here used to
+    -- claim visibility wasn't networked. It is.
+    --
+    -- A VIRTUAL session never hides it. The point of hiding is to keep the ped out
+    -- of a shot it is standing in — and in a virtual session the ped isn't in the
+    -- shot at all: it stays exactly where it was while the camera cuts to the shell.
+    -- So the hide bought nothing, and left the player's own body missing from the
+    -- room they are physically standing in (theirs is the only client that sees it
+    -- go). They are still there, so they should still look it.
+    if not prop.virtual then
+        CreateThread(function()
+            Wait(EASE_MS - 200)
+            if StationActive then
+                SetLocalPedHidden(true)
+            end
+        end)
+    end
     return cam
 end
 
@@ -143,7 +154,7 @@ function StopStationCamera()
     -- gameplay camera takes over rather than snapping in at the very start.
     CreateThread(function()
         Wait(200)
-        SetEntityVisible(PlayerPedId(), true, false)
+        SetLocalPedHidden(false)
     end)
     CreateThread(function()
         Wait(EASE_MS + 50)
@@ -160,5 +171,5 @@ AddEventHandler("onResourceStop", function(res)
     end
     StationActive = false
     -- Don't leave the player invisible if we tear down mid-session.
-    SetEntityVisible(PlayerPedId(), true, false)
+    SetLocalPedHidden(false)
 end)

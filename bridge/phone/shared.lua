@@ -94,14 +94,31 @@ function PhoneBridgeClaim(resource)
     return true
 end
 
+-- ─── calling an export that might not exist ──────────────────────────────────
+-- EVERY probe goes through here. `exports[resource][name]` RAISES ON THE INDEX
+-- ("No such export sendCustomAppMessage in resource qb-phone"), not on the call — so
+-- `pcall(exports[res][name], ...)` throws before pcall ever runs: the index is an
+-- ARGUMENT, evaluated first, and pcall never sees it. That is what broke the qb-phone
+-- push probe, and it breaks the whole design of trying candidate names in turn, since
+-- a miss has to be catchable.
+--
+-- The index therefore happens INSIDE the protected function. Returns pcall's own
+-- (ok, err-or-result), so callers read exactly as before.
+function PhoneCallExport(resource, name, ...)
+    local args = table.pack(...)
+    return pcall(function()
+        return exports[resource][name](nil, table.unpack(args, 1, args.n))
+    end)
+end
+
 -- ─── runtime app registration ────────────────────────────────────────────────
 -- The phones that publish no stable custom-app API (Quasar, qb-phone and their forks)
 -- have moved registration between export names AND payload shapes across builds, and
 -- some builds expose it on the other side entirely. A single guessed call that
 -- silently does nothing is exactly the failure mode this exists to avoid: try the
 -- whole matrix, report which cell won, and let the caller print the manual route when
--- none do. A missing export raises when CALLED, not when indexed, so pcall around the
--- call is the only real test — there is no way to ask "does this export exist".
+-- none do. There is no way to ASK whether an export exists, so calling it (through
+-- PhoneCallExport, which catches the missing-export raise) is the only real test.
 --
 -- Add a name here if your build calls it something else; that is the only edit needed.
 PHONE_REGISTER_EXPORTS = {
@@ -115,7 +132,7 @@ function PhoneTryRegister(resource)
     local lastErr
     for _, name in ipairs(PHONE_REGISTER_EXPORTS) do
         for shape, payload in ipairs(PhoneAppShapes()) do
-            local ok, err = pcall(exports[resource][name], nil, payload)
+            local ok, err = PhoneCallExport(resource, name, payload)
             if ok then return name, shape end
             lastErr = err
         end
@@ -171,8 +188,8 @@ end
 --
 -- Only lb-phone publishes an unambiguous close (`ToggleOpen(false)`), so the other
 -- bridges hand this helper the plausible export names and the first that doesn't raise
--- wins, resolved once — the same treatment the Quasar push path gets. A missing export
--- raises when CALLED, not when indexed, so pcall around the call is the only real test.
+-- wins, resolved once — the same treatment the Quasar push path gets. The attempt goes
+-- through PhoneCallExport, which is what makes a missing export catchable.
 --
 -- Events are the LAST resort and are fired every time rather than resolved: TriggerEvent
 -- succeeds whether or not anything is listening, so there is nothing to learn from it.
@@ -182,12 +199,12 @@ local closeExport = {}   -- resource → export name, or false once every candid
 function PhoneCloseVia(resource, candidates, events)
     local resolved = closeExport[resource]
     if resolved then
-        pcall(exports[resource][resolved], nil)
+        PhoneCallExport(resource, resolved)
         return true
     end
     if resolved == nil then
         for _, name in ipairs(candidates or {}) do
-            if pcall(exports[resource][name], nil) then
+            if PhoneCallExport(resource, name) then
                 closeExport[resource] = name
                 return true
             end

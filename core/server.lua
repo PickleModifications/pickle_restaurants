@@ -12,7 +12,6 @@ PropCache       = {}    -- [id]            = prop row
 RecipeCache     = {}    -- array of recipe rows
 RecipeByInput   = {}    -- [input_item]    = recipe
 RecipeByOutput  = {}    -- [output_cooked_item] = recipe (reverse map for cost tracing)
-EmployeeCache   = {}    -- [restaurantId][identifier] = employee row
 StockCache      = {}    -- [restaurantId][item] = count
 TrayCache       = {}    -- [restaurantId][identifier][item] = { item, count, metas } (metas: one build stack — or false — per counted instance; TraySig(meta) addresses a variation)
 SettingsCache   = {}    -- [key]           = decoded value
@@ -21,8 +20,16 @@ OrderCache      = {}    -- [restaurantId][orderId] = open POS ticket row (lines 
 NextTicket      = {}    -- [restaurantId]  = next kitchen ticket number
 OrdersDirty     = {}    -- [restaurantId]  = true when the pool changed → register needs a live SyncOrders (coalesced flusher in modules/sales)
 PendingRefunds  = {}    -- [rowId]         = unpaid refund owed to an OFFLINE customer (see RefundOrder / the settle thread)
+TipCache        = {}    -- [restaurantId]  = UNPAID tip total (the pool; the rows are the truth, this is the running sum)
+-- (A booking's SEATS and GUESTS are cached by modules/phone, on the booking row
+-- itself — that module owns every write to both hold tables, so a second cache of
+-- them here would be a second truth, not a shortcut. See the reservations section
+-- near the bottom of this file.)
 
-PERMISSIONS = { "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance", "manage_stock" }
+-- `manage_payroll` is the new one: paying the tip pool out and running salaries is a
+-- money action a boss may want to delegate without handing over the whole balance.
+-- A boss/owner/admin holds it implicitly through ALL_PERMS.
+PERMISSIONS = { "cook", "sell", "manage_menu", "manage_props", "manage_employees", "view_finances", "manage_balance", "manage_stock", "manage_payroll" }
 ALL_PERMS   = {}
 for _, p in ipairs(PERMISSIONS) do ALL_PERMS[p] = true end
 
@@ -167,9 +174,13 @@ local DEFAULT_SETTINGS = {
     -- override all three in the menu editor ("When eaten").
     consume         = { hunger = 25, thirst = 0, anim = "eat_burger" },
     -- The eat/drink ANIMATIONS a food can be assigned, as a pickable list (seeded
-    -- with these defaults; an admin can retune them or add their own). `prop` is
-    -- held in the right hand for the duration and deleted after; `ms` is how long
-    -- one serving takes. Referenced by id from a food's `consume.anim`.
+    -- with these defaults; an admin can retune them or add their own). `prop` is a
+    -- LAST-RESORT prop, held for the duration and deleted after — a serving is
+    -- normally eaten with the food's own props (see LayerHeldProps). Which HAND, and
+    -- at what offset, is a property of the clip, not of the entry (HOLD_BY_DICT in
+    -- modules/consume/client.lua): the scenario-library idles below are right-handed,
+    -- the two mp_player_int* clips left. `ms` is how long one serving takes.
+    -- Referenced by id from a food's `consume.anim`.
     consume_anims   = {
         { id = "eat_burger", label = "Eating (two-handed)",
           dict = "mp_player_inteat@burger", clip = "mp_player_int_eat_burger",
@@ -185,14 +196,34 @@ local DEFAULT_SETTINGS = {
           prop = "p_amb_coffeecup_01", ms = 3500 },
     },
     blip            = { sprite = 93, color = 1, scale = 0.8, enabled = true },
-    default_roles   = {
-        ["0"] = { label = "Trainee", commission = 5,  permissions = { cook = true } },
-        ["1"] = { label = "Cook",    commission = 10, permissions = { cook = true, sell = true } },
-        ["2"] = { label = "Manager", commission = 15, permissions = {
-            cook = true, sell = true, manage_menu = true, manage_props = true,
-            manage_employees = true, view_finances = true, manage_stock = true,
-        } },
-    },
+    -- ── jobs, ranks & payroll ─────────────────────────────────────────────────
+    -- A restaurant is STAFFED BY A JOB (its `metadata.job`), and what each GRADE of
+    -- that job may do is the restaurant's own `metadata.ranks`. There is no employee
+    -- roster to keep in step with the framework's any more — the job IS the roster.
+    --
+    -- `jobs` only matters on a frameworkless server, where this resource is the job
+    -- system (bridge/custom reads it through StandaloneJobs; the admin panel edits
+    -- it). With ESX/QB/QBox running, the framework's own job list is used and this
+    -- stays empty.
+    jobs            = {},
+    -- What a NON-BOSS grade is given when a job is first assigned to a restaurant
+    -- (SetRestaurantJob seeds one rank per grade). Boss grades get everything. A
+    -- deliberately timid default: a new hire can cook and sell, nothing else.
+    default_rank_permissions = { cook = true, sell = true },
+    -- Automatic salary runs, in minutes (0 = manual only, the default — a server that
+    -- hasn't set salaries up should never be quietly draining restaurant balances).
+    payroll_interval_minutes = 0,
+    -- How the tip pool is divided when it's paid out: "even" (equal shares) or
+    -- "grade" (weighted by grade + 1, so seniority earns a bigger cut).
+    tip_split       = "even",
+    -- ── reservations ──────────────────────────────────────────────────────────
+    -- The bookable timeslots, as CANONICAL ids the server validates a booking
+    -- against — a reservation is an access grant over real seat anchors now, so an
+    -- arbitrary slot string would create a hold nothing could ever line up with.
+    -- "now" means "from the moment it was booked".
+    reservation_slots = { "now", "17:00", "18:00", "19:00", "20:00", "21:00" },
+    -- How long a booking holds its seats: its slot time .. + this many minutes.
+    reservation_hold_minutes = 90,
     -- The lid pressed onto a filled cup before it can be collected — kitchen
     -- equipment like the serving tray (no inventory item; cups come with lids),
     -- only its world model is configurable.
@@ -268,35 +299,43 @@ local DEFAULT_SETTINGS = {
 -- Seeded once and merged idempotently by id/item — admin edits are never
 -- clobbered; deleting a default re-seeds on restart.
 
+-- RAW STATION INPUTS lead the list. These are bought into the larder and dragged
+-- onto their station (grill / fryer / oven / fountain), never onto a prep build —
+-- the `GetPrepModels()` door in cooking's getIngredients skips anything a recipe or
+-- a tap consumes, so listing them here does NOT put a raw patty on the prep
+-- components bar. They are here because an ingredient entry is what gives an item
+-- an ADMIN-VISIBLE row (Menu → Ingredients, priceable next to its own picture) and
+-- a prep PROP; without one they existed only as a price key in Settings →
+-- Ingredient Costs, which is why they read as unobtainable. The models are the
+-- single-serving RAW props (the `_01` of each family) — the recipe's own cook-state
+-- models are the in-basket/on-griddle piles instead.
+--
+-- EVERY shipped entry carries a `group`, matching the food it belongs to ("Fast
+-- Food" / "Bakery" / "Pizza" / "Drinks" / "Condiments"). Remember what a group IS:
+-- an opt-in ACCESS RESTRICTION (`RestaurantHasAccess`) as well as the heading the
+-- admin Menu and boss Supplies tabs file a row under — a restaurant with NO groups
+-- set still carries everything, but one restricted to "Pizza" now gets the pizza
+-- ingredients only, which is the point of grouping them. Leave `group` off an entry
+-- that every restaurant should always be able to buy.
 DEFAULT_INGREDIENTS = {
-    -- RAW STATION INPUTS. These are bought into the larder and dragged onto their
-    -- station (grill / fryer / oven / fountain), never onto a prep build — the
-    -- `GetPrepModels()` door in cooking's getIngredients skips anything a recipe or
-    -- a tap consumes, so listing them here does NOT put a raw patty on the prep
-    -- components bar. They are here because an ingredient entry is what gives an
-    -- item an ADMIN-VISIBLE row (Menu → Ingredients, priceable next to its own
-    -- picture) and a prep PROP; without one they existed only as a price key in
-    -- Settings → Ingredient Costs, which is why they read as unobtainable.
-    -- The models are the single-serving RAW props (the `_01` of each family) — the
-    -- cook-state models on the recipe are the in-basket/on-griddle piles instead.
-    { item = "raw_beef_patty",    model = "pickle_patty_beef_01" },
-    { item = "raw_chicken_patty", model = "pickle_patty_friedchicken_01" },
-    { item = "raw_drumstick",     model = "pickle_chicken_drumstick_01" },
-    { item = "raw_fries",         model = "pickle_side_fries_01" },
-    { item = "raw_nuggets",       model = "pickle_side_nuggets_01" },
-    { item = "raw_doughnut",      model = "pickle_dough_unapplied_01" },
-    { item = "empty_cup",         model = "pickle_drink_container_01" },
-    { item = "bun", model = "pickle_bread_bun_01",
+    { item = "raw_beef_patty",    model = "pickle_patty_beef_01",         group = "Fast Food" },
+    { item = "raw_chicken_patty", model = "pickle_patty_friedchicken_01", group = "Fast Food" },
+    { item = "raw_drumstick",     model = "pickle_chicken_drumstick_01",  group = "Fast Food" },
+    { item = "raw_fries",         model = "pickle_side_fries_01",         group = "Fast Food" },
+    { item = "raw_nuggets",       model = "pickle_side_nuggets_01",       group = "Fast Food" },
+    { item = "raw_doughnut",      model = "pickle_dough_unapplied_01",    group = "Bakery" },
+    { item = "empty_cup",         model = "pickle_drink_container_01",    group = "Drinks" },
+    { item = "bun", model = "pickle_bread_bun_01", group = "Fast Food",
       halves = { top_model = "pickle_bread_bun_01", bottom_model = "pickle_bread_bun_02" } },
-    { item = "cheese", model = "pickle_cheese_applied_01",
+    { item = "cheese", model = "pickle_cheese_applied_01", group = "Fast Food",
       melts = { applied_model = "pickle_cheese_applied_01", melted_model = "pickle_cheese_applied_02", melt_ms = 8000 } },
-    { item = "lettuce", model = "pickle_lettuce_applied_01" },
-    { item = "tomato",  model = "pickle_tomato_applied_01" },
-    { item = "pickle",  model = "pickle_pickle_applied_01" },
-    { item = "pizza_dough",  model = "pickle_pizza_dough_01", box_base = true },
-    { item = "pizza_sauce",  model = "pickle_pizza_sauce_01" },
-    { item = "pizza_cheese", model = "pickle_pizza_cheese_01" },
-    { item = "pepperoni",    model = "pickle_pizza_pepperoni_01" },
+    { item = "lettuce", model = "pickle_lettuce_applied_01", group = "Fast Food" },
+    { item = "tomato",  model = "pickle_tomato_applied_01",  group = "Fast Food" },
+    { item = "pickle",  model = "pickle_pickle_applied_01",  group = "Fast Food" },
+    { item = "pizza_dough",  model = "pickle_pizza_dough_01", box_base = true, group = "Pizza" },
+    { item = "pizza_sauce",  model = "pickle_pizza_sauce_01",  group = "Pizza" },
+    { item = "pizza_cheese", model = "pickle_pizza_cheese_01", group = "Pizza" },
+    { item = "pepperoni",    model = "pickle_pizza_pepperoni_01", group = "Pizza" },
 }
 
 DEFAULT_TOOLS = {
@@ -350,11 +389,15 @@ DEFAULT_TOOLS = {
             { id = "chips",     label = "Chocolate Chips", model = "pickle_cookie_chips_01",     color = "#5b3a21" },
           } },
       } },
-    { id = "ketchup", item = "ketchup", mode = "layer",
+    -- The squeeze bottles are their own group rather than "Fast Food": sauce goes on
+    -- anything, so a pizza place carrying only "Pizza" should be able to add
+    -- "Condiments" without also taking the burger line. (A restaurant with no groups
+    -- set still gets them, as always.)
+    { id = "ketchup", item = "ketchup", mode = "layer", group = "Condiments",
       tool_model = "pickle_ketchup_container_01", applied_model = "pickle_ketchup_applied_01" },
-    { id = "mustard", item = "mustard", mode = "layer",
+    { id = "mustard", item = "mustard", mode = "layer", group = "Condiments",
       tool_model = "pickle_mustard_container_01", applied_model = "pickle_mustard_applied_01" },
-    { id = "mayo", item = "mayo", mode = "layer",
+    { id = "mayo", item = "mayo", mode = "layer", group = "Condiments",
       tool_model = "pickle_mayo_container_01", applied_model = "pickle_mayo_applied_01" },
     { id = "baking_mix", item = "baking_mix", tool_model = "pickle_cake_mix_01",
       mode = "fill", rub_dist = 1.2, group = "Bakery",
@@ -382,7 +425,8 @@ DEFAULT_FOODS = {
         output = "cooked_fries", output_burnt = "burnt_fries", cook_ms = 12000, burn_ms = 12000,
         output_count = 4, serving_model = "pickle_side_fries_02", serving_burnt_model = "pickle_side_fries_03" } } },
     { id = "cooked_nuggets", label = "Nuggets", kind = "interactive", group = "Fast Food",
-      consume = { hunger = 15, anim = "eat_snack" },
+      -- a serving of nuggets is a handful, not a one-handed nibble: two-handed
+      consume = { hunger = 15, anim = "eat_burger" },
       steps = { { type = "cook", input = "raw_nuggets", station = "fryer", method = "fry",
         raw_model = "pickle_fryer_nuggets_01", cooked_model = "pickle_fryer_nuggets_02", burnt_model = "pickle_fryer_nuggets_03",
         output = "cooked_nuggets", output_burnt = "burnt_nuggets", cook_ms = 12000, burn_ms = 12000,
@@ -420,7 +464,7 @@ DEFAULT_FOODS = {
         { id = "pickle",  label = "Pickle",  item = "pickle",  price = 0 },
       } },
     { id = "cooked_doughnut", label = "Doughnut", kind = "interactive", group = "Bakery",
-      consume = { hunger = 15, anim = "eat_snack" },
+      consume = { hunger = 15, anim = "eat_burger" },
       steps = { { type = "cook", input = "raw_doughnut", station = "fryer", method = "fry",
         raw_model = "pickle_doughnut_01", cooked_model = "pickle_doughnut_02", burnt_model = "pickle_doughnut_03",
         output = "cooked_doughnut", output_burnt = "burnt_doughnut", cook_ms = 12000, burn_ms = 12000 } } },
@@ -442,6 +486,10 @@ DEFAULT_FOODS = {
     -- cheese sheet; pepperoni is an optional topping alteration) then oven-baked.
     -- ONE entry — `raw_pizza` is a kitchen intermediate, never an installed item.
     { id = "cooked_pizza", label = "Pizza", kind = "interactive", group = "Pizza",
+      -- STATED, not left to the global `consume` fallback: a pizza is held in both
+      -- hands, and a food that authors no clip is at the mercy of whatever an admin
+      -- has set as the default for everything else.
+      consume = { hunger = 40, anim = "eat_burger" },
       steps = {
         { type = "assemble", output = "raw_pizza", label = "Pizza (uncooked)", model = "pickle_pizza_dough_01",
           components = { "pizza_dough", "pizza_sauce", "pizza_cheese" } },
@@ -453,22 +501,22 @@ DEFAULT_FOODS = {
     -- tap order (first six hold the taps); `flavor` is a KEY, not an item — every
     -- poured drink collects as the ONE `drink_item` item with the flavor as
     -- build-stack metadata. `color` tints the poured liquid stream.
-    { id = "water", label = "Pure Aqua", kind = "interactive",
+    { id = "water", label = "Pure Aqua", kind = "interactive", group = "Drinks",
       consume = { thirst = 30, anim = "drink_cup" },
       steps = { { type = "pour", input = "empty_cup", flavor = "water", model = "pickle_drink_container_01", fill_ms = 3000, color = { 160, 205, 230 } } } },
-    { id = "lemonade", label = "Lemonade Bliss", kind = "interactive",
+    { id = "lemonade", label = "Lemonade Bliss", kind = "interactive", group = "Drinks",
       consume = { thirst = 30, anim = "drink_cup" },
       steps = { { type = "pour", input = "empty_cup", flavor = "lemonade", model = "pickle_drink_container_01", fill_ms = 3000, color = { 235, 215, 90 } } } },
-    { id = "soda", label = "Classic Cola", kind = "interactive",
+    { id = "soda", label = "Classic Cola", kind = "interactive", group = "Drinks",
       consume = { thirst = 30, anim = "drink_cup" },
       steps = { { type = "pour", input = "empty_cup", flavor = "soda", model = "pickle_drink_container_01", fill_ms = 3000, color = { 90, 50, 25 } } } },
-    { id = "diet_cola", label = "Diet Cola", kind = "interactive",
+    { id = "diet_cola", label = "Diet Cola", kind = "interactive", group = "Drinks",
       consume = { thirst = 30, anim = "drink_cup" },
       steps = { { type = "pour", input = "empty_cup", flavor = "diet_cola", model = "pickle_drink_container_01", fill_ms = 3000, color = { 120, 80, 55 } } } },
-    { id = "grape_soda", label = "Grape Zap", kind = "interactive",
+    { id = "grape_soda", label = "Grape Zap", kind = "interactive", group = "Drinks",
       consume = { thirst = 30, anim = "drink_cup" },
       steps = { { type = "pour", input = "empty_cup", flavor = "grape_soda", model = "pickle_drink_container_01", fill_ms = 3000, color = { 135, 70, 170 } } } },
-    { id = "coffee", label = "Coffee", kind = "interactive",
+    { id = "coffee", label = "Coffee", kind = "interactive", group = "Drinks",
       consume = { thirst = 30, anim = "drink_cup" },
       steps = { { type = "pour", input = "empty_cup", flavor = "coffee", model = "pickle_drink_container_01", fill_ms = 3000, color = { 80, 50, 30 } } } },
 }
@@ -496,6 +544,12 @@ local function CreateTables()
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
 
+    -- LEGACY. Restaurants are staffed by a framework JOB now (`metadata.job` +
+    -- `metadata.ranks`), so nothing reads or writes this table any more. The CREATE
+    -- stays because the schema is DECLARED and never migrated: dropping it would
+    -- destroy the one record a server upgrading from the employee model has of who
+    -- used to work where, which is exactly what an operator needs to re-hire them
+    -- into the job. Do not add reads back.
     MySQL.query.await([[
         CREATE TABLE IF NOT EXISTS `pickle_restaurant_employees` (
             `id`              INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -673,6 +727,89 @@ local function CreateTables()
             KEY `idx_ident_paid` (`identifier`, `paid_at`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
+
+    -- STANDALONE JOB ASSIGNMENTS. Only used on a frameworkless server, where this
+    -- resource is the job system (bridge/custom). One row per player — a character
+    -- holds one job, exactly as a framework would model it — so `identifier` is
+    -- unique and an unemployed player is simply the absence of a row.
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `pickle_restaurant_job_players` (
+            `id`         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `identifier` VARCHAR(80)  NOT NULL,
+            `job`        VARCHAR(60)  NOT NULL,
+            `grade`      INT          NOT NULL DEFAULT 0,
+            `name`       VARCHAR(100) DEFAULT NULL,
+            `updated_at` TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            UNIQUE KEY `uniq_jp` (`identifier`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
+
+    -- TIPS OWED. A tip is STAFF money, never the house's: it lands here instead of on
+    -- the restaurant balance, and the POOL is simply the unpaid rows. Keeping the rows
+    -- (rather than one running total) is what lets a payout say who earned what and
+    -- makes a partially-paid pool impossible to lose track of.
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `pickle_restaurant_tips` (
+            `id`            INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `restaurant_id` INT UNSIGNED NOT NULL,
+            -- who earned it, when that is known (a phone order's server). NULL for a
+            -- tip nobody in particular earned — an NPC leaving one on the counter.
+            `identifier`    VARCHAR(80)  DEFAULT NULL,
+            `amount`        INT          NOT NULL,
+            `source`        VARCHAR(16)  DEFAULT NULL,
+            `paid`          TINYINT(1)   NOT NULL DEFAULT 0,
+            `created_at`    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_rest_paid` (`restaurant_id`, `paid`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
+
+    -- PAYSLIP HISTORY. Every tip payout and salary run writes one row per recipient —
+    -- the audit trail behind the Payroll tab. Money that left the restaurant has to be
+    -- answerable for per person, which a single ledger line ("payroll -$1,240") isn't.
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `pickle_restaurant_payroll` (
+            `id`            INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `restaurant_id` INT UNSIGNED NOT NULL,
+            `identifier`    VARCHAR(80)  NOT NULL,
+            `name`          VARCHAR(100) DEFAULT NULL,
+            `grade`         INT          NOT NULL DEFAULT 0,
+            `amount`        INT          NOT NULL DEFAULT 0,
+            `kind`          VARCHAR(12)  NOT NULL DEFAULT 'salary', -- 'salary' | 'tips'
+            `paid_at`       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_rest` (`restaurant_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
+
+    -- RESERVED SEATS. A reservation is an ACCESS GRANT over specific seat anchors for
+    -- one timeslot (never an instance), so the seats it holds are rows of their own:
+    -- `prop_id` is a `pickle_restaurant_props` seat row. One booking, many seats.
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `pickle_restaurant_reservation_seats` (
+            `id`             INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `reservation_id` INT UNSIGNED NOT NULL,
+            `prop_id`        INT UNSIGNED NOT NULL,
+            PRIMARY KEY (`id`),
+            KEY `idx_res` (`reservation_id`),
+            KEY `idx_prop` (`prop_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
+
+    -- GUESTS. Who else may sit in a booking's seats. Granted per RESERVATION rather
+    -- than per seat: a party that has been let in is let in, and asking a holder to
+    -- approve every chair separately is the same question five times.
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `pickle_restaurant_reservation_guests` (
+            `id`             INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `reservation_id` INT UNSIGNED NOT NULL,
+            `identifier`     VARCHAR(80)  NOT NULL,
+            `name`           VARCHAR(100) DEFAULT NULL,
+            PRIMARY KEY (`id`),
+            KEY `idx_res` (`reservation_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
 end
 
 -- Every table CreateTables is responsible for. The boot refuses to open the
@@ -684,7 +821,9 @@ local REQUIRED_TABLES = {
     "pickle_restaurants", "pickle_restaurant_employees", "pickle_restaurant_props",
     "pickle_restaurant_menu", "pickle_restaurant_stock", "pickle_restaurant_cooked_items",
     "pickle_restaurant_ledger", "pickle_restaurant_settings", "pickle_restaurant_orders",
-    "pickle_restaurant_pending_refunds",
+    "pickle_restaurant_pending_refunds", "pickle_restaurant_job_players",
+    "pickle_restaurant_tips", "pickle_restaurant_payroll",
+    "pickle_restaurant_reservation_seats", "pickle_restaurant_reservation_guests",
 }
 
 -- Returns the first required table that is still missing (nil = schema is whole).
@@ -1568,15 +1707,6 @@ local function SeedUnifiedMenu()
     merge("ingredients", DEFAULT_INGREDIENTS, "item")
 end
 
-local function LoadEmployees()
-    EmployeeCache = {}
-    local rows = MySQL.query.await("SELECT * FROM pickle_restaurant_employees") or {}
-    for _, row in ipairs(rows) do
-        EmployeeCache[row.restaurant_id] = EmployeeCache[row.restaurant_id] or {}
-        EmployeeCache[row.restaurant_id][row.identifier] = row
-    end
-end
-
 local function LoadStock()
     StockCache = {}
     local rows = MySQL.query.await("SELECT * FROM pickle_restaurant_stock") or {}
@@ -1746,6 +1876,51 @@ function CollectGroups()
     for _, ing in ipairs(GetIngredientsCfg()) do add(ing.group) end
     table.sort(out)
     return out
+end
+
+-- The group a BUYABLE item files under — the heading the boss panel's Supplies tab
+-- and the admin Menu tab put its row beneath. The item's own authored entry wins
+-- (an ingredient's `group`, a tool's `group`); failing that it is DERIVED from what
+-- consumes it, so a larder still reads as organised on a config written before the
+-- shipped defaults carried groups (or one an admin only half-grouped). A derivation
+-- is only trusted when every consumer agrees: an item used by two different groups
+-- belongs to neither, and guessing one would file it somewhere misleading.
+-- Returns nil for ungrouped (the caller shows it under "Ungrouped").
+function ItemGroup(item)
+    if not item or item == "" then return nil end
+    local ing = IngredientDef(item)
+    if ing and ing.group and ing.group ~= "" then return ing.group end
+    for _, t in ipairs(GetTools()) do
+        if t.item == item and t.group and t.group ~= "" then return t.group end
+    end
+    local found
+    local function note(g)
+        if not g or g == "" then return end
+        if found == nil then found = g
+        elseif found ~= g then found = false end -- consumers disagree: no honest answer
+    end
+    local rec = RecipeByInput[item]
+    if rec then note(rec.group) end
+    for _, a in ipairs(GetAssembly()) do
+        for _, c in ipairs(a.components or {}) do
+            if c == item then note(a.group) end
+        end
+    end
+    for _, d in ipairs(GetDrinks()) do
+        if d.input == item then note(d.group) end
+    end
+    for _, cr in ipairs(GetCrafts()) do
+        for _, c in ipairs(cr.components or {}) do
+            if c == item then note(cr.group) end
+        end
+    end
+    for _, b in ipairs(GetBakingList()) do
+        if b.mix_item == item then
+            note(b.group)
+            for _, tr in ipairs(b.trays or {}) do note(tr.group) end
+        end
+    end
+    return found or nil
 end
 
 -- ─── ingredient cost & default pricing ───────────────────────────────────────
@@ -2172,9 +2347,218 @@ function AnnotateIngredients()
     return out
 end
 
+-- ─── jobs & ranks (who works here, and what they may do) ─────────────────────
+-- A restaurant is STAFFED BY A JOB. `metadata.job` names it and `metadata.ranks`
+-- says what each GRADE of that job may do here — so hiring, firing and promoting
+-- are the framework's own job actions and there is no private employee roster to
+-- keep in step with them. (The `pickle_restaurant_employees` table is legacy; see
+-- the CREATE.) The framework is reached only through the bridge job API
+-- (GetJobList / GetPlayerJobInfo / …), which every variant defines — including the
+-- standalone one, where WE are the job system.
+
+-- The `jobs` setting (standalone only), validated on READ like every other
+-- admin-editable list: the NUI is untrusted, and a malformed grade here would mean a
+-- restaurant whose ranks can't be resolved.
+function SanitizeJobs(list)
+    local out, seen = {}, {}
+    for _, j in ipairs(type(list) == "table" and list or {}) do
+        if type(j) == "table" then
+            local name = trimStr(j.name) or (trimStr(j.label) and foodSlug(j.label))
+            if name and not seen[name] then
+                seen[name] = true
+                local grades, gseen = {}, {}
+                for _, g in ipairs(type(j.grades) == "table" and j.grades or {}) do
+                    if type(g) == "table" then
+                        local lvl = math.max(0, math.floor(numOr(g.grade, 0)))
+                        if not gseen[lvl] then
+                            gseen[lvl] = true
+                            grades[#grades + 1] = { grade = lvl,
+                                                    label = trimStr(g.label) or _L("job_grade_n", lvl),
+                                                    isboss = g.isboss == true or nil }
+                        end
+                    end
+                end
+                table.sort(grades, function(a, b) return a.grade < b.grade end)
+                -- A job with no grades can never have a boss, so nobody could ever
+                -- manage a restaurant assigned to it: give it grade 0 as the boss.
+                if #grades == 0 then
+                    grades[1] = { grade = 0, label = _L("job_grade_n", 0), isboss = true }
+                end
+                out[#out + 1] = { name = name:sub(1, 60), label = trimStr(j.label) or name, grades = grades }
+            end
+        end
+    end
+    return out
+end
+
+function StandaloneJobs() return SanitizeJobs(GetSetting("jobs", {})) end
+
+-- The job a restaurant is staffed by, or nil (unassigned — then only the owner and
+-- admins can do anything there, which is the sane out-of-the-box state).
+function RestaurantJob(rid)
+    local r = GetRestaurant(rid)
+    local j = r and type(r.metadata) == "table" and r.metadata.job or nil
+    return (type(j) == "string" and j ~= "") and j or nil
+end
+
+-- One rank config, sanitized. `permissions` is filtered against PERMISSIONS so a
+-- forged key can never appear in a perms table; `boss` short-circuits to ALL_PERMS
+-- wherever it's read, so what's stored for a boss grade doesn't matter.
+local function sanitizeRank(cfg, label, boss)
+    cfg = type(cfg) == "table" and cfg or {}
+    local perms = {}
+    for _, p in ipairs(PERMISSIONS) do
+        if type(cfg.permissions) == "table" and cfg.permissions[p] == true then perms[p] = true end
+    end
+    local isBoss = (cfg.boss == true) or (boss == true) or nil
+    if isBoss then
+        for _, p in ipairs(PERMISSIONS) do perms[p] = true end
+    end
+    return {
+        label       = trimStr(cfg.label) or label,
+        permissions = perms,
+        commission  = math.max(0, math.min(100, math.floor(numOr(cfg.commission,
+                          tonumber(GetSetting("default_commission", 10)) or 10)))),
+        salary      = math.max(0, math.floor(numOr(cfg.salary, 0))),
+        boss        = isBoss,
+    }
+end
+
+-- Every rank of a restaurant's job, keyed by GRADE NUMBER — always complete: the
+-- framework's grades UNION whatever the restaurant has authored. Complete matters
+-- because a grade added to the job after the restaurant was set up must still be
+-- workable (it gets `default_rank_permissions`), and a rank authored for a grade the
+-- framework has since dropped must still be visible so it can be cleaned up.
+--
+-- Stored under STRING keys (it lives in a JSON column, which has no other kind), read
+-- back as numbers so every caller can just index by grade.
+function RestaurantRanks(rid)
+    local r = GetRestaurant(rid)
+    if not r then return {} end
+    local stored = (type(r.metadata) == "table" and type(r.metadata.ranks) == "table") and r.metadata.ranks or {}
+    local defaults = type(GetSetting("default_rank_permissions", {})) == "table"
+        and GetSetting("default_rank_permissions", {}) or {}
+    local out = {}
+    local function put(grade, label, boss)
+        grade = tonumber(grade)
+        if not grade or out[grade] then return end
+        local cfg = stored[tostring(grade)] or stored[grade]
+        -- No authored rank for this grade: it gets the default permission set (a new
+        -- grade must be able to work, not silently be locked out of the kitchen).
+        if type(cfg) ~= "table" then cfg = { permissions = defaults } end
+        out[grade] = sanitizeRank(cfg, label or _L("job_grade_n", grade), boss)
+    end
+    local job = RestaurantJob(rid)
+    if job and GetJobGradeList then
+        for _, g in ipairs(GetJobGradeList(job) or {}) do put(g.grade, g.label, g.isboss) end
+    end
+    for k in pairs(stored) do put(k) end
+    return out
+end
+
+-- ONE rank, never nil. A grade the job doesn't declare (renamed away, or a player
+-- moved by another script) still HOLDS the job, so it resolves to a basic employee —
+-- the default permissions, never boss.
+function RankFor(rid, grade)
+    local ranks = RestaurantRanks(rid)
+    local g = tonumber(grade) or 0
+    if ranks[g] then return ranks[g] end
+    local defaults = type(GetSetting("default_rank_permissions", {})) == "table"
+        and GetSetting("default_rank_permissions", {}) or {}
+    return sanitizeRank({ permissions = defaults }, _L("job_grade_n", g), false)
+end
+
+-- Write-through of ONE rank. Sanitized here rather than at the call site so a panel
+-- can hand the stored shape straight in.
+function SetRestaurantRank(rid, grade, cfg)
+    rid = tonumber(rid)
+    local r = GetRestaurant(rid); if not r then return false end
+    grade = tonumber(grade); if not grade then return false end
+    local job = RestaurantJob(rid)
+    local boss = (job and IsJobBossGrade and IsJobBossGrade(job, grade)) or false
+    r.metadata = type(r.metadata) == "table" and r.metadata or {}
+    r.metadata.ranks = type(r.metadata.ranks) == "table" and r.metadata.ranks or {}
+    r.metadata.ranks[tostring(grade)] = sanitizeRank(cfg, _L("job_grade_n", grade), boss)
+    MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), rid })
+    return true
+end
+
+-- Assign (or clear, jobName nil) a restaurant's job and SEED one rank per grade of
+-- it: boss grades get everything, the rest get `default_rank_permissions`. Seeding
+-- up front is what makes the Ranks editor immediately meaningful instead of an empty
+-- list the boss has to guess the shape of. An existing rank for a grade is KEPT — a
+-- re-assignment to the same job must not wipe a boss's tuning.
+function SetRestaurantJob(rid, jobName)
+    rid = tonumber(rid)
+    local r = GetRestaurant(rid); if not r then return false end
+    jobName = trimStr(jobName)
+    r.metadata = type(r.metadata) == "table" and r.metadata or {}
+    r.metadata.job = jobName
+    if jobName then
+        local defaults = type(GetSetting("default_rank_permissions", {})) == "table"
+            and GetSetting("default_rank_permissions", {}) or {}
+        local stored = type(r.metadata.ranks) == "table" and r.metadata.ranks or {}
+        for _, g in ipairs((GetJobGradeList and GetJobGradeList(jobName)) or {}) do
+            local key = tostring(g.grade)
+            if type(stored[key]) ~= "table" then
+                stored[key] = sanitizeRank({ permissions = defaults }, g.label, g.isboss)
+            end
+        end
+        r.metadata.ranks = stored
+    end
+    MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), rid })
+    SyncToClient(-1)
+    return true
+end
+
+-- Everyone holding the restaurant's job, annotated with the RESTAURANT's rank labels
+-- (the boss renames a grade for their own staff, not for the framework). `cb` is
+-- always called — with an empty list when no job is assigned.
+--
+-- Callback-shaped because a bridge's roster MAY be async (the contract allows it);
+-- every variant we ship answers inline, which is what `RosterNow` below relies on.
+function RestaurantRoster(rid, cb)
+    rid = tonumber(rid)
+    local job = RestaurantJob(rid)
+    if not job or not GetJobEmployees then
+        if type(cb) == "function" then cb({}) end
+        return
+    end
+    local ranks = RestaurantRanks(rid)
+    GetJobEmployees(job, function(list)
+        local out = {}
+        for _, e in ipairs(list or {}) do
+            local grade = tonumber(e.grade) or 0
+            local rank = ranks[grade]
+            out[#out + 1] = {
+                identifier = e.identifier,
+                name       = e.name or e.identifier,
+                grade      = grade,
+                gradeLabel = (rank and rank.label) or e.gradeLabel or _L("job_grade_n", grade),
+                boss       = (rank and rank.boss == true) or false,
+            }
+        end
+        if type(cb) == "function" then cb(out) end
+    end)
+end
+
+-- The roster as a plain return, for the money paths (which are written straight-line
+-- and can't be turned inside out around a callback). Every shipped bridge calls back
+-- inline; one that didn't would yield an empty list here rather than paying a
+-- half-built roster, which is the safe way to be wrong about money.
+function RosterNow(rid)
+    local got = nil
+    RestaurantRoster(rid, function(list) got = list end)
+    return got or {}
+end
+
 -- ─── permissions ─────────────────────────────────────────────────────────────
 
--- Returns: permsTable, isOwnerOrAdmin, employeeRow
+-- Returns: permsTable, isBoss, jobInfo (the bridge's job info table for `source`).
+-- The ONE authority — every mutating callback gates on this (or on HasPerm).
+--
+-- Note DUTY is not consulted: plenty of servers never toggle it, and a restaurant
+-- nobody can work because a flag defaults to off is indistinguishable from broken.
 function ResolvePerms(restaurantId, source)
     local r = GetRestaurant(restaurantId)
     if not r then return nil, false, nil end
@@ -2182,11 +2566,16 @@ function ResolvePerms(restaurantId, source)
     local id = GetIdentifier(source)
     if not id then return nil, false, nil end
     if r.owner_identifier and r.owner_identifier == id then return ALL_PERMS, true, nil end
-    local emp = EmployeeCache[restaurantId] and EmployeeCache[restaurantId][id]
-    if not emp then return nil, false, nil end
-    local roles = r.roles or GetSetting("default_roles", {})
-    local role = roles[tostring(emp.grade)] or roles[emp.grade]
-    return (role and role.permissions) or {}, false, emp
+    local job = RestaurantJob(restaurantId)
+    if not job then return nil, false, nil end
+    local info = GetPlayerJobInfo and GetPlayerJobInfo(source) or nil
+    if not info or info.name ~= job then return nil, false, nil end
+    local rank = RankFor(restaurantId, info.grade)
+    -- Boss either way round: the framework's own per-grade flag, or the rank the
+    -- restaurant marked as its boss (a server whose job defs have no boss grade must
+    -- still be able to appoint a manager).
+    if info.isBoss == true or rank.boss == true then return ALL_PERMS, true, info end
+    return rank.permissions or {}, false, info
 end
 
 function HasPerm(restaurantId, source, perm)
@@ -2195,6 +2584,16 @@ function HasPerm(restaurantId, source, perm)
     if isOwner then return true end
     return perms[perm] == true
 end
+
+-- A player's job changed (or a job DEFINITION did — then `src` is nil and it applies
+-- to everyone holding it). Every bridge funnels its framework's own event into this
+-- one, and nothing here is cached per player, so there is nothing to invalidate
+-- server-side: what needs telling is the CLIENT, whose open phone/panel is showing
+-- the employment it resolved a moment ago. Relayed as one client event so those
+-- surfaces can re-ask rather than sitting on a stale answer.
+AddEventHandler("pickle_restaurants:jobChanged", function(src)
+    TriggerClientEvent("pickle_restaurants:jobChanged", src and tonumber(src) or -1)
+end)
 
 -- ─── balance / ledger / stock ────────────────────────────────────────────────
 
@@ -2207,6 +2606,170 @@ end
 function AddLedger(restaurantId, ltype, amount, description, identifier)
     MySQL.insert("INSERT INTO pickle_restaurant_ledger (restaurant_id, type, amount, description, identifier) VALUES (?, ?, ?, ?, ?)",
         { restaurantId, ltype, RoundMoney(amount), description or "", identifier })
+end
+
+-- ─── tips & payroll ──────────────────────────────────────────────────────────
+-- A TIP IS STAFF MONEY, NOT HOUSE MONEY. It used to be added to the restaurant
+-- balance, which quietly made every gratuity the owner's — so tips now land in
+-- `pickle_restaurant_tips` as unpaid rows and never touch the balance in either
+-- direction. The POOL is the unpaid rows; paying it out splits it across the current
+-- roster and marks them paid.
+--
+-- SALARIES are the other direction: they DO come out of the balance (that is what a
+-- wage is), one payroll row per recipient plus a single ledger line, and the whole run
+-- is refused if the balance can't cover it — a half-paid payroll is worse than a late
+-- one.
+--
+-- Both pay ONLINE staff only. There is no deferred-wages store (the one deferral
+-- machinery this resource has, pending refunds, exists because a CUSTOMER must never
+-- lose money they already spent), and a wage nobody was present to earn is better
+-- caught by the next run than parked forever. That is also why the tip pool is left
+-- untouched when nobody is on shift, instead of being paid to an empty room.
+
+function AddTip(rid, amount, identifier, source)
+    rid = tonumber(rid)
+    amount = RoundMoney(amount)
+    if not rid or amount <= 0 then return false end
+    TipCache[rid] = (TipCache[rid] or 0) + amount
+    MySQL.insert("INSERT INTO pickle_restaurant_tips (restaurant_id, identifier, amount, source) VALUES (?, ?, ?, ?)",
+        { rid, identifier, amount, tostring(source or "order"):sub(1, 16) })
+    return true
+end
+
+function TipPool(rid) return TipCache[tonumber(rid)] or 0 end
+
+-- One payroll row per person paid — the audit behind the Payroll tab (`kind` is
+-- "tips" or "salary").
+local function AddPayrollRow(rid, m, amount, kind)
+    MySQL.insert("INSERT INTO pickle_restaurant_payroll (restaurant_id, identifier, name, grade, amount, kind) "
+        .. "VALUES (?, ?, ?, ?, ?, ?)",
+        { rid, m.identifier, m.name, m.grade or 0, RoundMoney(amount), kind })
+end
+
+-- The roster members who are actually reachable right now, each with its live source.
+local function PayableRoster(rid)
+    local out = {}
+    for _, m in ipairs(RosterNow(rid)) do
+        local src = ResolveSourceForIdentifier(m.identifier)
+        if src then
+            out[#out + 1] = { identifier = m.identifier, name = m.name, grade = m.grade,
+                              gradeLabel = m.gradeLabel, source = src }
+        end
+    end
+    return out
+end
+
+-- Split the unpaid pool across the roster and pay it out. Returns paid, recipients
+-- (and an error key as a third return when there was nothing to do).
+function PayTips(rid)
+    rid = tonumber(rid)
+    local total = TipPool(rid)
+    if total <= 0 then return 0, {}, "tips_none" end
+    local roster = PayableRoster(rid)
+    if #roster == 0 then return 0, {}, "tips_no_staff" end
+
+    -- "even" = equal shares; "grade" = weighted by grade + 1 (grade 0 still earns a
+    -- share — a weight of zero would mean a trainee works the shift for nothing).
+    local byGrade = GetSetting("tip_split", "even") == "grade"
+    local weights, sum = {}, 0
+    for i, m in ipairs(roster) do
+        weights[i] = byGrade and ((tonumber(m.grade) or 0) + 1) or 1
+        sum = sum + weights[i]
+    end
+
+    -- Whole dollars, and the ROUNDING REMAINDER goes to the first recipient rather
+    -- than being lost: the pool is emptied by this payout, so every cent of it has to
+    -- land on somebody.
+    local shares, handed = {}, 0
+    for i = 1, #roster do
+        shares[i] = math.floor(total * weights[i] / sum)
+        handed = handed + shares[i]
+    end
+    shares[1] = shares[1] + (total - handed)
+
+    -- CLAIM FIRST, exactly as RefundOrder does: empty the pool before any payout, so
+    -- a second call (or one racing the payroll thread) finds nothing left to pay.
+    TipCache[rid] = 0
+    MySQL.update.await("UPDATE pickle_restaurant_tips SET paid = 1 WHERE restaurant_id = ? AND paid = 0", { rid })
+
+    local recipients = {}
+    for i, m in ipairs(roster) do
+        local amount = shares[i]
+        if amount > 0 then
+            AddMoney(m.source, amount, "money")
+            AddPayrollRow(rid, m, amount, "tips")
+            ShowNotification(m.source, _L("payroll_tips_paid", GetCurrencyString(amount)))
+            recipients[#recipients + 1] = { identifier = m.identifier, name = m.name,
+                                            grade = m.grade, amount = amount }
+        end
+    end
+    -- Ledger, not AdjustBalance: the money was never in the balance to take out of it.
+    -- The line exists so the finances tab can still account for what left the business.
+    AddLedger(rid, "payroll", -total, _L("ledger_tips_paid", #recipients), nil)
+    return total, recipients
+end
+
+-- Pay every roster member their rank's salary. Returns paid, recipients (and an error
+-- key as a third return when the run didn't happen).
+function RunPayroll(rid)
+    rid = tonumber(rid)
+    local r = GetRestaurant(rid); if not r then return nil, nil, "no_restaurant" end
+    local ranks = RestaurantRanks(rid)
+    local due, total = {}, 0
+    for _, m in ipairs(PayableRoster(rid)) do
+        local rank = ranks[m.grade] or RankFor(rid, m.grade)
+        local salary = math.max(0, math.floor(tonumber(rank.salary) or 0))
+        if salary > 0 then
+            m.amount = salary
+            due[#due + 1] = m
+            total = total + salary
+        end
+    end
+    if total <= 0 then return 0, {}, "payroll_none" end
+    -- ALL OR NOTHING. Paying the first three of five staff and leaving the rest owed
+    -- is the failure mode a boss can't unpick, so a short balance refuses the run.
+    if (tonumber(r.balance) or 0) < total then return nil, nil, "payroll_insufficient" end
+
+    AdjustBalance(rid, -total)
+    local recipients = {}
+    for _, m in ipairs(due) do
+        AddMoney(m.source, m.amount, "money")
+        AddPayrollRow(rid, m, m.amount, "salary")
+        ShowNotification(m.source, _L("payroll_salary_paid", GetCurrencyString(m.amount)))
+        recipients[#recipients + 1] = { identifier = m.identifier, name = m.name,
+                                        grade = m.grade, amount = m.amount }
+    end
+    AddLedger(rid, "payroll", -total, _L("ledger_payroll", #recipients), nil)
+    return total, recipients
+end
+
+-- Automatic salary runs. One thread for every restaurant (the cadence is global —
+-- it's a server policy, not a per-restaurant one), and every skip is SILENT: nobody
+-- owed, no staff online or a balance that can't cover it are all ordinary states, not
+-- errors worth spamming a console over. `payroll_interval_minutes = 0` disables it,
+-- and the setting is re-read every pass so a change applies without a restart.
+CreateThread(function()
+    while not RestaurantsReady do Wait(1000) end
+    while true do
+        local mins = math.floor(tonumber(GetSetting("payroll_interval_minutes", 0)) or 0)
+        if mins <= 0 then
+            Wait(60000)
+        else
+            Wait(mins * 60000)
+            if (tonumber(GetSetting("payroll_interval_minutes", 0)) or 0) > 0 then
+                for rid in pairs(RestaurantCache) do pcall(RunPayroll, rid) end
+            end
+        end
+    end
+end)
+
+local function LoadTips()
+    TipCache = {}
+    local rows = MySQL.query.await(
+        "SELECT restaurant_id, SUM(amount) AS total FROM pickle_restaurant_tips WHERE paid = 0 GROUP BY restaurant_id") or {}
+    for _, row in ipairs(rows) do
+        TipCache[row.restaurant_id] = math.floor(tonumber(row.total) or 0)
+    end
 end
 
 function GetStockCount(restaurantId, item)
@@ -2930,22 +3493,163 @@ function PoolConsumeMatch(rid, item, match, count)
     return taken
 end
 
--- ─── employee cache mutators (used by management module) ──────────────────────
+-- ─── reservations: the seats a booking HOLDS ─────────────────────────────────
+-- A reservation is ACCESS CONTROL over real seat anchors for one timeslot — never an
+-- instance, never a private room. The booking rows themselves belong to
+-- modules/phone (ReservationCache); what lives here is the part the rest of the
+-- engine needs: which SEATS a booking holds, who may sit in them, whether a booking
+-- is currently active at all, and the expiry sweep that frees seats nobody turned up
+-- for. Without a sweep a single "now" booking would hold a table until the next
+-- restart.
 
-function CacheEmployee(restaurantId, row)
-    EmployeeCache[restaurantId] = EmployeeCache[restaurantId] or {}
-    EmployeeCache[restaurantId][row.identifier] = row
+-- The canonical bookable slots. Validated on read (the NUI is untrusted and a slot
+-- is what the hold window is computed FROM — an arbitrary string would create a hold
+-- that never starts and never ends). "now" always survives: it is the one slot that
+-- needs no clock and the fallback if an admin empties the list.
+function ReservationSlots()
+    local out, seen = {}, {}
+    for _, s in ipairs(GetSetting("reservation_slots", {}) or {}) do
+        if type(s) == "string" then
+            s = s:gsub("^%s+", ""):gsub("%s+$", "")
+            if s ~= "" and not seen[s] and (s == "now" or s:match("^%d%d?:%d%d$")) then
+                seen[s] = true
+                out[#out + 1] = s
+            end
+        end
+    end
+    if #out == 0 then out[1] = "now" end
+    return out
 end
 
-function UncacheEmployee(restaurantId, identifier)
-    if EmployeeCache[restaurantId] then EmployeeCache[restaurantId][identifier] = nil end
+function IsReservationSlot(slot)
+    for _, s in ipairs(ReservationSlots()) do
+        if s == slot then return true end
+    end
+    return false
 end
 
-function GetEmployeesForRestaurant(restaurantId)
-    local list = {}
-    for _, emp in pairs(EmployeeCache[restaurantId] or {}) do list[#list + 1] = emp end
-    return list
+function ReservationHoldMinutes()
+    return math.max(5, math.floor(tonumber(GetSetting("reservation_hold_minutes", 90)) or 90))
 end
+
+-- When a booking was made, as unix seconds. Rows come from three places with three
+-- shapes (a freshly-created cache row stamped by the phone, oxmysql's `created_at`,
+-- or a row loaded with no timestamp selected at all), so all three are accepted. A
+-- row we genuinely can't date is stamped NOW and remembered: that way a "now" booking
+-- restarts its hold window after a resource restart, rather than either expiring the
+-- instant the server comes back or holding its table forever.
+local function reservationCreated(row)
+    local n = tonumber(row.createdAt)
+    if n then return n end
+    local c = row.created_at
+    if type(c) == "number" then
+        row.createdAt = (c > 1e11) and math.floor(c / 1000) or math.floor(c)
+        return row.createdAt
+    end
+    if type(c) == "string" then
+        local y, mo, d, h, mi, s = c:match("(%d+)-(%d+)-(%d+)[T ](%d+):(%d+):(%d+)")
+        if y then
+            row.createdAt = os.time({ year = tonumber(y), month = tonumber(mo), day = tonumber(d),
+                                      hour = tonumber(h), min = tonumber(mi), sec = tonumber(s) })
+            return row.createdAt
+        end
+    end
+    row.createdAt = os.time()
+    return row.createdAt
+end
+
+-- The window a booking holds its seats for: its slot time TODAY (server local time)
+-- .. + `reservation_hold_minutes`. "now" starts the moment it was booked.
+function ReservationWindow(row)
+    if type(row) ~= "table" then return 0, 0 end
+    local hold = ReservationHoldMinutes() * 60
+    local slot = row.slot
+    if type(slot) ~= "string" or slot == "" or slot == "now" then
+        local from = reservationCreated(row)
+        return from, from + hold
+    end
+    local h, m = slot:match("^(%d%d?):(%d%d)$")
+    if not h then
+        local from = reservationCreated(row)
+        return from, from + hold
+    end
+    local now = os.date("*t")
+    local from = os.time({ year = now.year, month = now.month, day = now.day,
+                           hour = tonumber(h), min = tonumber(m), sec = 0 })
+    return from, from + hold
+end
+
+-- Is this booking holding its seats right now? A cancelled/expired row never is.
+function ReservationActive(row)
+    if type(row) ~= "table" then return false end
+    if row.status ~= nil and row.status ~= "booked" then return false end
+    local from, to = ReservationWindow(row)
+    local now = os.time()
+    return now >= from and now < to
+end
+
+-- The booking row for an id, out of the phone module's cache (nil when that module
+-- isn't loaded, or the booking is gone — either way there is no live hold).
+function ReservationById(resId)
+    resId = tonumber(resId)
+    if not resId then return nil end
+    for _, byId in pairs(ReservationCache or {}) do
+        if byId[resId] then return byId[resId] end
+    end
+    return nil
+end
+
+-- WHICH SEATS A BOOKING HOLDS, AND WHO IT ADMITS, LIVES IN modules/phone.
+-- That module owns `ReservationCache` and every write to the two hold tables, and it
+-- carries a booking's seats and guests ON the cached row — so a second cache of the
+-- same two tables here (which this file briefly had) is not a speed-up, it is a
+-- second truth that drifts the moment either half writes. The engine-side helpers
+-- this file keeps are the ones that need no row at all: the slot vocabulary, the hold
+-- window, and whether a row is live. Everything else is the phone's:
+--   ReservationForSeat(propId) / ReservationAdmits(res, ident) / ReservationAddGuest /
+--   ReleaseReservation(res) / ReservedSeatMap(rid)
+
+
+-- EXPIRY SWEEP. Nothing else ends a booking: a party that never showed up would
+-- otherwise hold its table forever (there was no expiry at all before this). A lapsed
+-- row is marked `expired` in the DB, dropped from the phone's cache and its seats
+-- freed — one pass a minute is ample for a 90-minute hold.
+--
+-- Driven off ReservationCache rather than a query, so this is a no-op on a server
+-- running without the phone module (no bookings can exist) and never touches a table
+-- that module owns the schema of.
+-- Freeing the seats and guest grants is `ReleaseReservation` (modules/phone), the same
+-- path a cancellation takes — an expiry is a cancellation the clock performed, and two
+-- ways to end a booking is how one of them ends up forgetting the guest rows.
+CreateThread(function()
+    while not RestaurantsReady do Wait(1000) end
+    -- The boot sync ran before the phone module loaded its bookings, so the first
+    -- payload went out with no `reservedSeats`. Re-sync once we can actually see them.
+    local seeded = false
+    while true do
+        Wait(60000)
+        local expired = {}
+        for _, byId in pairs(ReservationCache or {}) do
+            for resId, row in pairs(byId) do
+                if not ReservationActive(row) then expired[#expired + 1] = { id = resId, row = row } end
+            end
+        end
+        for _, e in ipairs(expired) do
+            MySQL.update("UPDATE pickle_restaurant_reservations SET status = 'expired' WHERE id = ?", { e.id })
+            e.row.status = "expired"
+            if ReleaseReservation then
+                ReleaseReservation(e.row) -- drops the cache row, the seats and the guests
+            end
+        end
+        -- A freed table has to stop reading "Reserved" on every client, and after a
+        -- restart the seats only become visible once the phone has loaded its bookings.
+        if #expired > 0 then SyncToClient(-1) end
+        if not seeded and ReservedSeatMap and ReservationCache and next(ReservationCache) ~= nil then
+            seeded = true
+            SyncToClient(-1)
+        end
+    end
+end)
 
 -- ─── client sync ─────────────────────────────────────────────────────────────
 
@@ -2954,7 +3658,12 @@ local function BuildClientRestaurant(r)
         id      = r.id,
         name    = r.name,
         label   = r.label,
-        blip    = r.blip,
+        -- Per-restaurant map blip { enabled, sprite, color, scale }, edited in the
+        -- admin panel. An EMPTY column follows the global `blip` setting — resolved
+        -- here rather than on the client (which has no settings), so clearing an
+        -- override hands the restaurant back to the server default instead of the
+        -- client's hardcoded fallback.
+        blip    = r.blip or GetSetting("blip", nil),
         counter = r.counter,
         -- brand image URLs (drive the runtime texture replacement on packaging props):
         -- `brand_image` is the shared default; `brand_images` holds per-texture
@@ -2972,6 +3681,15 @@ local function BuildClientRestaurant(r)
         -- board tracks menu edits (each menu change re-syncs). Guarded because the
         -- builder lives in the sales module (loaded after core).
         menu         = BuildMenuBoard and BuildMenuBoard(r.id) or nil,
+        -- Seat anchors currently held by an ACTIVE reservation, { [propId] = true }.
+        -- Purely so the seat interaction can read "Reserved" instead of promising a
+        -- chair the server will refuse: it is holder-agnostic, and whether THIS player
+        -- may sit is still decided on `seating:sit` where the holder and its guests are
+        -- known. (Numeric keys survive the trip — events are msgpack, not JSON.)
+        -- Guarded, not assumed: the resolver lives in modules/phone (which owns the
+        -- booking cache) and core's first sync runs before that module has loaded —
+        -- an unguarded call would error out the whole boot payload.
+        reservedSeats = (ReservedSeatMap and ReservedSeatMap(r.id)) or {},
     }
 end
 
@@ -3152,6 +3870,11 @@ function BuildSyncPayload()
         box_lid_model  = BoxLidModel(),
         bag_item  = BagItemName(),
         bag_model = BagModel(),
+        -- The ONE generic drink item every poured drink collects as (the flavor
+        -- rides in metadata). Shipped so the client can tell a DRINK part from a
+        -- build component by item name rather than by guessing at cup models —
+        -- a drink is a finished serving and never takes part in stacking.
+        drink_item = GetSetting("drink_item", "drink"),
         finishes = finishes,
         condiments = condiments,
         baking   = baking,
@@ -3205,11 +3928,12 @@ CreateThread(function()
         RebuildDerived()
         LoadRestaurants()
         LoadProps()
-        LoadEmployees()
         LoadStock()
         LoadOrders()
         LoadPendingRefunds() -- refunds owed to customers who were offline at cancel time
         LoadCookedItems()
+        LoadTips()             -- the unpaid tip pool per restaurant
+        LoadReservationHolds() -- which seats each booking holds, and who it lets sit
         RestaurantsReady = true
         debugPrint(("Booted: %d restaurants, %d props, %d recipes."):format(
             #BuildSyncPayload().restaurants, #BuildSyncPayload().props, #RecipeCache))

@@ -193,6 +193,125 @@ function GetJobGrades(jobName)
     return grades
 end
 
+-- ─── the normalized JOB API ───────────────────────────────────────────────────
+-- A restaurant is STAFFED BY A FRAMEWORK JOB (its `metadata.job`) rather than by a
+-- private employee table, so every bridge variant answers the same questions about
+-- jobs in the same shape. Core's ResolvePerms and the admin/management panels only
+-- ever speak this API — they never touch ESX or QB directly.
+--
+-- ESX has no per-grade boss flag. The long-standing convention is a grade literally
+-- NAMED "boss", and failing that the highest grade of the job; that is the exact
+-- heuristic IsPlayerJobBoss above has always used here and it is kept, so a server's
+-- existing job definitions need no editing to be usable as a restaurant's staff.
+
+function JobsAvailable() return true end
+
+-- One job definition → our grades array. `boss` is decided per grade by the
+-- heuristic above: the grade named "boss", else the highest grade there is.
+local function esxGradeList(job)
+    local grades, maxGrade = {}, -1
+    for _, g in pairs((job and job.grades) or {}) do
+        local lvl = tonumber(g.grade) or 0
+        if lvl > maxGrade then maxGrade = lvl end
+        grades[#grades + 1] = {
+            grade  = lvl,
+            label  = g.label or g.name or (_L("job_grade_n", lvl)),
+            isboss = (g.name == "boss") or nil,
+            _name  = g.name,
+        }
+    end
+    table.sort(grades, function(a, b) return a.grade < b.grade end)
+    local named = false
+    for _, g in ipairs(grades) do if g.isboss then named = true end end
+    for _, g in ipairs(grades) do
+        if not named and g.grade == maxGrade then g.isboss = true end
+        g.isboss = g.isboss == true
+        g._name = nil
+    end
+    return grades
+end
+
+function GetJobList()
+    local out = {}
+    for name, job in pairs(ESX.GetJobs and ESX.GetJobs() or {}) do
+        out[#out + 1] = { name = name, label = job.label or name, grades = esxGradeList(job) }
+    end
+    table.sort(out, function(a, b) return (a.label or a.name):lower() < (b.label or b.name):lower() end)
+    return out
+end
+
+function GetJobGradeList(jobName)
+    local jobs = ESX.GetJobs and ESX.GetJobs() or {}
+    return jobName and jobs[jobName] and esxGradeList(jobs[jobName]) or {}
+end
+
+function GetJobLabel(jobName)
+    if not jobName or jobName == "" then return nil end
+    local jobs = ESX.GetJobs and ESX.GetJobs() or {}
+    return (jobs[jobName] and jobs[jobName].label) or jobName
+end
+
+function GetPlayerJobInfo(source)
+    local xPlayer = ESX.GetPlayerFromId(tonumber(source))
+    if not xPlayer or not xPlayer.job or not xPlayer.job.name then return nil end
+    local grade = tonumber(xPlayer.job.grade) or 0
+    return {
+        name       = xPlayer.job.name,
+        label      = xPlayer.job.label or GetJobLabel(xPlayer.job.name),
+        grade      = grade,
+        gradeLabel = xPlayer.job.grade_label or xPlayer.job.grade_name or _L("job_grade_n", grade),
+        isBoss     = IsJobBossGrade(xPlayer.job.name, grade),
+        -- ESX has no duty concept of its own: everyone with the job is on it.
+        onDuty     = true,
+    }
+end
+
+-- jobName nil/"" = FIRE: ESX's unemployed job is the one every player falls back to.
+function SetPlayerJobGrade(source, jobName, grade)
+    local xPlayer = ESX.GetPlayerFromId(tonumber(source))
+    if not xPlayer then return false end
+    if not jobName or jobName == "" then
+        xPlayer.setJob("unemployed", 0)
+        return true
+    end
+    xPlayer.setJob(jobName, tonumber(grade) or 0)
+    return true
+end
+
+function IsJobBossGrade(jobName, grade)
+    grade = tonumber(grade) or 0
+    for _, g in ipairs(GetJobGradeList(jobName)) do
+        if g.grade == grade then return g.isboss == true end
+    end
+    return false
+end
+
+-- ONLINE players only: ESX keeps no queryable offline job index, and inventing a
+-- raw `users` query here would tie the bridge to one server's schema. A roster that
+-- lists who is actually on shift is also the more useful answer for tips + payroll.
+function GetJobEmployees(jobName, cb)
+    local out = {}
+    if jobName and jobName ~= "" then
+        for _, xPlayer in pairs(ESX.GetExtendedPlayers("job", jobName) or {}) do
+            local grade = tonumber(xPlayer.job.grade) or 0
+            out[#out + 1] = {
+                identifier = xPlayer.identifier,
+                name       = xPlayer.getName(),
+                grade      = grade,
+                gradeLabel = xPlayer.job.grade_label or _L("job_grade_n", grade),
+            }
+        end
+    end
+    if type(cb) == "function" then cb(out) end
+    return out
+end
+
+-- ONE resource event for "this player's job may have changed", whatever the
+-- framework calls it. Core listens and invalidates what it derived from the old job.
+AddEventHandler("esx:setJob", function(playerId, _job, _lastJob)
+    TriggerEvent("pickle_restaurants:jobChanged", tonumber(playerId))
+end)
+
 function IsPlayerAdmin(source)
     local xPlayer = ESX.GetPlayerFromId(source)
     if not xPlayer then return false end

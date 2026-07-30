@@ -29,6 +29,11 @@ local DRINK = {
 }
 
 local eating = false -- one bite at a time (a second use is ignored, never queued)
+-- True for the length of a clip, whichever surface asked for it. Read by
+-- modules/seating: ESC must not stand a diner up out of a mouthful that is already
+-- committed server-side.
+local animBusy = false
+function IsConsuming() return animBusy end
 
 local function loadDict(dict)
     if HasAnimDictLoaded(dict) then return true end
@@ -39,7 +44,39 @@ local function loadDict(dict)
 end
 
 -- Where a held prop sits in the hand. TUNE IN-GAME.
-local HOLD = { x = 0.13, y = 0.05, z = 0.02, rx = -50.0, ry = 16.0, rz = 60.0 }
+--
+-- THE CLIPS DO NOT AGREE ON A HAND, so this can't be one set of numbers. The
+-- ambient scenario-style idles (the coffee and doughnut clips the drinks and snacks
+-- default to) bring the RIGHT hand to the mouth, and they are authored around
+-- `PH_R_Hand` — the prop bone the animators placed where a held object belongs, so
+-- an attach at 0,0,0 lands the cup exactly where the hand is shaped for it (the
+-- pattern GTA's own vending-machine can uses). That is the default, because
+-- everything an admin is likely to add from the scenario library works the same way.
+--
+-- The two `mp_player_int*` clips are the exception: they carry their prop in the
+-- LEFT hand, and their numbers are the ones every ESX/QB consumable script uses for
+-- them (the burger offsets were already here — they came from that same lineage,
+-- which is why the default used to be a left hand).
+local HOLD = { bone = 28422, x = 0.0, y = 0.0, z = 0.0, rx = 0.0, ry = 0.0, rz = 0.0 }
+local HOLD_BY_DICT = {
+    -- The two-handed eat. `rx` is the community number's -50 TURNED OVER (-50 + 180):
+    -- those offsets were tuned for `prop_cs_burger_01`, which is authored lying the
+    -- other way up to our food props, so a pizza handed the raw numbers came to the
+    -- mouth upside down. TUNE IN-GAME: if a food reads flipped on its other axis,
+    -- `ry` is the one to turn, not this.
+    ["mp_player_inteat@burger"] = { bone = 18905, x = 0.13, y = 0.05,  z = 0.02,
+                                    rx = 130.0, ry = 16.0,  rz = 60.0 },
+    ["mp_player_intdrink"]      = { bone = 18905, x = 0.12, y = 0.028, z = 0.001,
+                                    rx = 10.0,  ry = 175.0, rz = 0.0 },
+}
+
+-- The hold for one clip spec: its own numbers if it is one of the known left-handed
+-- clips, else the right prop hand. Keyed by DICT, not by the catalogue entry's id —
+-- an admin can add or rename an entry, but a dict's authored hand is a property of
+-- the animation itself.
+local function holdFor(a)
+    return HOLD_BY_DICT[a and a.dict or ""] or HOLD
+end
 
 local function loadModelTimeout(name)
     local hash = (name and name ~= "") and GetHashKey(name) or nil
@@ -63,25 +100,44 @@ end
 -- modules/rendertarget is already painting the NEAREST restaurant's brand onto it,
 -- which is also what makes a meal carried into another restaurant read as that
 -- restaurant's cup.
-local function attachHeldStack(ped, models)
-    local objs, below, belowH = {}, nil, 0.0
-    for _, name in ipairs(models or {}) do
+local function attachHeldStack(ped, models, hold)
+    hold = hold or HOLD
+    -- The kitchen's own seating maths (STACK_TWEAKS and the collision-margin
+    -- cancellation included), so a capped cup in a hand is the capped cup the
+    -- fountain poured. Measuring here instead put the lid a whole margin-inflated
+    -- cup height up in the air.
+    local seats = HeldStackOffsets and HeldStackOffsets(models) or nil
+    local objs, below, belowIdx = {}, nil, nil
+    for idx, name in ipairs(models or {}) do
         local hash = loadModelTimeout(name)
         if hash then
             local c = GetEntityCoords(ped)
             local o = CreateObject(hash, c.x, c.y, c.z, true, true, false)
             if below and DoesEntityExist(below) then
-                AttachEntityToEntity(o, below, 0, 0.0, 0.0, belowH, 0.0, 0.0, 0.0,
+                -- Sum the seats from the layer we're actually attached to: a model
+                -- that wouldn't stream leaves its gap rather than collapsing the
+                -- tower onto whatever loaded.
+                local dz = 0.0
+                for i = (belowIdx or 1) + 1, idx do
+                    dz = dz + (seats and seats[i] or 0.0)
+                end
+                if dz <= 0.0 then
+                    -- no kitchen measurement to borrow (cooking client not loaded):
+                    -- mx.z + mn.z, never mx.z - mn.z — the physics box dips below the
+                    -- origin by the same margin it overshoots the mesh top by, so
+                    -- adding cancels it and subtracting counts it twice
+                    local mn, mx = GetModelDimensions(GetHashKey(models[belowIdx or (idx - 1)]))
+                    dz = (mn and mx) and math.max(mx.z + mn.z, 0.001) or 0.1
+                end
+                AttachEntityToEntity(o, below, 0, 0.0, 0.0, dz, 0.0, 0.0, 0.0,
                                      true, true, false, false, 1, true)
             else
-                AttachEntityToEntity(o, ped, GetPedBoneIndex(ped, 18905),
-                                     HOLD.x, HOLD.y, HOLD.z, HOLD.rx, HOLD.ry, HOLD.rz,
+                AttachEntityToEntity(o, ped, GetPedBoneIndex(ped, hold.bone),
+                                     hold.x, hold.y, hold.z, hold.rx, hold.ry, hold.rz,
                                      true, true, false, true, 1, true)
             end
             SetModelAsNoLongerNeeded(hash)
-            local mn, mx = GetModelDimensions(hash)
-            belowH = (mn and mx) and (mx.z - mn.z) or 0.12
-            below = o
+            below, belowIdx = o, idx
             objs[#objs + 1] = o
         end
     end
@@ -101,18 +157,43 @@ function ConsumeAnim(isDrink, label, spec, props)
         or (isDrink and DRINK or EAT)
     local ms = math.max(500, math.floor(tonumber(a.ms) or 3000))
     local ped = PlayerPedId()
+    -- A SEATED diner's pose is policed by modules/seating: to that loop the eat clip
+    -- looks exactly like a broken sit, so it re-tasks the sit within a second and the
+    -- mouthful never plays — the cup ends up in a lap instead of at a mouth. Hold the
+    -- repair for the clip and hand the pose back the instant it's done.
+    if HoldSeatPose then HoldSeatPose(true) end
+    animBusy = true
     if loadDict(a.dict) then
         TaskPlayAnim(ped, a.dict, a.clip, 4.0, -4.0, -1, 49, 0.0, false, false, false)
     end
-    local held = (type(props) == "table" and #props > 0) and props
-        or ((a.prop and a.prop ~= "") and { a.prop } or nil)
-    local objs = held and attachHeldStack(ped, held) or {}
-    if lib and lib.progressBar then
-        lib.progressBar({ duration = ms, label = label, useWhileDead = false,
-                          canCancel = false, disable = { move = false, combat = true } })
-    else
-        Wait(ms)
+    -- The FOOD'S OWN props (server-resolved: a branded cup, a burger's whole tower, a
+    -- box) whenever it has any; the animation's catalogue prop is the last resort, and
+    -- it is a poor one — an authored clip carries whatever prop suited the clip, so
+    -- everyone ate a doughnut.
+    local held = nil
+    if type(props) == "table" then
+        held = {}
+        for _, m in ipairs(props) do
+            if type(m) == "string" and m ~= "" then held[#held + 1] = m end
+        end
+        if #held == 0 then held = nil end
     end
+    held = held or ((a.prop and a.prop ~= "") and { a.prop } or nil)
+    -- the hand belongs to the CLIP that's playing, not to the food
+    local objs = held and attachHeldStack(ped, held, holdFor(a)) or {}
+    -- THE CLIP'S LENGTH IS OUR OWN CLOCK, never the progress bar's return. A
+    -- progressBar refuses to run at all in some states (another bar already up, and
+    -- notably while another resource holds NUI focus — which is exactly the eat-in
+    -- view) and returns immediately: the props were then deleted a frame after they
+    -- were attached, so the drink you were sipping never appeared in your hand. The
+    -- bar is cosmetic here, so it is fired alongside and the wait is ours.
+    if lib and lib.progressBar then
+        CreateThread(function()
+            lib.progressBar({ duration = ms, label = label, useWhileDead = false,
+                              canCancel = false, disable = { move = false, combat = true } })
+        end)
+    end
+    Wait(ms)
     for _, o in ipairs(objs) do
         if DoesEntityExist(o) then
             SetEntityAsMissionEntity(o, true, true)
@@ -120,6 +201,9 @@ function ConsumeAnim(isDrink, label, spec, props)
         end
     end
     ClearPedTasks(ped)
+    animBusy = false
+    if HoldSeatPose then HoldSeatPose(false) end
+    if ReassertSeatPose then ReassertSeatPose() end
 end
 
 -- Eat ONE layer out of a vessel. Server-authoritative: it re-reads the slot, drops

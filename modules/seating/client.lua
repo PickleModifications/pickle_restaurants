@@ -21,9 +21,19 @@
 --  are the same problem: handing placement to something that places it elsewhere.
 --
 --  Styles (posture + height trim) live in Config.SeatStyles (core/shared.lua).
+--
+--  WHO may sit is not decided here. A seat held by an active reservation admits only
+--  its holder and guests, and that is checked by `seating:sit` server-side — this file
+--  only reacts to the refusal by offering to ask the holder (see below). The
+--  "Reserved" interaction label main/client draws is a hint, never the gate.
 -- =============================================
 
-local SIT_CONTROL = 51 -- INPUT_CONTEXT (E) — same key sits and stands
+local SIT_CONTROL = 51 -- INPUT_CONTEXT (E) — what SITS you down (the interaction)
+-- STANDING UP IS ESC, the same "step out" set modules/interactive treats as leaving a
+-- panel (ESC / pause-alternate / backspace). One key for both means the seated player
+-- never has to know which of two keys applies: ESC backs out of whatever they're in,
+-- innermost first — the meal view, then the seat.
+local STAND_KEYS  = { 322, 200, 202, 194 }
 -- The pose can read as "not playing" for a frame or two after it starts, so the
 -- loop doesn't police it until either it's confirmed playing or this expires.
 local SETTLE_MS   = 3000
@@ -73,8 +83,33 @@ end
 -- ─── state ───────────────────────────────────────────────────────────────────
 
 local seatedSeat = nil -- the seat prop we're currently sitting on (nil = standing)
+-- Something else is deliberately animating the seated ped (a mouthful at the
+-- eat-in table). The repair below must not fight it: to the loop, "not playing the
+-- sit clip" is indistinguishable from a broken pose, so it would re-task the sit
+-- within REPAIR_MS and snap the eat/drink clip away mid-bite — which is what left a
+-- diner's branded cup buried in their lap instead of raised to their mouth.
+local poseHold = false
 
 function IsSeated() return seatedSeat ~= nil end
+
+-- Put the pose repair on hold (and take it off again) around a clip that is MEANT
+-- to replace the sit for a moment. Global: modules/consume's ConsumeAnim brackets
+-- every mouthful with it, seated or not.
+function HoldSeatPose(on)
+    poseHold = on and true or false
+end
+
+-- Put the seated ped straight back in its pose. Called the instant a borrowed clip
+-- finishes (it ends on ClearPedTasks), so the diner doesn't sit bolt upright for up
+-- to REPAIR_MS waiting for the loop to notice.
+function ReassertSeatPose()
+    local seat = seatedSeat
+    if not seat then return end
+    local ped, style = PlayerPedId(), styleFor(seat)
+    if not HasAnimDictLoaded(style.anim.dict) then return end
+    playSit(ped, style)
+    FreezeEntityPosition(ped, true)
+end
 
 -- The seat row we're sitting on (nil = standing). modules/dining reads its
 -- `metadata.tray` to lay the meal out on THIS seat's placed table spot.
@@ -111,6 +146,93 @@ function StandUp()
     TriggerEvent("pickle_restaurants:seating:stood", seat.id)
 end
 
+-- ─── asking for a reserved seat ──────────────────────────────────────────────
+-- A held anchor rejects everyone but its reservation's holder and guests. Rather than
+-- leaving a stranger staring at a chair they can't use, we offer to ASK: the server
+-- pages the holder (phone notification + the prompt below), and an accept makes us a
+-- guest of that reservation and sits us down.
+--
+-- Both sides are ox_lib context menus, like the bag's contents menu — the request and
+-- the answer are both "pick one of two things", and a context menu is the one dialog
+-- this resource already uses for that.
+
+-- The seat we asked for, so an accept can seat us on it without trusting the event's
+-- id alone. Cleared on any answer.
+local askedSeat = nil
+
+local function offerSeatRequest(seat, why)
+    askedSeat = seat
+    lib.registerContext({
+        id = "pickle_restaurants_seat_reserved",
+        title = _L("seat_reserved_title"),
+        options = {
+            {
+                title = _L("seat_ask_to_sit"),
+                description = why or _L("seat_reserved"),
+                icon = "hand",
+                onSelect = function()
+                    local res = lib.callback.await("pickle_restaurants:seating:requestSeat", false, { propId = seat.id })
+                    if res and res.ok then
+                        ShowNotification(_L("seat_request_sent"))
+                    else
+                        askedSeat = nil
+                        ShowNotification((res and res.error) or _L("seat_reserved"))
+                    end
+                end,
+            },
+            {
+                title = _L("seat_ask_never_mind"),
+                icon = "xmark",
+                onSelect = function() askedSeat = nil end,
+            },
+        },
+    })
+    lib.showContext("pickle_restaurants_seat_reserved")
+end
+
+-- HOLDER side: somebody wants a seat at our table. Answering is one event either way;
+-- ignoring it is also an answer (the request expires server-side after `ttl`).
+RegisterNetEvent("pickle_restaurants:seating:seatRequest", function(d)
+    if type(d) ~= "table" or not d.id then return end
+    local function answer(accept)
+        TriggerServerEvent("pickle_restaurants:seating:answerSeat", { id = d.id, accept = accept })
+    end
+    lib.registerContext({
+        id = "pickle_restaurants_seat_request",
+        title = _L("seat_request_title"),
+        options = {
+            {
+                title = _L("seat_request_accept"),
+                description = _L("seat_request_body", d.name or "?", d.restaurant or "?"),
+                icon = "check",
+                onSelect = function() answer(true) end,
+            },
+            {
+                title = _L("seat_request_decline"),
+                icon = "xmark",
+                onSelect = function() answer(false) end,
+            },
+        },
+    })
+    lib.showContext("pickle_restaurants_seat_request")
+end)
+
+-- ASKER side: the answer. On an accept we sit ourselves down — the point of asking was
+-- to sit, and the seat is checked again by `seating:sit` anyway, so this is a normal sit
+-- and not a second grant path. The prop row comes from the client's synced cache
+-- (modules/main) so we act on the seat the SERVER named, with the one we asked about as
+-- the fallback for a row that hasn't synced.
+RegisterNetEvent("pickle_restaurants:seating:seatAnswer", function(d)
+    local seat = askedSeat
+    askedSeat = nil
+    if type(d) ~= "table" or not d.ok then
+        return ShowNotification((d and d.error) or _L("seat_request_declined"))
+    end
+    if GetClientProp and d.propId then seat = GetClientProp(tonumber(d.propId)) or seat end
+    ShowNotification(_L("seat_request_accepted"))
+    if seat and not IsSeated() then SitOnSeat(seat) end
+end)
+
 -- ─── sitting down ────────────────────────────────────────────────────────────
 
 -- Sit on a placed seat anchor. Reserves it server-side first (so two players can't
@@ -123,6 +245,11 @@ function SitOnSeat(seat)
 
     local res = lib.callback.await("pickle_restaurants:seating:sit", false, { id = seat.id })
     if not (res and res.ok) then
+        -- The seat belongs to somebody's reservation and we're not on it. That's not a
+        -- dead end: the holder can be ASKED (see below), so offer it instead of a bare
+        -- refusal. `reserved` is the server's flag — the interaction's "Reserved" label
+        -- is only ever a hint off the synced map, so this is where we find out.
+        if res and res.reserved then return offerSeatRequest(seat, res.error) end
         return ShowNotification((res and res.error) or _L("seat_taken"))
     end
 
@@ -132,6 +259,9 @@ function SitOnSeat(seat)
     local h     = (seat.heading or 0.0) + 0.0
 
     seatedSeat = seat
+    -- a hold left over from a mouthful that was interrupted by standing up must
+    -- never carry into the next sit, or its pose would never be repaired at all
+    poseHold = false
     EnableInteraction = false -- no other interactions (incl. re-sitting) while seated
 
     -- Stream the clip in BEFORE placing the ped: a dict that arrives late would
@@ -153,7 +283,7 @@ function SitOnSeat(seat)
     playSit(ped, style)
 
     CreateThread(function()
-        -- swallow the sit keypress so its release doesn't instantly stand us again
+        -- swallow the sit keypress so a held E can't do anything else on release
         while IsControlPressed(0, SIT_CONTROL) do Wait(0) end
         local settled, startT, nextRepair = false, GetGameTimer(), 0
         while seatedSeat == seat do
@@ -168,9 +298,39 @@ function SitOnSeat(seat)
             DisableControlAction(0, 22, true)  -- INPUT_JUMP
             DisableControlAction(0, 23, true)  -- INPUT_ENTER (vehicle)
             DisableControlAction(0, 36, true)  -- INPUT_DUCK
-            helpText(_L("seat_stand_prompt"))
 
-            if IsControlJustPressed(0, SIT_CONTROL) or IsEntityDead(ped) then
+            -- WHAT ESC MEANS RIGHT NOW. A panel owns the key first — with the eat-in
+            -- meal laid out, ESC puts the meal away and the NEXT press gets you up —
+            -- so the prompt names whichever of the two the next press does, and this
+            -- loop doesn't read the key at all while a view is up (modules/interactive
+            -- is reading it for that view; both acting on one press would stand the
+            -- diner up out of the meal they were only closing).
+            local inView  = (IsMealViewOpen and IsMealViewOpen()) and true or false
+            local mouthful = ((IsConsuming and IsConsuming()) or (IsMealBusy and IsMealBusy()))
+                and true or false
+            helpText(_L(inView and "seat_meal_prompt" or "seat_stand_prompt"))
+
+            -- NOT MID-MOUTHFUL. Standing up tears the meal view down and puts the
+            -- vessel away underneath a bite that the server is already committing —
+            -- the food would be gone with nothing to show it, and the ped would be
+            -- animating a mouthful in the middle of the room.
+            local stand = false
+            if NUIView == "none" and not mouthful then
+                -- ESC would otherwise reach the frontend as well: disable the pause
+                -- controls and read them back with the Disabled* variants, the same
+                -- pattern (and the same frontend shove) modules/interactive uses.
+                DisableControlAction(0, 199, true) -- INPUT_FRONTEND_PAUSE
+                DisableControlAction(0, 200, true) -- INPUT_FRONTEND_PAUSE_ALTERNATE
+                DisableControlAction(0, 322, true) -- ESC
+                if IsPauseMenuActive() then
+                    SetFrontendActive(false)
+                    ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
+                end
+                for _, key in ipairs(STAND_KEYS) do
+                    if IsDisabledControlJustReleased(0, key) then stand = true break end
+                end
+            end
+            if stand or IsEntityDead(ped) then
                 StandUp()
                 break
             end
@@ -179,7 +339,7 @@ function SitOnSeat(seat)
             -- we're still meant to be seated: re-assert it. Only once settled, and
             -- only every REPAIR_MS — re-tasking on every frame is a sit-down loop,
             -- not a repair.
-            if settled and GetGameTimer() >= nextRepair and not isPlayingSit(ped, style) then
+            if settled and not poseHold and GetGameTimer() >= nextRepair and not isPlayingSit(ped, style) then
                 nextRepair = GetGameTimer() + REPAIR_MS
                 if HasAnimDictLoaded(style.anim.dict) then
                     playSit(ped, style)
