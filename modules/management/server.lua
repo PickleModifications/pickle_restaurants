@@ -253,7 +253,7 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
     return {
         ok        = true,
         dashboard = dash,
-        restaurant = { id = r.id, label = r.label, name = r.name, balance = r.balance, owner = r.owner_identifier,
+        restaurant = { id = r.id, label = r.label, name = r.name, balance = RestaurantBalance(r.id), owner = r.owner_identifier,
                        hasShell     = (r.metadata and r.metadata.shell) ~= nil,
                        hasNpcSpawn  = (r.metadata and r.metadata.npc_spawn) ~= nil,
                        brand_image  = r.metadata and r.metadata.brand_image or nil,
@@ -466,7 +466,7 @@ lib.callback.register("pickle_restaurants:management:runPayroll", function(src, 
     local n = #(recipients or {})
     if not paid or paid <= 0 or n == 0 then return { ok = false, error = _L("mgmt_payroll_nobody") } end
     ShowNotification(src, _L("mgmt_payroll_paid", paid, n))
-    return { ok = true, paid = paid, recipients = n, balance = GetRestaurant(id).balance }
+    return { ok = true, paid = paid, recipients = n, balance = RestaurantBalance(id) }
 end)
 
 -- ─── price list (POS menu) ───────────────────────────────────────────────────
@@ -523,15 +523,21 @@ lib.callback.register("pickle_restaurants:management:buyStock", function(src, d)
     local unit = math.max(0, math.floor(tonumber(costs[key]) or 0))
     local total = unit * qty
     local r = GetRestaurant(id); if not r then return { ok = false } end
-    if (r.balance or 0) < total then return { ok = false, error = _L("mgmt_insufficient_funds") } end
+    if RestaurantBalance(id) < total then return { ok = false, error = _L("mgmt_insufficient_funds") } end
     local label = StockKeyLabel(key)
     if total > 0 then
-        AdjustBalance(id, -total)
+        -- The balance is a society account the whole server shares, so it can move
+        -- between the check above and here. STOCK IS ONLY GRANTED IF THE MONEY LEFT:
+        -- trusting the pre-read would hand out free ingredients whenever the debit
+        -- failed (funds gone, account missing, banking resource down).
+        if not AdjustBalance(id, -total) then
+            return { ok = false, error = _L("mgmt_insufficient_funds") }
+        end
         AddLedger(id, "supply", -total, _L("ledger_restock", qty, label), GetIdentifier(src))
     end
     AddStock(id, key, qty)
     ShowNotification(src, _L("mgmt_stock_bought", qty, label))
-    return { ok = true, balance = GetRestaurant(id).balance, stock = GetStockCount(id, key) }
+    return { ok = true, balance = RestaurantBalance(id), stock = GetStockCount(id, key) }
 end)
 
 -- Move ingredients between a manager's own pockets and the shared pool — the
@@ -594,10 +600,12 @@ lib.callback.register("pickle_restaurants:management:deposit", function(src, d)
     local amount = math.floor(tonumber(d.amount) or 0)
     if amount <= 0 then return { ok = false } end
     if GetMoney(src, "money") < amount then return { ok = false, error = _L("not_enough_cash") } end
+    -- CREDIT THE ACCOUNT FIRST. Taking the cash and then failing to bank it would
+    -- destroy a player's money; this way a failure costs them nothing.
+    if not AdjustBalance(id, amount) then return { ok = false, error = _L("mgmt_no_account") } end
     RemoveMoney(src, amount, "money")
-    AdjustBalance(id, amount)
     AddLedger(id, "deposit", amount, _L("ledger_deposit"), GetIdentifier(src))
-    return { ok = true, balance = GetRestaurant(id).balance }
+    return { ok = true, balance = RestaurantBalance(id) }
 end)
 
 lib.callback.register("pickle_restaurants:management:withdraw", function(src, d)
@@ -605,11 +613,13 @@ lib.callback.register("pickle_restaurants:management:withdraw", function(src, d)
     if not HasPerm(id, src, "manage_balance") then return { ok = false, error = _L("no_permission") } end
     local amount = math.floor(tonumber(d.amount) or 0)
     if amount <= 0 then return { ok = false } end
-    if GetRestaurant(id).balance < amount then return { ok = false, error = _L("mgmt_insufficient_funds") } end
-    AdjustBalance(id, -amount)
+    if RestaurantBalance(id) < amount then return { ok = false, error = _L("mgmt_insufficient_funds") } end
+    -- The DEBIT is the authority (see buyStock): pay the player only once the business
+    -- account has actually given the money up, or a failed debit would mint cash.
+    if not AdjustBalance(id, -amount) then return { ok = false, error = _L("mgmt_insufficient_funds") } end
     AddMoney(src, amount, "money")
     AddLedger(id, "withdraw", -amount, _L("ledger_withdrawal"), GetIdentifier(src))
-    return { ok = true, balance = GetRestaurant(id).balance }
+    return { ok = true, balance = RestaurantBalance(id) }
 end)
 
 -- ─── branding ────────────────────────────────────────────────────────────────

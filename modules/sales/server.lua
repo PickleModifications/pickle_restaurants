@@ -1045,7 +1045,7 @@ local function buildRegister(src, id)
         ok           = true,
         restaurantId = id,
         label        = r.label,
-        balance      = r.balance,
+        balance      = RestaurantBalance(id),
         -- the cashier's own cut, read off their RANK (the POS prints it as a subtitle)
         commission   = commissionRate(id, src),
         catalog      = (BuildPricedCatalog(id, true)),

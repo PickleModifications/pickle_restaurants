@@ -765,6 +765,20 @@ local function CreateTables()
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
 
+    -- THE STANDALONE SOCIETY STORE. Used ONLY on a server with no banking resource at
+    -- all (bridge/society falls back to it) — everywhere else a restaurant's money is the
+    -- job's real society account and this table stays empty. Keyed by JOB, not by
+    -- restaurant: two restaurants on one job share their books, exactly as a society
+    -- account does everywhere else.
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `pickle_restaurant_society` (
+            `job`        VARCHAR(60)  NOT NULL,
+            `amount`     BIGINT       NOT NULL DEFAULT 0,
+            `updated_at` TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (`job`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
+
     -- PAYSLIP HISTORY. Every tip payout and salary run writes one row per recipient —
     -- the audit trail behind the Payroll tab. Money that left the restaurant has to be
     -- answerable for per person, which a single ledger line ("payroll -$1,240") isn't.
@@ -822,7 +836,7 @@ local REQUIRED_TABLES = {
     "pickle_restaurant_menu", "pickle_restaurant_stock", "pickle_restaurant_cooked_items",
     "pickle_restaurant_ledger", "pickle_restaurant_settings", "pickle_restaurant_orders",
     "pickle_restaurant_pending_refunds", "pickle_restaurant_job_players",
-    "pickle_restaurant_tips", "pickle_restaurant_payroll",
+    "pickle_restaurant_tips", "pickle_restaurant_payroll", "pickle_restaurant_society",
     "pickle_restaurant_reservation_seats", "pickle_restaurant_reservation_guests",
 }
 
@@ -2505,6 +2519,13 @@ function SetRestaurantJob(rid, jobName)
             end
         end
         r.metadata.ranks = stored
+        -- The job's account is where this restaurant's money now lives, so make sure it
+        -- EXISTS the moment the job is assigned. A provider that creates on first write
+        -- answers true and does nothing; one that doesn't (Renewed-Banking) gets its
+        -- account made here, before the first sale needs somewhere to land.
+        if EnsureSocietyAccount then
+            EnsureSocietyAccount(jobName, (GetJobLabel and GetJobLabel(jobName)) or r.label)
+        end
     end
     MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), rid })
     SyncToClient(-1)
@@ -2596,11 +2617,73 @@ AddEventHandler("pickle_restaurants:jobChanged", function(src)
 end)
 
 -- ─── balance / ledger / stock ────────────────────────────────────────────────
+-- THE BALANCE IS THE JOB'S SOCIETY ACCOUNT. We host no money: `bridge/society` resolves
+-- whichever banking resource the server runs and every dollar in and out of a restaurant
+-- moves THERE, so the boss menu, a job's own banking UI and this resource can't disagree
+-- about what a business is worth. The `pickle_restaurants.balance` column is dead —
+-- declared (the schema is declared, never migrated) and never read or written again.
+--
+-- No job assigned ⇒ no account ⇒ no money movement. That is the same rule employment
+-- follows, and it is why a restaurant REQUIRES a job.
 
+-- The standalone store, used ONLY when no banking resource exists (bridge/society's
+-- FALLBACK provider calls these). Rows are per JOB, not per restaurant: two restaurants
+-- sharing a job share their books, which is what a society account means everywhere else.
+function SocietyLocalBalance(job)
+    if not job or job == "" then return 0 end
+    local row = MySQL.single.await("SELECT amount FROM pickle_restaurant_society WHERE job = ?", { job })
+    return math.floor(tonumber(row and row.amount) or 0)
+end
+
+function SocietyLocalAdjust(job, delta)
+    if not job or job == "" then return false end
+    delta = RoundMoney(delta)
+    if delta == 0 then return true end
+    -- ONE statement, so two concurrent sales can't both read-then-write the same total.
+    -- The WHERE clause is what refuses an overdraw: no row is updated when the funds
+    -- aren't there, and `affectedRows` reports it.
+    if delta < 0 then
+        local res = MySQL.update.await(
+            "UPDATE pickle_restaurant_society SET amount = amount + ? WHERE job = ? AND amount >= ?",
+            { delta, job, -delta })
+        return (tonumber(res) or 0) > 0
+    end
+    MySQL.query.await([[
+        INSERT INTO pickle_restaurant_society (job, amount) VALUES (?, ?)
+        ON DUPLICATE KEY UPDATE amount = amount + VALUES(amount)
+    ]], { job, delta })
+    return true
+end
+
+-- What a restaurant is worth right now. Read it; never cache it — the account is shared
+-- with the rest of the server and can move without us.
+function RestaurantBalance(restaurantId)
+    local job = RestaurantJob(restaurantId)
+    if not job then return 0 end
+    return GetSocietyBalance and GetSocietyBalance(job) or 0
+end
+
+-- Move money in (delta > 0) or out (delta < 0). Returns TRUE only if the account
+-- actually moved: a withdrawal that would overdraw is refused, and callers must treat
+-- false as "the money did not move" rather than assuming it did.
 function AdjustBalance(restaurantId, delta)
-    local r = GetRestaurant(restaurantId); if not r then return end
-    r.balance = (r.balance or 0) + RoundMoney(delta)
-    MySQL.update("UPDATE pickle_restaurants SET balance = ? WHERE id = ?", { r.balance, restaurantId })
+    local job = RestaurantJob(restaurantId)
+    delta = RoundMoney(delta)
+    if delta == 0 then return true end
+    if not job then
+        -- Loud, not silent: an unassigned restaurant taking a customer's cash would drop
+        -- it on the floor, and that is a money bug someone has to be able to find.
+        print(("[pickle_restaurants] ^1restaurant %s has no job, so it has no account: %s not moved^7")
+            :format(tostring(restaurantId), tostring(delta)))
+        return false
+    end
+    local ok
+    if delta > 0 then ok = AddSocietyMoney(job, delta) else ok = RemoveSocietyMoney(job, -delta) end
+    if not ok and delta > 0 then
+        print(("[pickle_restaurants] ^1society credit FAILED (%s -> %s, %s). The ledger row still "
+            .. "records it — reconcile by hand.^7"):format(tostring(restaurantId), job, tostring(delta)))
+    end
+    return ok and true or false
 end
 
 function AddLedger(restaurantId, ltype, amount, description, identifier)
@@ -2728,9 +2811,12 @@ function RunPayroll(rid)
     if total <= 0 then return 0, {}, "payroll_none" end
     -- ALL OR NOTHING. Paying the first three of five staff and leaving the rest owed
     -- is the failure mode a boss can't unpick, so a short balance refuses the run.
-    if (tonumber(r.balance) or 0) < total then return nil, nil, "payroll_insufficient" end
-
-    AdjustBalance(rid, -total)
+    -- The DEBIT is the check that counts: the balance is a society account shared with
+    -- the rest of the server, so it can move between a read and a write. Take the whole
+    -- wage bill out FIRST and only pay anyone if that succeeded — the pre-read is just a
+    -- cheap early exit.
+    if RestaurantBalance(rid) < total then return nil, nil, "payroll_insufficient" end
+    if not AdjustBalance(rid, -total) then return nil, nil, "payroll_insufficient" end
     local recipients = {}
     for _, m in ipairs(due) do
         AddMoney(m.source, m.amount, "money")
@@ -3933,7 +4019,9 @@ CreateThread(function()
         LoadPendingRefunds() -- refunds owed to customers who were offline at cancel time
         LoadCookedItems()
         LoadTips()             -- the unpaid tip pool per restaurant
-        LoadReservationHolds() -- which seats each booking holds, and who it lets sit
+        -- NOT the reservation holds: modules/phone owns the booking cache and loads each
+        -- row's seats and guests onto it in its own LoadReservations (it also creates
+        -- those tables, after core has booted — a load from here would race that).
         RestaurantsReady = true
         debugPrint(("Booted: %d restaurants, %d props, %d recipes."):format(
             #BuildSyncPayload().restaurants, #BuildSyncPayload().props, #RecipeCache))

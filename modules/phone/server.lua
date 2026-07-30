@@ -1337,7 +1337,7 @@ lib.callback.register("pickle_restaurants:phone:analytics", function(src, d)
 
     return {
         ok = true,
-        balance = r and r.balance or 0,
+        balance = r and RestaurantBalance(r.id) or 0,
         revenue = revenue, payroll = payroll, refunds = refunds,
         tickets = ticketCount,
         avgTicket = ticketCount > 0 and math.floor(revenue / ticketCount) or 0,

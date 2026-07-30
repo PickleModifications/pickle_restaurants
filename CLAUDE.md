@@ -502,6 +502,38 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
 
 - All money crossing a boundary goes through `RoundMoney()` (whole dollars) so commissions
   never leave fractional cents.
+- **THE BALANCE IS THE JOB'S SOCIETY ACCOUNT. We host no money.** There is no
+  `balance` of ours to drift from the boss menu the rest of the server already uses:
+  buying stock, banking a sale and paying wages all move the same dollars a job's own
+  banking UI shows. `bridge/society/server.lua` is the ONE definition of that API
+  (`SocietyAvailable`, `SocietyProvider`, `GetSocietyBalance`, `AddSocietyMoney`,
+  `RemoveSocietyMoney`, `EnsureSocietyAccount`) and it is **probed BY PROVIDER, not by
+  framework** — Renewed-Banking `provide`s both `qb-management` AND `esx_society`, so
+  "ESX ⇒ addon accounts" is simply wrong on a server running it. Preference order:
+  Renewed-Banking → qb-management → qb-banking → esx_addonaccount → our own table. The
+  framework bridges deliberately define NONE of it (two definitions of
+  `AddSocietyMoney` would be a load-order coin toss), and the probe is re-run on any
+  resource start/stop so a bank that boots after us is picked up.
+  `pickle_restaurants.balance` is DEAD: declared, never read, never written.
+- **`RestaurantBalance(rid)` reads; `AdjustBalance(rid, delta)` moves and RETURNS
+  WHETHER IT MOVED.** The account is shared with the rest of the server, so it can
+  change between a read and a write — which makes the DEBIT the authority, never the
+  pre-read. Every spend path now gates on it: stock is only granted if the money left,
+  a withdrawal only pays out if the account gave it up, a deposit banks the cash BEFORE
+  taking it off the player (a failure must cost them nothing), and a payroll run debits
+  the whole wage bill first and pays nobody if that fails. No job ⇒ no account ⇒ no
+  movement, logged loudly rather than dropped on the floor.
+  `starting_balance` is applied when a job is ASSIGNED (an account only exists then) and
+  only into an empty account, so re-assigning a job can't top a working business back up.
+  A society account can't go negative, so a refund the business can't cover pays the
+  customer anyway and leaves the ledger to show it — the customer is owed either way.
+- **We are the bank only when there is no bank.** With no banking resource at all, the
+  fallback provider uses `pickle_restaurant_society` (keyed by JOB — two restaurants on
+  one job share their books, as a society account does everywhere else), and its
+  withdrawal is ONE conditional UPDATE (`WHERE amount >= ?`) so two concurrent sales
+  can't read-then-write the same total or overdraw it. Same reasoning as the standalone
+  job store: the feature works frameworkless without pretending to be a bank on a server
+  that has one.
 - **A TIP IS STAFF MONEY, NOT HOUSE MONEY.** Tips used to be added to the restaurant
   balance, which quietly made every gratuity the owner's. They now land in
   `pickle_restaurant_tips` as unpaid rows and never touch the balance in either direction:

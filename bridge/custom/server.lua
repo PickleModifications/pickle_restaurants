@@ -285,7 +285,9 @@ function RemoveMoney(source, count, currency)
     return true
 end
 
-function AddSocietyMoney(_, _) end -- restaurant balance is tracked in our own tables
+-- No society API here either (bridge/society/server.lua owns it). On a frameworkless
+-- server it falls back to one small table of ours — we are the bank only when there is
+-- no bank.
 
 -- Inventory ───────────────────────────────────────────────────────────────
 CreateThread(function()

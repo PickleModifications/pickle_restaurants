@@ -324,11 +324,10 @@ function IsPlayerAdmin(source)
     return false
 end
 
-function AddSocietyMoney(name, amount)
-    TriggerEvent('esx_addonaccount:getSharedAccount', "society_"..name, function(account)
-        account.addMoney(amount)
-    end)
-end
+-- The society/business account API lives in bridge/society/server.lua, NOT here: money
+-- providers are not 1:1 with frameworks (Renewed-Banking provides both `esx_society` and
+-- `qb-management`), so it probes for the PROVIDER and every framework shares the answer.
+-- Two definitions of `AddSocietyMoney` would just be a load-order coin toss.
 
 function AddOwnedVehicle(source, model)
     local xPlayer = ESX.GetPlayerFromId(source)

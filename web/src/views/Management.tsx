@@ -200,14 +200,18 @@ function Dashboard({ id, dash, perms, balance }: any) {
       {/* the shift clock — the one thing on this tab you ACT on */}
       <Card>
         <CardContent className="flex flex-wrap items-center gap-4 p-4">
-          <div className="min-w-[9rem]">
-            <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-              {d?.clockedIn ? _L("mgmt.dash_on_clock") : _L("mgmt.dash_off_duty")}
+          {/* ON THE CLOCK ONLY. Off duty this read "Off duty / —", which is a big empty
+              readout saying nothing the Clock In button doesn't already say. */}
+          {d?.clockedIn && (
+            <div className="min-w-[9rem]">
+              <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                {_L("mgmt.dash_on_clock")}
+              </div>
+              <div className="font-mono text-3xl font-extrabold tabular-nums leading-tight">
+                {fmtClock(elapsed)}
+              </div>
             </div>
-            <div className="font-mono text-3xl font-extrabold tabular-nums leading-tight">
-              {d?.clockedIn ? fmtClock(elapsed) : "—"}
-            </div>
-          </div>
+          )}
           <div className="flex gap-4">
             <div>
               <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{_L("mgmt.dash_tips")}</div>
@@ -619,11 +623,29 @@ const KIND_LABEL: Record<string, string> = {
 // 0 or a disabled toggle means the item is NOT orderable at the register. Edits
 // auto-save (debounced per row) — there are no Save buttons anywhere.
 function Menu({ id, priceList, stale }: { id: number; priceList: any[]; stale: any[] }) {
+  // Filed under GROUP headings, the same way Supplies files the larder and the admin
+  // Menu tab files the catalogue: a price list is read by section ("what does the pizza
+  // line cost?"), not as one alphabetical wall. Every catalog entry already carries its
+  // access group, so this is purely presentational. Ungrouped sorts last.
+  const groups = useMemo(() => {
+    const by: Record<string, any[]> = {};
+    priceList.forEach((e) => { (by[e.group || ""] ||= []).push(e); });
+    return Object.keys(by)
+      .sort((a, b) => (a === "" ? 1 : b === "" ? -1 : a.localeCompare(b)))
+      .map((name) => ({ name, rows: by[name] }));
+  }, [priceList]);
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <p className="text-[11px] text-muted-foreground">{_L("mgmt.price_list_hint")}</p>
       {priceList.length === 0 && <div className="py-4 text-center text-sm text-muted-foreground">{_L("mgmt.no_sellables")}</div>}
-      {priceList.map((e: any) => <PriceRow key={e.key} id={id} entry={e} />)}
+      {groups.map((grp) => (
+        <div key={grp.name || "__ungrouped__"} className="space-y-2">
+          <div className="flex items-center gap-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            <Tags className="h-3.5 w-3.5" /> {grp.name || _L("menu.ungrouped")}
+          </div>
+          {grp.rows.map((e: any) => <PriceRow key={e.key} id={id} entry={e} />)}
+        </div>
+      ))}
 
       {stale.length > 0 && (
         <div className="mt-4 rounded-lg border border-amber-500/40 p-3">

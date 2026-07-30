@@ -104,6 +104,31 @@ RegisterNUICallback("phone:clockOut", function(d, cb)
     if res and res.ok then ClockedRid = nil end
     cb(res or {})
 end)
+
+-- PUNCH THE CLOCK WITHOUT A PHONE OR A PANEL. Every employee has to be able to start a
+-- shift, but the register's own options are gated (the POS wants `sell`, the boss panel
+-- wants a management perm) — so a cook with neither could only clock in through the phone
+-- app, if their phone even hosts it. This is the register's third option
+-- (modules/main/client.lua), open to anyone the server recognises as staff.
+--
+-- ONE toggle rather than two options, because the interaction's labels are built once
+-- when the prop spawns and would go stale the moment someone punched in: read the live
+-- status, do the other thing, and say which happened. The server is the authority on
+-- whether this player works here at all.
+function ToggleShiftClock(rid)
+    rid = tonumber(rid); if not rid then return end
+    local st = lib.callback.await("pickle_restaurants:phone:shiftStatus", false, { id = rid })
+    if not (st and st.ok) then
+        return ShowNotification((st and st.error) or _L("phone_not_employed"))
+    end
+    local ev = st.clockedIn and "pickle_restaurants:phone:clockOut" or "pickle_restaurants:phone:clockIn"
+    local res = lib.callback.await(ev, false, { id = rid })
+    if not (res and res.ok) then
+        return ShowNotification((res and res.error) or _L("phone_not_employed"))
+    end
+    ClockedRid = st.clockedIn and nil or rid
+    ShowNotification(_L(st.clockedIn and "shift_clocked_out" or "shift_clocked_in"))
+end
 RegisterNUICallback("phone:startDelivery", relay("pickle_restaurants:phone:startDelivery"))
 RegisterNUICallback("phone:cancelDelivery", relay("pickle_restaurants:phone:cancelDelivery"))
 

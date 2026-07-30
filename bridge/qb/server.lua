@@ -366,13 +366,9 @@ function IsPlayerAdmin(source)
     return false
 end
 
-function AddSocietyMoney(name, amount)
-    if Config.FrameworkSettings.society == "qb-management" then
-        exports["qb-management"]:AddMoney(name, amount)
-    else
-        exports["qb-banking"]:AddMoney(name, amount)
-    end
-end
+-- The society/business account API lives in bridge/society/server.lua (it probes for the
+-- PROVIDER — qb-management, qb-banking, Renewed-Banking — rather than assuming one per
+-- framework). `Config.FrameworkSettings.society` is still read, there.
 
 -- Inventory Fallback
 

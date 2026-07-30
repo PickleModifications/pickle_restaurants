@@ -64,7 +64,7 @@ local function buildAdminData()
             name         = r.name,
             label        = r.label,
             owner        = r.owner_identifier,
-            balance      = r.balance,
+            balance      = RestaurantBalance(r.id),
             hasCounter   = r.counter ~= nil,
             hasShell     = (r.metadata and r.metadata.shell) ~= nil,
             hasNpcSpawn  = (r.metadata and r.metadata.npc_spawn) ~= nil,
@@ -137,9 +137,13 @@ lib.callback.register("pickle_restaurants:admin:create", function(src, d)
     -- be seeded with a COPY of the setting here, and since a per-restaurant override
     -- always wins, that made Settings → Map Blip permanently inert — saved, synced
     -- and shadowed on every restaurant that existed.
+    -- NO BALANCE EITHER: a restaurant's money is its JOB's society account now (see
+    -- "The balance is the job's society account"), and it has no job yet — assigning one
+    -- is the next thing an admin does. `starting_balance` is therefore applied THEN, not
+    -- here, and the dead column is left at its default.
     local id = MySQL.insert.await(
-        "INSERT INTO pickle_restaurants (name, label, balance) VALUES (?, ?, ?)",
-        { d.name, d.label or d.name, GetSetting("starting_balance", 0) })
+        "INSERT INTO pickle_restaurants (name, label) VALUES (?, ?)",
+        { d.name, d.label or d.name })
     if not id then return { ok = false } end
     reloadRestaurant(id)
     SyncToClient(-1)
@@ -241,7 +245,18 @@ lib.callback.register("pickle_restaurants:admin:setJob", function(src, d)
         end
         if not known then return { ok = false, error = _L("admin_unknown_job") } end
     end
-    SetRestaurantJob(id, job) -- write-through + seeds ranks + syncs
+    SetRestaurantJob(id, job) -- write-through + seeds ranks + ensures the account + syncs
+    -- SEED FLOAT. `starting_balance` used to be written into our own `balance` column at
+    -- creation; the money is the job's society account now, and a brand-new restaurant
+    -- only gets an account when it gets a job — so this is where the float lands, and
+    -- only when the account is genuinely empty (re-assigning a job must never top a
+    -- working business back up).
+    local seed = math.floor(tonumber(GetSetting("starting_balance", 0)) or 0)
+    if job and seed > 0 and RestaurantBalance(id) <= 0 then
+        if AdjustBalance(id, seed) then
+            AddLedger(id, "deposit", seed, _L("ledger_starting_float"), GetIdentifier(src))
+        end
+    end
     ShowNotification(src, job and _L("admin_job_set", GetJobLabel(job)) or _L("admin_job_cleared"))
     return { ok = true, job = job, jobLabel = job and GetJobLabel(job) or nil }
 end)

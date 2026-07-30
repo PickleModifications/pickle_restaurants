@@ -259,12 +259,18 @@ local function SpawnProp(prop)
             options        = {
                 { label = _L("main_staff_register"), icon = "fa-solid fa-cash-register" },
                 { label = _L("main_management"),     icon = "fa-solid fa-users-gear" },
+                -- EVERY employee needs this one, which is why it is here and not behind
+                -- the POS: the register wants `sell` and the panel wants a management
+                -- perm, so a cook with neither had no way to start a shift but the phone.
+                { label = _L("main_clock_toggle"),   icon = "fa-solid fa-user-clock" },
             },
         }, function(selection)
             if selection == 1 then
                 if OpenRegisterScreen then OpenRegisterScreen(prop, ent) end
             elseif selection == 2 then
                 OpenManagement(prop.restaurant_id)
+            elseif selection == 3 then
+                if ToggleShiftClock then ToggleShiftClock(prop.restaurant_id) end
             end
         end)
         return
@@ -287,12 +293,15 @@ local function SpawnProp(prop)
             options        = {
                 { label = _L("main_staff_register"), icon = "fa-solid fa-cash-register" },
                 { label = _L("main_management"),     icon = "fa-solid fa-users-gear" },
+                { label = _L("main_clock_toggle"),   icon = "fa-solid fa-user-clock" },
             },
         }, function(selection)
             if selection == 1 then
                 OpenRegister(prop.restaurant_id)
             elseif selection == 2 then
                 OpenManagement(prop.restaurant_id)
+            elseif selection == 3 then
+                if ToggleShiftClock then ToggleShiftClock(prop.restaurant_id) end
             end
         end)
         return

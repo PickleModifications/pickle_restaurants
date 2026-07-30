@@ -31,6 +31,10 @@ Language["en"] = {
     ["seat_request_decline"] = "Decline",
     ["seat_request_notify_title"] = "Table request",
     ["seat_request_notify_body"] = "%s wants to sit at your table at %s.",
+    -- The register's third target option: any employee can punch the clock there.
+    ["main_clock_toggle"] = "Clock In / Out",
+    ["shift_clocked_in"] = "You're on the clock.",
+    ["shift_clocked_out"] = "You've clocked out.",
     ["main_sit_reserved"] = "Reserved seat",
     -- ── employment through the framework JOB, and pay by RANK ────────────────
     -- A grade the framework names nothing for (or a rank authored for a grade since
@@ -47,6 +51,9 @@ Language["en"] = {
     ["mgmt_hired"] = "%s has been hired.",
     ["mgmt_fired"] = "%s has been dismissed.",
     ["mgmt_fired_from"] = "You no longer work at %s.",
+    -- The business account (the job's society/banking account — bridge/society)
+    ["mgmt_no_account"] = "This restaurant has no business account. An admin has to assign it a job first.",
+    ["ledger_starting_float"] = "Starting float",
     ["mgmt_rank_saved"] = "Rank saved.",
     -- Tips are staff money the house only holds; wages come out of the balance.
     ["mgmt_no_tips"] = "There are no tips to pay out.",

@@ -81,7 +81,10 @@
       "Bash(sed 's/`[A-Za-z_0-9]*`/0/g' modules/cooking/client.lua)",
       "Bash(luac5.4 -p /tmp/ck.lua)",
       "Bash(sed -i 's/^local function hoverHalfHeight\\(ent\\)/function hoverHalfHeight\\(ent\\)/' modules/cooking/client.lua)",
-      "Bash(luac5.4 -p modules/doorstep/client.lua modules/doorstep/server.lua)"
+      "Bash(luac5.4 -p modules/doorstep/client.lua modules/doorstep/server.lua)",
+      "Bash(luac5.4 -p /tmp/c.lua)",
+      "Bash(luac5.4 -p locales/translations/en.lua modules/admin/server.lua)",
+      "Bash(luac5.4 -p locales/translations/en.lua modules/main/client.lua modules/phone/client.lua)"
     ]
   }
 }
