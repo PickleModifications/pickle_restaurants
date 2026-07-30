@@ -1062,12 +1062,42 @@ lib.callback.register("pickle_restaurants:sales:getRegister", function(src, d)
     return buildRegister(src, id)
 end)
 
+-- ─── the public projection ───────────────────────────────────────────────────
+-- Strip an annotated list to what a public board shows. Same SHAPE, not a different one:
+-- the screens client projects it again for its own page, and the idle register board
+-- renders the ticket queue from these fields, so re-shaping here would break both.
+local function publicOrders(list)
+    local out = {}
+    for _, o in ipairs(list or {}) do
+        out[#out + 1] = {
+            orderId = o.orderId, ticket = o.ticket, lines = o.lines,
+            status = o.status, npc = o.npc, orderType = o.orderType,
+            -- `total` STAYS. It is the priced sum of menu lines, and the menu with those
+            -- prices is on the board next to this one — it discloses nothing the room
+            -- can't already read. What's dropped is who ordered (`customer`), where they
+            -- live (`address`) and who's driving it (`driver_*`).
+            total = o.total,
+            -- an NPC's patience radial is a display element, and an NPC has no privacy
+            expiresIn = o.expiresIn, patience = o.patience,
+            -- `ready` is the whole point of an orders board; the rest of the fulfilment
+            -- plan (what's missing, which vessels could cover it) is kitchen business
+            fulfill = { ready = (o.fulfill and o.fulfill.ready) == true },
+        }
+    end
+    return out
+end
+
 -- PUBLIC idle payload for the always-on register board (modules/register). The counter
 -- screen persistently shows the POS UI even when nobody's ringing anything up, so it
 -- needs a seed anyone can fetch — the SAME display-safe data the public menu + orders
 -- boards already show (label/theme/catalog + the open-ticket queue). It carries
 -- NO balance/commission and NO nearby-players list; those live only in the perm-gated
 -- buildRegister a cashier gets on interact.
+-- The ticket list goes through publicOrders for the same reason: ANYONE may call this,
+-- so it must not be a way to read customer names, delivery addresses, driver identifiers
+-- and order totals for a restaurant you have nothing to do with. It previously returned
+-- the full staff-grade annotation, which made "display-safe" true of the screen but not
+-- of the payload.
 lib.callback.register("pickle_restaurants:register:getPublic", function(_, d)
     local id = tonumber(d and d.id)
     local r = id and GetRestaurant(id)
@@ -1078,7 +1108,7 @@ lib.callback.register("pickle_restaurants:register:getPublic", function(_, d)
         label        = r.label,
         theme        = r.metadata and r.metadata.theme or nil,
         catalog      = BuildPricedCatalog(id, true),
-        tickets      = AnnotateOrders(id, GetOpenOrders(id)),
+        tickets      = publicOrders(AnnotateOrders(id, GetOpenOrders(id))),
     }
 end)
 
@@ -1096,16 +1126,28 @@ lib.callback.register("pickle_restaurants:sales:getTickets", function(src, d)
     return { tickets = AnnotateOrders(id, GetOpenOrders(id)) }
 end)
 
--- Seed for the customer-facing ORDERS SCREEN (modules/screens). The screen stays
--- live off the SyncOrders broadcast (sent to everyone), but a player who arrives
--- between changes needs the current list once — this is that one-shot. Public on
--- purpose: an orders board is a "now preparing" display anyone standing in the
--- restaurant can read (the client shows only ticket #, items and ready-state — no
--- customer identity), so it is NOT perm-gated like the staff widget above.
+-- Seed for the customer-facing ORDERS SCREEN (modules/screens). The screen stays live off
+-- the SyncOrders push, but a player who arrives between changes needs the current list
+-- once — this is that one-shot. Public on purpose: an orders board is a "now preparing"
+-- display anyone standing in the restaurant can read, so it is NOT perm-gated like the
+-- staff widget above. Which is exactly why it returns the PROJECTED list: the claim that
+-- it carries no customer identity has to be true of the payload, not just of the page
+-- drawing it. It used to hand the full annotation to any caller.
+-- Seed for the customer-facing MENU SCREEN (modules/screens). Public for the same reason
+-- the orders board is: a menu board is a priced menu on a wall, which is the single most
+-- public thing a restaurant owns. This exists because the menu was removed from the world
+-- sync payload — it was shipping every restaurant's whole catalog to every player when only
+-- a board ever read it (see BuildClientRestaurant). Fetched by the board that paints it.
+lib.callback.register("pickle_restaurants:screens:getMenu", function(_, d)
+    local id = tonumber(d and d.id)
+    if not id or not GetRestaurant(id) then return { menu = {} } end
+    return { menu = BuildMenuBoard(id) }
+end)
+
 lib.callback.register("pickle_restaurants:screens:getOrders", function(src, d)
     local id = tonumber(d.id)
     if not id or not GetRestaurant(id) then return { orders = {} } end
-    return { orders = AnnotateOrders(id, GetOpenOrders(id)) }
+    return { orders = publicOrders(AnnotateOrders(id, GetOpenOrders(id))) }
 end)
 
 -- Push the fresh open-ticket list to every client. Each client applies it if it has
@@ -1118,8 +1160,81 @@ end)
 -- previous bug was a SECOND update path: the acting cashier ALSO refreshed straight
 -- from its callback reply, which could race the broadcast and revive a cancelled
 -- ticket. The callbacks now return ok/error ONLY and never touch the list.)
+-- ONE TICKET LIST, THREE AUDIENCES. This used to go to `-1`: the full staff-grade list,
+-- to every player on the server, up to once per 750ms per busy restaurant. Two problems,
+-- and the second is the worse one.
+--
+-- (1) Cost. It is the largest payload the resource sends repeatedly — every open ticket
+--     with its lines, mods, totals and fulfilment plan — multiplied by the whole player
+--     count, forever, while anyone is cooking.
+-- (2) DISCLOSURE. It carried `customer` (character name), `address` (a player's delivery
+--     address), `driver_identifier` (a raw license/citizenid) and per-order spend to
+--     everybody. The projection that hides those was applied CLIENT-side
+--     (modules/screens' projectOrders), which protects nothing: the data was already on
+--     every machine. The boundary the callbacks above draw so carefully — getTickets is
+--     perm-gated, screens:getOrders is public "because it carries no customer identity" —
+--     was simply not drawn on the broadcast.
+--
+-- So the audience is resolved here, and each member gets the least-privileged list that
+-- still works for them. The sets are built disjoint, most-privileged first, so nobody
+-- receives two lists and no client has to reconcile them:
+--   STAFF    — full list. Anyone with cook/sell who is AT the restaurant, plus whoever
+--              is clocked in (the phone KDS is the one staff surface that isn't).
+--   PARTY    — a customer or claimed driver gets ONLY the tickets that are theirs.
+--   BYSTANDER— everyone else near the restaurant: the same list with every private field
+--              removed. That is what the menu/orders boards and the idle register screen
+--              paint, and it is all they ever displayed.
+-- Anyone further away than a board is readable from gets nothing, because there is
+-- nothing they could be looking at. Arriving later is covered by the boards' existing
+-- one-shot seeds (screens:getOrders / register:getPublic).
+
+-- The tickets belonging to one party member — the orders they placed, or the delivery
+-- they claimed. A customer tracking their order in the phone app needs their own ticket
+-- and has no business receiving the restaurant's queue. `own` is the orderId set from
+-- OrderPartyIdentifiers; the customer identifier itself is never put on a client.
+local function ownOrders(list, own)
+    local out = {}
+    for _, o in ipairs(list or {}) do
+        if own[o.orderId] then out[#out + 1] = o end
+    end
+    return out
+end
+
 function SyncOrders(id)
-    TriggerClientEvent("pickle_restaurants:sales:orders", -1, id, AnnotateOrders(id, GetOpenOrders(id)))
+    local full = AnnotateOrders(id, GetOpenOrders(id))
+    local sent = {} -- [src] = true, so the disjoint rule is enforced not just intended
+
+    -- STAFF: at the restaurant with perms, or clocked in from anywhere
+    local candidates = PlayersNearRestaurant(id, ScopeRadius.BOARD)
+    local staff = {}
+    for _, src in ipairs(candidates) do
+        if HasPerm(id, src, "cook") or HasPerm(id, src, "sell") then
+            staff[#staff + 1] = src; sent[src] = true
+        end
+    end
+    for _, src in ipairs(ClockedInSources and ClockedInSources(id) or {}) do
+        if not sent[src] then staff[#staff + 1] = src; sent[src] = true end
+    end
+    SendTo(staff, "pickle_restaurants:sales:orders", id, full)
+
+    -- PARTY: each customer/driver with a live ticket, their own only. Walks the tickets
+    -- (a handful) rather than the player list.
+    for ident, own in pairs(OrderPartyIdentifiers(id)) do
+        local src = ResolveSourceForIdentifier and ResolveSourceForIdentifier(ident) or nil
+        if src and not sent[src] then
+            sent[src] = true
+            TriggerClientEvent("pickle_restaurants:sales:orders", src, id, ownOrders(full, own))
+        end
+    end
+
+    -- BYSTANDERS: the boards and the idle register screen
+    local pub = nil
+    for _, src in ipairs(candidates) do
+        if not sent[src] then
+            pub = pub or publicOrders(full)
+            TriggerClientEvent("pickle_restaurants:sales:orders", src, id, pub)
+        end
+    end
 end
 
 -- ─── order helpers ───────────────────────────────────────────────────────────

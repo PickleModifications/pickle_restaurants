@@ -286,16 +286,30 @@ end)
 -- route item use through the framework core instead. Registering both costs nothing
 -- (ox bypasses the core hook, the core hook fires on everything else) and means the
 -- vessel is usable whichever the server runs.
+--
+-- The INVENTORY's own registrar is the second route, tried only when the framework
+-- has none: several inventories (Quasar, CodeM, core_inventory) own item-use
+-- themselves, which is the difference between a meal being usable and doing
+-- nothing at all on a standalone server. It is deliberately not tried in ADDITION
+-- to a working framework hook — those inventories route use through the framework
+-- when there is one, so wiring both would eat two bites per click.
 local function register(item)
     if not item or item == "" or Registered[item] then return end
     Registered[item] = true
-    if RegisterUsableItem then
-        RegisterUsableItem(item, function(source) useVessel(source, item, nil) end)
-    else
+    local use = function(source) useVessel(source, item, nil) end
+
+    -- ESX/QB return nothing from their registrar; only an explicit `false` (the
+    -- standalone bridge saying "there is no core here") means it didn't take.
+    local wired = RegisterUsableItem and RegisterUsableItem(item, use) ~= false
+    if not wired and Inventory and Inventory.RegisterUsable then
+        wired = Inventory.RegisterUsable(item, use)
+    end
+    if not wired then
         -- No core hook AND no ox export means using the item does nothing at all,
         -- which is invisible from in-game — say so once, at boot, by name.
-        print(("[pickle_restaurants] ^3no usable-item hook for '%s': this framework "
-            .. "exposes none, so it can only be used through ox_inventory's item export.^7"):format(item))
+        print(("[pickle_restaurants] ^3no usable-item hook for '%s': neither this framework "
+            .. "nor this inventory exposes one, so it can only be used through ox_inventory's "
+            .. "item export.^7"):format(item))
     end
 end
 

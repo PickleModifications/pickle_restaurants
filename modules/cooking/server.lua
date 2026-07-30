@@ -202,9 +202,25 @@ end
 -- build variation.
 local function MealItem() return GetSetting("meal_item", "meal") end
 
+-- EVERY COOKING EVENT IS SCOPED TO THE STATION. A patty on a grill is only observable
+-- from a few metres away, so its spawn/flip/progress/removal go to the players near that
+-- station (see PlayersNearProp / ScopeRadius in core) — never `-1`, which would put one
+-- message per connected player in the outbound queue for every phase change of every
+-- item in every kitchen on the server. The client half subscribes by range and
+-- re-hydrates a station's items from `cooking:getActive` when it walks in, so a scoped
+-- send that a distant player missed is not a lost update (modules/cooking/client.lua's
+-- range watcher).
+--
+-- `it.prop_id` is always the station, and PropCache has its coords. An item whose prop
+-- has been deleted resolves to an empty audience, which is correct: nobody can be
+-- looking at a station that isn't there.
+local function sendStation(propId, event, ...)
+    SendNearProp(propId, ScopeRadius.PROP, event, ...)
+end
+
 local function broadcastSpawn(it)
     -- prop_id rides along so every client can face the item to its station's heading
-    TriggerClientEvent("pickle_restaurants:cooking:spawn", -1, it.uid, it.model, it.x, it.y, it.z, it.state, it.prop_id)
+    sendStation(it.prop_id, "pickle_restaurants:cooking:spawn", it.uid, it.model, it.x, it.y, it.z, it.state, it.prop_id)
 end
 
 -- ─── dual-sided patties ──────────────────────────────────────────────────────
@@ -258,7 +274,7 @@ local function dualPayload(it)
 end
 
 local function broadcastDual(it)
-    TriggerClientEvent("pickle_restaurants:cooking:dual", -1, dualPayload(it))
+    sendStation(it.prop_id, "pickle_restaurants:cooking:dual", dualPayload(it))
 end
 
 -- Banking the down face's accrued cook time and cancelling its pending timeout,
@@ -343,7 +359,7 @@ end
 -- Push a live progress snapshot for the hover (mirrors broadcastDual).
 local function broadcastGate(it)
     local give = cookGiveItem(it)
-    TriggerClientEvent("pickle_restaurants:cooking:progress", -1, {
+    sendStation(it.prop_id, "pickle_restaurants:cooking:progress", {
         uid = it.uid, method = it.method, prog = singleProgress(it),
         give = give, giveLabel = give and GetItemLabel(give) or nil,
         giveImage = give and GetItemImage(give) or nil,
@@ -379,11 +395,11 @@ local function armGateTimer(it)
             -- swap that one layer and re-render the whole stack — collapsing to a single
             -- prop is what dropped the sauce/cheese once cooked.
             cur.stack[cur.stackBase or 1] = cur.model
-            TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, {
+            sendStation(cur.prop_id, "pickle_restaurants:cooking:slotSpawn", {
                 uid = uid, model = cur.model, prop_id = cur.prop_id, method = cur.method,
                 door = cur.door, slot = cur.slot, state = cur.state, stack = cur.stack })
         else
-            TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, cur.model, cur.state, cur.prop_id)
+            sendStation(cur.prop_id, "pickle_restaurants:cooking:update", uid, cur.model, cur.state, cur.prop_id)
         end
         broadcastGate(cur)
         armGateTimer(cur)
@@ -442,7 +458,7 @@ end
 -- Push a live status snapshot for the cup's hover panel (mirrors broadcastGate).
 local function broadcastSoda(it)
     local give = sodaGiveItem(it)
-    TriggerClientEvent("pickle_restaurants:cooking:progress", -1, {
+    sendStation(it.prop_id, "pickle_restaurants:cooking:progress", {
         uid = it.uid, method = "soda", prog = sodaProgress(it),
         give = give, giveLabel = sodaGiveLabel(it, give),
         giveImage = sodaGiveImage(it, give),
@@ -1716,7 +1732,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
             if method == "oven" then it.gate = not doorOpen(prop, door)
             else it.gate = basketDown(prop, slot) end
             CookingItems[uid] = it
-            TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, {
+            sendStation(prop.id, "pickle_restaurants:cooking:slotSpawn", {
                 uid = uid, model = it.model, prop_id = prop.id, method = method,
                 door = door, slot = slot, state = it.state, stack = it.stack })
             armGateTimer(it)
@@ -1750,11 +1766,11 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         SetTimeout(recipe.cook_ms, function()
             local cur = CookingItems[uid]; if not cur or cur.state ~= "raw" then return end
             cur.state, cur.model = "cooked", recipe.cooked_model
-            TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, cur.model, cur.state, cur.prop_id)
+            sendStation(cur.prop_id, "pickle_restaurants:cooking:update", uid, cur.model, cur.state, cur.prop_id)
             SetTimeout(recipe.burn_ms, function()
                 local c2 = CookingItems[uid]; if not c2 or c2.state ~= "cooked" then return end
                 c2.state, c2.model = "burnt", recipe.burnt_model
-                TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, c2.model, c2.state, c2.prop_id)
+                sendStation(c2.prop_id, "pickle_restaurants:cooking:update", uid, c2.model, c2.state, c2.prop_id)
             end)
         end)
         return { ok = true, uid = uid }
@@ -1787,7 +1803,7 @@ lib.callback.register("pickle_restaurants:cooking:place", function(src, d)
         it.input, it.state, it.ice = cup, "empty", false
         it.model = model or "pickle_drink_container_01"
         CookingItems[uid] = it
-        TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, sodaSpawnPayload(it))
+        sendStation(it.prop_id, "pickle_restaurants:cooking:slotSpawn", sodaSpawnPayload(it))
         broadcastSoda(it)
         return { ok = true, uid = uid }
 
@@ -1850,7 +1866,7 @@ lib.callback.register("pickle_restaurants:cooking:fryerDip", function(src, d)
             broadcastGate(it)
         end
     end
-    TriggerClientEvent("pickle_restaurants:fryer:dip", -1, prop.id, slot, lowered)
+    sendStation(prop.id, "pickle_restaurants:fryer:dip", prop.id, slot, lowered)
     return { ok = true, lowered = lowered }
 end)
 
@@ -1887,7 +1903,7 @@ lib.callback.register("pickle_restaurants:cooking:sodaTap", function(src, d)
             cur.ice, cur.state, cur.phaseStart = true, prev, nil
             -- full slotSpawn (not update) so the payload carries the new ice flag
             -- and every client spawns the rim cubes
-            TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, sodaSpawnPayload(cur))
+            sendStation(cur.prop_id, "pickle_restaurants:cooking:slotSpawn", sodaSpawnPayload(cur))
             broadcastSoda(cur)
         end)
     else
@@ -1903,7 +1919,7 @@ lib.callback.register("pickle_restaurants:cooking:sodaTap", function(src, d)
             local cur = CookingItems[uid]
             if not cur or cur.timerToken ~= token then return end
             cur.state, cur.phaseStart = "filled", nil
-            TriggerClientEvent("pickle_restaurants:cooking:update", -1, uid, cur.model, cur.state, cur.prop_id)
+            sendStation(cur.prop_id, "pickle_restaurants:cooking:update", uid, cur.model, cur.state, cur.prop_id)
             broadcastSoda(cur)
         end)
     end
@@ -1922,7 +1938,7 @@ lib.callback.register("pickle_restaurants:cooking:applyLid", function(src, d)
     if it.state ~= "filled" then return { ok = false, error = _L("cook_fill_cup_first") } end
     it.state = "capped"
     it.stack = { it.model, GetSetting("drink_lid_model", "pickle_drink_lid_01") }
-    TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, sodaSpawnPayload(it))
+    sendStation(it.prop_id, "pickle_restaurants:cooking:slotSpawn", sodaSpawnPayload(it))
     broadcastSoda(it)
     return { ok = true, label = GetItemLabel(it.output) }
 end)
@@ -1984,7 +2000,7 @@ lib.callback.register("pickle_restaurants:cooking:move", function(src, d)
     if not it then return { ok = false } end
     if not HasPerm(it.rid, src, "cook") then return { ok = false } end
     it.x, it.y, it.z = d.x + 0.0, d.y + 0.0, d.z + 0.0
-    TriggerClientEvent("pickle_restaurants:cooking:move", -1, it.uid, it.x, it.y, it.z, it.prop_id)
+    sendStation(it.prop_id, "pickle_restaurants:cooking:move", it.uid, it.x, it.y, it.z, it.prop_id)
     return { ok = true }
 end)
 
@@ -2009,7 +2025,7 @@ lib.callback.register("pickle_restaurants:cooking:reslot", function(src, d)
         if it.state == "filling" then return { ok = false, error = _L("cook_still_pouring") } end
         if not slotFree(it.prop_id, "soda", nil, slot) then return { ok = false, error = _L("cook_spot_taken") } end
         it.slot = slot
-        TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, sodaSpawnPayload(it))
+        sendStation(it.prop_id, "pickle_restaurants:cooking:slotSpawn", sodaSpawnPayload(it))
         broadcastSoda(it)
         return { ok = true }
     end
@@ -2028,7 +2044,7 @@ lib.callback.register("pickle_restaurants:cooking:reslot", function(src, d)
     if it.method == "oven" then it.gate = not doorOpen(prop, door)
     else it.gate = basketDown(prop, slot) end
     armGateTimer(it)
-    TriggerClientEvent("pickle_restaurants:cooking:slotSpawn", -1, {
+    sendStation(it.prop_id, "pickle_restaurants:cooking:slotSpawn", {
         uid = it.uid, model = it.model, prop_id = it.prop_id, method = it.method,
         door = it.door, slot = it.slot, state = it.state, stack = it.stack })
     broadcastGate(it)
@@ -2112,7 +2128,7 @@ lib.callback.register("pickle_restaurants:cooking:collect", function(src, d)
         else AddTray(it.rid, GetIdentifier(src), giveItem, giveCount, giveMeta) end
     end
     CookingItems[it.uid] = nil
-    TriggerClientEvent("pickle_restaurants:cooking:remove", -1, it.uid)
+    sendStation(it.prop_id, "pickle_restaurants:cooking:remove", it.uid)
     return { ok = true, item = giveItem,
              label = giveLabel or (giveItem and GetItemLabel(giveItem)) or nil }
 end)
@@ -2664,6 +2680,12 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     if not HasPerm(rid, src, "cook") then return { ok = false } end
     local item = d.item
     if not item then return { ok = false } end
+    -- A CARRIER CAN'T BE A LAYER. prepAdd is the one door a part enters a build by, so
+    -- refusing the meal and bag items here is what stops a bag being arranged on a
+    -- serving tray, a meal being dropped into a bag, and either being nested in itself.
+    -- See IsCarrierItem (core) for why; the client refuses the drag too, this is the
+    -- authority (the NUI is untrusted).
+    if IsCarrierItem(item) then return { ok = false, error = _L("cook_no_nested_vessel") } end
     -- a layer's topping rides in the reserved instance's meta, resolved by `sig` in
     -- consumeLayers — there is no separate cheese/topping dimension on the reservation.
     -- only a halves-configured ingredient may reserve a half (the NUI is untrusted)
@@ -3550,7 +3572,7 @@ AddEventHandler("pickle_restaurants:propDeleted", function(propId)
     for uid, it in pairs(CookingItems) do
         if it.prop_id == propId then
             CookingItems[uid] = nil
-            TriggerClientEvent("pickle_restaurants:cooking:remove", -1, uid)
+            sendStation(propId, "pickle_restaurants:cooking:remove", uid)
         end
     end
 end)
@@ -3604,7 +3626,7 @@ function DestroyStationCookingItems(propId)
     for uid, it in pairs(CookingItems) do
         if it.prop_id == propId then
             CookingItems[uid] = nil
-            TriggerClientEvent("pickle_restaurants:cooking:remove", -1, uid)
+            sendStation(propId, "pickle_restaurants:cooking:remove", uid)
             n = n + 1
         end
     end

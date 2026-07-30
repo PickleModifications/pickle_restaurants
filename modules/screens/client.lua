@@ -48,6 +48,13 @@ local TICK_MS = 1000   -- driver cadence: re-pick nearest + re-push changed data
 local ScreenOrders = {}   -- [rid] = projected orders list (newest first)
 local seededOrders = {}   -- [rid] = true once the one-shot seed has been requested
 
+-- Priced board menus, per restaurant. FETCHED, not synced: the menu used to ride the world
+-- sync payload, where it was the largest term and went to every player regardless of
+-- whether they were near a board (this module is its only reader). Same seed-once shape as
+-- the orders above; RefreshScreens drops it so a price edit re-fetches.
+local ScreenMenus = {}    -- [rid] = { { label, price, image, kind }, … }
+local seededMenus = {}    -- [rid] = true once the one-shot fetch has been requested
+
 -- Bumped every time a BROADCAST updates a restaurant's data. A one-shot seed reply that
 -- comes back to find the epoch moved on is STALE and must be dropped: the broadcast that
 -- overtook it is the newer truth, and "nothing there" is a value the seed can't tell
@@ -161,8 +168,11 @@ end
 local function payloadFor(t, r)
     if not r then return nil end
     if t.kind == "menu" then
+        -- nil until the fetch lands, which is fine: payloadFor returning an empty list
+        -- makes the page draw its own empty state, and the next driver tick re-pushes
+        -- once ScreenMenus has it.
         return { action = "menu", title = r.label, theme = restaurantTheme(r),
-                 items = r.menu or {} }
+                 items = ScreenMenus[r.id] or {} }
     else
         return { action = "orders", title = r.label, theme = restaurantTheme(r),
                  orders = ScreenOrders[r.id] or {} }
@@ -188,11 +198,20 @@ local function nearestFor(t)
     local here = GetEntityCoords(PlayerPedId())
     local best, bestDist
     for _, r in pairs(Restaurants or {}) do
+        -- Only a restaurant whose props we actually HOLD can drive a board. Prop ROWS are
+        -- kept for every restaurant on the server, but entities are loaded by proximity
+        -- (modules/main's reconciler) and AddReplaceTexture only takes on a model that
+        -- exists — so without this, the "nearest" board could be one across the map whose
+        -- prop isn't in the world, and we'd bind a texture to nothing and fetch its menu
+        -- for no reason. The comment above about there being no range gate predates
+        -- proximity loading: IsRestaurantLoaded IS the range gate now.
+        if IsRestaurantLoaded and IsRestaurantLoaded(r.id) then
         for _, p in ipairs(r.props or {}) do
             if p.prop_type == t.prop_type then
                 local dist = #(here - vector3(p.x + 0.0, p.y + 0.0, p.z + 0.0))
                 if not bestDist or dist < bestDist then bestDist, best = dist, r end
             end
+        end
         end
     end
     return best
@@ -201,6 +220,19 @@ end
 -- Ensure the orders board has a current list for `rid`: it stays live off the
 -- broadcast, but the first time a restaurant's board activates we ask the server once
 -- (a player standing there before any order changes would otherwise see it empty).
+-- Ensure the menu board has this restaurant's priced menu. Unlike the orders list there is
+-- no broadcast to stay live off — a menu changes when a boss edits it, which fires a world
+-- sync, and RefreshScreens (called from main's ApplySync) drops the cache so the next tick
+-- re-fetches. No epoch guard needed for that reason: nothing can overtake this reply.
+local function seedMenu(rid)
+    if not rid or seededMenus[rid] then return end
+    seededMenus[rid] = true
+    CreateThread(function()
+        local res = lib.callback.await("pickle_restaurants:screens:getMenu", false, { id = rid })
+        ScreenMenus[rid] = (res and res.menu) or {}
+    end)
+end
+
 local function seedOrders(rid)
     if not rid or seededOrders[rid] then return end
     seededOrders[rid] = true
@@ -229,7 +261,10 @@ local function driveScreen(t, r)
         if firstApply then rebindAfterPaint(t) end
         return
     end
-    if t.kind == "orders" then seedOrders(r.id) end
+    -- Fetch whichever data this board needs for the restaurant it's now showing. Both are
+    -- one-shot per restaurant and cheap to call every tick (they return immediately once
+    -- asked), so the driver doesn't have to track which boards it has already seeded.
+    if t.kind == "orders" then seedOrders(r.id) else seedMenu(r.id) end
     local firstApply = not t.applied
     local ridChanged = t.rid ~= r.id
     t.rid = r.id
@@ -313,6 +348,11 @@ end
 -- each active screen while its freshly-spawned prop exists.
 function RefreshScreens()
     for _, t in ipairs(SCREENS) do t.sig = nil end -- force a re-push with fresh data
+    -- A menu price may have changed — that's what a sync usually IS — and the menu no
+    -- longer rides the payload, so drop the fetched copies and let the driver re-ask.
+    -- Cleared rather than re-fetched here: only the boards actually in range will ask,
+    -- and they ask on the very next tick.
+    ScreenMenus, seededMenus = {}, {}
     driveOnce()
     for _, t in ipairs(SCREENS) do
         if t.applied then rebindAfterPaint(t) end

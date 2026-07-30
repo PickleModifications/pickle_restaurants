@@ -21,7 +21,12 @@ lib.callback.register("pickle_restaurants:doors:toggle", function(src, d)
     doors[door] = not doors[door]
     prop.metadata.doors = doors -- in-memory only; rides the sync payload
 
-    TriggerClientEvent("pickle_restaurants:doors:set", -1, prop.id, door, doors[door])
+    -- Scoped to the oven: the handler animates a door on a prop that must be spawned
+    -- locally to do anything at all (SetOvenDoor no-ops without it), so every player
+    -- outside the station's range was paying for a message they discarded. The door's
+    -- open/closed state also rides the sync payload, so a client arriving later reads
+    -- the current position from its prop row rather than from a missed event.
+    SendNearProp(prop.id, ScopeRadius.PROP, "pickle_restaurants:doors:set", prop.id, door, doors[door])
     -- drive the bake gate: closing a door starts baking its cavity, opening pauses it
     TriggerEvent("pickle_restaurants:oven:gate", prop.id, door, doors[door])
     return { ok = true, open = doors[door] }

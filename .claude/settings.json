@@ -84,7 +84,30 @@
       "Bash(luac5.4 -p modules/doorstep/client.lua modules/doorstep/server.lua)",
       "Bash(luac5.4 -p /tmp/c.lua)",
       "Bash(luac5.4 -p locales/translations/en.lua modules/admin/server.lua)",
-      "Bash(luac5.4 -p locales/translations/en.lua modules/main/client.lua modules/phone/client.lua)"
+      "Bash(luac5.4 -p locales/translations/en.lua modules/main/client.lua modules/phone/client.lua)",
+      "WebFetch(domain:docs.okokscripts.io)",
+      "WebFetch(domain:docs.quasar-store.com)",
+      "WebFetch(domain:docs.qbcore.org)",
+      "WebFetch(domain:codem.gitbook.io)",
+      "WebFetch(domain:docs.tgiann.com)",
+      "WebFetch(domain:docs.origen-scripts.com)",
+      "WebFetch(domain:tgiann.gitbook.io)",
+      "WebFetch(domain:docs.17movement.net)",
+      "WebFetch(domain:docs.felis.gg)",
+      "WebFetch(domain:docs.c8re.store)",
+      "Bash(luac5.4 -p bridge/inventory/metadata/server.lua)",
+      "Bash(awk '/^local DEFAULT_FOODS/{s=NR} /^local DEFAULT_TOOLS/{t=NR} /^local DEFAULT_INGREDIENTS/{i=NR} END{}' core/server.lua)",
+      "Bash(awk 'NR>=1465 && NR<=1505 {printf \"%d\\\\t%s\\\\n\", NR, $0}' modules/cooking/client.lua)",
+      "Bash(awk 'NR>=612 && NR<=618 {printf \"%d\\\\t%s\\\\n\", NR, $0}' modules/cooking/client.lua)",
+      "Bash(awk 'NR>=1087 && NR<=1092 {printf \"%d\\\\t%s\\\\n\", NR, $0}' modules/cooking/client.lua)",
+      "Bash(awk 'NR>=320 && /^}/{print \"INGREDIENTS block ends at \" NR; exit}' core/server.lua)",
+      "Bash(awk '/^}/{print \"FOODS end offset \"NR; exit}')",
+      "Bash(grep -n \"CREATE TABLE IF NOT EXISTS \\\\`\\\\?pickle_restaurant_recipes\" -A 30 core/server.lua)",
+      "Bash(grep -n \"CREATE TABLE IF NOT EXISTS \\\\`\\\\?pickle_restaurant_props\" -A 20 core/server.lua)",
+      "Bash(lua5.4 -e \"loadfile\\('modules/cooking/client.lua'\\)\")",
+      "Bash(luac5.4 -p modules/placement/server.lua)",
+      "Bash(luac5.4 -p modules/register/client.lua)",
+      "Bash(grep -n \"RefreshTray\\(\\); RefreshBar\\(\\)$\" -A 2 modules/cooking/client.lua)"
     ]
   }
 }

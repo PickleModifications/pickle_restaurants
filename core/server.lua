@@ -2210,6 +2210,21 @@ function BoxLidModel()  return GetSetting("box_lid_model", "pickle_takeout_box_0
 function BagItemName() return GetSetting("bag_item", "restaurant_bag") end
 function BagModel() return GetSetting("bag_model", "pickle_restaurant_bag_01") end
 
+-- A CARRIER NEVER GOES INSIDE ANOTHER CARRIER. The serving tray and the Restaurant
+-- Bag are both multi-item carriers whose contents ride as build-stack metadata, so
+-- nesting one in the other is a container inside itself: the layer would render as a
+-- bare bag/meal prop lying on a tray, its own contents invisible, and every consumer
+-- that walks a vessel's layers (the eat menu, layerIdentity, the POS's mealCovers,
+-- prepDecompose) would have to recurse a second vessel layer deep to describe or
+-- refund it. Fulfilment would double-count too — a bagged meal's units would be
+-- claimable through both carriers. A TAKEOUT BOX is deliberately NOT here: it holds
+-- exactly one food and IS a sellable unit, so a box on a tray or in a bag is a side
+-- in its box, which the render/consume paths already handle.
+function IsCarrierItem(item)
+    if not item or item == "" then return false end
+    return item == BagItemName() or item == GetSetting("meal_item", "meal")
+end
+
 -- A bag food's raw ingredient cost = the sum of its component costs (the bag
 -- output itself is free packaging, never an ingredient). Default menu price.
 function CraftCost(cr)
@@ -2528,7 +2543,10 @@ function SetRestaurantJob(rid, jobName)
         end
     end
     MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), rid })
-    SyncToClient(-1)
+    -- No world sync here on purpose. Assigning a job changes `metadata.job`/`metadata.ranks`
+    -- and neither is in the sync payload — BuildClientRestaurant carries none of it, because
+    -- employment is server-side authority (ResolvePerms) and no client renders it. This used
+    -- to push the ENTIRE world config to every player to change nothing observable.
     return true
 end
 
@@ -2866,8 +2884,15 @@ end
 -- (another cook consumed, a decompose refunded, or a manager restocked). Clients
 -- refresh only if they're currently at a station; getIngredients is
 -- restaurant-scoped server-side, so an unnecessary refresh is harmless.
+-- Scoped to the restaurant, and it matters here more than anywhere: this fires on EVERY
+-- stock movement — every single ingredient a cook consumes, every decompose refund, every
+-- restocked line — so as a `-1` it was one message per connected player per lettuce leaf.
+-- Only someone standing at one of this restaurant's stations can act on it (the handler
+-- refreshes an open ingredient bar and does nothing otherwise), and a cook is at the
+-- restaurant by definition — the stations are physical props in it.
 local function BroadcastStockDirty(restaurantId)
-    TriggerClientEvent("pickle_restaurants:cooking:stockDirty", -1, restaurantId)
+    SendTo(PlayersNearRestaurant(restaurantId, ScopeRadius.BOARD),
+           "pickle_restaurants:cooking:stockDirty", restaurantId)
 end
 
 function AddStock(restaurantId, item, count)
@@ -3202,6 +3227,27 @@ function OrderChannel(o)
     return viaPhone and "pickup" or "walk_in"
 end
 
+-- Who is PARTY to this restaurant's open tickets: `[identifier] = { [orderId] = true }`
+-- for every customer and claimed driver. Read straight off the cache rather than added
+-- to the GetOpenOrders projection on purpose — a customer identifier is exactly the kind
+-- of field that leaks the moment it rides a list somebody broadcasts (see SyncOrders in
+-- modules/sales, which uses this to send each customer THEIR OWN ticket and nobody
+-- else's). Nothing needs it on a client, so it never goes to one.
+function OrderPartyIdentifiers(restaurantId)
+    local out = {}
+    for _, o in pairs(OrderCache[restaurantId] or {}) do
+        if o.status == "open" then
+            for _, ident in ipairs({ o.customer_identifier, o.driver_identifier }) do
+                if ident and ident ~= "" then
+                    out[ident] = out[ident] or {}
+                    out[ident][o.id] = true
+                end
+            end
+        end
+    end
+    return out
+end
+
 function GetOpenOrders(restaurantId)
     local list = {}
     for _, o in pairs(OrderCache[restaurantId] or {}) do
@@ -3260,6 +3306,155 @@ function NearbyPlayers(src, radius)
     end
     return list
 end
+
+-- ─── audience scoping: never send a world event to the whole world ───────────
+--
+-- A `-1` send costs one queued outbound message PER CONNECTED PLAYER. At 2000
+-- players a single patty flip is 2000 messages, and this resource emits several per
+-- cooked item, per NPC, per door, per fire — enough backlog to stall the server and
+-- crash clients. Almost none of it is world news: a prop spawning on a grill, an oven
+-- door swinging, a basket dipping and an NPC queueing are only observable within a few
+-- dozen metres, and the client handlers throw the rest away anyway (after paying for
+-- the delivery, the deserialization and, for the spawn events, a real CreateObject).
+--
+-- So every world event goes through one of the helpers below, which resolve an
+-- AUDIENCE — a plain list of server ids — and send once per member. Rules:
+--   • an event that renders something in the world  -> SendNear / SendNearProp
+--   • an event only one player can act on           -> TriggerClientEvent(ev, src, …)
+--   • genuinely global config news (a blip, a theme) -> -1 is still correct
+--
+-- Positions come from a CACHE refreshed on a slow thread, not from GetEntityCoords per
+-- send: the cache is read many times per second by the cooking module, and a per-send
+-- scan of every ped would replace a network cost with a native-call cost. A cache that
+-- is up to PLAYER_POS_MS stale is fine for a metre-scale radius — every audience radius
+-- here is padded well past a second of sprinting, and the consequence of a miss is one
+-- late prop, which the range-entry re-hydration fixes anyway.
+local PlayerPos = {}          -- [src] = { x, y, z } as of the last sweep
+local PLAYER_POS_MS = 1000    -- position cache refresh (TUNE IN-GAME)
+
+CreateThread(function()
+    while true do
+        local fresh = {}
+        for _, p in ipairs(GetPlayers()) do
+            local src = tonumber(p)
+            local ped = src and GetPlayerPed(src)
+            if ped and ped ~= 0 then
+                local c = GetEntityCoords(ped)
+                -- a player still loading in sits at the origin; treat as unplaced so a
+                -- spawn point near 0,0,0 doesn't become everybody's audience
+                if c and not (c.x == 0.0 and c.y == 0.0) then
+                    fresh[src] = { x = c.x, y = c.y, z = c.z }
+                end
+            end
+        end
+        PlayerPos = fresh -- swap whole, so a reader never sees a half-built table
+        Wait(PLAYER_POS_MS)
+    end
+end)
+
+-- Server ids within `radius` of a point. Squared compare, no vector allocation — this
+-- runs on the cooking module's hot paths.
+function PlayersNearPoint(x, y, z, radius)
+    local out, r2 = {}, (radius or 60.0) * (radius or 60.0)
+    for src, c in pairs(PlayerPos) do
+        local dx, dy, dz = c.x - x, c.y - y, c.z - z
+        if (dx * dx + dy * dy + dz * dz) <= r2 then out[#out + 1] = src end
+    end
+    return out
+end
+
+-- Server ids within `radius` of a placed prop. The audience for anything that renders
+-- ON that prop: cooking items, oven doors, fryer baskets, kitchen fires, NPCs at a
+-- counter. An unknown prop id yields NOBODY, deliberately — a prop we can't place is a
+-- prop nothing can be looking at, and falling back to -1 would silently restore the
+-- broadcast this exists to remove.
+function PlayersNearProp(propId, radius)
+    local p = PropCache[tonumber(propId or 0) or 0]
+    if not p or not p.x then return {} end
+    return PlayersNearPoint(p.x, p.y, p.z, radius)
+end
+
+-- A restaurant's extent as ONE sphere: the centroid of its placed props plus the
+-- distance to the furthest one. Testing every prop against every player would be props ×
+-- players per send — a 40-seat venue on a full server is tens of thousands of compares
+-- for a list that changes twice a second. One padded sphere costs one compare per player
+-- and can only ever be too generous, which is the safe direction to be wrong in.
+--
+-- Cached with a short TTL rather than invalidated on prop change: placement, deletion and
+-- the gizmo all move props, and a stale sphere for a few seconds means at worst a slightly
+-- wide audience, where a missed invalidation would mean a permanently wrong one.
+local RestaurantExtent = {}   -- [rid] = { x, y, z, r, at = os.time() }
+local EXTENT_TTL = 5
+
+local function restaurantExtent(rid)
+    local c = RestaurantExtent[rid]
+    if c and (os.time() - c.at) < EXTENT_TTL then return c end
+    local sx, sy, sz, n = 0.0, 0.0, 0.0, 0
+    for _, p in pairs(PropCache) do
+        if p.restaurant_id == rid and p.x then
+            sx, sy, sz, n = sx + p.x, sy + p.y, sz + p.z, n + 1
+        end
+    end
+    if n == 0 then RestaurantExtent[rid] = nil; return nil end
+    local cx, cy, cz = sx / n, sy / n, sz / n
+    local far = 0.0
+    for _, p in pairs(PropCache) do
+        if p.restaurant_id == rid and p.x then
+            local dx, dy, dz = p.x - cx, p.y - cy, p.z - cz
+            local d = dx * dx + dy * dy + dz * dz
+            if d > far then far = d end
+        end
+    end
+    c = { x = cx, y = cy, z = cz, r = math.sqrt(far), at = os.time() }
+    RestaurantExtent[rid] = c
+    return c
+end
+
+-- Server ids within `radius` of any part of restaurant `rid`. The audience for anything
+-- restaurant-wide rather than prop-specific: the ticket list its boards and register
+-- paint, NPC queue news. A restaurant with no props placed yet has no location, so
+-- nobody — same fail-closed rule as PlayersNearProp.
+function PlayersNearRestaurant(rid, radius)
+    local e = restaurantExtent(tonumber(rid) or rid)
+    if not e then return {} end
+    return PlayersNearPoint(e.x, e.y, e.z, e.r + (radius or 60.0))
+end
+
+-- The same sphere, for the CLIENT. A client needs to know where a restaurant is without
+-- holding its props — that is the whole point of loading props by proximity — so this rides
+-- the sync payload per restaurant and is what the client's own approach loop measures
+-- against. It also gives a blip a position for a restaurant that has no counter placed:
+-- SetupBlip used to fall back to `props[1]`, which is exactly the dependency being removed.
+function RestaurantCentre(rid)
+    local e = restaurantExtent(tonumber(rid) or rid)
+    if not e then return nil end
+    return { x = e.x, y = e.y, z = e.z, r = e.r }
+end
+
+-- Send one event to an explicit audience. `targets` is a list of server ids; an empty
+-- list sends nothing, which is the whole point — nobody is looking.
+function SendTo(targets, event, ...)
+    for i = 1, #targets do TriggerClientEvent(event, targets[i], ...) end
+end
+
+function SendNear(x, y, z, radius, event, ...)
+    SendTo(PlayersNearPoint(x, y, z, radius), event, ...)
+end
+
+function SendNearProp(propId, radius, event, ...)
+    SendTo(PlayersNearProp(propId, radius), event, ...)
+end
+
+-- Radii, in metres (TUNE IN-GAME). Padded past what the client actually renders at, so
+-- a player crossing into range during the position cache's staleness window is already
+-- receiving events by the time anything is visible to them.
+--   PROP  — things rendered on a station prop. modules/quad draws at 40m, cookfx at 40m;
+--           100m covers both plus a sprint through the cache window.
+--   NPC   — npc_customers' own RENDER_DIST is 150m, so the audience must not be tighter.
+--   BOARD — the menu/orders boards and the register POS screen: readable well inside
+--           this, but a client keeps the nearest restaurant's data bound, so give it
+--           room to be the nearest one.
+ScopeRadius = { PROP = 100.0, NPC = 160.0, BOARD = 120.0 }
 
 -- ─── cooked-items tray (per-player, per-restaurant) ──────────────────────────
 
@@ -3720,19 +3915,24 @@ CreateThread(function()
                 if not ReservationActive(row) then expired[#expired + 1] = { id = resId, row = row } end
             end
         end
+        local freed = {}
         for _, e in ipairs(expired) do
             MySQL.update("UPDATE pickle_restaurant_reservations SET status = 'expired' WHERE id = ?", { e.id })
             e.row.status = "expired"
+            if e.row.restaurant_id then freed[e.row.restaurant_id] = true end
             if ReleaseReservation then
                 ReleaseReservation(e.row) -- drops the cache row, the seats and the guests
             end
         end
-        -- A freed table has to stop reading "Reserved" on every client, and after a
-        -- restart the seats only become visible once the phone has loaded its bookings.
-        if #expired > 0 then SyncToClient(-1) end
+        -- A freed table has to stop reading "Reserved" — but only its own restaurant's
+        -- seats changed, so this is a per-restaurant delta, not a world sync.
+        for rid in pairs(freed) do SyncReservedSeats(rid) end
         if not seeded and ReservedSeatMap and ReservationCache and next(ReservationCache) ~= nil then
+            -- The boot sync went out before the phone module had loaded its bookings, so
+            -- every client's seat labels are missing. This one IS world-wide: it's a
+            -- one-shot correction of the payload everybody already holds.
             seeded = true
-            SyncToClient(-1)
+            for rid in pairs(ReservationCache) do SyncReservedSeats(rid) end
         end
     end
 end)
@@ -3762,11 +3962,18 @@ local function BuildClientRestaurant(r)
         -- virtual kitchen shell anchor { x, y, z, heading } — where a virtual
         -- point session builds its local shell + stations (XY = counter).
         shell        = r.metadata and r.metadata.shell or nil,
-        -- Compact orderable menu for a placed MENU SCREEN prop (modules/screens):
-        -- { label, price, image, kind }. Built from the live priced catalog so the
-        -- board tracks menu edits (each menu change re-syncs). Guarded because the
-        -- builder lives in the sales module (loaded after core).
-        menu         = BuildMenuBoard and BuildMenuBoard(r.id) or nil,
+        -- WHERE THIS RESTAURANT IS, as { x, y, z, r }, independent of its props. The
+        -- client loads props by PROXIMITY, so it needs a position it can measure against
+        -- before it holds any of them — this is what its approach loop and its blip use.
+        centre       = RestaurantCentre(r.id),
+        -- NO `menu` HERE. The priced board menu used to ride this payload, and it was the
+        -- worst-scaling term in the whole sync: every restaurant's ENTIRE priced catalog
+        -- (label + price + kind + a full nui:// image url per entry, 3-5KB each) shipped to
+        -- every player, whether or not that player was anywhere near a menu board — and
+        -- re-shipped on every config edit. Exactly ONE consumer ever read it: the placed
+        -- MENU SCREEN prop in modules/screens. So it is fetched per restaurant, on demand,
+        -- by the board that actually paints it (`screens:getMenu`), through the same
+        -- seed-once + epoch machinery that module already uses for its orders board.
         -- Seat anchors currently held by an ACTIVE reservation, { [propId] = true }.
         -- Purely so the seat interaction can read "Reserved" instead of promising a
         -- chair the server will refuse: it is holder-agnostic, and whether THIS player
@@ -3956,6 +4163,10 @@ function BuildSyncPayload()
         box_lid_model  = BoxLidModel(),
         bag_item  = BagItemName(),
         bag_model = BagModel(),
+        -- the EAT-IN carrier's item name. Synced only so the client can refuse a
+        -- carrier-in-a-carrier drag up front (IsCarrierItem) — prepAdd is the
+        -- authority; this just outlines the drop red instead of round-tripping.
+        meal_item = GetSetting("meal_item", "meal"),
         -- The ONE generic drink item every poured drink collects as (the flavor
         -- rides in metadata). Shipped so the client can tell a DRINK part from a
         -- build component by item name rather than by guessing at cup models —
@@ -3975,12 +4186,92 @@ function BuildSyncPayload()
     } }
     for _, r in pairs(RestaurantCache) do payload.restaurants[#payload.restaurants + 1] = BuildClientRestaurant(r) end
     for _, p in pairs(PropCache) do payload.props[#payload.props + 1] = p end
+    -- No props fingerprint here. There briefly was one, so a client could skip rebuilding
+    -- the world when the props hadn't changed — but the client now DIFFS PER PROP against
+    -- the row it built each one from (`propRowSig`, modules/main/client.lua), which is
+    -- strictly finer: a single moved prop no longer rebuilds the world either, and the
+    -- reconciler needs a per-prop answer anyway to load props by proximity. One mechanism,
+    -- in the place that acts on it.
     return payload
 end
 
 function SyncToClient(target)
     TriggerClientEvent("pickle_restaurants:sync", target, BuildSyncPayload())
 end
+
+-- ─── the full world sync is COALESCED ────────────────────────────────────────
+--
+-- `SyncToClient(-1)` is the single most expensive thing this resource can do: the payload
+-- is every restaurant (with its whole priced menu), every prop, every recipe and the
+-- entire authored menu config — tens to hundreds of KB — and it is sent once per
+-- connected player. On the receiving end DoApplySync then tears down and respawns every
+-- prop of every restaurant, blocking on each model.
+--
+-- Nearly every caller is an EDIT from an auto-saving panel (the NUI has no save buttons by
+-- design), so dragging a colour picker or typing in a price field used to emit one of
+-- these per debounce tick. They are also almost always redundant with each other: ten
+-- setting writes in a row need ONE resulting payload, not ten identical ones.
+--
+-- So config changes call SyncWorldSoon() and a flusher sends at most one payload per
+-- SYNC_MIN_MS, building it ONCE for everybody. Callers that must be immediate (a client's
+-- own requestSync, boot) still call SyncToClient directly with their target.
+local worldDirty = false
+local SYNC_MIN_MS = 1500 -- floor between full world syncs (TUNE IN-GAME)
+
+function SyncWorldSoon() worldDirty = true end
+
+CreateThread(function()
+    while true do
+        Wait(SYNC_MIN_MS)
+        if worldDirty then
+            worldDirty = false
+            -- one payload, reused for every recipient by the event layer
+            SyncToClient(-1)
+        end
+    end
+end)
+
+-- Push ONE restaurant's reserved-seat map. A booking starting, being cancelled or lapsing
+-- changes a `{ propId -> true }` table and nothing else — it used to cost a full world
+-- sync (every restaurant, every prop, every recipe, to every player), including one from
+-- the expiry sweep as often as once a minute for as long as the server is up.
+--
+-- Scoped to the restaurant, which is only safe because the map rides the approach fetch
+-- (`world:getRestaurant`) as well: a client bakes "Reserved" into a seat's interaction from
+-- whatever map it last held, so without that edge a player who was across the map when a
+-- booking landed would keep a stale label indefinitely. With it, they read the current map
+-- as they walk in — before any of those seats is in reach.
+function SyncReservedSeats(rid)
+    rid = tonumber(rid) or rid
+    if not rid or not ReservedSeatMap then return end
+    SendTo(PlayersNearRestaurant(rid, ScopeRadius.BOARD),
+           "pickle_restaurants:reservedSeats", rid, ReservedSeatMap(rid))
+end
+
+-- ONE RESTAURANT'S AUTHORITATIVE WORLD, fetched by a client as it approaches.
+--
+-- This is the HYDRATION EDGE that lets the prop events be scoped at all. `propPlaced`,
+-- `propRemoved`, `shellMoved` and `reservedSeats` now go only to players near the
+-- restaurant, so a client that was across the map while an admin was placing props holds a
+-- stale set. It repairs itself here: approaching a restaurant replaces everything the client
+-- knows about it with the server's current answer, before anything of it is in view.
+--
+-- Public and unguarded on purpose — placed props are world furniture, visible to anyone who
+-- walks in. `reservedSeats` rides along because it is the other thing a seat's interaction
+-- needs and it is holder-agnostic (a label hint; `seating:sit` is the gate).
+lib.callback.register("pickle_restaurants:world:getRestaurant", function(_, d)
+    local rid = tonumber(d and d.id)
+    if not rid or not GetRestaurant(rid) then return nil end
+    local props = {}
+    for _, p in pairs(PropCache) do
+        if p.restaurant_id == rid then props[#props + 1] = p end
+    end
+    return {
+        id    = rid,
+        props = props,
+        reservedSeats = (ReservedSeatMap and ReservedSeatMap(rid)) or {},
+    }
+end)
 
 RegisterNetEvent("pickle_restaurants:requestSync", function()
     -- Rebuild the catalogue from the live inventory first, so newly-registered

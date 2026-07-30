@@ -489,7 +489,7 @@ lib.callback.register("pickle_restaurants:management:saveMenuItem", function(src
     ]], { id, entry.item, entry.variant or "", entry.label, math.max(0, math.floor(tonumber(d.price) or 0)),
           entry.kind, d.enabled and 1 or 0 })
     ShowNotification(src, _L("mgmt_menu_saved"))
-    SyncToClient(-1) -- refresh the customer-facing menu SCREEN board (modules/screens)
+    SyncWorldSoon() -- refresh the customer-facing menu SCREEN board (modules/screens)
     return { ok = true }
 end)
 
@@ -501,7 +501,7 @@ lib.callback.register("pickle_restaurants:management:deleteMenuItem", function(s
     MySQL.update.await("DELETE FROM pickle_restaurant_menu WHERE restaurant_id = ? AND item = ? AND variant = ?",
         { id, item, variant })
     ShowNotification(src, _L("mgmt_menu_removed"))
-    SyncToClient(-1) -- refresh the customer-facing menu SCREEN board (modules/screens)
+    SyncWorldSoon() -- refresh the customer-facing menu SCREEN board (modules/screens)
     return { ok = true }
 end)
 
@@ -669,7 +669,7 @@ function SetRestaurantBrand(id, key, url, crop)
         r.metadata.brand_image = (url ~= "") and url or nil
     end
     MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), id })
-    SyncToClient(-1) -- push the new branding to every client's render target
+    SyncWorldSoon() -- push the new branding to every client's render target
     return { ok = true }
 end
 
@@ -711,7 +711,7 @@ function SetRestaurantTheme(id, theme)
     r.metadata = r.metadata or {}
     r.metadata.theme = SanitizeTheme(theme)
     MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), id })
-    SyncToClient(-1) -- the theme rides the restaurant sync payload
+    SyncWorldSoon() -- the theme rides the restaurant sync payload
     return { ok = true }
 end
 
@@ -751,7 +751,7 @@ function SetRestaurantName(id, label)
     if name == "" then name = r.name end -- a label of pure symbols keeps the old key
     MySQL.update.await("UPDATE pickle_restaurants SET name = ?, label = ? WHERE id = ?", { name, label, id })
     r.name, r.label = name, label
-    SyncToClient(-1)
+    SyncWorldSoon()
     return { ok = true, name = name, label = label }
 end
 

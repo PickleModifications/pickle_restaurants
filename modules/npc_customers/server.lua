@@ -210,7 +210,13 @@ local function broadcastQueue(rid, r, cfg)
     if not st then return end
     local map = {}
     for i, e in ipairs(st.queue) do map[tostring(e.orderId)] = i - 1 end
-    TriggerClientEvent("pickle_restaurants:npc:queue", -1, {
+    -- Scoped to the restaurant. An NPC's ped is a client-LOCAL entity that the client
+    -- refuses to render past RENDER_DIST (150m) anyway, so every send beyond that was
+    -- paid for and thrown away. Safe because approach is already a hydration edge: the
+    -- client re-asks for a full queue snapshot (npc:requestState) every 8s while near
+    -- any counter, and on every world sync — so a walk-up sees the queue whether or not
+    -- it caught the incremental events.
+    SendTo(PlayersNearRestaurant(rid, ScopeRadius.NPC), "pickle_restaurants:npc:queue", {
         rid = rid, counter = npcCounter(r), geo = geometry(cfg), queue = map,
     })
 end
@@ -233,7 +239,7 @@ function NpcDropOrder(rid, orderId, happy)
         if e.orderId == orderId then table.remove(st.queue, i); removed = true; break end
     end
     if not removed then return end
-    TriggerClientEvent("pickle_restaurants:npc:despawn", -1, rid, orderId, happy == true)
+    SendTo(PlayersNearRestaurant(rid, ScopeRadius.NPC), "pickle_restaurants:npc:despawn", rid, orderId, happy == true)
     local r = GetRestaurant(rid)
     if r then broadcastQueue(rid, r, NpcConfig()) end
 end
@@ -312,7 +318,7 @@ local function spawnNpcCustomer(rid, r, cfg)
     -- Ticket appears in every open register / Tickets widget.
     if SyncOrders then SyncOrders(rid) end
     -- Spawn the ped on all clients (each renders a local, distance-gated copy).
-    TriggerClientEvent("pickle_restaurants:npc:spawn", -1, {
+    SendTo(PlayersNearRestaurant(rid, ScopeRadius.NPC), "pickle_restaurants:npc:spawn", {
         rid        = rid,
         orderId    = order.id,
         model      = model,

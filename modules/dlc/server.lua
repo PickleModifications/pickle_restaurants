@@ -192,7 +192,7 @@ local function applyChange()
     touch() -- invalidate BOTH this file's lists and core's merge memo
     if not RestaurantsReady then return end
     RebuildDerived()
-    SyncToClient(-1)
+    SyncWorldSoon()
 end
 
 -- THE export a pack calls. Idempotent by id: re-registering (a pack restart, or

@@ -97,7 +97,137 @@ the inventory catalogue and replies with `pickle_restaurants:setupInventory` (it
 + `pickle_restaurants:sync` (`BuildSyncPayload`). **Only valid configs are synced to the
 world** — a recipe/drink/assembly referencing an item missing from the inventory
 catalogue is filtered out of the payload (but still shown, flagged, in the admin panel so
-it can be fixed). After any config change, server code calls `SyncToClient(-1)`.
+it can be fixed). After any config change, server code calls **`SyncWorldSoon()`** — never
+`SyncToClient(-1)` directly (see below).
+
+### Never send a world event to the whole world
+
+**A `-1` send costs one queued outbound message PER CONNECTED PLAYER.** At 2000 players a
+single patty flip is 2000 messages, and this resource emits several per cooked item, per
+NPC, per oven door, per stock movement — enough backlog to stall the server. Almost none of
+it is world news, and the client handlers discarded most of it anyway *after* paying for
+delivery, deserialization and (for the spawn events) a real `CreateObject`.
+
+Every world event therefore resolves an AUDIENCE first. The primitives are in
+`core/server.lua`: `PlayersNearPoint`, **`PlayersNearProp(propId, radius)`** (the audience
+for anything rendered ON a station), **`PlayersNearRestaurant(rid, radius)`** (restaurant-wide
+news), `SendTo(targets, ev, …)`, `SendNear`, `SendNearProp`, and the radii in
+`ScopeRadius` (`PROP` / `NPC` / `BOARD`, TUNE IN-GAME). Positions come from a **cache**
+refreshed every `PLAYER_POS_MS`, not `GetEntityCoords` per send — these run on the cooking
+module's hot paths, so a per-send ped scan would just trade a network cost for a native one.
+A restaurant's extent is ONE padded sphere (centroid + furthest prop, short TTL cache):
+testing every prop against every player is props × players per send.
+
+`PlayersNearProp` / `PlayersNearRestaurant` **fail CLOSED** — an unknown prop or a
+restaurant with nothing placed yields NOBODY, deliberately. Falling back to `-1` would
+silently restore the broadcast the helper exists to remove.
+
+The rule for a new event:
+- renders something in the world → `SendNearProp` / `SendNear` / `SendTo(PlayersNearRestaurant(…))`
+- only one player can act on it → `TriggerClientEvent(ev, src, …)`
+- **`-1` needs a reason that survives the question "why would a player across the city need
+  this?"** There are exactly THREE left, and each answers it: the phone PROMO push (it fires
+  a phone notification, so it must reach CLOSED phones — an advert only shown to people
+  already in the restaurant is not an advert; and it now only fires on the rising edge of a
+  promo going active, not on every auto-saved keystroke), and the two qb-phone client
+  registrations (every client must register the app on its own side, twice in a server's
+  lifetime, never on a gameplay event). If a fourth is ever added, it needs an answer of the
+  same kind written at the call site.
+
+**SCOPING BY DISTANCE REQUIRES A HYDRATION EDGE.** A scoped send a distant player missed is
+only safe if arriving in range re-fetches the state. Never scope an event without pointing at
+the edge that repairs it. Where those edges are:
+- props, and the reserved-seat map: **`world:getRestaurant(rid)`**, fetched by the client's
+  reconciler as it walks into a restaurant (below). This is what allows `propPlaced`,
+  `propRemoved`, `shellMoved` and `reservedSeats` to be scoped at all — approaching replaces
+  everything the client knows about that restaurant with the server's current answer.
+- cooking: the **station range watcher** (`CookRange` in `modules/cooking/client.lua`)
+  subscribes/unsubscribes per station and calls the pre-existing
+  `ReplayActiveItemsFor(propId)` / `DropItemsFor(propId)`. Its `in` radius is TIGHTER than
+  the server's `ScopeRadius.PROP` on purpose — the server must already be sending us a
+  station's events before we ask for its state, or a change landing between the reply and
+  our arrival in the audience is lost. `out > in` so pacing the boundary doesn't thrash.
+  This is also a straight win on its own: a client now holds only the kitchens it is in,
+  instead of an entity per stack layer of every item on every grill on the server.
+  VIRTUAL points are skipped — session gating (`renderableProp`) is stricter than distance.
+- NPCs: the client already re-asks `npc:requestState` every 8s while near a counter.
+- oven doors, reserved seats: the state rides the sync payload / its own delta, so a late
+  arrival reads the current value rather than replaying an event.
+- kitchen FIRES stay `-1`: ignite/douse are rare and the payload is a self-correcting
+  world list, so there is nothing to subscribe to.
+
+**The full world sync is COALESCED.** `SyncToClient(-1)` is the most expensive thing here —
+every restaurant, every prop, every recipe and the entire authored menu config, to every
+player. Nearly every caller is an edit from an auto-saving panel (there are no save buttons
+by design), so a colour-picker drag used to emit one per debounce tick. Config changes call
+**`SyncWorldSoon()`**; one flusher sends at most one payload per `SYNC_MIN_MS`. Reserved
+seats got their own tiny delta event (`SyncReservedSeats` → the client rebuilds just that
+restaurant's seat interactions), and `SetRestaurantJob` pushes nothing at all —
+`metadata.job`/`ranks` are not in the payload, so it was syncing the world to change nothing
+observable.
+
+### A CLIENT HOLDS ONLY THE RESTAURANTS IT IS AT
+
+A client used to spawn a real entity for every placed prop of every restaurant on the server
+the moment it synced, and respawn the lot on every config edit. **That is what forced the prop
+events to be world-wide broadcasts** — if everyone holds everything, everyone has to be told
+about everything. So proximity decides now, and **ONE function is the only thing that spawns
+or despawns a placed prop**: the reconciler in `modules/main/client.lua`.
+
+It DIFFS. `propRowSig(prop)` describes everything about a row that changes what it puts in the
+world (type, model, transform, metadata, its restaurant's label, and whether a reservation
+holds it — a seat's label is baked in at spawn), and `RWorld.sig[propId]` is the row each prop
+was actually built from. So an unchanged prop is left alone, a moved or re-styled one is
+rebuilt, a deleted or walked-away-from one is torn down. A config-only edit — which is what a
+sync almost always is — now costs NO entity work.
+
+Rules that hold this together:
+- **Rows are global; only ENTITIES are proximity-scoped.** `propsById` stays complete from the
+  sync, so every lookup elsewhere keeps working for restaurants across the map. Anything that
+  binds a render target to a placed prop's model must additionally ask
+  **`IsRestaurantLoaded(rid)`**, because `AddReplaceTexture` only takes on a model that
+  exists — `modules/screens`' `nearestFor` and `modules/register`'s counter picker both pick
+  "the nearest restaurant with this prop placed", which before proximity loading could never
+  be a restaurant whose prop wasn't spawned.
+- **ONE thread reconciles.** `SpawnProp` yields while its model streams, and two passes racing
+  on one prop is the same orphan-nothing-tracks bug as `CookSpawnGen`. Events and syncs only
+  ever `markRestaurantDirty(rid)`; they never spawn. `DoApplySync` doesn't either.
+- **Snapshot before iterating.** `reconcileRestaurant` copies the prop list first: `SpawnProp`
+  yields, and a `propPlaced` landing in that window ADDS a key to `propsById` — mutating a
+  table mid-`pairs` is undefined in Lua (nil-ing an existing field is the only legal mutation).
+- **Re-check the row after the yield.** `propsById[id] ~= prop` means the row was replaced or
+  deleted while we streamed; keeping the entity would orphan it.
+- Hysteresis `REST_IN`/`REST_OUT` (250/320m) must stay far wider than `CookRange` (70/85m), or
+  a station's prop would vanish while its cooking items were still subscribed.
+- `SetupBlip` uses `counter or centre`, never `props[1]` — a distant restaurant has no props
+  loaded, so the old fallback would have silently dropped its blip. `centre` is
+  server-computed (`RestaurantCentre`) and rides the payload for exactly this reason.
+- A sync never touched cooking ITEM props and still doesn't — do not add a drop/re-hydrate
+  there, that is exactly the churn this removes.
+
+**A restaurant's priced `menu` is FETCHED, not synced.** It was the worst-scaling term in the
+payload — every restaurant's entire priced catalog, with a full `nui://` image url per entry,
+to every player regardless of whether they were near a board — and exactly ONE consumer read
+it: the menu SCREEN in `modules/screens`. It now comes from `screens:getMenu`, cached per
+restaurant behind a seed-once flag, dropped by `RefreshScreens()` so a price edit re-fetches.
+Anything else that wants a restaurant's catalog should take the same route rather than
+putting it back in `BuildClientRestaurant`.
+
+**A BROADCAST IS A DISCLOSURE BOUNDARY.** `SyncOrders` (`modules/sales/server.lua`) sent the
+full staff-grade ticket list to every player up to once per 750ms: customer names, delivery
+addresses, raw driver identifiers and per-order spend, server-wide. The projection that hid
+those ran CLIENT-side, which protects nothing — the data was already on every machine. It
+now resolves three DISJOINT audiences, most-privileged first, so nobody gets two lists:
+**STAFF** (cook/sell at the restaurant, plus whoever is clocked in — the phone KDS is the
+one staff surface that isn't there) get the full list; **PARTY** (a customer or claimed
+driver) get ONLY their own tickets; **BYSTANDERS** near the restaurant get `publicOrders` —
+ticket #, lines, total and ready-state, with identity stripped. Same SHAPE, not a different
+one: the screens client projects it again and the idle register board renders these fields.
+`register:getPublic` and `screens:getOrders` return `publicOrders` too — they are callable
+by anyone, so "display-safe" has to be true of the PAYLOAD, not just of the page drawing
+it. `OrderPartyIdentifiers` (core) resolves who is party to a ticket from the order cache,
+so a customer identifier never rides a list at all. When adding a field to
+`GetOpenOrders`'s projection, decide which of the three audiences may see it.
 
 **No migrations. The schema is DECLARED.** Every column a module needs is in that
 table's one `CREATE TABLE IF NOT EXISTS` in `CreateTables()` — including the columns the
@@ -116,13 +246,64 @@ so all variants can be loaded together (`bridge/**/server.lua` glob) and only th
 one defines the globals. Bridges provide a common API: `GetIdentifier`, `IsPlayerAdmin`,
 `ShowNotification`, `AddMoney`/`RemoveMoney`, `GetPlayerCharacterName`, and an `Inventory`
 table (`AddItem`, `RemoveItem`, `Items`, `ItemExists`, `RefreshItems`, …). Variants:
-`esx`, `qb`, `custom`, plus `xp` and a `target/` layer (`ox_target`/`qb-target`/`qtarget`).
-Target usage is auto-detected in `core/shared.lua` (`Config.UseTarget`); no manual toggle.
+`esx`, `qb` (also QBox), `custom`, plus the `target/`, `phone/`, `inventory/` and
+`society/` layers. Target usage is auto-detected in `core/shared.lua`
+(`Config.UseTarget`); no manual toggle. A framework bridge owns the framework, the money
+and the jobs — inventory and society are NOT its business, because neither is 1:1 with a
+framework (see below).
 
 `Inventory.Items` (name → `{ label, image }`) is the catalogue the NUI uses so configs are
 built by **picking real items** rather than typing codenames. `InventoryImageBase()` /
 `InvImageUrl()` in `core/shared.lua` resolve `nui://` image paths across ~9 supported
 inventories.
+
+**Every adapter layer is ONE FOLDER PER SUPPORTED RESOURCE, registering itself into a
+registry that a resolver reads.** `bridge/phone`, `bridge/target`, `bridge/inventory` and
+`bridge/society` all follow this: the registry + safe-export helpers live in that layer's
+`shared.lua`, the resolver + public API in its `server.lua`, and supporting one more
+resource is one more file. `exports[res][name]` **RAISES ON THE INDEX**, and as an argument
+to `pcall` it is evaluated before pcall ever runs — so every probe goes through the layer's
+own helper (`PhoneCallExport` / `InvExport` / `SocietyExport`), which does the index INSIDE
+the protected call. That is the whole reason trying candidate export names is possible.
+
+**`bridge/inventory` is THE inventory layer.** The framework bridges no longer carry one;
+they call `InitializeInventory()` and it builds the global `Inventory` table out of a
+DRIVER. A driver is a set of PRIMITIVES (`items`, `count`, `add`, `remove`, `slots`,
+`setMetadata`, `canCarry`, `inventory`, `registerUsable`) — never an `Inventory` of its own
+— because everything else is expressed once on top of them. Highest-priority driver whose
+resource is started wins; the framework's own item storage (`bridge/inventory/esx`,
+`bridge/inventory/qb`) is itself a low-priority driver, and `none` is the floor so a bare
+server still gets a working (honestly empty) `Inventory` rather than a nil. Most qb-lineage
+forks are one shared shape, `InvQbShapedDriver` — a resource name plus whatever it calls
+things, since forks rename exports far more often than they change arguments.
+
+**A driver that reports `metadata = false` is WRAPPED, not accepted.** ESX stores an item as
+a name and a number: no slots, nowhere to put a build stack — and this resource's three
+vessels ARE their metadata (one-item consolidation). `bridge/inventory/metadata` keeps ONE
+ROW PER METADATA-BEARING UNIT in `pickle_restaurant_item_meta` and reconciles it against the
+inventory's live count on every read. Two stores, one authority: the COUNT is the
+framework's, the VARIATION is ours. Plain units are never tracked (500 bottles of water
+would be 500 rows) — they are the REMAINDER, reported as one entry on **slot 0**, which is
+also why a removal against slot 0 deletes no row. Virtual slots start at 1 and are claimed
+in the cache BEFORE the insert awaits (the await yields; two cooks bagging up at once would
+otherwise collide on the unique key), and rows are deleted by that key rather than by `id`,
+which may still be in flight. Because of the overlay, `GetItemSlots` / `RemoveItemSlot` /
+`SetItemMetadata` are ALWAYS defined — the old `if Inventory.GetItemSlots then … else …`
+fallbacks at the call sites are now what the layer itself does for a driver that can't.
+
+**Item use has two routes and only one is tried at a time.** The framework's hook
+(`RegisterUsableItem`) is primary; `Inventory.RegisterUsable` (Quasar, CodeM,
+core_inventory own item-use) is tried ONLY when the framework returned `false` — those
+inventories route use through the framework when there is one, so wiring both would eat two
+bites per click. ox is neither: it calls the export named in the item definition.
+
+**`bridge/society` is per-provider too**, and probed BY PROVIDER, NOT BY FRAMEWORK —
+Renewed-Banking `provide`s both `qb-management` and `esx_society`, and okokBanking runs on
+ESX and QB alike, so "ESX ⇒ addon accounts" is simply wrong on a server running either.
+Priority order: Renewed-Banking (it shims the others, so it must win) → okokBanking →
+fd_banking → qb-management → qb-banking → esx_addonaccount → our own table. `SocietyAmount`
+unwraps a provider that answers with an account TABLE instead of a number — a table where a
+number was expected reads as "unknown account", i.e. as a broke restaurant.
 
 ### Modules (`modules/<name>/{client,server}.lua`)
 
@@ -1061,6 +1242,67 @@ via the bridge's `Nourish(source, hunger, thirst)` (0-100 percentages, scaled pe
 framework: esx_status ×10,000, QB metadata + HUD event, standalone none). Every
 variant also fires `pickle_restaurants:nourish(source, hunger, thirst)`, so a server
 running its own needs system hooks that instead of editing the bridge.
+
+## A carrier never goes inside another carrier
+
+The **serving tray** (`meal_item`) and the **Restaurant Bag** (`bag_item`) are both
+multi-item carriers whose contents ride as build-stack metadata, so nesting one in the
+other is a container inside itself: the layer would render as a bare bag/meal prop lying on
+a tray with its own contents invisible, every consumer that walks a vessel's layers (the
+eat menu, `layerIdentity`, the POS's `mealCovers`, `prepDecompose`) would have to recurse a
+second vessel deep, and fulfilment would double-count — a bagged meal's units claimable
+through both carriers. `IsCarrierItem(item)` (`core/server.lua`, mirrored in
+`modules/main/client.lua`) is the one answer, and **`prepAdd` is the authority**: it is the
+single door a part enters a build by, so refusing a carrier there covers a bag on a tray, a
+meal in a bag, and either nested in itself. The client refuses the drag before it starts so
+the drop isn't a round-trip, but the NUI is untrusted and the server decides.
+
+A **takeout box is deliberately NOT a carrier** by this rule: it holds exactly one food and
+IS a sellable unit, so a box on a tray or in a bag is a side in its box — which the render
+and consume paths already handle.
+
+## The drag gate: ANSWERING THE NUI ends the critical section
+
+`DragGate` (`modules/cooking/client.lua`) serializes every drag's `begin*`/`end*` so an `end`
+can't run before its `begin` published the drag. It protects exactly that, and nothing more —
+so a handler holds it only until it REPLIES. `DragGate.callback` wraps `cb` to release the
+gate, and releases are TOKENED: without that, a handler that replied early would, on
+returning, clear a claim a LATER handler had since taken — the gate silently open with a drag
+in flight, which is the bug it exists to prevent.
+
+**This is why a released drag used to hang on the cursor for seconds.** Every `end*` handler
+did `RefreshTray(); RefreshBar()` — two more server round trips — BEFORE `cb`, so the gate was
+held across 3-4 SEQUENTIAL callbacks. The next drag's `begin` then couldn't start until they
+finished, so its preview prop appeared *after* the player had already released, followed the
+cursor, and only placed when the queued `end` finally ran. At `DragGate.ms = 2000` that caps at
+two seconds of an item refusing to let go. **Refresh AFTER you reply, always** — those results
+arrive as their own NUI messages and were never part of the drop's answer.
+
+The other half of the hold is model streaming: `begin` spawns a preview through `SpawnProp` →
+`EnsureModel`, up to a second for a cold model, inside the gate. `WarmBarModels` requests the
+open station's bar models (one per frame, off-thread) when the bar refreshes, so the first drag
+is as warm as the second. Ordinary `RequestModel` refs, never held — nothing to release.
+
+## Spawning a cook item YIELDS, so every spawner needs a token
+
+`SpawnProp` waits on the model streaming in (`EnsureModel` and `CreateProp` both `Wait(0)`)
+— instant on a warm client, **hundreds of ms on a cold one, i.e. a first join**. In that
+window another payload for the SAME uid (a flip, a phase timeout, the join's own
+`cooking:bulk` replay) can run to completion, and the slow pass then overwrites the live
+entity handle with its own. The overwritten prop is referenced by nothing, so no cleanup
+path — they all iterate the tracked tables — ever deletes it: **that orphan is the patty
+half left stuck on the stovetop**, and it is why the bug shows up on someone's first join
+and can't be reproduced by spamming flips on a warm client.
+
+Every spawner (`RebuildDual`, `SpawnCookObject`, `SpawnSlotObject`) therefore bumps
+`CookSpawnGen[uid]` (`BumpSpawnGen`) on entry and, after each yielding spawn, drops what it
+made if the token moved. Two supporting rules: **empty the table slot BEFORE yielding** (so
+a removal arriving mid-stream doesn't find a stale handle and think it already freed that
+prop), and re-check the record's identity too (`CookDual[uid] ~= rec`) — a `cooking:remove`
+mid-stream nils the table, and writing a live prop onto the discarded record is the same
+orphan by a second route. `RemoveDual` and `dropItemLocal` bump it as well. `CookSpawnGen`
+is a GLOBAL because `modules/cooking/client.lua` sits exactly AT Lua's 200-local ceiling,
+where a 201st top-level local is a hard compile error.
 
 ## One-item consolidation rule
 

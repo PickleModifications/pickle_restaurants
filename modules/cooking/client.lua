@@ -111,21 +111,47 @@ local prepDrag = nil     -- { parts = {…}, fromSid?, hit, coords, targetSid, t
 -- handler that errors out without releasing it only stalls the next one until
 -- `ms` — never forever. (One table, not four locals: this file is close to Lua's
 -- 200-local limit for a chunk.)
-local DragGate = { ms = 2000, busy = nil }
+--
+-- ANSWERING THE NUI IS WHAT ENDS THE CRITICAL SECTION — not the handler returning.
+-- The gate protects one thing: that an `end` can't run before its `begin` published the
+-- drag. By the time a handler replies it has claimed the drag and decided its outcome, so
+-- everything it does afterwards (refreshing the bar, refreshing the tray — a server round
+-- trip each) needs no lock. Holding the gate across those is what made a released drag hang
+-- on the cursor: the reply the NUI clears its ghost on came only after 3-4 SEQUENTIAL server
+-- callbacks, and the next drag's `begin` couldn't even start until they finished. Under load
+-- that reads as seconds of the item refusing to let go.
+--
+-- Releases are TOKENED. Without that, a handler that replied early would, on returning, clear
+-- a claim a LATER handler had since taken — the gate would be silently open with a drag
+-- mid-flight, which is the exact bug it exists to prevent.
+local DragGate = { ms = 2000, busy = nil, owner = 0, seq = 0 }
 function DragGate.wait()
     local t0 = GetGameTimer()
     while DragGate.busy and GetGameTimer() - DragGate.busy < DragGate.ms
         and GetGameTimer() - t0 < DragGate.ms do Wait(0) end
-    DragGate.busy = GetGameTimer()
+    DragGate.seq = DragGate.seq + 1
+    DragGate.busy, DragGate.owner = GetGameTimer(), DragGate.seq
+    return DragGate.seq
+end
+function DragGate.release(token)
+    -- only the holder may open it; a late release from a handler that already replied is a
+    -- no-op rather than a door left open for someone else's drag
+    if DragGate.owner == token then DragGate.busy = nil end
 end
 -- Register an NUI callback that takes part in a drag's lifecycle (any begin*/end*
 -- that spawns, publishes or releases a carried prop). Identical to
 -- RegisterNUICallback except its handlers can never overlap each other.
 function DragGate.callback(name, fn)
     RegisterNUICallback(name, function(d, cb)
-        DragGate.wait()
-        local res = fn(d, cb)
-        DragGate.busy = nil
+        local token = DragGate.wait()
+        -- replying frees the gate, so a handler gets this for free wherever it already
+        -- answers early — and any post-reply work runs unlocked
+        local function reply(res)
+            DragGate.release(token)
+            return cb(res)
+        end
+        local res = fn(d, reply)
+        DragGate.release(token) -- returned without replying (shouldn't happen; belt and braces)
         return res
     end)
 end
@@ -611,10 +637,30 @@ local function curYaw()
     return p and stationHeadingZ(p.id, p) or 0.0
 end
 
+-- SPAWNING A COOK ITEM YIELDS, SO EVERY SPAWNER NEEDS A TOKEN. `SpawnProp` waits on
+-- the model streaming in (EnsureModel + CreateProp both Wait(0)), which is instant on a
+-- warm client and hundreds of ms on a cold one — a first join. In that window another
+-- payload for the SAME uid (a flip, a phase timeout, the join's own cooking:bulk replay)
+-- can run to completion, and the slow pass then overwrites the live entity handle with
+-- its own: the overwritten prop is referenced by nothing, so no remove/cleanup path
+-- (which all iterate the tracked tables) ever deletes it. That orphan is the patty half
+-- left stuck on the stovetop. Every spawner bumps its uid's generation on entry and
+-- drops what it spawned if the token moved while it was streaming. A global, not a
+-- local: this file sits at Lua's 200-local ceiling.
+CookSpawnGen = CookSpawnGen or {} -- [uid] = monotonic spawn token
+
+function BumpSpawnGen(uid)
+    local g = (CookSpawnGen[uid] or 0) + 1
+    CookSpawnGen[uid] = g
+    return g
+end
+
 local function SpawnCookObject(uid, model, x, y, z, state, propId)
-    if CookObjects[uid] then SafeDeleteEntity(CookObjects[uid]) end
+    local token = BumpSpawnGen(uid)
+    if CookObjects[uid] then SafeDeleteEntity(CookObjects[uid]); CookObjects[uid] = nil end
     local ent = SpawnProp(model, x, y, z)
     if not ent then return end
+    if CookSpawnGen[uid] ~= token then SafeDeleteEntity(ent); return end
     -- CreateProp seats the model's bounds at z; the drag preview and live-move
     -- both place the raw origin with SetEntityCoordsNoOffset, so match them here
     -- or the synced prop lands at a slightly different (nearby) spot than dragged.
@@ -1085,7 +1131,9 @@ end
 -- projection can hit-test it like a dual patty. `stack` (optional, bottom-to-top model
 -- list) renders an uncooked assembled item as its whole build stack.
 local function SpawnSlotObject(uid, model, propId, method, door, slot, state, stack)
+    local token = BumpSpawnGen(uid)
     if CookObjects[uid] then CookEntityUid[CookObjects[uid]] = nil; SafeDeleteEntity(CookObjects[uid]) end
+    CookObjects[uid] = nil
     clearSlotStack(uid)
     CookState[uid] = state
     CookSlot[uid]  = { propId = propId, method = method, door = door, slot = slot }
@@ -1118,6 +1166,13 @@ local function SpawnSlotObject(uid, model, propId, method, door, slot, state, st
         local ents, hs, rl, of = {}, {}, {}, {}
         for i, mdl in ipairs(mdls) do
             local e = SpawnProp(mdl, 0.0, 0.0, 0.0)
+            -- a newer pass owns this uid now: drop the WHOLE tower we were building,
+            -- nothing is published to CookSlotStack yet so nothing else can free it
+            if CookSpawnGen[uid] ~= token then
+                if e then SafeDeleteEntity(e) end
+                for _, prev in ipairs(ents) do CookEntityUid[prev] = nil; SafeDeleteEntity(prev) end
+                return
+            end
             if e then
                 ents[#ents + 1] = e
                 hs[#hs + 1] = heights[i]
@@ -1137,6 +1192,7 @@ local function SpawnSlotObject(uid, model, propId, method, door, slot, state, st
 
     local ent = SpawnProp(model, 0.0, 0.0, 0.0)
     if not ent then return end
+    if CookSpawnGen[uid] ~= token then SafeDeleteEntity(ent); return end
     CookObjects[uid] = ent
     CookEntityUid[ent] = uid
     seatSlotItem(uid)
@@ -1476,19 +1532,30 @@ local function RebuildDual(p)
         rec = { ent = {}, modelName = {}, sides = sides, flipped = flipped, input = input }
         CookDual[uid] = rec
     end
+    -- see CookSpawnGen: the face spawns below YIELD on a cold model, and a flip/melt/
+    -- bulk-replay payload for this same patty arriving in that window would otherwise
+    -- leave one of the two faces orphaned on the stovetop forever
+    local token = BumpSpawnGen(uid)
 
     for s = 1, 2 do
         local model = modelForSide(input, sides[s])
         local ent = rec.ent[s]
         if (not ent) or (not DoesEntityExist(ent)) or rec.modelName[s] ~= model then
             if ent then CookEntityUid[ent] = nil; SafeDeleteEntity(ent) end
+            -- empty the slot BEFORE yielding: a remove arriving mid-stream must not
+            -- find a stale handle here and think it already freed this face
+            rec.ent[s], rec.modelName[s] = nil, nil
             ent = model and SpawnProp(model, x, y, z) or nil
+            -- `CookDual[uid] ~= rec` catches removal too: a cooking:remove mid-stream
+            -- nils the table, and writing onto the discarded rec is the same orphan
+            if CookSpawnGen[uid] ~= token or CookDual[uid] ~= rec then
+                if ent then SafeDeleteEntity(ent) end
+                return
+            end
             if ent then
                 rec.ent[s] = ent
                 rec.modelName[s] = model
                 CookEntityUid[ent] = uid
-            else
-                rec.ent[s] = nil
             end
         end
     end
@@ -1501,8 +1568,13 @@ local function RebuildDual(p)
         local model = topping.model or toppingModel(topping)
         if model and ((not rec.meltEnt) or (not DoesEntityExist(rec.meltEnt)) or rec.meltModel ~= model) then
             if rec.meltEnt then SafeDeleteEntity(rec.meltEnt) end
-            rec.meltEnt = SpawnProp(model, x, y, z)
-            rec.meltModel = rec.meltEnt and model or nil
+            rec.meltEnt, rec.meltModel = nil, nil
+            local melt = SpawnProp(model, x, y, z) -- yields; same token rule as the faces
+            if CookSpawnGen[uid] ~= token or CookDual[uid] ~= rec then
+                if melt then SafeDeleteEntity(melt) end
+                return
+            end
+            rec.meltEnt, rec.meltModel = melt, melt and model or nil
         end
     elseif rec.meltEnt then
         SafeDeleteEntity(rec.meltEnt); rec.meltEnt, rec.meltModel = nil, nil
@@ -1526,6 +1598,7 @@ local function RebuildDual(p)
 end
 
 local function RemoveDual(uid)
+    BumpSpawnGen(uid) -- a spawn still streaming for this uid must drop what it makes
     local rec = CookDual[uid]; if not rec then return false end
     for s = 1, 2 do
         local ent = rec.ent[s]
@@ -1739,6 +1812,7 @@ end)
 -- drop one item's local props/visuals (shared by the remove broadcast and a
 -- closing virtual session dropping its own renders — the server state lives on)
 local function dropItemLocal(uid)
+    BumpSpawnGen(uid) -- invalidate any spawn still streaming for this uid
     if CookObjects[uid] then CookEntityUid[CookObjects[uid]] = nil end
     if not RemoveDual(uid) then
         SafeDeleteEntity(CookObjects[uid])
@@ -1749,6 +1823,9 @@ local function dropItemLocal(uid)
     SodaFill[uid] = nil
     CookPropId[uid] = nil
     CookObjects[uid], CookState[uid], CookCoords[uid], CookSlot[uid], CookProg[uid], CookYaw[uid] = nil, nil, nil, nil, nil, nil
+    -- safe to forget the token: server uids are monotonic (cookUid) and never reused, and
+    -- a pass still streaming compares against nil, which can never match its token
+    CookSpawnGen[uid] = nil
 end
 
 RegisterNetEvent("pickle_restaurants:cooking:remove", dropItemLocal)
@@ -1794,6 +1871,95 @@ function DropItemsFor(propId)
     end
 end
 
+-- ─── station range watcher (what makes scoped sends safe) ─────────────────────
+--
+-- The server no longer broadcasts cooking events to the world — it sends them to the
+-- players near the station (SendNearProp, ScopeRadius.PROP). That alone would leave a
+-- player who walks up from further out staring at an empty grill, because the spawn
+-- they missed is never re-sent. So range is a SUBSCRIPTION with two edges, and the two
+-- functions above already are the edges: entering a station's range re-hydrates its
+-- items from `cooking:getActive` (filtered by prop server-side), leaving it drops
+-- exactly that station's props again.
+--
+-- This is also a straight win on its own: before, every client in the city spawned a
+-- real entity for every item on every grill on the server — one CreateObject per stack
+-- layer, per client, per restaurant. Now a client only holds the kitchens it is in.
+--
+-- VIRTUAL points are skipped entirely: their items are gated on being in a session at
+-- that exact point (renderableProp), which is a stricter rule than distance and is
+-- already driven by ReplayActiveItemsFor/DropItemsFor at session open/close. Adding a
+-- distance edge on top would drop a session's items the moment the shell put the player
+-- a little further from the anchor than the radius.
+-- A GLOBAL, and ONE table rather than a field per tunable: this file is exactly AT Lua's
+-- 200-local ceiling, where a 201st top-level local is a hard compile error, not a warning.
+-- That is also why the functions below are globals. Prefixed to keep it out of the way of
+-- the other modules sharing this client.
+-- `in`/`out` are tighter than the server's ScopeRadius.PROP on purpose — the server must
+-- already be sending us a station's events BEFORE we ask for its state, or a change
+-- landing between the getActive reply and our arrival in the server's audience is lost.
+-- That gap is the hysteresis that guarantees the ordering; `out` > `in` so pacing the
+-- boundary doesn't thrash subscribe/unsubscribe.
+CookRange = {
+    subbed = {},  -- [propId] = true while we hold this station's items
+    ms     = 1000, -- range poll (TUNE IN-GAME)
+    ["in"] = 70.0,
+    out    = 85.0,
+}
+
+CreateThread(function()
+    while true do
+        Wait(CookRange.ms)
+        local props = GetClientProps and GetClientProps() or nil
+        if props then
+            local pc = GetEntityCoords(PlayerPedId())
+            -- Prune subscriptions to stations that no longer exist. A deleted prop already
+            -- drops its items through propRemoved, but the SUBSCRIPTION would linger as a
+            -- stale `true` — and if that prop id ever came back, the loop below would think
+            -- we already held it and never re-hydrate.
+            for pid in pairs(CookRange.subbed) do
+                if not props[pid] then CookRange.subbed[pid] = nil end
+            end
+            for _, p in pairs(props) do
+                if p.prop_type ~= "virtual_point" and p.x and StationCooks(p) then
+                    local d = #(pc - vector3(p.x, p.y, p.z))
+                    if CookRange.subbed[p.id] then
+                        if d > CookRange.out then
+                            CookRange.subbed[p.id] = nil
+                            DropItemsFor(p.id)
+                        end
+                    elseif d < CookRange["in"] then
+                        -- claim BEFORE the await: ReplayActiveItemsFor yields on the
+                        -- callback (and on every model it streams), and a second pass
+                        -- of this loop meanwhile would ask again and double-spawn
+                        CookRange.subbed[p.id] = true
+                        ReplayActiveItemsFor(p.id)
+                        pc = GetEntityCoords(PlayerPedId()) -- may have moved while we waited
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- A station whose items this watcher is responsible for. Anything a cooking item can
+-- sit on; other prop types (seats, doors, counters, registers) hold none.
+function StationCooks(p)
+    local t = p.prop_type
+    return t == "stovetop" or t == "fryer" or t == "kitchen_prep" or t == "soda_machine"
+end
+
+-- Force a re-hydration of every station we hold. Nothing calls this on a normal sync (a
+-- sync leaves cooking items standing — see the note in main's DoApplySync); it exists for
+-- a caller that has genuinely invalidated our items and wants them rebuilt from the server.
+function ResubscribeStations()
+    local held = {}
+    for pid in pairs(CookRange.subbed) do held[#held + 1] = pid end
+    CookRange.subbed = {}
+    for _, pid in ipairs(held) do DropItemsFor(pid) end
+    -- left empty on purpose: the range loop re-enters each within CookRange.ms and
+    -- re-hydrates through the normal subscribe edge, so there is one code path, not two
+end
+
 -- ─── click-to-flip hover ─────────────────────────────────────────────────────
 
 local hoveredDual = nil
@@ -1818,10 +1984,47 @@ end
 
 -- ─── open / close ────────────────────────────────────────────────────────────
 
+-- PRE-WARM WHAT THE BAR OFFERS. A drag's `begin` spawns its preview prop, and SpawnProp
+-- waits on EnsureModel — up to a second for a cold model, INSIDE the drag gate. That hold
+-- delays the release that follows (and the next drag's begin), which is the other half of
+-- "the item stayed on my cursor and then placed". Every one of these models is something the
+-- player can drag within seconds of the bar appearing, so requesting them up front turns
+-- that wait into nothing on the very first drag rather than the second.
+--
+-- Bounded by construction: only the open station's own bar, requested once per model (the
+-- HasModelLoaded check makes a re-open free), and never held — these are ordinary
+-- RequestModel refs the engine is free to evict, exactly as before. Off-thread so opening
+-- the station doesn't block on it.
+-- A global, not a local: this file is AT Lua's 200-local ceiling for a chunk.
+function WarmBarModels(ing)
+    CreateThread(function()
+        local seen = {}
+        for _, e in ipairs(ing or {}) do
+            for _, m in ipairs({ e.model, e.tool_model, e.container_model, e.applied_model, e.lidModel }) do
+                if type(m) == "string" and m ~= "" and not seen[m] then
+                    seen[m] = true
+                    local hash = GetHashKey(m)
+                    if not HasModelLoaded(hash) then RequestModel(hash) end
+                    Wait(0) -- one per frame: a burst of RequestModel is a frame hitch
+                end
+            end
+            for _, f in ipairs(e.flavors or {}) do
+                if type(f.model) == "string" and f.model ~= "" and not seen[f.model] then
+                    seen[f.model] = true
+                    local hash = GetHashKey(f.model)
+                    if not HasModelLoaded(hash) then RequestModel(hash) end
+                    Wait(0)
+                end
+            end
+        end
+    end)
+end
+
 local function RefreshBar()
     if not cookingOpen or not currentCookProp then return end
     local ing = lib.callback.await("pickle_restaurants:cooking:getIngredients", false, { prop_id = currentCookProp.id })
     SendNUIMessage({ action = "cookingIngredients", ingredients = ing })
+    WarmBarModels(ing)
 end
 
 local function RefreshTray()
@@ -1852,8 +2055,8 @@ end)
 -- the NUI's live countdown hit 0 on an item -> re-pull the tray immediately (getTray
 -- purges spoiled rows server-side) so it drops without waiting for the periodic sweep.
 RegisterNUICallback("cooking:refreshTray", function(_, cb)
+    cb({ ok = true }) -- reply first; the refresh arrives as its own NUI message
     if cookingOpen and currentCookProp then RefreshTray() end
-    cb({ ok = true })
 end)
 
 -- ─── interactive prep build (free-form stacking) ─────────────────────────────
@@ -3499,8 +3702,9 @@ DragGate.callback("cooking:endPlace", function(d, cb)
         while not (CookObjects[uid] or CookDual[uid]) and tries < 60 do Wait(0); tries = tries + 1 end
     end
     deletePreview(p)
-    if res and res.ok then RefreshBar(); RefreshTray() elseif res and res.error then ShowNotification(res.error) end
+    if res and res.error then ShowNotification(res.error) end
     cb(res or { ok = false })
+    if res and res.ok then RefreshBar(); RefreshTray() end -- after the reply, never before
 end)
 
 -- chip grabbed: drag the *real* placed prop live under the cursor, the same way
@@ -3667,6 +3871,12 @@ DragGate.callback("cooking:beginPrepPlace", function(d, cb)
     cancelPlace(); cancelMove()
     if prepDrag then deleteDrag(prepDrag); prepDrag = nil end
     if not currentCookProp then return cb({ ok = false }) end
+    -- a packed carrier is not a part: refuse the drag before it starts rather than let
+    -- it follow the cursor to a drop prepAdd will only reject (see IsCarrierItem)
+    if IsCarrierItem(d.item) then
+        ShowNotification(_L("cook_no_nested_vessel"))
+        return cb({ ok = false })
+    end
 
     local dual      = (d.dual == 1 or d.dual == true)
 
@@ -3772,8 +3982,12 @@ DragGate.callback("cooking:endPrepPlace", function(d, cb)
         PrepStacks[prepSid] = stack
     end
     relayout(stack)
-    RefreshTray(); RefreshBar()
+    -- Reply BEFORE the refreshes. The pile is committed and laid out, so the drop's outcome
+    -- is already known; RefreshTray/RefreshBar are two more server round trips whose results
+    -- arrive as their own NUI messages. Waiting for them here is what kept the dragged item
+    -- stuck to the cursor after release.
     cb(res or { ok = false })
+    RefreshTray(); RefreshBar()
 end)
 
 -- Spawn one prep part per decompose spec (a halves layer picks its bottom/top prop,
@@ -3879,7 +4093,7 @@ DragGate.callback("cooking:endPrepDecompose", function(d, cb)
     end
     if #parts == 0 then
         for _, e in ipairs(trayEnts or {}) do SafeDeleteEntity(e) end
-        RefreshTray(); RefreshBar(); return cb({ ok = false })
+        cb({ ok = false }); RefreshTray(); RefreshBar(); return
     end
 
     -- A meal sets down as its whole tray (or its pizza box, lid open): the pair
@@ -3894,8 +4108,7 @@ DragGate.callback("cooking:endPrepDecompose", function(d, cb)
         end
         if ents then
             commitTrayGroup(coords.x, coords.y, coords.z, ents, groupPiles(parts), kind, res.box and true or false)
-            RefreshTray(); RefreshBar()
-            return cb(res)
+            cb(res); RefreshTray(); RefreshBar(); return
         end
         -- tray prop failed to spawn: fall through and keep the parts as a plain stack
     else
@@ -3915,8 +4128,8 @@ DragGate.callback("cooking:endPrepDecompose", function(d, cb)
         PrepStacks[prepSid] = stack
     end
     relayout(stack)
-    RefreshTray(); RefreshBar()
     cb(res or { ok = true })
+    RefreshTray(); RefreshBar() -- display refresh, after the reply
 end)
 
 -- Grab a placed part: lift it and everything above it off its stack (grab the top
@@ -3966,8 +4179,7 @@ DragGate.callback("cooking:prepDrop", function(d, cb)
                         -- uncooked intermediate), so re-pull the tray too — otherwise
                         -- the "Uncooked Items" tab stays empty until the station is
                         -- reopened (why it only showed up at the oven before)
-                        RefreshTray(); RefreshBar()
-                        return cb(res)
+                        cb(res); RefreshTray(); RefreshBar(); return
                     end
                     if res and res.error then ShowNotification(res.error) end
                     -- fall through: set the tray back down
@@ -4013,8 +4225,7 @@ DragGate.callback("cooking:prepDrop", function(d, cb)
             if res and res.ok then
                 deleteDrag(drag)
                 if res.label then ShowNotification(_L("cook_made", res.label)) end
-                RefreshTray(); RefreshBar()
-                return cb(res)
+                cb(res); RefreshTray(); RefreshBar(); return
             end
             if res and res.error then ShowNotification(res.error) end
             -- fall through: put the tray (and everything on it) back down
@@ -4042,8 +4253,7 @@ DragGate.callback("cooking:prepDrop", function(d, cb)
                 if res and res.ok then
                     deleteParts(drag.parts)
                     if res.label then ShowNotification(_L("cook_saved", res.label)) end
-                    RefreshTray(); RefreshBar()
-                    return cb(res)
+                    cb(res); RefreshTray(); RefreshBar(); return
                 end
             end
         end
@@ -4052,8 +4262,7 @@ DragGate.callback("cooking:prepDrop", function(d, cb)
             if p.id then res = lib.callback.await("pickle_restaurants:cooking:prepRemove", false, { id = p.id }) end
         end
         deleteParts(drag.parts)
-        RefreshTray(); RefreshBar()
-        return cb(res or { ok = true })
+        cb(res or { ok = true }); RefreshTray(); RefreshBar(); return
     end
     local stack
     if drag.hit and drag.targetSid and PrepStacks[drag.targetSid] then
@@ -4101,8 +4310,8 @@ end)
 RegisterNUICallback("cooking:prepClear", function(_, cb)
     local res = lib.callback.await("pickle_restaurants:cooking:prepClear", false, {})
     clearPrepStacks()
-    RefreshTray(); RefreshBar()
     cb(res or { ok = true })
+    RefreshTray(); RefreshBar() -- display refresh, after the reply
 end)
 
 -- Build a single stack into the chosen recipe. The stack's reserved part ids go up
@@ -4196,8 +4405,7 @@ RegisterNUICallback("cooking:prepDisassemble", function(d, cb)
             if #stack.parts == 0 then removePrepStack(sid) else relayout(stack) end
         end
         if res and res.error then ShowNotification(res.error) end
-        RefreshTray(); RefreshBar()
-        return cb(res or { ok = false })
+        cb(res or { ok = false }); RefreshTray(); RefreshBar(); return
     end
 
     local parts = partsFromDecomposeSpecs(res.parts)
@@ -4207,8 +4415,7 @@ RegisterNUICallback("cooking:prepDisassemble", function(d, cb)
         table.remove(stack.parts, idx)
         deleteParts({ part })
         if #stack.parts == 0 then removePrepStack(sid) else relayout(stack) end
-        RefreshTray(); RefreshBar()
-        return cb(res)
+        cb(res); RefreshTray(); RefreshBar(); return
     end
     -- swap the one product layer for its components, IN PLACE: anything stacked on
     -- top of it stays on top, exactly as with a drop-in decompose
@@ -4216,8 +4423,8 @@ RegisterNUICallback("cooking:prepDisassemble", function(d, cb)
     deleteParts({ part })
     for i, p in ipairs(parts) do table.insert(stack.parts, idx + i - 1, p) end
     relayout(stack)
-    RefreshTray(); RefreshBar()
     cb(res)
+    RefreshTray(); RefreshBar() -- display refresh, after the reply
 end)
 
 -- ─── serving tray & pizza box (kitchen_prep) ─────────────────────────────────
@@ -4336,8 +4543,8 @@ RegisterNUICallback("cooking:prepMakeMeal", function(d, cb)
         ShowNotification(mkLid and _L("cook_box_empty") or _L("cook_tray_empty"))
         return cb({ ok = false })
     end
-    if res.ok then RefreshTray(); RefreshBar() end
     cb(res or { ok = false })
+    if res.ok then RefreshTray(); RefreshBar() end -- after the reply, never before
 end)
 
 -- The lidded box tooltip's Take Out: empty the box back onto the table — each pile
@@ -4511,8 +4718,9 @@ DragGate.callback("cooking:endTopping", function(d, cb)
         local res = lib.callback.await("pickle_restaurants:cooking:applyTopping", false,
             { uid = uid, item = (p and p.item) or (d and d.item) })
         if res and res.error then ShowNotification(res.error) end
-        if res and res.ok then RefreshBar() end
-        return cb(res or { ok = false })
+        cb(res or { ok = false })
+        if res and res.ok then RefreshBar() end -- after the reply
+        return
     end
     cb({ ok = false })
 end)
@@ -4593,9 +4801,12 @@ DragGate.callback("cooking:endLid", function(d, cb)
         local res = lib.callback.await("pickle_restaurants:cooking:applyLid", false, { uid = uid })
         if res and res.error then ShowNotification(res.error) end
         -- drop the liquid right away — don't let it flash back in the gap
-        -- before the capped-cup sync lands
-        if res and res.ok then SodaFill[uid] = nil; RefreshBar() end
-        return cb(res or { ok = false })
+        -- before the capped-cup sync lands. This one stays BEFORE the reply: it's a local
+        -- render flag, not a round trip, and its whole point is the ordering.
+        if res and res.ok then SodaFill[uid] = nil end
+        cb(res or { ok = false })
+        if res and res.ok then RefreshBar() end -- the round trip goes after
+        return
     end
     cb({ ok = false })
 end)
@@ -4607,7 +4818,7 @@ RegisterNUICallback("cooking:applyTopping", function(d, cb)
         local res = lib.callback.await("pickle_restaurants:cooking:applyTopping", false,
             { uid = uid, item = d.item })
         if res and res.error then ShowNotification(res.error) end
-        if res and res.ok then RefreshBar() end
+        if res and res.ok then cb({ ok = true }); RefreshBar(); return end
     end
     cb({ ok = true })
 end)

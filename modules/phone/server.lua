@@ -366,6 +366,20 @@ function IsClockedIn(rid, src)
     return (sc and sc[GetIdentifier(src)]) ~= nil
 end
 
+-- The ONLINE server ids clocked in here. This is the audience for the phone's kitchen
+-- board (the KDS), which is the one staff surface that is NOT at the restaurant: a
+-- manager reads the queue from anywhere, so SyncOrders can't find them by distance.
+-- Resolving identifier→source costs a player scan each, so it walks the shift set (a
+-- handful) rather than every connected player.
+function ClockedInSources(rid)
+    local out = {}
+    for ident in pairs(ShiftCache[rid] or {}) do
+        local src = ResolveSourceForIdentifier and ResolveSourceForIdentifier(ident) or nil
+        if src then out[#out + 1] = src end
+    end
+    return out
+end
+
 -- ─── notifications through the phone ─────────────────────────────────────────────
 -- Server-side push to a player's equipped phone. `PhoneAppNotify` is defined by
 -- whichever bridge/phone/* variant matched an installed phone — nil when the server
@@ -1113,10 +1127,11 @@ lib.callback.register("pickle_restaurants:phone:reserve", function(src, d)
             { res.id, pid })
         res.seats[#res.seats + 1] = pid
     end
-    -- The seat interaction's "Reserved" label rides the sync payload, so a booking that
-    -- doesn't re-sync leaves every client offering a plain "Sit" on a held anchor until
-    -- the next config change.
-    SyncToClient(-1)
+    -- The seat interaction's "Reserved" label is baked in when the interaction is built,
+    -- so a booking that pushes nothing leaves every client offering a plain "Sit" on a
+    -- held anchor until the next config change. The MAP is all that changed, so send the
+    -- map — this used to re-send the entire world config to every player.
+    SyncReservedSeats(rid)
     return { ok = true, id = res.id, party = res.party, seats = res.seats, reservation = ReservationView(res) }
 end)
 
@@ -1132,8 +1147,9 @@ lib.callback.register("pickle_restaurants:phone:cancelReservation", function(src
     end
     if not res then return { ok = false, error = _L("reserve_not_found") } end
     MySQL.update.await("UPDATE pickle_restaurant_reservations SET status = 'cancelled' WHERE id = ? AND identifier = ?", { resId, id })
+    local rid = res.restaurant_id
     ReleaseReservation(res)
-    SyncToClient(-1)   -- the freed anchors go back to reading as plain seats
+    SyncReservedSeats(rid) -- the freed anchors go back to reading as plain seats
     return { ok = true }
 end)
 
@@ -1361,6 +1377,16 @@ lib.callback.register("pickle_restaurants:phone:savePromo", function(src, d)
     local kind = (d.kind == "happy_hour") and "happy_hour" or "discount"
     local active = d.active ~= false
     local promoId = d.promoId and tonumber(d.promoId)
+    -- Was this promo ALREADY live? A push notification is for a promo that has just gone
+    -- out, not for every keystroke of editing one — and this panel auto-saves, so without
+    -- this an admin retyping a label would notify every player on the server once per
+    -- debounce tick. Read before the write, so the comparison is against the old row.
+    local wasActive = false
+    if promoId then
+        local prev = MySQL.single.await("SELECT active FROM pickle_restaurant_promos WHERE id = ? AND restaurant_id = ?",
+            { promoId, rid })
+        wasActive = prev ~= nil and (tonumber(prev.active) or 0) ~= 0
+    end
     if promoId then
         MySQL.update.await("UPDATE pickle_restaurant_promos SET label=?, percent=?, kind=?, active=? WHERE id=? AND restaurant_id=?",
             { label, percent, kind, active and 1 or 0, promoId, rid })
@@ -1369,9 +1395,14 @@ lib.callback.register("pickle_restaurants:phone:savePromo", function(src, d)
             { rid, label, percent, kind, active and 1 or 0 })
     end
     LoadPromos()
-    SyncToClient(-1)
-    -- Broadcast the promo to every phone as a push, DoorDash-style.
-    if active then
+    SyncWorldSoon()
+    -- Announce it to every phone, DoorDash-style. THE ONE REMAINING DELIBERATE `-1`
+    -- BROADCAST OF A GAMEPLAY EVENT, and it is one because the audience genuinely is
+    -- everybody: it fires PhoneApp.Notify on the client, i.e. a phone notification, which
+    -- has to reach phones that are CLOSED. Scoping it by distance would make it a promo
+    -- only advertised to people already standing in the restaurant, which is the opposite
+    -- of advertising. Rare, now that it only fires on the RISING EDGE.
+    if active and not wasActive then
         local r = GetRestaurant(rid)
         TriggerClientEvent("pickle_restaurants:phone:pushPromo", -1, {
             title = _L("promo_push_title", r and (r.label or r.name) or _L("phone_order_fallback"), percent),

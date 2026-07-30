@@ -249,9 +249,10 @@ end)
 -- ─── theme push ──────────────────────────────────────────────────────────────
 -- The admin panel changed the ONE global phone theme — forward the new seed to the
 -- app so an open phone reskins live (otherwise it lands on the next home refresh).
-RegisterNetEvent("pickle_restaurants:phone:pushTheme", function(theme)
-    ToApp("theme", { theme = theme })
-end)
+-- No pushTheme handler: the app skin is no longer broadcast. It rides the phone's own
+-- bootstrap payload (`theme` in getData), so a phone reads the current skin when it opens
+-- and an auto-saving admin panel doesn't send one message per player per keystroke.
+-- See modules/admin/server.lua's setPhoneTheme.
 
 -- ─── promotions push ─────────────────────────────────────────────────────────
 RegisterNetEvent("pickle_restaurants:phone:pushPromo", function(p)

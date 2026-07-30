@@ -75,25 +75,10 @@ function ToggleOutfit(onduty)
     end
 end
 
--- Inventory Fallback
-
+-- ─── inventory ───────────────────────────────────────────────────────────────
+-- The client half is only the item catalogue mirror; bridge/inventory/client.lua
+-- is the one copy of it.
 CreateThread(function()
     Wait(100)
-    
-    if InitializeInventory then return InitializeInventory() end -- Already loaded through inventory folder.
-
-    Inventory = {}
-
-    Inventory.Items = {}
-    
-    Inventory.Ready = false
-    
-    RegisterNetEvent("pickle_restaurants:setupInventory", function(data)
-        Inventory.Items = data.items
-        Inventory.Ready = true
-    end)
-    
-    RegisterNetEvent("pickle_restaurants:updateInventory", function(inventory) 
-        -- RefreshInventory(inventory)
-    end)
+    InitializeInventory()
 end)

@@ -20,10 +20,21 @@ StackTweaks      = {}    -- [model] = { sink?, rise? } manual stacking correctio
 ConfigGen        = 0     -- bumped every sync so lazily-built hash caches invalidate
 BagItem          = "restaurant_bag" -- the ONE takeaway CARRIER item (its contents ride as metadata)
 BagModel         = "pickle_restaurant_bag_01" -- the Restaurant Bag vessel prop
+MealItem         = "meal"           -- the ONE eat-in CARRIER item (serving-tray layout in metadata)
 BoxItem          = "takeout_box"    -- the ONE item every bag-KIND food (soup, salad…) becomes
 DrinkItem        = "drink"          -- the ONE item every poured drink becomes (flavor in metadata)
 BoxBaseModel     = "pickle_takeout_box_01" -- takeout box: base half
 BoxLidModel      = "pickle_takeout_box_02" -- takeout box: hinged lid
+
+-- A CARRIER NEVER GOES INSIDE ANOTHER CARRIER — the serving tray and the Restaurant
+-- Bag both hold their contents as build-stack metadata, so nesting one in the other is
+-- a container inside itself (see IsCarrierItem in core/server.lua). The takeout box is
+-- NOT a carrier by this rule: it holds one food and IS a unit, so it rides on a tray or
+-- in a bag as a side in its box. Client-side this only refuses the drag early; prepAdd
+-- is the authority.
+function IsCarrierItem(item)
+    return item ~= nil and item ~= "" and (item == BagItem or item == MealItem)
+end
 
 -- prop_type → localization key (resolved via _L at interaction-build time)
 local STATION_LABELS = {
@@ -58,6 +69,10 @@ local virtualStations = {} -- [propId] = entity while a virtual session is open
 
 function RegisterVirtualStation(propId, ent) virtualStations[propId] = ent end
 function GetClientProp(propId) return propsById[propId] end
+-- The whole synced prop table, for the loops that must walk every placed prop rather
+-- than look one up: modules/cooking's station range watcher (which decides whose
+-- cooking events this client is subscribed to). Returned by reference — read only.
+function GetClientProps() return propsById end
 
 -- The world entity a placed prop is currently rendered as — the virtual station
 -- inside an open shell session if there is one, else the physical world prop.
@@ -83,21 +98,30 @@ local function SafeDeleteEntity(ent)
     DeleteEntity(ent)
 end
 
-local function ClearWorld()
-    if ClearPropHighlight then ClearPropHighlight() end -- drop any hover outline/temp body
-    for id, ent in pairs(spawnedProps) do
-        if DespawnOvenDoors then DespawnOvenDoors(id) end
-        if DespawnFryerBaskets then DespawnFryerBaskets(id) end
-        SafeDeleteEntity(ent)
-        spawnedProps[id] = nil
-    end
-    for id, idx in pairs(propInteractions) do
-        DeleteInteraction(idx); propInteractions[id] = nil
-    end
+-- Everything ONE placed prop puts in the world: its entity, its oven doors / fryer
+-- baskets, its interaction. Idempotent — the single teardown for a prop, whether it was
+-- deleted, changed, or just walked away from.
+local function DespawnProp(id)
+    if DespawnOvenDoors then DespawnOvenDoors(id) end
+    if DespawnFryerBaskets then DespawnFryerBaskets(id) end
+    if spawnedProps[id] then SafeDeleteEntity(spawnedProps[id]); spawnedProps[id] = nil end
+    if propInteractions[id] then DeleteInteraction(propInteractions[id]); propInteractions[id] = nil end
+end
+
+local function ClearBlips()
     for id, blip in pairs(restaurantBlips) do
         if DoesBlipExist(blip) then RemoveBlip(blip) end
         restaurantBlips[id] = nil
     end
+end
+
+-- Full teardown. Only for resource stop now — a SYNC no longer razes the world (see the
+-- reconciler), it re-diffs it.
+local function ClearWorld()
+    if ClearPropHighlight then ClearPropHighlight() end -- drop any hover outline/temp body
+    for id in pairs(spawnedProps) do DespawnProp(id) end
+    for id in pairs(propInteractions) do DespawnProp(id) end
+    ClearBlips()
 end
 
 -- ─── prop spawning + interaction ─────────────────────────────────────────────
@@ -381,15 +405,172 @@ local function SpawnProp(prop)
     end)
 end
 
+-- ─── the world reconciler ────────────────────────────────────────────────────
+--
+-- A CLIENT HOLDS ONLY THE RESTAURANTS IT IS AT. It used to spawn a real entity for every
+-- placed prop of every restaurant on the server the moment it synced, and re-spawn the lot
+-- on every config edit. That is what forced the prop events to be world-wide broadcasts:
+-- if everyone holds everything, everyone has to be told about everything.
+--
+-- Now proximity decides, and ONE function is the only thing that spawns or despawns a
+-- prop. It DIFFS: for each prop we compare the row we'd build against the row we actually
+-- built from, so an unchanged prop is left alone, a moved or re-styled one is rebuilt, and
+-- a deleted or walked-away-from one is torn down. This replaces the whole-payload
+-- fingerprint that used to gate the rebuild — a per-prop diff is strictly finer (a single
+-- moved prop no longer rebuilds the world either) and it is what makes range loading
+-- possible at all.
+--
+-- Rows are NOT range-scoped, only entities: `propsById` stays complete from the sync, so
+-- every lookup elsewhere keeps working for restaurants across the map. What proximity
+-- governs is what exists in the world.
+local RWorld = {
+    near    = {},  -- [rid]    = true while we hold this restaurant's props
+    sig     = {},  -- [propId] = signature of the row we spawned from (nil = not spawned)
+    dirty   = {},  -- [rid]    = true -> re-diff on the next tick
+    fetched = {},  -- [rid]    = true once we've pulled the authoritative set for it
+}
+
+-- ONE thread owns reconciliation, so there is no concurrency to guard: SpawnProp yields
+-- while its model streams, and two passes racing on one prop is exactly the double-spawn
+-- that leaves an orphan nothing tracks (see CookSpawnGen in modules/cooking/client.lua for
+-- the same hazard). Events and syncs only ever mark a restaurant DIRTY; they never spawn.
+local WORLD_TICK_MS = 250 -- responsive enough that a placing admin sees the prop appear
+
+-- Hysteresis, and both radii are deliberately far larger than anything that renders: the
+-- cooking module's own station range (CookRange, 70/85m) must fall INSIDE this, or a
+-- station's prop would vanish while its items were still subscribed. Measured against the
+-- restaurant's whole extent, not its centre, so a far-flung delivery door or shell anchor
+-- still counts as part of the restaurant. TUNE IN-GAME.
+local REST_IN, REST_OUT = 250.0, 320.0
+
+-- What about a prop row would change what it puts in the world. The reserved-seat flag is
+-- folded in because a seat's interaction LABEL is baked in at spawn — a booking landing has
+-- to rebuild that seat, and nothing about the prop row itself moves when it does.
+local function propRowSig(prop)
+    local rest = Restaurants[prop.restaurant_id]
+    local resMap = rest and rest.reservedSeats or nil
+    local reserved = (resMap and (resMap[prop.id] or resMap[tostring(prop.id)])) and "1" or "0"
+    return table.concat({
+        prop.prop_type or "", prop.model or "",
+        string.format("%.3f,%.3f,%.3f,%.3f", prop.x or 0, prop.y or 0, prop.z or 0, prop.heading or 0),
+        json.encode(prop.metadata or {}), reserved,
+        (rest and rest.label) or "", -- a virtual register's interaction is titled with it
+    }, "|")
+end
+
+local function restaurantInRange(r, here)
+    local c = r.centre or r.counter
+    if not c then return false end
+    local d = #(here - vector3(c.x + 0.0, c.y + 0.0, c.z + 0.0))
+    local reach = (c.r or 0.0) + (RWorld.near[r.id] and REST_OUT or REST_IN)
+    return d <= reach
+end
+
+-- Bring restaurant `rid`'s props in the world into line with the rows we hold.
+local function reconcileRestaurant(rid, want)
+    -- SNAPSHOT FIRST. SpawnProp yields while its model streams, and a `propPlaced` arriving
+    -- in that window ADDS a key to propsById — modifying a table during a `pairs` traversal
+    -- is undefined in Lua (assigning nil to an existing field is the only mutation that's
+    -- allowed). The new prop isn't missed: its event marked the restaurant dirty, so the
+    -- next tick reconciles it.
+    local list = {}
+    for id, prop in pairs(propsById) do
+        if prop.restaurant_id == rid then list[#list + 1] = { id = id, prop = prop } end
+    end
+    for _, e in ipairs(list) do
+        local id, prop = e.id, e.prop
+        local sig = want and propRowSig(prop) or nil
+        if RWorld.sig[id] ~= sig then
+            DespawnProp(id)
+            RWorld.sig[id] = sig
+            -- The claim is recorded BEFORE the yield, and this thread is the only spawner,
+            -- so there is no second pass to race. But the ROW can be replaced or deleted
+            -- while we stream, which would leave our entity behind as an orphan nothing
+            -- tracks — so re-check that it's still the row we were building before keeping it.
+            if want then
+                SpawnProp(prop)
+                if propsById[id] ~= prop then DespawnProp(id); RWorld.sig[id] = nil end
+            end
+        end
+    end
+end
+
+-- Props we hold whose row is gone entirely (their restaurant was deleted, or the row was
+-- removed while we were out of range and the delta never reached us).
+local function reapOrphanProps()
+    for id in pairs(RWorld.sig) do
+        if not propsById[id] then DespawnProp(id); RWorld.sig[id] = nil end
+    end
+end
+
+-- Pull the authoritative props + reserved seats for a restaurant we're walking into. THIS
+-- is what allows propPlaced / propRemoved / shellMoved / reservedSeats to be scoped: any
+-- delta we missed while out of range is repaired here, before the place is in view.
+local function fetchRestaurant(rid)
+    local res = lib.callback.await("pickle_restaurants:world:getRestaurant", false, { id = rid })
+    if not res then return end
+    local r = Restaurants[rid]
+    if r then
+        r.reservedSeats = res.reservedSeats or {}
+        r.props = {}
+    end
+    -- replace, don't merge: rows we hold for this restaurant that the server didn't send
+    -- are rows that no longer exist
+    for id, prop in pairs(propsById) do
+        if prop.restaurant_id == rid then propsById[id] = nil end
+    end
+    for _, prop in ipairs(res.props or {}) do
+        propsById[prop.id] = prop
+        if r then table.insert(r.props, prop) end
+    end
+end
+
+CreateThread(function()
+    while true do
+        Wait(WORLD_TICK_MS)
+        local here = GetEntityCoords(PlayerPedId())
+        reapOrphanProps()
+        for rid, r in pairs(Restaurants or {}) do
+            local want = restaurantInRange(r, here)
+            local was  = RWorld.near[rid] and true or false
+            if want ~= was or RWorld.dirty[rid] then
+                RWorld.dirty[rid] = nil
+                RWorld.near[rid] = want or nil
+                -- Entering range: take the server's word for what's here before building
+                -- it. Once per approach — the scoped deltas keep it current while we stay.
+                if want and not RWorld.fetched[rid] then
+                    RWorld.fetched[rid] = true
+                    fetchRestaurant(rid)
+                elseif not want then
+                    RWorld.fetched[rid] = nil -- re-fetch next time we come back
+                end
+                reconcileRestaurant(rid, want)
+            end
+        end
+    end
+end)
+
+-- Mark a restaurant for re-diffing on the next tick. The ONE way anything outside the
+-- reconciler asks for a world change.
+local function markRestaurantDirty(rid)
+    if rid then RWorld.dirty[rid] = true end
+end
+
+-- Are this restaurant's props actually IN THE WORLD for us? Rows are kept for every
+-- restaurant (so lookups work everywhere), but only a restaurant we're at has entities. Any
+-- driver that binds a render target to a placed prop's model has to ask, because
+-- AddReplaceTexture only takes on a model that exists: modules/screens and modules/register
+-- both pick "the nearest restaurant with this prop placed", and before proximity loading
+-- that could never be a restaurant whose prop wasn't spawned.
+function IsRestaurantLoaded(rid) return RWorld.near[rid] and true or false end
+
 local function SetupBlip(restaurant)
     local b = restaurant.blip or { sprite = 93, color = 1, scale = 0.8, enabled = true }
     if b.enabled == false then return end
-    local coords = restaurant.counter
-    if not coords then
-        for _, prop in ipairs(restaurant.props or {}) do
-            coords = { x = prop.x, y = prop.y, z = prop.z }; break
-        end
-    end
+    -- `centre` is server-computed and always present for a restaurant with any prop placed,
+    -- which is why this no longer falls back to `props[1]`: props are loaded by proximity
+    -- now, so a distant restaurant has none and its blip would have gone missing.
+    local coords = restaurant.counter or restaurant.centre
     if not coords then return end
     local blip = AddBlipForCoord(coords.x + 0.0, coords.y + 0.0, coords.z + 0.0)
     SetBlipSprite(blip, b.sprite or 93)
@@ -405,7 +586,12 @@ end
 -- ─── sync handler ────────────────────────────────────────────────────────────
 
 local function DoApplySync(payload)
-    ClearWorld()
+    -- A sync no longer razes the world. Blips are rebuilt (cheap, and a label or counter can
+    -- change with no prop changing); the props are handed to the reconciler, which diffs
+    -- them per prop and touches only what actually differs. A config-only edit — which is
+    -- what a sync almost always is — therefore costs no entity work at all, where it used to
+    -- delete and respawn every prop of every restaurant, each blocking on its model.
+    ClearBlips()
     Restaurants, RecipesByInput, RecipesByStation, Drinks, Assembly, Finishes, Condiments = {}, {}, {}, {}, {}, {}, {}
 
     for _, r in ipairs(payload.restaurants or {}) do
@@ -426,6 +612,7 @@ local function DoApplySync(payload)
         Crafts   = payload.settings.crafts or {}
         BagItem  = payload.settings.bag_item or "restaurant_bag"
         BagModel = payload.settings.bag_model or "pickle_restaurant_bag_01"
+        MealItem = payload.settings.meal_item or "meal"
         BoxItem      = payload.settings.box_item or "takeout_box"
         DrinkItem    = payload.settings.drink_item or "drink"
         BoxBaseModel = payload.settings.box_base_model or "pickle_takeout_box_01"
@@ -462,9 +649,11 @@ local function DoApplySync(payload)
             table.insert(Restaurants[prop.restaurant_id].props, prop)
         end
     end
-    for _, prop in ipairs(payload.props or {}) do
-        SpawnProp(prop)
-    end
+    -- Hand every restaurant to the reconciler rather than spawning here. It runs on its own
+    -- thread — the only spawner, which is what keeps SpawnProp's yield free of races — and
+    -- will build exactly the ones we're standing at. A restaurant that vanished from the
+    -- payload has no row left, so reapOrphanProps takes its props down.
+    for rid in pairs(Restaurants) do markRestaurantDirty(rid) end
     for _, r in pairs(Restaurants) do
         SetupBlip(r)
     end
@@ -472,25 +661,34 @@ local function DoApplySync(payload)
     -- so a brand edit takes effect after re-streaming the item (no resource restart).
     -- RefreshBrands is defined in modules/rendertarget/client.lua (same client).
     if RefreshBrands then RefreshBrands() end
-    -- Same for the info SCREENS: their props were just (re)spawned above, so re-assert
-    -- each screen's render-target replacement while the fresh prop exists and re-push
-    -- its data (menu may have changed). RefreshScreens is in modules/screens/client.lua.
+    -- Same for the info SCREENS: re-assert each screen's render-target replacement while
+    -- its prop exists and re-push its data (a menu price may have changed — and the menu is
+    -- FETCHED now, not synced, so RefreshScreens is what invalidates the fetched copy).
+    -- Idempotent, so it's correct whether or not the props were respawned just above.
+    -- RefreshScreens is in modules/screens/client.lua.
     if RefreshScreens then RefreshScreens() end
-    -- And the always-on register board: the counter was just (re)spawned and its
-    -- catalog/menu may have changed, so re-seed + re-paint it (modules/register).
+    -- And the always-on register board: its counter's catalog/menu may have changed, so
+    -- re-seed + re-paint it (modules/register).
     if RefreshRegister then RefreshRegister() end
+    -- NOT touched here: the cooking module's station subscriptions and the item props they
+    -- own. A sync leaves cooking items standing, and the reconciler re-seats them through
+    -- SpawnProp's OnStationSpawned for any station it actually rebuilds. Dropping and
+    -- re-hydrating them on every sync would be the exact entity churn the per-prop diff
+    -- exists to avoid. A subscription to a prop that has GONE is pruned by that module's
+    -- own range loop (modules/cooking/client.lua).
 end
 
--- Serialize syncs. SpawnProp yields (CreatePropEntity blocks while its model streams
--- in), so DoApplySync is asynchronous: a prop's entity isn't recorded in `spawnedProps`
--- until its model has loaded. On join a client gets TWO overlapping syncs — the server's
--- `playerJoining` push (modules/main/server.lua) and the client's own `requestSync` — and
--- config edits fire more (SyncToClient(-1)). If a second pass ran while the first was
--- still mid-spawn, its ClearWorld couldn't delete the first pass's not-yet-registered
--- entities, so both passes spawned a full set → props double up until a resource restart.
--- Guard against re-entry: while one pass runs, a newer sync just parks its payload
--- (coalesced to the latest), and we re-run once the current pass has fully finished — its
--- ClearWorld now sees the previous set registered and clears it before respawning.
+-- Serialize syncs. This guard used to be load-bearing for a different reason: DoApplySync
+-- spawned props itself, SpawnProp yields while a model streams, and two overlapping syncs
+-- (a joining client gets one from `playerJoining` and one from its own `requestSync`) each
+-- spawned a full set because neither could see the other's not-yet-registered entities —
+-- props doubled up until a resource restart.
+--
+-- DoApplySync no longer spawns anything: it records data and marks restaurants dirty, and
+-- the reconciler thread — the only spawner — does the world work. The double-spawn it
+-- guarded against is now structurally impossible. It stays because coalescing overlapping
+-- payloads to the latest is still the right behaviour: a payload superseded before it was
+-- applied is work nobody needs.
 local applyingSync = false
 local pendingSync  = nil
 
@@ -511,22 +709,50 @@ end
 
 RegisterNetEvent("pickle_restaurants:sync", ApplySync)
 
-RegisterNetEvent("pickle_restaurants:propPlaced", function(prop)
-    propsById[prop.id] = prop
-    if Restaurants[prop.restaurant_id] then
-        table.insert(Restaurants[prop.restaurant_id].props, prop)
-    end
-    SpawnProp(prop)
+-- ONE restaurant's reserved-seat map changed (a booking made, cancelled or lapsed). Scoped
+-- to the restaurant by the server, and repaired on approach by world:getRestaurant for
+-- anyone who was out of range. The "Reserved" label and lock icon are baked in when a seat's
+-- interaction is created, so the map is folded into propRowSig and marking the restaurant
+-- dirty is enough — the reconciler rebuilds exactly the seats whose label changed, and
+-- nothing else. Never spawn from here: one thread owns that.
+RegisterNetEvent("pickle_restaurants:reservedSeats", function(rid, map)
+    local r = Restaurants[rid]
+    if not r then return end
+    r.reservedSeats = map or {}
+    markRestaurantDirty(rid)
 end)
 
+-- Scoped by the server to players at this restaurant; anyone further out gets it from
+-- world:getRestaurant when they walk in. Record the row and mark it dirty — the reconciler
+-- spawns it on the next tick if we're actually in range (an admin placing props is, by
+-- definition, standing there).
+-- An UPSERT, not an append: `placement:updateProp` sends this too (moving a prop is a new
+-- transform for an existing id), so appending would duplicate the row in `r.props` on every
+-- gizmo save — and that list is what the screens driver and the register board scan.
+RegisterNetEvent("pickle_restaurants:propPlaced", function(prop)
+    propsById[prop.id] = prop
+    local r = Restaurants[prop.restaurant_id]
+    if r then
+        r.props = r.props or {}
+        local replaced = false
+        for i, p in ipairs(r.props) do
+            if p.id == prop.id then r.props[i] = prop; replaced = true; break end
+        end
+        if not replaced then r.props[#r.props + 1] = prop end
+    end
+    markRestaurantDirty(prop.restaurant_id)
+end)
+
+-- Scoped by the server to players at this restaurant (the audience is resolved BEFORE the
+-- row leaves PropCache, since the restaurant's extent is derived from its props). A client
+-- that was out of range never held an entity for it, and its stale row is replaced wholesale
+-- by world:getRestaurant on approach.
 RegisterNetEvent("pickle_restaurants:propRemoved", function(propId)
-    if DespawnOvenDoors then DespawnOvenDoors(propId) end
-    if DespawnFryerBaskets then DespawnFryerBaskets(propId) end
     local prop = propsById[propId]
-    -- Delete the entity we're tracking. Note whether we actually held a live one.
+    -- Note whether we held a live entity BEFORE tearing down, for the ghost sweep below.
     local hadEntity = spawnedProps[propId] and DoesEntityExist(spawnedProps[propId])
-    SafeDeleteEntity(spawnedProps[propId])
-    spawnedProps[propId] = nil
+    DespawnProp(propId)
+    RWorld.sig[propId] = nil -- no longer built from anything (reapOrphanProps would too)
     -- Safety sweep: if our tracked handle was already gone (the prop streamed out and
     -- back, or was placed before we cached its entity), the world object could linger
     -- until a resource restart. Delete any object of this model still sitting at the
@@ -549,7 +775,12 @@ RegisterNetEvent("pickle_restaurants:propRemoved", function(propId)
         local list = Restaurants[prop.restaurant_id].props or {}
         for i = #list, 1, -1 do if list[i].id == propId then table.remove(list, i) end end
     end
-    if propInteractions[propId] then DeleteInteraction(propInteractions[propId]); propInteractions[propId] = nil end
+    -- A deleted station takes its cooking items with it, and we drop them LOCALLY rather
+    -- than wait for the server's per-item removals: those are scoped by the station's
+    -- coords (SendNearProp), and by the time propDeleted fires the row may already be
+    -- out of PropCache — an audience of nobody, i.e. food left floating where the grill
+    -- used to be. Nothing else can be looking at these items either way.
+    if DropItemsFor then DropItemsFor(propId) end
 end)
 
 -- ─── boot ────────────────────────────────────────────────────────────────────

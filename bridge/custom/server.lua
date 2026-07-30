@@ -289,96 +289,14 @@ end
 -- server it falls back to one small table of ours — we are the bank only when there is
 -- no bank.
 
--- Inventory ───────────────────────────────────────────────────────────────
+-- ─── inventory ───────────────────────────────────────────────────────────────
+-- bridge/inventory owns it. On a frameworkless server that means whichever
+-- inventory resource is installed (ox, Quasar, …) or, with none at all, the
+-- `none` driver — which reports honestly that it holds nothing, so `giveVessel`
+-- falls back to the cooked-items tray instead of quietly destroying a meal.
 CreateThread(function()
     Wait(100)
-    if InitializeInventory then return InitializeInventory() end
-    Inventory = {}
-    Inventory.Items = {}
-    Inventory.Ready = false
-
-    local hasOx = GetResourceState("ox_inventory") == "started"
-
-    Inventory.GetInventory = function(source)
-        if hasOx then
-            local items = {}
-            for _, item in pairs(exports.ox_inventory:GetInventoryItems(source) or {}) do
-                items[#items + 1] = { name = item.name, label = item.label, count = item.count, weight = item.weight }
-            end
-            return items
-        end
-        return {}
-    end
-
-    Inventory.GetItemCount = function(source, name)
-        if hasOx then return exports.ox_inventory:GetItemCount(source, name) or 0 end
-        return 0
-    end
-
-    Inventory.CanCarryItem = function(source, name, count)
-        if hasOx then return exports.ox_inventory:CanCarryItem(source, name, count) end
-        return true
-    end
-
-    Inventory.AddItem = function(source, name, count, metadata)
-        if hasOx then exports.ox_inventory:AddItem(source, name, count, metadata) end
-        TriggerClientEvent("pickle_restaurants:updateInventory", source, Inventory.GetInventory(source))
-    end
-
-    Inventory.RemoveItem = function(source, name, count)
-        if hasOx then exports.ox_inventory:RemoveItem(source, name, count) end
-        TriggerClientEvent("pickle_restaurants:updateInventory", source, Inventory.GetInventory(source))
-    end
-
-    Inventory.HasWeapon = function(source, name) return Inventory.GetItemCount(source, name) > 0 end
-    Inventory.AddWeapon = function(source, name, count, metadata) Inventory.AddItem(source, name, count, metadata) end
-    Inventory.RemoveWeapon = function(source, name, count) Inventory.RemoveItem(source, name, count) end
-
-    -- Rebuild the catalogue from the live ox registry. Called on boot and again
-    -- whenever items may have changed (see core's requestSync refresh), so we
-    -- never serve a stale startup snapshot.
-    Inventory.RefreshItems = function()
-        if not hasOx then return end
-        local items = {}
-        for item, data in pairs(exports.ox_inventory:Items() or {}) do
-            items[item] = { label = data.label, image = InvImageUrl(InventoryImageBase(), item, data.image) }
-        end
-        Inventory.Items = items
-    end
-
-    -- Live existence check straight from ox, so an item registered after this
-    -- resource started is still recognised.
-    Inventory.ItemExists = function(name)
-        if not name or name == "" then return false end
-        if hasOx then return exports.ox_inventory:Items(name) ~= nil end
-        return Inventory.Items[name] ~= nil
-    end
-
-    -- Per-slot access (ox only) so item variations survive the inventory
-    -- round-trip — see the qb bridge for the shape.
-    if hasOx then
-        Inventory.GetItemSlots = function(source, name)
-            local out = {}
-            for _, s in ipairs(exports.ox_inventory:Search(source, "slots", name) or {}) do
-                out[#out + 1] = { slot = s.slot, count = s.count or 1, metadata = s.metadata }
-            end
-            return out
-        end
-        Inventory.RemoveItemSlot = function(source, name, count, slot)
-            exports.ox_inventory:RemoveItem(source, name, count, nil, slot)
-        end
-        -- Rewrite ONE slot's metadata in place. Used when a customer eats one thing
-        -- out of a Restaurant Bag: the bag keeps its slot (and its stack position),
-        -- only its recorded contents shrink. Absent on a framework with no slot
-        -- metadata — callers fall back to remove + re-add.
-        Inventory.SetItemMetadata = function(source, _name, slot, metadata)
-            exports.ox_inventory:SetMetadata(source, slot, metadata)
-            return true
-        end
-    end
-
-    Inventory.RefreshItems()
-    Inventory.Ready = true
+    InitializeInventory()
 end)
 
 -- No framework needs system on the standalone bridge: eating still consumes the

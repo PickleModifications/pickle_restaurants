@@ -37,7 +37,10 @@ lib.callback.register("pickle_restaurants:placement:saveProp", function(src, d)
         x = d.x + 0.0, y = d.y + 0.0, z = d.z + 0.0, heading = (d.heading or 0.0) + 0.0, metadata = {},
     }
     PropCache[propId] = prop
-    TriggerClientEvent("pickle_restaurants:propPlaced", -1, prop)
+    -- Scoped: a prop appearing is only news to players at that restaurant. Anyone further
+    -- out picks it up from `world:getRestaurant` as they approach — writing PropCache FIRST
+    -- is what makes that safe, since the fetch reads it.
+    SendTo(PlayersNearRestaurant(id, ScopeRadius.PROP), "pickle_restaurants:propPlaced", prop)
     return { ok = true, id = propId }
 end)
 
@@ -90,7 +93,10 @@ lib.callback.register("pickle_restaurants:placement:saveSeat", function(src, d)
         metadata = metadata,
     }
     PropCache[propId] = prop
-    TriggerClientEvent("pickle_restaurants:propPlaced", -1, prop)
+    -- Scoped: a prop appearing is only news to players at that restaurant. Anyone further
+    -- out picks it up from `world:getRestaurant` as they approach — writing PropCache FIRST
+    -- is what makes that safe, since the fetch reads it.
+    SendTo(PlayersNearRestaurant(id, ScopeRadius.PROP), "pickle_restaurants:propPlaced", prop)
     return { ok = true, id = propId }
 end)
 
@@ -118,7 +124,10 @@ lib.callback.register("pickle_restaurants:placement:saveDeliveryDoor", function(
         metadata = {},
     }
     PropCache[propId] = prop
-    TriggerClientEvent("pickle_restaurants:propPlaced", -1, prop)
+    -- Scoped: a prop appearing is only news to players at that restaurant. Anyone further
+    -- out picks it up from `world:getRestaurant` as they approach — writing PropCache FIRST
+    -- is what makes that safe, since the fetch reads it.
+    SendTo(PlayersNearRestaurant(id, ScopeRadius.PROP), "pickle_restaurants:propPlaced", prop)
     return { ok = true, id = propId }
 end)
 
@@ -155,7 +164,10 @@ lib.callback.register("pickle_restaurants:placement:saveVirtualPoint", function(
         x = x + 0.0, y = y + 0.0, z = z + 0.0, heading = (tonumber(d.heading) or 0.0) + 0.0, metadata = metadata,
     }
     PropCache[propId] = prop
-    TriggerClientEvent("pickle_restaurants:propPlaced", -1, prop)
+    -- Scoped: a prop appearing is only news to players at that restaurant. Anyone further
+    -- out picks it up from `world:getRestaurant` as they approach — writing PropCache FIRST
+    -- is what makes that safe, since the fetch reads it.
+    SendTo(PlayersNearRestaurant(id, ScopeRadius.PROP), "pickle_restaurants:propPlaced", prop)
     return { ok = true, id = propId }
 end)
 
@@ -181,9 +193,11 @@ lib.callback.register("pickle_restaurants:placement:saveShell", function(src, d)
     MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), id })
     -- cooking shifts any free-placed virtual items with the shell...
     TriggerEvent("pickle_restaurants:shellMoved", id, old, r.metadata.shell)
-    -- ...and any client mid-session inside this shell closes out cleanly.
-    TriggerClientEvent("pickle_restaurants:shellMoved", -1, id)
-    SyncToClient(-1)
+    -- ...and any client mid-session inside this shell closes out cleanly. Scoped: only
+    -- someone AT this restaurant can be in one of its virtual sessions, and the new anchor
+    -- rides the world sync below for everyone else.
+    SendTo(PlayersNearRestaurant(id, ScopeRadius.BOARD), "pickle_restaurants:shellMoved", id)
+    SyncWorldSoon()
     return { ok = true }
 end)
 
@@ -210,7 +224,7 @@ lib.callback.register("pickle_restaurants:placement:saveCounter", function(src, 
         x = d.x + 0.0, y = d.y + 0.0, z = d.z + 0.0, heading = (d.heading or 0.0) + 0.0, metadata = {},
     }
     RecomputeCounterAnchor(id) -- may become the new primary anchor (blip/shell/NPC)
-    SyncToClient(-1) -- rebuild counter interactions + blip everywhere
+    SyncWorldSoon() -- rebuild counter interactions + blip everywhere
     return { ok = true, id = propId }
 end)
 
@@ -239,7 +253,10 @@ lib.callback.register("pickle_restaurants:placement:saveVirtualRegister", functi
         x = x + 0.0, y = y + 0.0, z = z + 0.0, heading = (tonumber(d.heading) or 0.0) + 0.0, metadata = {},
     }
     PropCache[propId] = prop
-    TriggerClientEvent("pickle_restaurants:propPlaced", -1, prop)
+    -- Scoped: a prop appearing is only news to players at that restaurant. Anyone further
+    -- out picks it up from `world:getRestaurant` as they approach — writing PropCache FIRST
+    -- is what makes that safe, since the fetch reads it.
+    SendTo(PlayersNearRestaurant(id, ScopeRadius.PROP), "pickle_restaurants:propPlaced", prop)
     return { ok = true, id = propId }
 end)
 
@@ -276,7 +293,17 @@ lib.callback.register("pickle_restaurants:placement:updateProp", function(src, d
             { json.encode(prop.metadata), propId })
     end
     if prop.prop_type == "counter" then RecomputeCounterAnchor(prop.restaurant_id) end
-    SyncToClient(-1) -- respawn the prop at its new transform for everyone
+    -- The MOVE goes out as a scoped prop update, not as a world sync. `propPlaced` is an
+    -- upsert on the client — it replaces the row by id — and the reconciler diffs the row
+    -- it built each prop from, so the new transform is part of that signature and exactly
+    -- this prop is rebuilt. Sending it directly also keeps the gizmo feeling immediate: a
+    -- world sync is coalesced (up to SYNC_MIN_MS), which an admin nudging a prop into place
+    -- would feel as lag.
+    SendTo(PlayersNearRestaurant(prop.restaurant_id, ScopeRadius.PROP), "pickle_restaurants:propPlaced", prop)
+    -- A counter move can shift the restaurant's primary anchor (blip / shell XY / NPC
+    -- queue), which lives on the restaurant row rather than the prop — that still needs a
+    -- sync, and only for a counter.
+    if prop.prop_type == "counter" then SyncWorldSoon() end
     return { ok = true }
 end)
 
@@ -311,15 +338,20 @@ lib.callback.register("pickle_restaurants:placement:removeProp", function(src, d
     -- gate that actually enforces it (the NUI is untrusted).
     if not IsPlayerAdmin(src) then return { ok = false, error = _L("no_permission") } end
     MySQL.update.await("DELETE FROM pickle_restaurant_props WHERE id = ?", { propId })
+    -- Audience BEFORE the cache write. PlayersNearRestaurant derives its sphere from the
+    -- restaurant's props, so asking after the row is gone can answer with a sphere this prop
+    -- no longer contributes to — or, for the last prop of a restaurant, with nobody at all.
+    -- Resolve who is watching while the thing being removed still exists.
+    local audience = PlayersNearRestaurant(prop.restaurant_id, ScopeRadius.PROP)
     PropCache[propId] = nil
-    TriggerClientEvent("pickle_restaurants:propRemoved", -1, propId)
+    SendTo(audience, "pickle_restaurants:propRemoved", propId)
     -- server-side notice so other modules can release state tied to this prop
     -- (cooking drops any items cooking on it; seating frees its occupancy)
     TriggerEvent("pickle_restaurants:propDeleted", propId)
     -- Removing a counter may drop or shift the restaurant's primary anchor
     -- (blip / shell XY / NPC queue) — recompute it and re-sync the world.
     if prop.prop_type == "counter" and RecomputeCounterAnchor(prop.restaurant_id) then
-        SyncToClient(-1)
+        SyncWorldSoon()
     end
     return { ok = true }
 end)

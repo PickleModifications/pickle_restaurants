@@ -121,6 +121,7 @@ Language["en"] = {
     ["cook_missing_item"] = "Missing item.",
     ["cook_need_cup"] = "Need a cup.",
     ["cook_no_cheese"] = "No cheese.",
+    ["cook_no_nested_vessel"] = "That already holds a serving — unpack it first.",
     ["cook_no_tool_left"] = "No %s left.",
     ["cook_none_to_take"] = "None to take apart.",
     ["cook_not_enough"] = "Not enough.",

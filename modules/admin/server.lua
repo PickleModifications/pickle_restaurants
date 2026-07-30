@@ -146,7 +146,7 @@ lib.callback.register("pickle_restaurants:admin:create", function(src, d)
         { d.name, d.label or d.name })
     if not id then return { ok = false } end
     reloadRestaurant(id)
-    SyncToClient(-1)
+    SyncWorldSoon()
     return { ok = true, id = id }
 end)
 
@@ -196,14 +196,19 @@ lib.callback.register("pickle_restaurants:admin:delete", function(src, d)
     RestaurantCache[id] = nil
     StockCache[id] = nil
     ClearOrders(id) -- drops OrderCache/NextTicket + bumps the rev so a stale register can't re-apply
+    -- Audience resolved ONCE, and before the props start disappearing: the restaurant's
+    -- extent is derived from them, so mid-loop it would shrink toward nothing and the last
+    -- few removals would reach nobody. (RestaurantCache is already cleared above, so this
+    -- reads PropCache — which is exactly why it has to happen before the loop.)
+    local audience = PlayersNearRestaurant(id, ScopeRadius.PROP)
     for _, pid in ipairs(propIds) do
         PropCache[pid] = nil
-        TriggerClientEvent("pickle_restaurants:propRemoved", -1, pid)
+        SendTo(audience, "pickle_restaurants:propRemoved", pid)
         -- release state other modules key on this prop (cooking items, seat
         -- occupancy, station claims) — same notice removeProp gives
         TriggerEvent("pickle_restaurants:propDeleted", pid)
     end
-    SyncToClient(-1)
+    SyncWorldSoon()
     return { ok = true }
 end)
 
@@ -281,7 +286,7 @@ lib.callback.register("pickle_restaurants:admin:setGroups", function(src, d)
     -- stale: the synced payload is filtered per restaurant by group, and without
     -- this the menu boards, kiosk, register catalogue and cooking bar all keep
     -- offering the old set until something else happens to trigger a sync.
-    SyncToClient(-1)
+    SyncWorldSoon()
     ShowNotification(src, _L("admin_settings_saved"))
     return { ok = true, groups = groups }
 end)
@@ -302,7 +307,7 @@ end)
 lib.callback.register("pickle_restaurants:admin:setItemImage", function(src, d)
     if not IsPlayerAdmin(src) then return { ok = false } end
     if not SetItemImageOverride(d.item, d.url, d.crop) then return { ok = false } end
-    SyncToClient(-1)
+    SyncWorldSoon()
     ShowNotification(src, _L("admin_settings_saved"))
     return { ok = true }
 end)
@@ -343,7 +348,7 @@ lib.callback.register("pickle_restaurants:admin:setBlip", function(src, d)
         MySQL.update.await("UPDATE pickle_restaurants SET blip = NULL WHERE id = ?", { id })
     end
     r.blip = blip -- write-through: the cache is what the sync payload reads
-    SyncToClient(-1) -- the blip rides the restaurant sync payload
+    SyncWorldSoon() -- the blip rides the restaurant sync payload
     ShowNotification(src, _L("blip_saved"))
     return { ok = true, blip = blip }
 end)
@@ -378,13 +383,22 @@ lib.callback.register("pickle_restaurants:admin:setAppTheme", function(src, d)
 end)
 
 -- Phone-app theme: ONE global skin for the companion phone app, stored as the
--- `phone_theme` setting (not per-restaurant — the phone keeps a single consistent
--- look). Pushed live to every open phone so the change previews without reopening.
+-- `phone_theme` setting (not per-restaurant — the phone keeps a single consistent look).
+--
+-- NO PUSH. This used to broadcast the theme to every player, and because the panel
+-- auto-saves (there are no save buttons by design) that meant one send per connected player
+-- per debounce tick — a colour picker drag was thousands of messages. It was also entirely
+-- REDUNDANT: the phone's own bootstrap payload already carries `theme` (modules/phone's
+-- getData), so every phone reads the current skin when it opens. The push existed only to
+-- repaint phones that were already open mid-edit — and the admin doing the editing is
+-- looking at the panel's own live preview, not at their phone.
+--
+-- Behaviour change, stated plainly: a phone already open when an admin restyles the app
+-- keeps the old skin until it is next opened.
 lib.callback.register("pickle_restaurants:admin:setPhoneTheme", function(src, d)
     if not IsPlayerAdmin(src) then return { ok = false } end
     local theme = SanitizeTheme(d.theme)
     SetSetting("phone_theme", theme)
-    TriggerClientEvent("pickle_restaurants:phone:pushTheme", -1, theme)
     ShowNotification(src, _L("theme_saved"))
     return { ok = true }
 end)
@@ -478,7 +492,7 @@ lib.callback.register("pickle_restaurants:admin:saveSetting", function(src, d)
     if not IsPlayerAdmin(src) then return { ok = false } end
     if not d.key then return { ok = false } end
     if applySetting(d.key, d.value) then RebuildDerived() end
-    SyncToClient(-1) -- foods/tools/blip may have changed
+    SyncWorldSoon() -- foods/tools/blip may have changed
     ShowNotification(src, _L("admin_settings_saved"))
     return { ok = true }
 end)
@@ -496,7 +510,7 @@ lib.callback.register("pickle_restaurants:admin:saveSettings", function(src, d)
     end
     if n == 0 then return { ok = false } end
     if rebuild then RebuildDerived() end
-    SyncToClient(-1)
+    SyncWorldSoon()
     ShowNotification(src, _L("admin_settings_saved"))
     return { ok = true }
 end)
@@ -508,7 +522,7 @@ end)
 lib.callback.register("pickle_restaurants:admin:resetRecipes", function(src)
     if not IsPlayerAdmin(src) then return { ok = false } end
     ResetMenuToDefault()
-    SyncToClient(-1)
+    SyncWorldSoon()
     ShowNotification(src, _L("admin_recipes_reset"))
     return { ok = true }
 end)

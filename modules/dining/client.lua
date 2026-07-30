@@ -152,8 +152,15 @@ local function eatPile(idx, whole)
     -- Drop the selection for the whole mouthful: nothing outlined, no tooltip, and
     -- the hover loop parked (it can't target while `busy`). What you're eating has
     -- left the table — there is nothing correct for the cursor to be pointing at.
+    -- The LOCK goes with it, not just the outline: a lock survives the cursor
+    -- leaving the food, so leaving it set means the card and the outline snap
+    -- straight back onto a pile that is currently in the diner's hand the moment
+    -- the loop unparks — a visible hitch across the camera hand-off. The clear must
+    -- happen BEFORE the eat callback awaits, since that await is the whole
+    -- transition. Re-locking is the player's to do when the view comes back.
     busy = true
     hovered = nil
+    locked, rawHover = nil, nil
     OutlineMealPile(render, nil)
     SendNUIMessage({ action = "diningHover", index = nil })
     local res = lib.callback.await("pickle_restaurants:consume:eat", false,

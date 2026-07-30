@@ -17,12 +17,10 @@ RegisterNetEvent(GetCurrentResourceName() .. ":showNotification", function(text)
     ShowNotification(text)
 end)
 
--- Inventory mirror (client). ox_inventory exposes a client export we wrap so
--- the cooking bar can render the player's items without a server round-trip.
+-- ─── inventory ───────────────────────────────────────────────────────────────
+-- The client half is only the item catalogue mirror; bridge/inventory/client.lua
+-- is the one copy of it.
 CreateThread(function()
     Wait(100)
-    if InitializeInventory then return InitializeInventory() end
-    Inventory = {}
-    Inventory.Items = {}
-    Inventory.Ready = true
+    InitializeInventory()
 end)

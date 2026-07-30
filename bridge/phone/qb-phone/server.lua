@@ -49,6 +49,12 @@ CreateThread(function()
     if AddApp() then return end
     -- No server-side registrar. A fork may expose it client-side instead, so hand the
     -- clients a shot before falling back to telling the admin how to do it by hand.
+    -- `-1` on purpose, and it is not a scoping candidate: qb-phone registers the app on the
+    -- CLIENT side, so every connected client genuinely has to run this once — there is no
+    -- subset of players for whom it's relevant. It fires exactly twice in a server's life
+    -- (our boot, and qb-phone's own start), never on a gameplay event, and late joiners take
+    -- the targeted `phone:qbAsk` path below instead. A one-time boot broadcast is not what
+    -- builds an event backlog.
     TriggerClientEvent("pickle_restaurants:phone:qbClientRegister", -1)
     PrintPhoneAppInstall(("%s did not accept a runtime app registration."):format(RESOURCE), INSTALL_NOTES)
 end)

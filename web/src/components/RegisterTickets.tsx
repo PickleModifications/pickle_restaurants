@@ -89,7 +89,15 @@ function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?:
             <span className={cn("shrink-0 rounded-sm bg-muted px-1.5 py-0.5 font-mono font-bold uppercase tracking-wider tabular-nums", big ? "text-xs" : "text-[10px]")}>
               {_L("register.ticket_num", t.ticket)}
             </span>
-            <span className={cn("truncate font-medium", big ? "text-base" : "text-sm")}>{t.customer}</span>
+            {/* No name on the PUBLIC feed: the always-on counter board and the orders
+                screen are seeded/pushed with the projected ticket list (publicOrders in
+                modules/sales), which drops the customer's name, address and driver so a
+                passerby's screen isn't a directory of who ordered what. The ticket number
+                beside this is the identity there — so render nothing rather than an empty
+                slot. A cashier's own session gets the full list and shows the name. */}
+            {t.customer && (
+              <span className={cn("truncate font-medium", big ? "text-base" : "text-sm")}>{t.customer}</span>
+            )}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {/* NPC walk-ins run out of patience — show the time left + radial so the

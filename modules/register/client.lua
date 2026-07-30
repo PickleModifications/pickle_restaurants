@@ -193,10 +193,15 @@ local function nearestCounterRestaurant()
     local here = GetEntityCoords(PlayerPedId())
     local best, bestDist
     for _, r in pairs(Restaurants or {}) do
-        for _, p in ipairs(r.props or {}) do
-            if p.prop_type == PROP_TYPE then
-                local dist = #(here - vector3(p.x + 0.0, p.y + 0.0, p.z + 0.0))
-                if not bestDist or dist < bestDist then bestDist, best = dist, r end
+        -- Same range gate as modules/screens' nearestFor: prop ROWS exist for every
+        -- restaurant, but only the one we're AT has a counter entity to paint (props are
+        -- loaded by proximity — modules/main's reconciler).
+        if IsRestaurantLoaded and IsRestaurantLoaded(r.id) then
+            for _, p in ipairs(r.props or {}) do
+                if p.prop_type == PROP_TYPE then
+                    local dist = #(here - vector3(p.x + 0.0, p.y + 0.0, p.z + 0.0))
+                    if not bestDist or dist < bestDist then bestDist, best = dist, r end
+                end
             end
         end
     end
