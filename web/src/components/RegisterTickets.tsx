@@ -6,7 +6,7 @@ import { _L } from "@/lib/locale";
 import { Trash2, Check, X, Loader2, Ban, UtensilsCrossed, ShoppingBag } from "lucide-react";
 import {
   Thumb, OptRow, arr, groupLines,
-  type Ticket, type MealOption, type MealItem, type OptView,
+  type Ticket, type MealOption, type MealItem, type OptView, type VesselNeed,
 } from "@/components/OrderBuilder";
 import { drinkLineImageUrl } from "@/lib/localImages";
 import TicketTimer from "@/components/TicketTimer";
@@ -21,19 +21,21 @@ import { channelIcon, channelLabel, isDelivery, orderChannel } from "@/lib/order
 export function Tickets({ id, tickets, big }: { id: number; tickets: Ticket[]; big?: boolean }) {
   // The meal picker is owned here (not per-card) so it overlays the ticket LIST
   // area only — dimming the content, not the panel header — and centres in it.
-  const [picker, setPicker] = useState<{ orderId: number; meals: MealOption[] } | null>(null);
+  const [picker, setPicker] = useState<{ orderId: number; meals: MealOption[]; needs: VesselNeed[] } | null>(null);
   const [busy, setBusy] = useState(false);
   // Drop the picker if its ticket left the list (completed/cancelled elsewhere).
   useEffect(() => {
     if (picker && !tickets.some((t) => t.orderId === picker.orderId)) setPicker(null);
   }, [tickets]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // `item` says which packed vessel is being handed over — a serving-tray meal or a
-  // Restaurant Bag. The server re-validates it (anything else falls back to the meal).
-  const fulfillMeal = async (sig: string, item?: string) => {
+  // Hand over EVERY package the cashier picked — a ticket for a pizza and a cake is
+  // two packages, so this is a list, not one choice. Each entry's `item` says which
+  // vessel it is (a serving-tray meal or a Restaurant Bag); the server re-validates
+  // every one of them and claims any further vessel the ticket still needs itself.
+  const fulfillMeals = async (picks: { sig: string; item?: string }[]) => {
     if (!picker) return;
     setBusy(true);
-    await fetchNui("sales:completeOrder", { id, orderId: picker.orderId, mealSig: sig, mealItem: item });
+    await fetchNui("sales:completeOrder", { id, orderId: picker.orderId, vessels: picks });
     setBusy(false);
     setPicker(null); // (also clears via the `orders` broadcast on success)
   };
@@ -44,22 +46,24 @@ export function Tickets({ id, tickets, big }: { id: number; tickets: Ticket[]; b
       <div className={cn("h-full overflow-y-auto pr-1 pb-4", big ? "space-y-3" : "space-y-2")}>
         {tickets.map((t) => (
           <TicketCard key={t.orderId} id={id} t={t} big={big}
-            onOpenPicker={(meals) => setPicker({ orderId: t.orderId, meals })} />
+            onOpenPicker={(meals, needs) => setPicker({ orderId: t.orderId, meals, needs })} />
         ))}
       </div>
       {picker && (
-        <MealPicker meals={picker.meals} busy={busy} big={big} onFulfill={fulfillMeal} onClose={() => setPicker(null)} />
+        <MealPicker meals={picker.meals} needs={picker.needs} busy={busy} big={big}
+          onFulfill={fulfillMeals} onClose={() => setPicker(null)} />
       )}
     </div>
   );
 }
 
-function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?: boolean; onOpenPicker: (meals: MealOption[]) => void }) {
+function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?: boolean; onOpenPicker: (meals: MealOption[], needs: VesselNeed[]) => void }) {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const f = t.fulfill;
   const mealOptions = arr<MealOption>(f?.mealOptions);
+  const needs = arr<VesselNeed>(f?.needs);
   const missing = arr<string>(f?.missing);
 
   // Fire the action; the ticket drops out of the list when the server's `orders`
@@ -142,8 +146,10 @@ function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?:
             }
           })}
         </div>
-        {/* nothing in the pool can complete this order yet (no singles, no meal) */}
-        {!f?.ok && mealOptions.length === 0 && missing.length > 0 && (
+        {/* the pool can't complete this order yet. Shown even when packages ARE on
+            offer: they may only cover part of the ticket now that partial ones are
+            listed, and "what's still short" is exactly what the cashier needs. */}
+        {!f?.ok && missing.length > 0 && (
           <div className="mb-2.5 rounded-sm bg-destructive/10 px-2 py-1.5 text-[11px] font-medium text-destructive">
             {_L("register.missing", missing.join(", "))}
           </div>
@@ -180,7 +186,7 @@ function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?:
                   can complete this order: open the in-depth picker to review the
                   contents and hand one over */}
               {mealOptions.length > 0 && (
-                <button disabled={busy} onClick={() => onOpenPicker(mealOptions)}
+                <button disabled={busy} onClick={() => onOpenPicker(mealOptions, needs)}
                   className={cn(btn, "border border-primary/50 bg-primary/10 text-primary hover:bg-primary/20")}>
                   {mealOptions.every((m) => m.bag) ? <ShoppingBag className={ic} /> : <UtensilsCrossed className={ic} />}
                   {" "}
@@ -208,21 +214,59 @@ function TicketCard({ id, t, big, onOpenPicker }: { id: number; t: Ticket; big?:
   );
 }
 
-// The in-depth meal fulfillment picker: a modal listing every pool meal that (with
-// single items) completes this order, each shown with its FULL contents — item
+// The in-depth fulfillment picker: a modal listing every package in the pool that
+// carries something this ticket asked for, each shown with its FULL contents — item
 // images + toppings (item images / colour swatches) + names — so the cashier reviews
-// exactly what they're handing over before fulfilling with it. Rendered as an
-// ABSOLUTE overlay so it dims + centres over the ticket LIST only (never the panel
-// header), and fades its backdrop + card in on mount and out on close.
-function MealPicker({ meals, busy, big, onFulfill, onClose }: {
-  meals: MealOption[]; busy: boolean; big?: boolean; onFulfill: (sig: string, item?: string) => void; onClose: () => void;
+// exactly what they're handing over.
+//
+// SEVERAL PACKAGES AT ONCE. A pizza and a cake are two different foods, so they are
+// two different packages, and a picker that only took one made that ticket
+// impossible to fulfil. Selection is per package (with a quantity when the pool holds
+// identical copies), and the tally at the foot adds their `covers` up against the
+// ticket's `needs` — so the button only goes live once the selection actually covers
+// the order. Nothing here decides what may be handed over: the server re-plans against
+// the same picks and refuses anything that doesn't add up.
+//
+// Rendered as an ABSOLUTE overlay so it dims + centres over the ticket LIST only
+// (never the panel header), and fades its backdrop + card in on mount and out on close.
+function MealPicker({ meals, needs, busy, big, onFulfill, onClose }: {
+  meals: MealOption[]; needs: VesselNeed[]; busy: boolean; big?: boolean;
+  onFulfill: (picks: { sig: string; item?: string }[]) => void; onClose: () => void;
 }) {
   const [visible, setVisible] = useState(false);
+  // how many of each package is being handed over, keyed item|sig
+  const [picked, setPicked] = useState<Record<string, number>>({});
   // fade in on mount (next frame so the transition has a 0→1 to animate)
   useEffect(() => { const r = requestAnimationFrame(() => setVisible(true)); return () => cancelAnimationFrame(r); }, []);
   // fade out, then unmount via the parent's onClose
   const close = () => { setVisible(false); window.setTimeout(onClose, 180); };
-  const fulfill = (sig: string, item?: string) => { setVisible(false); window.setTimeout(() => onFulfill(sig, item), 160); };
+
+  const key = (m: MealOption) => (m.item || "") + "|" + m.sig;
+  const qty = (m: MealOption) => picked[key(m)] || 0;
+  // Click a package to add one; clicking past the last copy in the pool takes it back
+  // off — one control, no steppers to aim at with the in-world cursor.
+  const bump = (m: MealOption) => {
+    const k = key(m);
+    const max = Math.max(1, m.count || 1);
+    const next = (picked[k] || 0) + 1;
+    setPicked({ ...picked, [k]: next > max ? 0 : next });
+  };
+  // What the current selection takes off the ticket, per need.
+  const covered: Record<string, number> = {};
+  for (const m of meals) {
+    const n = qty(m);
+    if (n <= 0) continue;
+    for (const [k, v] of Object.entries(m.covers || {})) covered[k] = (covered[k] || 0) + v * n;
+  }
+  const enough = needs.length > 0 && needs.every((n) => (covered[n.id] || 0) >= n.need);
+  const total = Object.values(picked).reduce((a, b) => a + b, 0);
+  const fulfill = () => {
+    const picks: { sig: string; item?: string }[] = [];
+    for (const m of meals) for (let i = 0; i < qty(m); i++) picks.push({ sig: m.sig, item: m.item });
+    if (picks.length === 0) return;
+    setVisible(false);
+    window.setTimeout(() => onFulfill(picks), 160);
+  };
   return (
     <div
       className={cn("absolute inset-0 z-30 flex items-center justify-center p-4 transition-opacity duration-200",
@@ -243,14 +287,43 @@ function MealPicker({ meals, busy, big, onFulfill, onClose }: {
           <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] font-bold tabular-nums text-muted-foreground">{meals.length}</span>
           <button onClick={close} className="ml-auto text-muted-foreground transition-colors hover:text-foreground"><X className="h-4 w-4" /></button>
         </div>
+        {/* WHAT THE TICKET STILL NEEDS PACKED, ticked off live as packages are
+            selected. Without it, picking two of anything is guesswork. */}
+        {needs.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 border-b border-border px-3 py-2">
+            {needs.map((n) => {
+              const got = Math.min(covered[n.id] || 0, n.need);
+              return (
+                <span key={n.id}
+                  className={cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[10px] font-bold tabular-nums",
+                    got >= n.need ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground")}>
+                  {got >= n.need && <Check className="h-3 w-3" />}
+                  {n.label} {got}/{n.need}
+                </span>
+              );
+            })}
+          </div>
+        )}
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
           {meals.map((m, mi) => {
             const items = arr<MealItem>(m.items);
+            const n = qty(m);
+            const max = Math.max(1, m.count || 1);
             return (
-              <div key={m.item + m.sig} className="rounded-lg border border-border bg-muted/30 p-3">
+              <button key={m.item + m.sig} type="button" onClick={() => bump(m)}
+                className={cn("w-full rounded-lg border p-3 text-left transition-colors",
+                  n > 0 ? "border-primary bg-primary/10" : "border-border bg-muted/30 hover:border-primary/50")}>
                 <div className="tape mb-2 flex items-center gap-1.5 text-muted-foreground">
                   {m.bag ? <ShoppingBag className="h-3 w-3" /> : <UtensilsCrossed className="h-3 w-3" />}
                   {_L(m.bag ? "register.bag_n" : "register.meal_n", mi + 1)}
+                  {max > 1 && (
+                    <span className="rounded-full bg-muted px-1.5 font-mono text-[10px] tabular-nums text-muted-foreground">×{max}</span>
+                  )}
+                  {n > 0 && (
+                    <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-primary px-2 py-0.5 font-mono text-[10px] font-bold tabular-nums text-primary-foreground">
+                      <Check className="h-3 w-3" />{n > 1 ? `×${n}` : _L("register.picked")}
+                    </span>
+                  )}
                 </div>
                 <div className="space-y-2">
                   {items.map((it, i) => (
@@ -274,14 +347,19 @@ function MealPicker({ meals, busy, big, onFulfill, onClose }: {
                     </div>
                   ))}
                 </div>
-                <Button className="mt-3 w-full" size="sm" disabled={busy} onClick={() => fulfill(m.sig, m.item)}>
-                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                  {" "}
-                  {_L(m.bag ? "register.fulfill_this_bag" : "register.fulfill_this_meal")}
-                </Button>
-              </div>
+              </button>
             );
           })}
+        </div>
+        {/* One hand-over for the whole selection. Live only once the tally above says
+            the picks cover the ticket — the server re-plans against exactly these
+            picks, so a button that lied would just produce a refusal notification. */}
+        <div className="border-t border-border p-3">
+          <Button className="w-full" size="sm" disabled={busy || !enough} onClick={fulfill}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+            {" "}
+            {total > 0 ? _L("register.hand_over_n", total) : _L("register.pick_packages")}
+          </Button>
         </div>
       </div>
     </div>

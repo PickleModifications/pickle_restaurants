@@ -9,6 +9,9 @@
 --    • MEAL — eat-in. Only usable while SEATED at one of the restaurant's placed
 --      seat anchors: it lays the tray out on the table in front of the customer
 --      as an interactive view (modules/dining) where they click what to eat.
+--    • TAKEOUT BOX / DRINK — one food, one flavor: no contents list, just the
+--      sip-or-finish pair. A box lays out on the table when seated; a drink is
+--      always drunk from the hand, out of the restaurant's own branded cup.
 --
 --  Both paths share this file's authority: the slot is re-read here on every
 --  action (never trusted from the client), the layer is removed server-side, and
@@ -37,6 +40,13 @@ local function vesselKind(item)
     -- meal (modules/dining) and is eaten by clicking it; on your feet it is eaten
     -- where you stand. Both go through the same eat callback.
     if item == BoxItemName() then return "box" end
+    -- A DRINK is a vessel too — one item for every flavor, told apart by the key on
+    -- its build stack — so using one has to come through here rather than through an
+    -- inventory's own "drink this" behaviour, which knows nothing of the flavor, the
+    -- restaurant's branded cup or what the food says it quenches. Like a box it holds
+    -- exactly one thing, so there is no contents list to choose from: it is sipped
+    -- where you stand.
+    if item == GetSetting("drink_item", "drink") then return "drink" end
     return nil
 end
 
@@ -125,16 +135,18 @@ local function useVessel(src, item, slot)
     local s, meta = findSlot(src, item, slot)
     if not s then return end
     local stack = slotStack(meta)
-    if #stack == 0 then
+    if #stack == 0 and kind ~= "drink" then
         -- a vessel with no readable contents (a framework that strips slot
         -- metadata, or an item spawned by hand): nothing to choose from
         return ShowNotification(src, _L("consume_empty"))
     end
     local payload = { kind = kind, item = item, slot = s, contents = describeContents(stack) }
-    -- A BOX has no contents list to choose from (one food, however many component
-    -- layers describe it), so it carries its own identity + progress instead —
-    -- that's what its bite/finish menu is built from.
-    if kind == "box" then
+    -- A BOX and a DRINK have no contents list to choose from (one food / one flavor,
+    -- however many layers describe it), so they carry their own identity + progress
+    -- instead — that's what the bite/sip menu is built from. A drink with NO readable
+    -- flavor is still a drink: it names itself off the item and is drunk plain, rather
+    -- than being refused as an empty vessel.
+    if kind == "box" or kind == "drink" then
         local disp  = LayerDisplay and LayerDisplay({ item = item, stack = stack }) or nil
         local spec  = ConsumeSpecFor(item, stack)
         local eaten = math.max(0, math.floor(tonumber(stack[1] and stack[1].eaten) or 0))
@@ -167,7 +179,8 @@ lib.callback.register("pickle_restaurants:consume:eat", function(src, d)
     -- A TAKEOUT BOX is one food, however many component layers were recorded to
     -- describe it: eating it eats the whole box, so the client's indices are
     -- irrelevant and eating "part of a soup" is not a thing.
-    if kind == "box" then
+    -- A DRINK is the same story: one flavor, however it was recorded.
+    if kind == "box" or kind == "drink" then
         for i = 1, #stack do idxs[i] = i end
     elseif type(d.indices) == "table" then
         for _, v in ipairs(d.indices) do
@@ -178,12 +191,14 @@ lib.callback.register("pickle_restaurants:consume:eat", function(src, d)
         local n = tonumber(d.index)
         if stack[n] then idxs[1] = n end
     end
-    if #idxs == 0 then return { ok = false, error = _L("consume_gone") } end
+    -- A metadata-less DRINK has no layers at all and is still perfectly drinkable —
+    -- it is the item itself. Every other vessel needs something to act on.
+    if #idxs == 0 and kind ~= "drink" then return { ok = false, error = _L("consume_gone") } end
     table.sort(idxs, function(a, b) return a > b end)
     local layer = stack[idxs[#idxs]] -- the lowest index names the mouthful
-    -- A box is named and nourishes as its FOOD, resolved from the box + its whole
-    -- stack — never as whichever component layer happens to sit at the bottom.
-    local subject = (kind == "box") and { item = item, stack = stack } or layer
+    -- A box or a drink is named and nourishes as its FOOD / FLAVOR, resolved from the
+    -- vessel + its whole stack — never as whichever layer happens to sit at the bottom.
+    local subject = (kind == "box" or kind == "drink") and { item = item, stack = stack } or layer
     local disp = LayerDisplay and LayerDisplay(subject) or nil
     -- What THIS food does when eaten + which clip it's eaten with, authored on the
     -- food itself and filled in from the global `consume` fallback. Resolved BEFORE
@@ -220,9 +235,13 @@ lib.callback.register("pickle_restaurants:consume:eat", function(src, d)
     -- meal going back in a pocket, and a reconnect — a half-eaten burger stays
     -- half-eaten. The BOX tracks on its first layer, since it is consumed whole.
     local total = spec.bites or 1
-    local track = (kind == "box") and stack[1] or layer
+    local track = (kind == "box" or kind == "drink") and stack[1] or layer
     local done  = math.max(0, math.floor(tonumber(track and track.eaten) or 0))
     local whole = (d and d.whole) and true or false
+    -- Nothing to record progress ON (a hand-spawned drink with no metadata): there is
+    -- no slot to write a sip count back to, so it goes down in one rather than
+    -- silently resetting to full on every sip.
+    if not track then whole = true end
     local take  = whole and (total - done) or 1
     if take < 1 then take = 1 end
     local left  = total - done - take
@@ -317,6 +336,7 @@ function RegisterConsumables()
     register(BagItemName())
     register(GetSetting("meal_item", "meal"))
     register(BoxItemName())
+    register(GetSetting("drink_item", "drink"))
 end
 
 -- ox_inventory's per-item server export. ox calls it twice around a use
@@ -356,5 +376,6 @@ end)
 -- An admin renaming bag_item / meal_item re-registers the new names (the old ones
 -- stay registered and harmlessly inert).
 AddEventHandler("pickle_restaurants:settingChanged", function(key)
-    if RestaurantsReady and (key == "bag_item" or key == "meal_item" or key == "box_item") then RegisterConsumables() end
+    if RestaurantsReady and (key == "bag_item" or key == "meal_item" or key == "box_item"
+        or key == "drink_item") then RegisterConsumables() end
 end)

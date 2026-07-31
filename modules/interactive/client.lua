@@ -58,6 +58,50 @@ end)
 EscapeHandlers = {} -- NUIView name -> function called instead of CloseNUI
 function SetEscapeHandler(view, fn) EscapeHandlers[view] = fn end
 
+-- THE PRESS THAT CLOSES A VIEW MUST NOT SURVIVE IT. Every ESC exit here has the same
+-- shape: a loop disables the pause controls while the view is up, the key closes the
+-- view, and the loop's condition is false on the NEXT frame — so the game gets the
+-- rest of that keypress (the hold, the release) with nothing disabling it any more,
+-- and the pause menu opens behind the panel that just closed. It reads exactly like
+-- ESC doing two things at once, which is what it is.
+--
+-- So closing ARMS this: the pause inputs stay disabled and the frontend stays shoved
+-- shut until the key is physically up plus a short tail, whoever is closing —
+-- the fullscreen panels below, the in-world register and the kiosk. One helper, since
+-- every one of those had its own copy of the disable and none of them had this.
+-- TUNE IN-GAME: the tail.
+-- THE GUARD MUST START ON THE FRAME IT IS ARMED. This was one long-lived thread
+-- idling at Wait(100) between guards, so arming it did nothing for up to a tenth of a
+-- second — and the press it exists to catch is already in flight. That hole is what
+-- made the pause menu still flash open on SOME exits and not others: whether it did
+-- depended only on where in the idle tick the key landed, which reads exactly like
+-- "a slight fade every other exit". Same bug, same fix, as modules/quad's
+-- `ensureDrawThread`: no idle poll, a thread started on demand that runs at frame
+-- rate and ends when the guard does.
+local PAUSE_KEYS = { 199, 200, 322, 194, 202 }
+local guardUntil, guarding = 0, false
+
+function GuardPauseKeys(tailMs)
+    guardUntil = math.max(guardUntil, GetGameTimer() + (tonumber(tailMs) or 250))
+    if guarding then return end
+    guarding = true
+    CreateThread(function()
+        while GetGameTimer() < guardUntil do
+            local held = false
+            for _, c in ipairs(PAUSE_KEYS) do
+                DisableControlAction(0, c, true)
+                if IsDisabledControlPressed(0, c) then held = true end
+            end
+            -- Still on the key: the tail hasn't started yet. Without this a held ESC
+            -- outlasts a fixed timer and lands on the frontend the moment we stop.
+            if held then guardUntil = GetGameTimer() + 250 end
+            ForcePauseMenuClosed()
+            Wait(0)
+        end
+        guarding = false
+    end)
+end
+
 -- NUI focus alone does NOT stop ESC from reaching the frontend: the game still
 -- processes the pause controls, so escaping a panel also opened the pause menu.
 -- They are DISABLED every frame a panel is up (and the menu shoved closed if one
@@ -72,14 +116,16 @@ CreateThread(function()
             -- Same working pattern as the gizmo/placement loops: force the frontend
             -- back closed before the key is read, so a single tap can't paint a frame
             -- of pause menu on its way to closing the panel.
-            if IsPauseMenuActive() then
-                SetFrontendActive(false)
-                ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
-            end
+            ForcePauseMenuClosed()
             if IsDisabledControlJustReleased(0, 322) or IsDisabledControlJustReleased(0, 200)
                 or IsDisabledControlJustReleased(0, 202) or IsDisabledControlJustReleased(0, 194) then
                 local handler = EscapeHandlers[NUIView]
                 if handler then handler() else CloseNUI() end
+                -- ...and keep the key away from the frontend on the way OUT. See
+                -- GuardPauseKeys: the frame this loop stops guarding is the frame the
+                -- game gets the press back, which is how ESC both closed the panel and
+                -- opened the pause menu behind it.
+                GuardPauseKeys()
             end
             Wait(0)
         else

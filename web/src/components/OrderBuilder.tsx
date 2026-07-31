@@ -40,11 +40,22 @@ export type MealItem = { item: string; label: string; image?: string; mods?: Opt
 // A packed VESSEL in the pool that can fill a ticket: a serving-tray meal or a
 // takeaway Restaurant Bag (`bag`). `item` is the inventory item handed over — it
 // rides back to the server on fulfilment so it knows which one to consume.
-export type MealOption = { sig: string; item?: string; bag?: boolean; label: string; items?: MealItem[] };
+// `covers` is what this package would take OFF the ticket, keyed by the same
+// "item|variation" id the ticket's `needs` use — the picker adds it up across
+// everything selected, which is how a pizza in one box and a cake in another
+// together complete an order neither could alone. `completes` is the one-package
+// case; `count` is how many identical copies of this exact packing are in the pool.
+export type MealOption = {
+  sig: string; item?: string; bag?: boolean; label: string; items?: MealItem[];
+  covers?: Record<string, number>; completes?: boolean; count?: number;
+};
+// One thing the ticket still needs PACKED (the loose pool can't cover it).
+export type VesselNeed = { id: string; item: string; label: string; need: number };
 // Per-ticket fulfillment state from the shared cooked-items pool (server-computed).
-// `ok` = completable with single items alone; `mealOptions` = meals that complete it;
-// `missing` = the single-item shortfall shown when nothing can complete it.
-export type Fulfill = { ok: boolean; mealOptions?: MealOption[]; missing?: string[] };
+// `ok` = completable as it stands (singles, plus any vessels the server claims by
+// itself); `mealOptions` = packages that carry something the ticket asked for;
+// `needs` = what must come packed; `missing` = the shortfall when nothing covers it.
+export type Fulfill = { ok: boolean; mealOptions?: MealOption[]; needs?: VesselNeed[]; missing?: string[] };
 // `npc` flags an AI walk-in customer; those carry a patience countdown (`expiresIn`
 // seconds left at send time, ticked down locally) out of `patience` total seconds
 // (the radial's denominator). Player tickets have npc=false and no timer fields.

@@ -29,6 +29,11 @@ type Props = {
   scope: Scope;
   foods: Food[]; tools: Tool[]; ingredients: IngredientDef[]; defaults?: DefaultMenu | null;
   settings: Record<string, any>; items: Item[]; groups: string[]; onSaved: () => void;
+  /** Kitchen products (a cooked patty, raw_pizza, a frosted cake): authored by the
+   *  menu, never installed items, and legitimate COMPONENTS of another recipe. The
+   *  component pickers offer these alongside `items` — with everything a component
+   *  may be on one list, those pickers no longer accept free text. */
+  products?: Item[];
   /** Buy-in costs with every installed pack's defaults underneath the authored map —
    *  what a cost field shows when this server hasn't set one of its own. */
   ingredientCosts?: Record<string, number>;
@@ -99,7 +104,15 @@ const PRESETS = (): Preset[] => (_presets ??= [
   },
 ]);
 
-export default function Menu({ scope, foods, tools, ingredients, defaults, settings, boxQuad, items, groups, ingredientCosts, onSaved }: Props) {
+export default function Menu({ scope, foods, tools, ingredients, defaults, settings, boxQuad, items, products, groups, ingredientCosts, onSaved }: Props) {
+  // What a COMPONENT may be: an installed inventory item, or a kitchen product this
+  // menu authors (tray-only things like a cooked patty or raw_pizza, which the
+  // inventory catalogue can never list). One list of everything valid is what lets
+  // the component pickers refuse free text — a name off this list is a typo.
+  const compItems = useMemo(() => {
+    const known = new Set((items || []).map((i) => i.name));
+    return [...(items || []), ...(products || []).filter((p) => !known.has(p.name))];
+  }, [items, products]);
   const showFood = scope === "food";
   const showIng = scope === "ingredients";
   // Kinds this tab renders (food-only vs tool+ingredient).
@@ -607,6 +620,7 @@ export default function Menu({ scope, foods, tools, ingredients, defaults, setti
       >
         {editing?.kind === "food" && (
           <FoodForm food={editing.data} onChange={(p) => updateFood(editing.index, p)} items={items} groups={groups}
+            compItems={compItems}
             itemImages={itemImages} onSetItemImage={setItemImage} anims={consumeAnims} boxQuad={boxQuad} />
         )}
         {editing?.kind === "tool" && (

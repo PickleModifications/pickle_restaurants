@@ -446,14 +446,14 @@ function StartShellPlacement(restaurantId)
         )
 
         -- pause-menu suppression (same working pattern as the gizmo loop)
-        if IsPauseMenuActive() then
-            SetFrontendActive(false)
-            ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
-        end
+        ForcePauseMenuClosed()
         if IsDisabledControlJustPressed(0, 202)
             or IsDisabledControlJustReleased(0, 199)
             or IsDisabledControlJustReleased(0, 200)
             or IsDisabledControlJustReleased(0, 322) then
+            -- same as the gizmo: the loop holding the key off the frontend is the
+            -- loop this press ends (modules/interactive's GuardPauseKeys)
+            if GuardPauseKeys then GuardPauseKeys() end
             break
         end
         if IsDisabledControlJustPressed(0, 51) then saved = true break end

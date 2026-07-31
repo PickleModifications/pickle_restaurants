@@ -107,7 +107,12 @@
       "Bash(lua5.4 -e \"loadfile\\('modules/cooking/client.lua'\\)\")",
       "Bash(luac5.4 -p modules/placement/server.lua)",
       "Bash(luac5.4 -p modules/register/client.lua)",
-      "Bash(grep -n \"RefreshTray\\(\\); RefreshBar\\(\\)$\" -A 2 modules/cooking/client.lua)"
+      "Bash(grep -n \"RefreshTray\\(\\); RefreshBar\\(\\)$\" -A 2 modules/cooking/client.lua)",
+      "Bash(luac5.4 -p modules/npc_customers/server.lua locales/translations/en.lua)",
+      "Bash(luac5.4 -p modules/consume/server.lua modules/consume/client.lua __INSTALL/items/ox_inventory.lua)",
+      "Bash(grep -n \"^- \\\\`cooking\\\\`\" -A 6 CLAUDE.md)",
+      "Bash(luac5.4 -p modules/prepmirror/client.lua)",
+      "Bash(luac5.4 -p modules/interactive/client.lua modules/register/client.lua modules/kiosk/client.lua)"
     ]
   }
 }

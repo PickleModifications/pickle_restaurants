@@ -402,6 +402,26 @@ RegisterNUICallback("dining:close", function(_, cb)
     cb({ ok = true })
 end)
 
+-- ─── what the ROOM sees (modules/mirror) ─────────────────────────────────────
+-- A meal laid out on a table is the most public thing a customer does with one, and
+-- it was rendered only for the diner: to everyone else they sat at an empty table
+-- miming a burger — the same gap the prep table had. So the diner publishes their own
+-- render (the kitchen's row builder walks the handle) against the SEAT ANCHOR they
+-- are sitting on, and modules/mirror relays it to everyone near that seat, who spawn
+-- ordinary local props from it.
+--
+-- The seat is the key for two reasons: the server already knows who is sitting there
+-- (SeatOccupancy — one authority, exactly like a station's claim), and it is a placed
+-- prop, so the audience and the walk-into-range hydration are the ones every other
+-- world render already uses. A meal eaten off a seat we can't name (no anchor) simply
+-- isn't published — there would be nothing to scope it to.
+function MealMirrorSnapshot()
+    if not (open and render) then return nil end
+    local seat = CurrentSeat and CurrentSeat()
+    if not (seat and seat.id) then return nil end
+    return seat.id, MealMirrorRows and MealMirrorRows(render) or {}
+end
+
 -- Standing up (or being pulled out of the seat) puts the meal away.
 AddEventHandler("pickle_restaurants:seating:stood", function() CloseMealView() end)
 

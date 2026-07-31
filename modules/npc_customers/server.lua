@@ -33,6 +33,24 @@ local CFG_DEFAULTS = {
     max_items        = 2,
     tip_chance       = 25,
     tip_max_percent  = 15,
+    -- WHAT AN NPC IS WILLING TO PAY. An NPC agrees to whatever is on the menu, so
+    -- without a ceiling the menu price IS a money printer: put a burger at $999,999,
+    -- cook one $3 burger, serve the ped, and the restaurant banks a million dollars
+    -- from thin air. A player customer chooses to pay a gouging price; an NPC can't
+    -- choose, so the ceiling stands in for that judgement.
+    --
+    -- Fair value is the sellable's RECOMMENDED price — what its ingredients cost the
+    -- restaurant, marked up by `profit_margin` (`MarkupPrice`/`e.defaultPrice`) — so
+    -- this tracks the server's own economy instead of being a second, drifting
+    -- opinion about what food is worth. An NPC simply won't ORDER something priced
+    -- past its limit (it isn't served at a discount): overprice the menu and you lose
+    -- NPC trade, which is the pressure that keeps prices honest.
+    max_markup       = 100,  -- percent ABOVE the recommended price an NPC will pay
+    -- Fallback for a sellable with NO cost basis (nothing in `ingredient_costs`
+    -- traces to it, so its recommended price is $0 and a percentage of it bounds
+    -- nothing). Those are a config gap, not a licence to charge anything, so they
+    -- get a flat cash ceiling rather than being trusted or refused outright.
+    unpriced_max     = 100,
     counter_offset   = 1.0,
     queue_spacing    = 0.85,
     spawn_distance   = 6.0,
@@ -87,6 +105,8 @@ function NpcConfig()
         max_items        = math.floor(maxI),
         tip_chance       = num(raw.tip_chance, CFG_DEFAULTS.tip_chance, 0, 100),
         tip_max_percent  = num(raw.tip_max_percent, CFG_DEFAULTS.tip_max_percent, 0, 100),
+        max_markup       = num(raw.max_markup, CFG_DEFAULTS.max_markup, 0, 100000),
+        unpriced_max     = num(raw.unpriced_max, CFG_DEFAULTS.unpriced_max, 0, 10000000),
         counter_offset   = num(raw.counter_offset, CFG_DEFAULTS.counter_offset, 0.0, 5.0),
         queue_spacing    = num(raw.queue_spacing, CFG_DEFAULTS.queue_spacing, 0.3, 3.0),
         spawn_distance   = num(raw.spawn_distance, CFG_DEFAULTS.spawn_distance, 1.0, 30.0),
@@ -279,10 +299,35 @@ local function lineFromEntry(e, qty)
     }
 end
 
-local function spawnNpcCustomer(rid, r, cfg)
-    -- Orderable menu (priced + enabled + valid). Empty menu → nothing to sell.
+-- The orderable menu an NPC will actually SHOP FROM: the priced catalog minus
+-- everything priced past what a walk-in is willing to pay (see `max_markup`).
+--
+-- THIS IS THE ONE DOOR into an NPC ticket. Both spawn paths (counter queue and phone
+-- delivery) come through here, so there is a single place the ceiling is applied and
+-- no second copy to forget — an NPC ticket's total is banked verbatim on serve, so a
+-- line that gets past this point is money the restaurant has already earned.
+--
+-- Rejecting rather than discounting is deliberate: the ped pays the ticket it agreed
+-- to, and a gouged menu simply stops drawing NPC custom. An entry with no cost basis
+-- (`defaultPrice` 0 — nothing in `ingredient_costs` reaches it) falls to the flat
+-- `unpriced_max`, since a percentage of nothing is no limit at all.
+local function npcShoppingCatalog(rid, cfg)
     local catalog = BuildPricedCatalog(rid, true)
-    if not catalog or #catalog == 0 then return end
+    if not catalog or #catalog == 0 then return nil end
+    local out = {}
+    for _, e in ipairs(catalog) do
+        local fair = tonumber(e.defaultPrice) or 0
+        local cap = (fair > 0) and RoundMoney(fair * (1 + cfg.max_markup / 100)) or cfg.unpriced_max
+        if (tonumber(e.price) or 0) <= cap then out[#out + 1] = e end
+    end
+    if #out == 0 then return nil end
+    return out
+end
+
+local function spawnNpcCustomer(rid, r, cfg)
+    -- Nothing an NPC will buy (no menu, or every item priced out) → no customer.
+    local catalog = npcShoppingCatalog(rid, cfg)
+    if not catalog then return end
 
     local count = math.random(cfg.min_items, cfg.max_items)
     local lines, total = {}, 0
@@ -380,8 +425,8 @@ local function pickDeliveryDoor(rid)
 end
 
 local function spawnNpcDelivery(rid, r, cfg, coords)
-    local catalog = BuildPricedCatalog(rid, true)
-    if not catalog or #catalog == 0 then return end
+    local catalog = npcShoppingCatalog(rid, cfg)
+    if not catalog then return end
 
     local count = math.random(cfg.min_items, cfg.max_items)
     local lines, total = {}, 0

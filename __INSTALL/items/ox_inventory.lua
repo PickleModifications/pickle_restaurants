@@ -50,16 +50,20 @@
         consume = 0,
         server = { export = 'pickle_restaurants.useItem' },
     },
+    -- Every poured drink is this ONE item with the flavor in its metadata, so it is
+    -- a VESSEL like the three above and must be declared the same way: `consume = 0`
+    -- + the export, with NO client status/anim. With ox's own status block it would
+    -- drink the item itself — its own thirst number, its own generic bottle, the
+    -- item destroyed — so this resource would never see the use and a drink could
+    -- never be sipped from the restaurant's branded cup. What a drink quenches is
+    -- authored on the FOOD (its `consume` block), never here.
     ['drink'] = {
         label  = 'Restaurant Drink',
         weight = 300,
-        stack  = true,
+        stack  = false,
         close  = true,
-        client = {
-            status = { thirst = 200000 },
-            anim   = { dict = 'mp_player_intdrink', clip = 'loop_bottle' }, usetime = 2500,
-        },
-        consume = 1,
+        consume = 0,
+        server = { export = 'pickle_restaurants.useItem' },
     },
     ['restaurant_receipt'] = {
         label  = 'Receipt',

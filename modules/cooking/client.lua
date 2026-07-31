@@ -3242,6 +3242,10 @@ local function StopCooking()
     clearPrepStacks()
     if wasPrep then TriggerServerEvent("pickle_restaurants:cooking:prepClose") end -- drop unfinished build
     StopStationCamera()
+    -- Unconditional: it is a no-op when nothing is posed, so no exit path (ESC, a
+    -- fire ejecting the cook, a virtual shell changing) has to know whether this
+    -- station had one — and every one of them has to take the scenario's props away.
+    if StopStovetopPose then StopStovetopPose() end
     CloseNUI()
     SendNUIMessage({ action = "cookingItems", items = {} })
     -- free the exclusive station claim (physical and virtual alike)
@@ -3291,6 +3295,18 @@ function OpenCookingStation(prop)
     currentCookProp = prop
     cookingOpen = true
     StartStationCamera(prop)
+    -- The cook is hidden in their OWN shot but not in anyone else's: pose them at the
+    -- cooktop (modules/stovetop) so the kitchen looks worked rather than stood in.
+    -- Physical stations only — a virtual session leaves the ped standing wherever it
+    -- really is, and a BBQ mimed in the street is worse than no pose at all.
+    if prop.prop_type == "stovetop" and not prop.virtual and StartStovetopPose then
+        StartStovetopPose()
+    end
+    -- We may already be holding a MIRROR of this prep table (we were standing near it
+    -- while someone else worked it, and a station is handed on the moment they leave).
+    -- Ours are about to be the real props, so drop the picture or the two sets sit in
+    -- the same place fighting each other. Same on the seat side when a diner sits.
+    if DropMirror then DropMirror(prop.id) end
     local ing = lib.callback.await("pickle_restaurants:cooking:getIngredients", false, { prop_id = prop.id })
     local rest = Restaurants[prop.restaurant_id]
     OpenNUI("cooking", { station = prop.prop_type, restaurantId = prop.restaurant_id, ingredients = ing, theme = rest and rest.theme or nil })
@@ -4614,6 +4630,17 @@ end)
 -- switch the scripted camera between the cooktop and either oven door
 RegisterNUICallback("cooking:setView", function(d, cb)
     if currentCookProp and SetStationView then SetStationView(currentCookProp, d.view) end
+    -- The cook's BBQ pose belongs to the COOKTOP, not to the whole stove: an oven
+    -- door view is a different part of the same entity, and someone crouched at an
+    -- open oven isn't flipping anything. Dropping the pose here also takes the
+    -- scenario's props with it, so they never outlive the part they belong to.
+    if currentCookProp and currentCookProp.prop_type == "stovetop" and not currentCookProp.virtual then
+        if d and (d.view == "door1" or d.view == "door2") then
+            if StopStovetopPose then StopStovetopPose() end
+        elseif StartStovetopPose then
+            StartStovetopPose()
+        end
+    end
     cb({ ok = true })
 end)
 
@@ -5504,4 +5531,97 @@ function CookFxItems()
     for uid, ent in pairs(CookObjects) do add(uid, ent) end
     for uid, d in pairs(CookDual) do add(uid, d.ent and (d.ent[1] or d.ent[2])) end
     return out
+end
+
+-- ─── what the ROOM sees: mirror snapshots (modules/mirror) ───────────────────
+-- Everything else this resource renders in a kitchen is world-visible: a patty on a
+-- grill, a tray in an oven, a cup under a tap all come from SERVER state, so every
+-- client near the station spawns its own copy. The prep table was the one exception —
+-- its build lives only in the cook's client — so from the outside a cook stood at an
+-- empty counter miming a burger.
+--
+-- A prep build is INHERENTLY client-authored: free 2D placement under a cursor,
+-- per-part offsets, a lid caught mid-swing. The server holds RESERVATIONS, not
+-- geometry, and teaching it the layout would be a second copy of the maths in this
+-- file that could only ever drift from it. So the cook publishes WHAT THEY SEE — one
+-- row per live prop — and the other clients spawn ordinary local props from it,
+-- exactly as they do for a grill. The station claim is exclusive, so there is only
+-- ever ONE author and nothing to reconcile between two of them.
+--
+-- Returns propId, rows (nil when this client isn't working a physical prep table).
+-- A VIRTUAL session is deliberately excluded: its shell is somewhere else entirely
+-- (underground, in the sky), so there is nobody standing at that table to see it, and
+-- the props would land in a room the cook isn't in.
+-- ONE row builder for everything that gets mirrored (modules/mirror): a live prop as
+-- model hash + transform, plus a takeout box's food PICTURE — that is drawn from the
+-- entity matrix rather than being part of the model, so without it a mirrored box
+-- would be an open box with nothing in it, which is the exact "nothing is there" all
+-- of this exists to fix.
+--
+-- Rounded on the way out, not on arrival: the publisher diffs against these same
+-- numbers to decide whether anything actually moved, so a prop resting still can
+-- never jitter its way into a re-send.
+function MirrorAddRow(rows, ent, quad, crop)
+    if not (ent and DoesEntityExist(ent)) then return end
+    -- HIDDEN IS HIDDEN, for the room as much as for the owner. A pile is hidden for
+    -- the length of a mouthful (the serving is in the diner's hand, and the held props
+    -- ARE networked) and a concealed stack is hidden inside a closed box — mirroring
+    -- either would put the same food in two places at once.
+    if not IsEntityVisible(ent) then return end
+    local c = GetEntityCoords(ent)
+    local r = GetEntityRotation(ent, 2)
+    rows[#rows + 1] = {
+        m  = GetEntityModel(ent),
+        x  = math.floor(c.x * 1000 + 0.5) / 1000,
+        y  = math.floor(c.y * 1000 + 0.5) / 1000,
+        z  = math.floor(c.z * 1000 + 0.5) / 1000,
+        rx = math.floor(r.x * 10 + 0.5) / 10,
+        ry = math.floor(r.y * 10 + 0.5) / 10,
+        rz = math.floor(r.z * 10 + 0.5) / 10,
+        q  = quad, qc = crop,
+    }
+end
+
+-- `parts[].ents` is the whole entity list of a part (deleteParts iterates exactly
+-- this, so anything not in it wouldn't be cleaned up either). The picture rides the
+-- BASE prop of a takeout box, exactly as SeatTakeoutPart attaches it.
+function MirrorAddParts(rows, parts)
+    for _, p in ipairs(parts or {}) do
+        for i, e in ipairs(p.ents or {}) do
+            MirrorAddRow(rows, e, (i == 1) and p.quad or nil, (i == 1) and p.quadCrop or nil)
+        end
+    end
+end
+
+-- The PREP TABLE's props, for the cook to publish. Returns propId, rows (nil when
+-- this client isn't working a physical prep table). A VIRTUAL session is deliberately
+-- excluded: its shell is somewhere else entirely (underground, in the sky), so there
+-- is nobody standing at that table to see it, and the props would land in a room the
+-- cook isn't in.
+function PrepMirrorSnapshot()
+    if not (cookingOpen and currentCookProp) then return nil end
+    if currentCookProp.prop_type ~= "kitchen_prep" or currentCookProp.virtual then return nil end
+    local rows = {}
+    for _, t in pairs(PrepTrays) do
+        for _, e in ipairs(t.ents or {}) do MirrorAddRow(rows, e) end
+    end
+    for _, s in pairs(PrepStacks) do MirrorAddParts(rows, s.parts) end
+    -- the carried drag too: a burger travelling under the cook's cursor is the most
+    -- legible thing they do, and it is exactly what looked like miming
+    if prepDrag then
+        MirrorAddParts(rows, prepDrag.parts)
+        for _, e in ipairs(prepDrag.tray or {}) do MirrorAddRow(rows, e) end
+    end
+    return currentCookProp.id, rows
+end
+
+-- A laid-out MEAL (the handle SpawnMealRender returned), as mirror rows. The eat-in
+-- view owns the handle; walking it here keeps the one description of "what a render
+-- is made of" next to the code that builds it.
+function MealMirrorRows(h)
+    local rows = {}
+    if type(h) ~= "table" then return rows end
+    for _, e in ipairs(h.ents or {}) do MirrorAddRow(rows, e) end
+    for _, pile in ipairs(h.piles or {}) do MirrorAddParts(rows, pile.parts) end
+    return rows
 end

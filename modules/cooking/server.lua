@@ -48,6 +48,14 @@ function ReleaseStationClaim(propId)
     StationOccupancy[tonumber(propId) or -1] = nil
 end
 
+-- Who is working this station right now (nil = nobody). The claim is what makes a
+-- station single-author, so anything that has to decide "may this player speak for
+-- this prop" asks here rather than keeping a second idea of who is there —
+-- modules/mirror gates the cook's published prep-table picture on it.
+function StationHolder(propId)
+    return StationOccupancy[tonumber(propId) or -1]
+end
+
 RegisterNetEvent("pickle_restaurants:cooking:closeStation", function(propId)
     propId = tonumber(propId)
     if propId and StationOccupancy[propId] == source then StationOccupancy[propId] = nil end
@@ -117,21 +125,6 @@ local function findAssembly(output)
     for _, a in ipairs(GetAssembly()) do
         if a.output == output then return a end
     end
-end
-
--- Does a STATION consume this item directly — a recipe's raw input (grill / fryer /
--- oven) or a fountain tap's cup? Such a thing is dragged onto its station, never
--- dropped into a build at the prep table, so it must not reach the prep COMPONENTS
--- bar through the standalone-ingredient door even though it is a configured
--- ingredient (which is what gives it its admin row, its price and its prep prop).
--- A component genuinely used in a build still arrives via the assembly/craft lists.
-local function isStationInput(item)
-    if not item or item == "" then return false end
-    if RecipeByInput[item] then return true end
-    for _, d in ipairs(GetDrinks()) do
-        if d.input == item then return true end
-    end
-    return false
 end
 
 -- The craft a Restaurant Bag's metadata records, by id (the bag's variation identity).
@@ -1590,8 +1583,18 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
                 for _, comp in ipairs(cr.components or {}) do addComp(comp) end
             end
         end
-        for comp in pairs(GetPrepModels()) do
-            if not isStationInput(comp) then addComp(comp) end
+        -- EVERY CONFIGURED INGREDIENT REACHES THE BAR. A station INPUT (a raw beef
+        -- patty, a cut of fries, a cup) used to be filtered out here on the grounds
+        -- that it belongs on its grill rather than in a build — but that decides for
+        -- the cook what a thing is for, and the commonest case (a raw patty) is
+        -- exactly the one it hid. An ingredient is an ingredient: if an admin gave it
+        -- a row in Supplies, it lists, and where it may go is still enforced where it
+        -- lands (a recipe's components, `prepAdd`'s carrier rule, a box's craft match).
+        -- The prep-model map covers everything with a prop; the ingredient list adds
+        -- the model-less ones, which drag as 2D pills.
+        for comp in pairs(GetPrepModels()) do addComp(comp) end
+        for _, ing in ipairs(GetIngredientsCfg()) do
+            if ing.item then addComp(ing.item) end
         end
     end
     return out
@@ -2302,6 +2305,14 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
             local exp = TrayExpiresAt(e.item, e.cookedAt)
             e.expiresIn = exp and math.max(0, exp - os.time()) or nil
             e.cookedAt = nil
+            -- CAN THIS BE POCKETED AT ALL? The tray holds things the real inventory
+            -- can't: most cooked products (fries, a patty, a pizza) are tray-only by
+            -- design — they reach a customer packed into a meal or a bag, never as a
+            -- bare item — and burnt food is unexchangeable. `trayToInventory` refuses
+            -- both, so offering Take / Take all on them is a button whose only outcome
+            -- is an error. The RULE lives here, with the two refusals it mirrors
+            -- (ItemExists + the burnt guard), rather than being re-derived in the NUI.
+            e.takeable = (ItemExists(e.item) and not e.burnt) or nil
             out[#out + 1] = e
         end
     end
@@ -2826,21 +2837,32 @@ lib.callback.register("pickle_restaurants:cooking:getCrafts", function(src, d)
     -- ranking, falling back to the box item's image
     local out = {}
     for _, cr in ipairs(GetCrafts()) do
-        if cr.id and cr.id ~= "" and cr.components and #cr.components > 0
-            and RestaurantHasAccess(prop.restaurant_id, cr.group) then
-            local valid = true
+        -- THE TOOLTIP MUST LIST EXACTLY WHAT THE MAKE ACCEPTS. This used to drop a
+        -- craft whose components weren't all installed items, while `prepMakeBox`
+        -- (bestCraftForLayers) never applied that test — so a food whose components
+        -- were sitting in the box could rank as "no match" and still have been
+        -- makeable, which reads as the box not recognising its own recipe. Validity
+        -- is the admin panel's report (AnnotateFoods flags it there); here the two
+        -- halves of the same feature just have to agree.
+        --
+        -- A craft this restaurant's GROUPS don't carry is listed too, marked `locked`
+        -- with the group that would unlock it. Dropping it here made a restaurant's
+        -- access list indistinguishable from a broken recipe: the food is authored,
+        -- its components are sitting in the box, and the box says "these don't form a
+        -- food yet" — with the actual reason (a group nobody is looking at) invisible
+        -- from the kitchen. Access is still ENFORCED where it matters, in the make.
+        if cr.id and cr.id ~= "" and cr.components and #cr.components > 0 then
             local comps = {}
             for _, c in ipairs(cr.components) do
-                if not ItemExists(c) and not IsProductItem(c) then valid = false end
                 comps[#comps + 1] = { item = c, label = GetItemLabel(c), image = GetItemImage(c) }
             end
-            if valid then
-                out[#out + 1] = {
-                    output = cr.id, label = cr.label or cr.id,
-                    image = FoodImageUrl(cr, BoxItemName()),
-                    components = comps,
-                }
-            end
+            out[#out + 1] = {
+                output = cr.id, label = cr.label or cr.id,
+                image = FoodImageUrl(cr, BoxItemName()),
+                components = comps,
+                locked = (not RestaurantHasAccess(prop.restaurant_id, cr.group)) or nil,
+                group = cr.group,
+            }
         end
     end
     return out
@@ -2891,18 +2913,26 @@ end
 -- components are all present (extras ride as variation), the one with the most
 -- components. nil if the contents match no craft. Mirrors bestAssemblyForLayers but
 -- over the `crafts` setting (stackSatisfies reads .components, so it works as-is).
+-- Second return: a craft the contents DO form but this restaurant's groups don't
+-- carry. "No such food" and "that food isn't carried here" are different answers and
+-- only one of them is the cook's to fix, so the refusal has to be able to tell them
+-- apart instead of reporting the access list as a missing recipe.
 local function bestCraftForLayers(layers, rid)
     if #layers == 0 then return nil end
     local provides = buildProvides(layers)
-    local best, bestScore
+    local best, bestScore, locked
     for _, cr in ipairs(GetCrafts()) do
         if cr.id and cr.id ~= "" and cr.components and #cr.components > 0
-            and stackSatisfies(provides, cr) and (rid == nil or RestaurantHasAccess(rid, cr.group)) then
-            local score = #cr.components
-            if not bestScore or score > bestScore then best, bestScore = cr, score end
+            and stackSatisfies(provides, cr) then
+            if rid ~= nil and not RestaurantHasAccess(rid, cr.group) then
+                locked = locked or cr
+            else
+                local score = #cr.components
+                if not bestScore or score > bestScore then best, bestScore = cr, score end
+            end
         end
     end
-    return best
+    return best, (not best) and locked or nil
 end
 
 -- Capture each product layer's own build stack off the exact instance being
@@ -3166,8 +3196,17 @@ lib.callback.register("pickle_restaurants:cooking:prepMakeBox", function(src, d)
     end
     if #layers == 0 then return { ok = false, error = _L("cook_nothing_in_box_food") } end
     -- must form a defined food; re-checked server-side (the NUI is untrusted)
-    local cr = bestCraftForLayers(layers, b.rid)
-    if not cr then return { ok = false, error = _L("cook_no_craft_match") } end
+    local cr, locked = bestCraftForLayers(layers, b.rid)
+    if not cr then
+        -- these DO form a food — this restaurant just doesn't carry its group. Say
+        -- which one: it's an admin's one-line fix, and reporting it as "no matching
+        -- food" sends the cook looking for a recipe bug that isn't there.
+        if locked then
+            return { ok = false, error = _L("cook_craft_group_locked",
+                                            locked.label or locked.id, locked.group or "?") }
+        end
+        return { ok = false, error = _L("cook_no_craft_match") }
+    end
     local ok, err = consumeLayers(src, b, id, layers) -- pins each product layer's nested stack
     if not ok then return { ok = false, error = err } end
     dropLayerReservations(src, b, layers)

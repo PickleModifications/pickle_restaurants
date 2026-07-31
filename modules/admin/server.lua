@@ -43,6 +43,11 @@ local function buildAdminData()
         jobs          = GetJobList(),
         jobsAvailable = JobsAvailable(),
         items       = BuildItemList(),     -- catalogue for item-pickers
+        -- Kitchen products (cooked patty, raw_pizza, a frosted cake): authored here,
+        -- never installed items. Component pickers offer these alongside `items` so
+        -- every legitimate component is on a list — which is what lets those pickers
+        -- stop accepting typed-in names that exist nowhere.
+        products    = BuildProductList(),
         groups      = CollectGroups(),     -- every group name in use (UI suggestions)
         players     = {},
         -- Brand-texture aspects for the crop UI, from the ONE render-target registry
@@ -287,7 +292,7 @@ lib.callback.register("pickle_restaurants:admin:setGroups", function(src, d)
     -- this the menu boards, kiosk, register catalogue and cooking bar all keep
     -- offering the old set until something else happens to trigger a sync.
     SyncWorldSoon()
-    ShowNotification(src, _L("admin_settings_saved"))
+    ShowNotificationOnce(src, "settings_saved", _L("admin_settings_saved"))
     return { ok = true, groups = groups }
 end)
 
@@ -296,7 +301,7 @@ end)
 lib.callback.register("pickle_restaurants:admin:setBrandImage", function(src, d)
     if not IsPlayerAdmin(src) then return { ok = false } end
     local res = SetRestaurantBrand(tonumber(d.id), d.key, d.url, d.crop)
-    if res and res.ok then ShowNotification(src, _L("branding_saved")) end
+    if res and res.ok then ShowNotificationOnce(src, "branding_saved", _L("branding_saved")) end
     return res
 end)
 
@@ -308,7 +313,7 @@ lib.callback.register("pickle_restaurants:admin:setItemImage", function(src, d)
     if not IsPlayerAdmin(src) then return { ok = false } end
     if not SetItemImageOverride(d.item, d.url, d.crop) then return { ok = false } end
     SyncWorldSoon()
-    ShowNotification(src, _L("admin_settings_saved"))
+    ShowNotificationOnce(src, "settings_saved", _L("admin_settings_saved"))
     return { ok = true }
 end)
 
@@ -493,7 +498,7 @@ lib.callback.register("pickle_restaurants:admin:saveSetting", function(src, d)
     if not d.key then return { ok = false } end
     if applySetting(d.key, d.value) then RebuildDerived() end
     SyncWorldSoon() -- foods/tools/blip may have changed
-    ShowNotification(src, _L("admin_settings_saved"))
+    ShowNotificationOnce(src, "settings_saved", _L("admin_settings_saved"))
     return { ok = true }
 end)
 
@@ -511,7 +516,7 @@ lib.callback.register("pickle_restaurants:admin:saveSettings", function(src, d)
     if n == 0 then return { ok = false } end
     if rebuild then RebuildDerived() end
     SyncWorldSoon()
-    ShowNotification(src, _L("admin_settings_saved"))
+    ShowNotificationOnce(src, "settings_saved", _L("admin_settings_saved"))
     return { ok = true }
 end)
 

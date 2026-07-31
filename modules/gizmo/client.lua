@@ -129,10 +129,7 @@ function StartMovement(prop, data)
         DisableControlAction(0, 199, true) -- INPUT_FRONTEND_PAUSE
         DisableControlAction(0, 200, true) -- INPUT_FRONTEND_PAUSE_ALTERNATE
         DisableControlAction(0, 322, true) -- INPUT_FRONTEND_PAUSE_ALTERNATE (alt)
-        if IsPauseMenuActive() then
-            SetFrontendActive(false)
-            ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
-        end
+        ForcePauseMenuClosed()
         if data.enableCancel and (
             IsControlJustPressed(1, 202)
             or IsDisabledControlJustReleased(0, 199)
@@ -142,6 +139,10 @@ function StartMovement(prop, data)
             if data.deleteEntity then
                 CleanupGizmoEntity(prop)
             end
+            -- This loop is what was keeping the key off the frontend, and it ends
+            -- HERE — so the rest of the same press would open the pause menu behind
+            -- the cancelled placement (modules/interactive).
+            if GuardPauseKeys then GuardPauseKeys() end
             return nil
         end
         -- Height trim, live in BOTH modes: unfrozen it re-offsets every raycast

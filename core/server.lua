@@ -33,6 +33,43 @@ PERMISSIONS = { "cook", "sell", "manage_menu", "manage_props", "manage_employees
 ALL_PERMS   = {}
 for _, p in ipairs(PERMISSIONS) do ALL_PERMS[p] = true end
 
+-- ─── coalesced confirmations ─────────────────────────────────────────────────
+
+-- ONE PANEL EDIT IS ONE CONFIRMATION, however many writes it took.
+-- There are no save buttons by design: every panel group auto-saves on its own
+-- debounce, so a single act — editing one recipe — commonly lands as three
+-- INDEPENDENT writes (the foods array, the item's custom image, its ingredient
+-- cost), each an honest save with its own callback. Notifying per write made that
+-- read as "Settings saved." three times over, which is noise about the panel's
+-- internals rather than news about the edit.
+--
+-- So the CONFIRMATION is throttled, never the save. Leading edge: the first write
+-- of a burst confirms immediately (feedback stays instant) and further ones under
+-- the same key are silent for `ms`. The panel's own inline "Saving…/Saved" hint is
+-- still per-group, so nothing is hidden — this only stops the toast repeating.
+local notifyAt = {}
+local NOTIFY_THROTTLE_MS = 2500
+
+-- Confirm `text` to `src`, at most once per `key` per `ms`. Use for anything an
+-- auto-saving panel can fire several of in one gesture; use ShowNotification
+-- directly for one-off news (a refusal, a purchase, a payout).
+function ShowNotificationOnce(src, key, text, ms)
+    src = tonumber(src); if not src then return end
+    local k = src .. "|" .. key
+    local now = GetGameTimer()
+    local last = notifyAt[k]
+    if last and now - last < (ms or NOTIFY_THROTTLE_MS) then return end
+    notifyAt[k] = now
+    ShowNotification(src, text)
+end
+
+AddEventHandler("playerDropped", function()
+    local src = source
+    for k in pairs(notifyAt) do
+        if k:sub(1, #tostring(src) + 1) == src .. "|" then notifyAt[k] = nil end
+    end
+end)
+
 -- ─── json helpers ────────────────────────────────────────────────────────────
 
 local function dec(v, default)
@@ -2021,6 +2058,32 @@ function BuildItemList()
             label = (type(data) == "table" and data.label) or name,
             image = ItemImageCache[name] or (type(data) == "table" and data.image) or nil,
         }
+    end
+    table.sort(list, function(a, b) return (a.label or a.name):lower() < (b.label or b.name):lower() end)
+    return list
+end
+
+-- Every KITCHEN PRODUCT the authored menu creates that is NOT an installed inventory
+-- item — a cooked patty, an assembled `raw_pizza`, a frosted cake, a bake tray's raw
+-- sheet. These live only in the cooked-items pool, so the inventory catalogue
+-- (BuildItemList) can never list them, yet they are legitimate COMPONENTS of another
+-- recipe. The component pickers show this alongside the item catalogue, which is what
+-- lets those pickers refuse free text: everything a component may be is now offered,
+-- so anything typed that isn't here is a typo rather than a kitchen-only name.
+function BuildProductList()
+    local seen, list = {}, {}
+    local function add(item)
+        if not item or item == "" or seen[item] or ItemExists(item) then return end
+        seen[item] = true
+        list[#list + 1] = { name = item, label = GetItemLabel(item), image = GetItemImage(item) }
+    end
+    for _, r in ipairs(RecipeCache) do add(r.output_cooked_item) end
+    for _, a in ipairs(GetAssembly()) do add(a.output) end
+    for _, f in ipairs(GetFinishes()) do
+        for _, t in ipairs(f.targets or {}) do add(t.output) end
+    end
+    for _, b in ipairs(GetBakingList()) do
+        for _, t in ipairs(b.trays or {}) do add(t.output) end
     end
     table.sort(list, function(a, b) return (a.label or a.name):lower() < (b.label or b.name):lower() end)
     return list

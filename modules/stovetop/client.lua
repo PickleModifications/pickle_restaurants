@@ -314,7 +314,120 @@ RegisterNetEvent("pickle_restaurants:doors:set", function(propId, door, open)
     SetOvenDoor(propId, door, open)
 end)
 
+-- ─── the cook's pose at the cooktop (BBQ scenario) ───────────────────────────
+--  A cooking session hides YOUR OWN ped (modules/camera) but everyone else in the
+--  kitchen still sees you standing at the stove — and standing there stock-still is
+--  what a player who isn't doing anything looks like. So the cook plays the BBQ
+--  scenario for as long as they are working the COOKTOP: it is the one vanilla
+--  scenario that is a person cooking over a hot surface.
+--
+--  IT BELONGS TO THE COOKTOP, NOT TO THE STATION. A stovetop is two parts — the
+--  hot surface and the two oven doors below it — and the camera already switches
+--  between them (SetStationView). Someone crouched at an open oven is not flipping
+--  burgers, so the pose stops on a door view and comes back with the cooktop. A
+--  VIRTUAL station never poses at all: the shell is somewhere else entirely and the
+--  ped is left standing where it really is, so a BBQ mimed in the middle of a
+--  street is exactly the "man miming at a door" that modules/doorstep fixed.
+--
+--  IT IS A SCENARIO, AND THAT IS SAFE HERE. modules/seating's warning (scenarios
+--  were TRIED AND REVERTED) is about a scenario deciding where to PUT a ped — the
+--  natives put players through the floor and the is-it-still-playing checks were
+--  too unreliable to repair from. Nothing here asks it to position anything:
+--  `TaskStartScenarioInPlace` leaves the ped exactly where it walked to, we never
+--  poll whether it's still running, and there is no repair loop to get stuck in.
+--
+--  THE SCENARIO BRINGS ITS OWN PROPS AND DOES NOT ALWAYS TAKE THEM AWAY. The task
+--  creates the cook's grill/utensils itself, and a session that ends any way other
+--  than the exit animation finishing — ESC, a fire ejecting the cook
+--  (ForceStopCooking), a resource restart — leaves them standing in the kitchen
+--  with nothing tracking them, exactly like the orphaned props SpawnProp's spawn
+--  token exists to prevent. So everything the task ADDED is deleted on the way out:
+--  the object pool is snapshotted before the scenario starts, and only objects that
+--  are absent from that snapshot can ever be deleted — a BBQ that was already part
+--  of the map, and every food prop this resource spawns on the station, is in the
+--  snapshot and can never be touched.
+local POSE = {
+    scenario = "PROP_HUMAN_BBQ",
+    -- How far from the cook one of the task's props may land. TUNE IN-GAME.
+    radius   = 3.0,
+    -- The models the scenario is known to bring with it. Anything ATTACHED to the
+    -- ped is claimed whatever its model (that's a held utensil, and nothing else
+    -- attaches to a player ped here); this list is what lets a free-standing prop
+    -- be told from the room it was set down in. TUNE IN-GAME — add a model if a
+    -- build's scenario spawns one this doesn't name.
+    models   = { "prop_bbq_1", "prop_bbq_2", "prop_bbq_3", "prop_bbq_4", "prop_bbq_5" },
+    -- The exit animation is allowed to put its own props away first; the sweep runs
+    -- again after it, since a cook who left mid-scene never gets that far.
+    exit_ms  = 700,
+}
+
+-- nil = not posed. `before` is the object pool as it stood the instant before the
+-- task started: the only objects we may ever delete are the ones missing from it.
+local posed = nil
+
+local function poseModelSet()
+    local set = {}
+    for _, m in ipairs(POSE.models) do set[GetHashKey(m)] = true end
+    return set
+end
+
+-- Delete what the scenario ADDED and nothing else. Called twice (immediately and
+-- after the exit animation) against the same snapshot — deleting an already-deleted
+-- entity is a no-op, so the two racing is harmless.
+local function sweepScenarioProps(before, ped)
+    if not before then return end
+    local models = poseModelSet()
+    local here = DoesEntityExist(ped) and GetEntityCoords(ped) or nil
+    for _, obj in ipairs(GetGamePool("CObject")) do
+        if not before[obj] and DoesEntityExist(obj) then
+            local attached = GetEntityAttachedTo(obj) == ped
+            local mine = attached
+                or (models[GetEntityModel(obj)] and here
+                    and #(GetEntityCoords(obj) - here) <= POSE.radius)
+            if mine then
+                SetEntityAsMissionEntity(obj, true, true)
+                DeleteEntity(obj)
+            end
+        end
+    end
+end
+
+-- Start (or keep) the cook's pose. Idempotent: the view can be switched back to the
+-- cooktop repeatedly without restarting the scenario under the ped.
+function StartStovetopPose()
+    if posed then return end
+    local ped = PlayerPedId()
+    if not DoesEntityExist(ped) or IsPedInAnyVehicle(ped, false) then return end
+    local before = {}
+    for _, obj in ipairs(GetGamePool("CObject")) do before[obj] = true end
+    posed = { ped = ped, before = before }
+    TaskStartScenarioInPlace(ped, POSE.scenario, 0, true)
+end
+
+-- Stop it and take the scenario's props with it. Safe to call when nothing is posed
+-- (every close path does, so no caller has to know whether this station had one).
+function StopStovetopPose()
+    local p = posed
+    if not p then return end
+    posed = nil
+    if DoesEntityExist(p.ped) then ClearPedTasks(p.ped) end
+    sweepScenarioProps(p.before, p.ped)
+    CreateThread(function()
+        Wait(POSE.exit_ms)
+        sweepScenarioProps(p.before, p.ped)
+    end)
+end
+
 AddEventHandler("onResourceStop", function(res)
     if res ~= GetCurrentResourceName() then return end
     for propId in pairs(OvenDoors) do DespawnOvenDoors(propId) end
+    -- A restart is the one ending the session's own paths never reach: without this
+    -- the cook keeps the pose (and the scenario's props keep standing there) with
+    -- nothing left able to clear either.
+    local p = posed
+    if p then
+        posed = nil
+        if DoesEntityExist(p.ped) then ClearPedTasks(p.ped) end
+        sweepScenarioProps(p.before, p.ped)
+    end
 end)

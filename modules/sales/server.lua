@@ -629,6 +629,59 @@ local function vesselLayerCount(meta, vesselItem)
     return n
 end
 
+-- The cashier's explicit picks, in ONE shape whichever surface sent them: a LIST of
+-- { sig, item } (the register's picker, which can hand over several packages at once)
+-- or the single `mealSig` + `mealItem` pair every other caller still sends (the phone
+-- KDS, the NPC branch). `VesselItem` sanitises each item name, so a forged payload can
+-- still only ever name a meal or a bag.
+-- Global for the same reason the vessel-store helpers are: PlanFulfillment is above
+-- them, and a local declared after it wouldn't be in its scope.
+function NormalizeVesselPins(mealSig, vesselItem)
+    local out = {}
+    if type(mealSig) == "table" then
+        for _, p in ipairs(mealSig) do
+            local sig = (type(p) == "table") and p.sig or nil
+            if type(sig) == "string" then
+                out[#out + 1] = { sig = sig, item = VesselItem(p.item) }
+            end
+        end
+    elseif type(mealSig) == "string" and mealSig ~= "" then
+        out[1] = { sig = mealSig, item = VesselItem(vesselItem) }
+    end
+    return out
+end
+
+-- The picks off a completion payload, in the shape PlanFulfillment takes: the
+-- register's `vessels` LIST when it sent one, else the legacy single `mealSig`. ONE
+-- door, so the two completion callbacks (player and NPC) can never read a payload
+-- differently — and an empty list means "no pick", never "pick nothing", so the
+-- planner still fills the ticket by itself.
+function VesselPinsFrom(d)
+    if type(d) ~= "table" then return nil end
+    if type(d.vessels) == "table" and d.vessels[1] then return d.vessels end
+    if type(d.mealSig) == "string" and d.mealSig ~= "" then return d.mealSig end
+    return nil
+end
+
+-- How much of an outstanding requirement ONE vessel covers, as { ["item|key"] = n }.
+-- Counted PER GROUP rather than per unit on purpose: the picker adds these up across
+-- everything the cashier selected, and two bags each holding one of the two pizzas a
+-- ticket asks for must add up to both — which a set of matched unit indices could
+-- never express (each bag independently matches the FIRST pizza).
+local function vesselCoverage(meta, req, vesselItem)
+    local cov = {}
+    for _, u in ipairs(req) do
+        local k = u.item .. "|" .. u.key
+        cov[k] = (cov[k] or 0) + 1
+    end
+    for _, u in ipairs(mealCovers(meta, req, vesselItem)) do
+        local k = u.item .. "|" .. u.key
+        cov[k] = (cov[k] or 0) - 1
+        if cov[k] <= 0 then cov[k] = nil end
+    end
+    return cov
+end
+
 -- Can the pool complete this order, and with WHAT? An order is filled from two stores:
 -- packed VESSELS (serving-tray meals and Restaurant Bags, whose top-level layers cover
 -- required units) and loose SINGLES straight out of the cooked-items pool.
@@ -670,15 +723,19 @@ function PlanFulfillment(rid, order, mealSig, vesselItem, looseOk, pool)
         return covered
     end
 
-    -- 1. the cashier's explicit pick goes first — they chose that exact vessel
-    if type(mealSig) == "string" and mealSig ~= "" then
-        local want = VesselItem(vesselItem)
+    -- 1. the cashier's explicit picks go first — they chose those exact vessels.
+    --    A TICKET MAY TAKE SEVERAL: a pizza and a cake are two different foods, so
+    --    they are two different packages, and the picker hands over as many as the
+    --    order needs. Each is claimed in the order it was picked and one that covers
+    --    nothing LEFT is simply not spent (never hand over an unrelated bag), so a
+    --    stray tick can't give food away.
+    for _, pin in ipairs(NormalizeVesselPins(mealSig, vesselItem)) do
         local pinned
         for _, v in ipairs(avail) do
-            if v.item == want and (v.sig or "") == mealSig and v.count > 0 then pinned = v break end
+            if v.item == pin.item and (v.sig or "") == pin.sig and v.count > 0 then pinned = v break end
         end
         if not pinned then return { ok = false, missing = { _L("order_meal_gone") } } end
-        claim(pinned) -- covering nothing = not spent (never hand over an unrelated bag)
+        claim(pinned)
     end
 
     -- 2. what the LOOSE pool can cover, per (item, variation key). An uninstalled
@@ -711,6 +768,23 @@ function PlanFulfillment(rid, order, mealSig, vesselItem, looseOk, pool)
     for _, s in ipairs(shortfall) do
         for _ = 1, s.need do
             req[#req + 1] = { item = s.g.item, key = s.g.key, label = s.g.label }
+        end
+    end
+    -- WHAT MUST COME PACKED, reported to the panel so a cashier picking vessels by
+    -- hand can be told when their selection actually covers the ticket. Snapshotted
+    -- HERE — after singles, before any vessel is claimed — because that is exactly the
+    -- question the picker is answering, and the claims below consume `req` as they go.
+    local packed = {}
+    do
+        local idx = {}
+        for _, u in ipairs(req) do
+            local k = u.item .. "|" .. u.key
+            if not idx[k] then
+                idx[k] = { id = k, item = u.item, key = u.key,
+                           label = u.label or GetItemLabel(u.item), need = 0 }
+                packed[#packed + 1] = idx[k]
+            end
+            idx[k].need = idx[k].need + 1
         end
     end
     while #req > 0 do
@@ -751,6 +825,7 @@ function PlanFulfillment(rid, order, mealSig, vesselItem, looseOk, pool)
 
     return { ok = (#lines == 0), singles = singles,
              vessels = (#used > 0) and used or nil,
+             needs = (#packed > 0) and packed or nil,
              missing = (#lines > 0) and lines or nil }
 end
 
@@ -1002,23 +1077,41 @@ local function AnnotateOrders(rid, list)
         -- The unpinned plan is the truth: it already claims as many vessels as the
         -- ticket needs, so `ok` (one-tap Complete) and `ready` agree.
         local base = PlanFulfillment(rid, o, nil, nil, loose, vessels)
+        -- What still has to come PACKED (everything the loose pool can't cover),
+        -- flattened back into units for the coverage maths below.
+        local outstanding = {}
+        for _, n in ipairs(base.needs or {}) do
+            for _ = 1, n.need do
+                outstanding[#outstanding + 1] = { item = n.item, key = n.key, label = n.label }
+            end
+        end
         local opts = {}
         for _, m in ipairs(vessels) do
-            -- Offer a vessel only if PINNING it still completes the order AND it
-            -- actually carries something the ticket asked for — the picker is for
-            -- choosing WHICH bag goes, never for handing over an unrelated one.
-            local plan = PlanFulfillment(rid, o, m.sig, m.item, loose, vessels)
-            local pinned = false
-            for _, v in ipairs(plan.vessels or {}) do
-                if v.item == m.item and (v.sig or "") == (m.sig or "") then pinned = true break end
-            end
-            if plan.ok and pinned then
+            -- Offer a vessel if it carries ANYTHING the ticket asked for — the picker
+            -- is for choosing WHICH packages go, never for handing over an unrelated
+            -- one. It no longer has to complete the order BY ITSELF: a pizza and a
+            -- cake are two packages, and refusing to list either because neither is
+            -- the whole order is what made that ticket unfulfillable. `covers` is what
+            -- it would take off the ticket, so the panel can add a selection up and
+            -- say when it's enough; `completes` is the old one-package case.
+            local cov = (#outstanding > 0) and vesselCoverage(m.meta, outstanding, m.item) or {}
+            if next(cov) then
+                local completes = true
+                for _, n in ipairs(base.needs or {}) do
+                    if (cov[n.id] or 0) < n.need then completes = false break end
+                end
                 opts[#opts + 1] = { sig = m.sig, item = m.item, bag = (m.item == bagItem) or nil,
                                     label = GetItemLabel(m.item),
+                                    -- how many identical copies of this exact packing
+                                    -- are in the pool: a two-pizza ticket may be filled
+                                    -- by picking the same bag twice
+                                    count = m.count,
+                                    covers = cov, completes = completes or nil,
                                     items = mealItemsDetail(m.meta, m.item) }
             end
         end
-        local fulfill = { ok = base.ok, ready = base.ok, missing = (not base.ok) and base.missing or nil }
+        local fulfill = { ok = base.ok, ready = base.ok, missing = (not base.ok) and base.missing or nil,
+                          needs = base.needs }
         if #opts > 0 then fulfill.mealOptions = opts end
         o.fulfill = fulfill
         -- Who (if anyone) has CLAIMED this delivery. This list is broadcast to every
@@ -2019,13 +2112,13 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
             return fail(_L("order_customer_missing"))
         end
 
-        -- the packed vessel (meal or Restaurant Bag) the cashier PINNED, if any — the
-        -- plan claims any further ones the ticket needs by itself
-        local mealSig = (type(d.mealSig) == "string" and d.mealSig ~= "") and d.mealSig or nil
-        local mealItem = VesselItem(d.mealItem)
+        -- the packed vessels (meals / Restaurant Bags) the cashier PINNED, if any — a
+        -- LIST from the register's picker, or the single mealSig/mealItem pair the
+        -- phone sends; the plan claims any further ones the ticket needs by itself
+        local pins = VesselPinsFrom(d)
         -- looseOk: the ped is handed the food directly, so nothing here has to be an
         -- installed inventory item (no AddItem happens on this branch at all)
-        local plan = PlanFulfillment(id, o, mealSig, mealItem, true)
+        local plan = PlanFulfillment(id, o, pins, d.mealItem, true)
         if not plan.ok then
             return fail(_L("order_missing_items", table.concat(plan.missing or {}, ", ")))
         end
@@ -2105,9 +2198,7 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
     -- anything else, so it always resolves to one of the two). The plan claims any
     -- further vessels the ticket needs on top of it, so a big order packed into two
     -- bags hands over both.
-    local mealSig = (type(d.mealSig) == "string" and d.mealSig ~= "") and d.mealSig or nil
-    local mealItem = VesselItem(d.mealItem)
-    local plan = PlanFulfillment(id, o, mealSig, mealItem)
+    local plan = PlanFulfillment(id, o, VesselPinsFrom(d), d.mealItem)
     if not plan.ok then
         return fail(_L("order_missing_items", table.concat(plan.missing or {}, ", ")))
     end

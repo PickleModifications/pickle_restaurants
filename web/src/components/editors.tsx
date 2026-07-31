@@ -363,13 +363,19 @@ export function ModifierListEditor({ mods, onChange, items }: { mods: Modifier[]
 }
 
 // A plain add/remove list of component items (assemble steps, bag contents).
-// Components may be kitchen products (tray-only intermediates), so allowFree.
+// DELIBERATELY NOT `allowFree`: a component has to be
+// something that already exists — an installed inventory item (authored in Supplies)
+// or a kitchen product this menu creates — and `items` here is that combined list
+// (Menu's `compItems`). Typing a name the search doesn't find used to commit it as a
+// brand-new "kitchen item", which silently authored a component nothing in the
+// kitchen can ever produce: the recipe then simply never matched, with no way to see
+// why from the build itself.
 function ComponentList({ comps, onChange, items }: { comps: string[]; onChange: (comps: string[]) => void; items: Item[] }) {
   return (
     <div className="space-y-2">
       {comps.map((c, ci) => (
         <div key={ci} className="flex gap-2">
-          <ItemPicker className="flex-1" items={items} value={c} allowFree onChange={(v) => onChange(comps.map((x, idx) => (idx === ci ? v : x)))} />
+          <ItemPicker className="flex-1" items={items} value={c} onChange={(v) => onChange(comps.map((x, idx) => (idx === ci ? v : x)))} />
           <Button size="icon" variant="ghost" onClick={() => onChange(comps.filter((_, idx) => idx !== ci))}><Trash2 className="h-4 w-4" /></Button>
         </div>
       ))}
@@ -394,10 +400,13 @@ function StepShell({ title, onRemove, children }: { title: string; onRemove: () 
 }
 
 function AssembleStepCard({
-  step, isMiddle, suggestedId, items, badModels, onChange, onRemove, itemImages, onSetItemImage,
+  step, isMiddle, suggestedId, items, compItems, badModels, onChange, onRemove, itemImages, onSetItemImage,
 }: {
   step: Extract<Step, { type: "assemble" }>; isMiddle: boolean; suggestedId: string;
-  items: Item[]; badModels: Set<string>; onChange: (patch: any) => void; onRemove: () => void;
+  items: Item[];
+  /** items ∪ kitchen products — what this step's COMPONENTS may be picked from. */
+  compItems?: Item[];
+  badModels: Set<string>; onChange: (patch: any) => void; onRemove: () => void;
   itemImages?: ItemImages; onSetItemImage?: SetItemImage;
 }) {
   return (
@@ -416,7 +425,7 @@ function AssembleStepCard({
         <ModelField label={_L("settings.prop_model")} value={step.model || ""} onChange={(v) => onChange({ model: v })} badModels={badModels} />
       </div>
       <Field label={_L("settings.components")} className="mt-3">
-        <ComponentList comps={step.components ?? []} onChange={(c) => onChange({ components: c })} items={items} />
+        <ComponentList comps={step.components ?? []} onChange={(c) => onChange({ components: c })} items={compItems ?? items} />
       </Field>
     </StepShell>
   );
@@ -571,11 +580,16 @@ function FoodIdentity({ food, onChange, anims, boxQuad }: {
   );
 }
 
-export function FoodForm({ food, onChange, items, groups, itemImages, onSetItemImage, anims, boxQuad }: {
-  food: Food; onChange: (patch: any) => void; items: Item[]; groups: string[];
+export function FoodForm({ food, onChange, items, compItems, groups, itemImages, onSetItemImage, anims, boxQuad }: {
+  food: Food; onChange: (patch: any) => void; items: Item[];
+  /** items ∪ kitchen products — everything a COMPONENT is allowed to be. Falls back
+   *  to the plain item catalogue when a caller doesn't supply it. */
+  compItems?: Item[];
+  groups: string[];
   itemImages?: ItemImages; onSetItemImage?: SetItemImage; anims?: ConsumeAnim[];
   boxQuad?: { w?: number; h?: number };
 }) {
+  const comps = compItems ?? items;
   const steps: Step[] = food.steps ?? [];
   const badModels = new Set(food.invalid_models || []);
   const patchStep = (i: number, patch: any) => onChange({ steps: steps.map((s, idx) => (idx === i ? { ...s, ...patch } : s)) });
@@ -609,7 +623,7 @@ export function FoodForm({ food, onChange, items, groups, itemImages, onSetItemI
       {food.kind === "bag" ? (
         <>
           <Field label={_L("settings.components")} className="mt-3">
-            <ComponentList comps={food.components ?? []} onChange={(c) => onChange({ components: c })} items={items} />
+            <ComponentList comps={food.components ?? []} onChange={(c) => onChange({ components: c })} items={comps} />
           </Field>
         </>
       ) : (
@@ -617,7 +631,7 @@ export function FoodForm({ food, onChange, items, groups, itemImages, onSetItemI
           {steps.map((s, i) =>
             s.type === "assemble" ? (
               <AssembleStepCard key={i} step={s} isMiddle={i < steps.length - 1} suggestedId={suggestedId}
-                items={items} badModels={badModels} onChange={(p) => patchStep(i, p)} onRemove={() => removeStep(i)}
+                items={items} compItems={comps} badModels={badModels} onChange={(p) => patchStep(i, p)} onRemove={() => removeStep(i)}
                 itemImages={itemImages} onSetItemImage={onSetItemImage} />
             ) : s.type === "cook" ? (
               <CookStepCard key={i} step={s} fedByPrevious={i > 0}

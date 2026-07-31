@@ -516,6 +516,10 @@ function NpcCustomers({ settings, onSaved }: { settings: any; onSaved: () => voi
   const [maxItems, setMaxItems] = useState(Number(c.max_items ?? 2));
   const [tipChance, setTipChance] = useState(Number(c.tip_chance ?? 25));
   const [tipMax, setTipMax] = useState(Number(c.tip_max_percent ?? 15));
+  // What a walk-in will pay, as a ceiling over the recommended price. Without one an
+  // NPC agrees to any price, which turns the menu into a money printer.
+  const [maxMarkup, setMaxMarkup] = useState(Number(c.max_markup ?? 100));
+  const [unpricedMax, setUnpricedMax] = useState(Number(c.unpriced_max ?? 100));
   const [counterOffset, setCounterOffset] = useState(Number(c.counter_offset ?? 1.0));
   const [queueSpacing, setQueueSpacing] = useState(Number(c.queue_spacing ?? 0.85));
   const [spawnDistance, setSpawnDistance] = useState(Number(c.spawn_distance ?? 6.0));
@@ -531,13 +535,14 @@ function NpcCustomers({ settings, onSaved }: { settings: any; onSaved: () => voi
         patience_seconds: intv(patience, 15),
         min_items: intv(minItems, 1), max_items: intv(maxItems, 1),
         tip_chance: intv(tipChance), tip_max_percent: intv(tipMax),
+        max_markup: intv(maxMarkup), unpriced_max: intv(unpricedMax),
         counter_offset: counterOffset || 0, queue_spacing: queueSpacing || 0,
         spawn_distance: spawnDistance || 0,
         models: models.map((m) => m.trim()).filter(Boolean),
       },
     }).then(onSaved),
     [enabled, requireStaff, staffRadius, interval, maxQueue, patience, minItems, maxItems,
-     tipChance, tipMax, counterOffset, queueSpacing, spawnDistance, models]
+     tipChance, tipMax, maxMarkup, unpricedMax, counterOffset, queueSpacing, spawnDistance, models]
   );
 
   const updateModel = (i: number, v: string) => setModels((l) => l.map((m, idx) => (idx === i ? v : m)));
@@ -558,6 +563,15 @@ function NpcCustomers({ settings, onSaved }: { settings: any; onSaved: () => voi
         <NumberField label={_L("settings.npc_max_items")} value={maxItems} min={1} onChange={setMaxItems} />
         <NumberField label={_L("settings.npc_tip_chance")} hint={_L("settings.npc_tip_chance_hint")} value={tipChance} min={0} onChange={setTipChance} />
         <NumberField label={_L("settings.npc_tip_max")} hint={_L("settings.npc_tip_max_hint")} value={tipMax} min={0} onChange={setTipMax} />
+      </div>
+
+      <div className="mt-2">
+        <h4 className="mb-2 text-xs font-semibold text-muted-foreground">{_L("settings.npc_pricing")}</h4>
+        <p className="mb-2 text-xs text-muted-foreground">{_L("settings.npc_pricing_hint")}</p>
+        <div className="grid grid-cols-2 gap-3">
+          <NumberField label={_L("settings.npc_max_markup")} hint={_L("settings.npc_max_markup_hint")} value={maxMarkup} min={0} onChange={setMaxMarkup} />
+          <NumberField label={_L("settings.npc_unpriced_max")} hint={_L("settings.npc_unpriced_max_hint")} value={unpricedMax} min={0} onChange={setUnpricedMax} />
+        </div>
       </div>
 
       <div className="mt-2">

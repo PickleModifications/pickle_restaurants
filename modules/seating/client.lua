@@ -322,16 +322,17 @@ function SitOnSeat(seat)
                 DisableControlAction(0, 199, true) -- INPUT_FRONTEND_PAUSE
                 DisableControlAction(0, 200, true) -- INPUT_FRONTEND_PAUSE_ALTERNATE
                 DisableControlAction(0, 322, true) -- ESC
-                if IsPauseMenuActive() then
-                    SetFrontendActive(false)
-                    ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
-                end
+                ForcePauseMenuClosed()
                 for _, key in ipairs(STAND_KEYS) do
                     if IsDisabledControlJustReleased(0, key) then stand = true break end
                 end
             end
             if stand or IsEntityDead(ped) then
                 StandUp()
+                -- Standing up ends this loop, and with it the disables above — so the
+                -- rest of the same keypress would reach the frontend and open the
+                -- pause menu on the way out of the chair (modules/interactive).
+                if stand and GuardPauseKeys then GuardPauseKeys() end
                 break
             end
 

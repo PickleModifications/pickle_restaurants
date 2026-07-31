@@ -312,6 +312,61 @@ Each module is a self-contained feature loaded by the `modules/**` glob. Key one
   that open cooking/ordering/management.
 - `cooking` — the heavy interactive station UX (drag ingredients into the 3D world, props
   cook `01→02→03`, dual-sided patties, cheese melt states, oven/fryer/grill methods).
+- `stovetop` — the stove's own parts: the two oven doors (transform, tween, cavity
+  slots) and **the cook's pose at the cooktop**. A session hides your OWN ped
+  (`modules/camera`) but nobody else's view, so the cook plays the `PROP_HUMAN_BBQ`
+  scenario while they work the COOKTOP — `StartStovetopPose` / `StopStovetopPose`,
+  called from `OpenCookingStation`, `StopCooking` and the `cooking:setView` relay,
+  because a stovetop is TWO parts and someone crouched at an open oven door isn't
+  flipping burgers. PHYSICAL stations only: a virtual session leaves the ped standing
+  where it really is, so the mime would happen in the street. **A scenario is safe
+  here for the reason it wasn't in `modules/seating`** — nothing asks it to POSITION
+  anything (`TaskStartScenarioInPlace`), nothing polls whether it's still running, and
+  there is no repair loop to get stuck in. **The task brings its own props and doesn't
+  always take them away**, so every close path deletes what it ADDED: the CObject pool
+  is snapshotted before the scenario starts and only objects missing from that snapshot
+  can ever be deleted (so a map-placed BBQ and every food prop this resource spawns on
+  the station are untouchable), narrowed further to things attached to the ped or a
+  `POSE.models` prop within `POSE.radius`. Swept twice — immediately and after the exit
+  animation, which a cook thrown out mid-scene never reaches — plus on `onResourceStop`,
+  the one ending the session's own paths don't cover. TUNE IN-GAME: `POSE`.
+- `mirror` — **what one player renders, shown to the ROOM.** Almost everything in a
+  restaurant is world-visible because it renders from SERVER state (a patty on a grill,
+  a tray in an oven, a cup under a tap). TWO things were not, and both are the most
+  legible thing the player doing them does: a cook's **prep-table build** and a seated
+  diner's **laid-out meal** — from outside, both looked like miming at an empty surface.
+  Neither can move to the server: both are client-authored geometry (free 2D placement
+  under a cursor, per-part offsets, a lid mid-swing, a tray on whatever surface the seat
+  names) while the server holds RESERVATIONS and SLOTS, not positions — a second copy of
+  that maths could only drift. So the OWNER PUBLISHES WHAT THEY SEE, keyed by a PLACED
+  PROP, and everyone near it spawns plain local props from it. The key is what gives
+  this an audience and a hydration edge, i.e. what makes it a scoped event and not a
+  broadcast.
+  Rows come from ONE builder next to the code that creates the renders
+  (`MirrorAddRow` / `MirrorAddParts` / `PrepMirrorSnapshot` / `MealMirrorRows` at the
+  bottom of `modules/cooking/client.lua`; `MealMirrorSnapshot` in `modules/dining`):
+  model hash + transform, plus a takeout box's food picture (drawn from the entity
+  matrix, so not in the model). **A hidden entity is never mirrored** — a pile is hidden
+  for the length of a mouthful (the serving is in the diner's hand, and held props ARE
+  networked) and a concealed stack is hidden inside a closed box; mirroring either would
+  put the same food in two places.
+  **THE AUTHORITY IS THE PROP**, and each kind already has exactly one occupant:
+  `kitchen_prep` → the station claim (`StationHolder`), `seat` → the seat's occupant
+  (`SeatHolder`). Only that player's rows are accepted for that prop — so there is
+  nothing to merge — and a prop type with no occupancy rule is refused rather than
+  guessed at (a mirror nobody owns is a picture nobody can take down). The server
+  sanitises every row, caches the latest picture, and relays to `PlayersNearProp` MINUS
+  the author. Receivers hold LOCAL, frozen, COLLISIONLESS props — decoration, never an
+  input to a build, a meal or fulfilment — reconciled by DIFF (a dragged burger
+  republishes several times a second; re-spawning at that rate is a stutter), and
+  published on CHANGE only off a signature of the same rounded numbers that get sent.
+  The module owns its own range watcher (`MIRRORED` prop types, hysteresis like
+  `CookRange`), and **hydration is ONE batched callback per pass** (`mirror:state` takes
+  the whole newly-in-range list): seats are mirrored too, so a per-prop question would
+  be a callback per chair every time someone walks in. Cleared when the owner gives the
+  prop up (`closeStation` / `seating:stand`), on `playerDropped`, and whenever the cached
+  author no longer occupies the prop. VIRTUAL cooking sessions never publish — the shell
+  is elsewhere, so nobody is standing at that table.
 - `placement` / `gizmo` — placing & positioning station props (`PLACEABLE_MODELS` maps
   `prop_type` → model). Also places **seats**: `prop_type = "seat"` rows in the same
   `pickle_restaurant_props` table, but INVISIBLE — no model/runtime prop, only a
@@ -488,6 +543,37 @@ derived surface, so the DUI is rebuilt from it.
   guard existed to stop the BEEP repeating — so the beep is now first-frame only
   (`not helpBeeped`), which is the actual fix. `modules/seating` / `modules/cookfx`
   already draw theirs per frame; match them.
+  **NEVER `ActivateFrontendMenu` TO KEEP THE PAUSE MENU SHUT.** Every view that owns
+  the screen suppresses it, and they all used to do it as `SetFrontendActive(false)`
+  followed by `ActivateFrontendMenu(FE_MENU_VERSION_EMPTY_NO_BACKGROUND, true, -1)`.
+  That second call does not keep anything closed — it OPENS a pause menu, an empty
+  one, with the game paused and the frontend cursor drawn. So every shove swapped a
+  real pause menu for a contentless one, and the moment the shoving loop stopped
+  (the view had just closed — exactly when the last shove happens) the player was left
+  with a frontend cursor over a paused game and no menu to back out of: nothing
+  in-game dismisses that, which is the "I had to reboot my game" bug.
+  **`ForcePauseMenuClosed()`** (`core/client.lua`, so it loads before every module) is
+  now the ONE way this is done anywhere, and it only deactivates. It PRE-EMPTS rather
+  than undoes: `SetPauseMenuActive(false)` every frame stops the menu opening at all,
+  because closing one that already opened plays its transition — the screen dims and
+  comes back, the "slight fade on exit" no reaction speed can avoid. `IsPauseMenuActive()`
+  only answers once it is fully up (the fade has played by then), so the recovery
+  branch tests `GetPauseMenuState()` too and catches one mid-open.
+  **THE PRESS THAT CLOSES A VIEW MUST NOT SURVIVE IT.** Every ESC exit has the same
+  shape — a loop disables the pause inputs while the view is up, the key closes the
+  view, and the loop's condition is false on the NEXT frame, so the game gets the rest
+  of that keypress (hold, release) with nothing disabling it and the pause menu opens
+  behind the panel that just closed. Closing therefore ARMS **`GuardPauseKeys()`**
+  (`modules/interactive`), which keeps 199/200/322/194/202 disabled and the frontend
+  shoved shut until the key is physically UP plus a short tail. **It starts on the
+  frame it is armed** — an on-demand thread, never an idle poll: as a loop idling at
+  `Wait(100)` it did nothing for up to a tenth of a second after arming, and the press
+  it exists to catch is already in flight, so the menu still flashed open on whichever
+  exits happened to land in an idle tick ("a fade every other exit"). Same bug and same
+  fix as `modules/quad`'s `ensureDrawThread`. Called from the
+  fullscreen-panel ESC reader, both in-world screens (`register`, `kiosk`), the
+  gizmo/placement cancel and standing up out of a seat. A view that reads its own exit
+  key must call it too.
 - `register` — the STAFF POS register painted on the counter's `register_brand`
   screen. It is an **ALWAYS-ON board** (like the `screens` menu/orders boards): an idle
   driver picks the nearest counter's restaurant, keeps the `register_brand` texture
@@ -715,6 +801,19 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   can't read-then-write the same total or overdraw it. Same reasoning as the standalone
   job store: the feature works frameworkless without pretending to be a bank on a server
   that has one.
+- **AN NPC HAS A CEILING ON WHAT IT WILL PAY.** An NPC accepts whatever the menu says
+  and its ticket total is banked verbatim on serve, so the boss-set price WAS a money
+  printer: a $999,999 burger, one $3 burger cooked, a million dollars from thin air. A
+  player customer chooses to pay a gouging price; an NPC can't choose, so
+  `npc_customers.max_markup` (percent over the item's RECOMMENDED price — ingredient
+  cost × `profit_margin`, i.e. `e.defaultPrice`) stands in for that judgement, with
+  `unpriced_max` as the flat ceiling for a sellable no `ingredient_costs` entry reaches
+  (a percentage of $0 bounds nothing). Overpriced entries are simply NOT ORDERED, never
+  served at a discount — the ped pays the ticket it agreed to, and gouging costs you
+  walk-in trade. `npcShoppingCatalog` (`modules/npc_customers/server.lua`) is the ONE
+  door: both spawn paths (counter queue and phone delivery) build their lines from it,
+  so there is no second copy of the ceiling to forget. A restaurant whose whole menu is
+  priced out spawns no NPCs at all.
 - **A TIP IS STAFF MONEY, NOT HOUSE MONEY.** Tips used to be added to the restaurant
   balance, which quietly made every gratuity the owner's. They now land in
   `pickle_restaurant_tips` as unpaid rows and never touch the balance in either direction:
@@ -983,6 +1082,13 @@ ride as build-stack metadata:
   renderer against an external anchor (`extAnchor`) instead of a station — so a meal
   on a diner's table is identical to the one the cook built. TUNE IN-GAME: `DINE` in
   `modules/dining/client.lua`.
+  **THE ROOM SEES THE MEAL.** A tray laid out on a table is the most public thing a
+  customer does with one, and it used to render for the diner alone — everyone else
+  watched them mime at an empty table. `MealMirrorSnapshot` publishes the live render
+  against the SEAT ANCHOR they're sitting on (`modules/mirror`, which keys the audience
+  and the walk-into-range hydration off that placed prop and gates the author on
+  `SeatHolder`). A meal eaten off a seat with no anchor id isn't published — there would
+  be nothing to scope it to.
   A mouthful BORROWS the seated ped: the eat/drink clip is a task, so it replaces
   the sit pose, which `modules/seating`'s repair loop cannot tell from a broken
   pose — it re-tasked the sit within `REPAIR_MS` and snapped the clip away, leaving
@@ -1081,6 +1187,13 @@ model through the same door. That is the same
 restaurant-wide pool by a different storage — the tray pool already spans every
 cook's tray — and without it, crafting a bag would quietly remove it from the POS.
 
+The same rule decides what the kitchen bar's tooltip may offer: **Take / Take all are
+gated on `e.takeable`** (`getTray`'s tray branch = `ItemExists(item) and not burnt`),
+the server's own answer rather than a rule re-derived in the NUI. `trayToInventory`
+refuses both cases — a tray-only product has no item to become (cooked fries leave the
+kitchen inside a meal or a bag) and burnt food is unexchangeable — so offering the
+button was offering an error. The bin stays: it's the only way to clear those.
+
 **A SELLABLE need not be an installed item; a LOOSE hand-over must be.** Cooked and
 assembled foods live only in the restaurant-wide cooked-items pool and reach a customer
 packed into a meal or a Restaurant Bag — which is why `RecipeMissingItems` /
@@ -1107,10 +1220,32 @@ by least left over inside, so a 4-item bag isn't spent on a 1-item ticket. `meal
 `mealItem` are now a PIN, not the whole answer — that exact vessel goes first, is ignored
 if it covers nothing (a stray pick can't give away an unrelated bag), and the planner
 fills the remainder itself; the plan returns `vessels = {{item, sig}, …}` and completion
-hands over every one. `AnnotateOrders` offers meals AND bags in one `mealOptions` list
-(an option must both complete the order and actually carry something it asked for), so
-`ok` and `ready` now agree and one-tap Complete works. `VesselItem` rejects anything that
-isn't the meal or bag item, so a forged payload can never hand over an arbitrary item.
+hands over every one.
+
+**THE PIN IS A LIST — a pizza and a cake are two packages.** `mealSig` takes either a
+single sig (what the phone KDS and the NPC branch still send) or a LIST of
+`{sig, item}`, normalised by **`NormalizeVesselPins`**; `VesselPinsFrom(d)` is the ONE
+door a completion payload is read through (`d.vessels` list → legacy `d.mealSig` →
+nothing), so the player and NPC callbacks can't read a payload differently. Each pin is
+claimed in the order it was picked and one that covers nothing LEFT is not spent, so a
+stray tick can't give food away. `VesselItem` rejects anything that isn't the meal or
+bag item, so a forged payload can never hand over an arbitrary item.
+
+`AnnotateOrders` offers meals AND bags in one `mealOptions` list. An option no longer
+has to complete the ticket BY ITSELF — that is exactly what made a pizza-and-cake order
+unfulfillable — it only has to carry something the ticket asked for, and it ships
+`covers` (`{["item|key"] = n}`, from `vesselCoverage`) alongside `completes` and the
+pool `count`. The plan also returns **`needs`**: the units that must come PACKED,
+snapshotted after singles and before any vessel is claimed, which is precisely the
+question the picker answers. **Coverage is counted PER GROUP, never as matched unit
+indices** — two bags each holding one of the two pizzas a ticket asks for must add up to
+both, and independently-matched indices would both name the first pizza. The picker
+(`MealPicker` in `web/src/components/RegisterTickets.tsx`, so BOTH the fullscreen NUI
+register and the in-world DUI get it) selects several packages with a quantity, tallies
+`covers` against `needs`, and only goes live when the selection covers the ticket; the
+server re-plans against the same picks, so the button can only ever be optimistic about
+something the plan will refuse anyway. `ok`/`ready` still come from the UNPINNED plan,
+so one-tap Complete keeps working.
 
 **A takeout box is a SINGLE, not a coverage vessel — and it lives in a POCKET.**
 `giveVessel` puts all THREE crafted vessels straight into the maker's inventory, but
@@ -1228,16 +1363,54 @@ satisfy `stackSatisfies` trivially, i.e. be buildable from an empty table), and
 `AnnotateFoods` flags the offending part as `no_input` so the admin row says which step
 is empty rather than the entry being silently inert in-game.
 
+**A COMPONENT IS PICKED, NEVER TYPED.** `ComponentList` (`web/src/components/editors.tsx`
+— the assemble step's and the bag food's ingredient list) deliberately does NOT pass
+`allowFree`: a component has to be something that already exists. `Menu`'s `compItems`
+is that combined list — the inventory catalogue (`items`) ∪ **`BuildProductList()`**
+(`core/server.lua`, sent as `products` in `buildAdminData`), which is every KITCHEN
+PRODUCT the menu authors that isn't an installed item (a cooked patty, `raw_pizza`, a
+frosted cake, a bake tray's raw sheet). Everything a component may legitimately be is
+therefore on one list, which is what makes refusing free text safe. Before, typing a
+name the search didn't find committed it as a brand-new "kitchen item", authoring a
+component nothing in the kitchen can ever produce — the recipe then simply never
+matched, with nothing in the build to say why. OUTPUT fields keep `allowFree`: naming a
+new tray-only product is exactly what they are for.
+
+**A GROUP GATE MUST EXPLAIN ITSELF.** `getCrafts` marks a craft the restaurant's
+groups don't carry as `locked` (with the group name) instead of omitting it, the box
+tooltip renders that in place of "these don't form a food yet", and
+`bestCraftForLayers` returns the locked match as a SECOND value so `prepMakeBox` can
+refuse with `cook_craft_group_locked` rather than `cook_no_craft_match`. Access is
+still enforced — only in the make, which is the only place it has to be. Dropped
+silently, an access list is indistinguishable from a broken recipe: the food is
+authored, its components are sitting in the box, and nothing in the kitchen can see
+the one setting that explains it. Any other surface that hides content by group owes
+the same answer.
+
+**The takeout box's ranking and its make must list the same crafts.** `getCrafts` (the
+tooltip's "Create <food>" catalogue) used to drop any craft whose components weren't all
+installed items, while `prepMakeBox` → `bestCraftForLayers` applies no such test — so a
+food whose components were sitting in the box could rank as "no match" and still have
+been perfectly makeable, which reads as the box not recognising its own recipe. Validity
+is the ADMIN PANEL's report (`AnnotateFoods` flags a missing component on the row); the
+two halves of the kitchen feature just have to agree with each other.
+
 `FoodForItem(item, meta)` is what maps a held thing back to its authoring food:
 `DerivedFoodById` (a takeout box's food id, a drink's flavor key) + `DerivedFoodByOutput`
 (every terminal cook/assemble/pour output), both rebuilt in `RebuildDerived`.
 
 **Item use** has no single cross-framework hook: ESX/QB take a per-name callback
-(`RegisterUsableItem`, re-registered on a `bag_item`/`meal_item` rename via the
-`pickle_restaurants:settingChanged` event), while ox_inventory calls the
-`pickle_restaurants.useItem` **export** named in the item definition — so the bag and
-meal ship as `stack = false, consume = 0` in `__INSTALL/items/`, and this resource
-(never ox) decides when the vessel is destroyed. Eating tops up the framework's needs
+(`RegisterUsableItem`, re-registered on a `bag_item`/`meal_item`/`box_item`/`drink_item`
+rename via the `pickle_restaurants:settingChanged` event), while ox_inventory calls the
+`pickle_restaurants.useItem` **export** named in the item definition — so ALL FOUR
+vessels (bag, meal, takeout box and the `drink_item`) ship as `stack = false,
+consume = 0` in `__INSTALL/items/`, and this resource (never ox) decides when the
+vessel is destroyed. A drink shipped with ox's own `status`/`anim` block and
+`consume = 1` instead, which is why it couldn't be drunk as an item: ox drank it
+itself, applying its own thirst number and its own generic bottle, so the flavor, the
+branded cup and the food's authored `consume` never got a look in. Like a takeout box
+it has no contents list (one flavor), so using one offers the sip/finish pair and is
+always drunk from the hand — seated or not, there is nothing to lay out on a table. Eating tops up the framework's needs
 via the bridge's `Nourish(source, hunger, thirst)` (0-100 percentages, scaled per
 framework: esx_status ×10,000, QB metadata + HUD event, standalone none). Every
 variant also fires `pickle_restaurants:nourish(source, hunger, thirst)`, so a server
@@ -1326,11 +1499,18 @@ picture beside its price and no prep prop. An ingredient entry is what gives an 
 an admin-visible identity, so they are all in `DEFAULT_INGREDIENTS` now, mapped to the
 single-serving RAW props (`pickle_side_fries_01`, `pickle_chicken_drumstick_01`,
 `pickle_dough_unapplied_01`, … — the `_01` of each family; the recipe's own cook-state
-models are the in-basket/on-griddle piles instead). They must NOT become droppable
-prep components: `isStationInput` (`modules/cooking/server.lua`) filters the
-`GetPrepModels()` door in `getIngredients`, so a raw patty stays on its grill while a
-DLC toy still reaches the bar through it. Components genuinely used in a build arrive
-via the assembly/craft lists, which that guard never touches.
+models are the in-basket/on-griddle piles instead).
+
+**EVERY CONFIGURED INGREDIENT REACHES THE PREP BAR.** `getIngredients` lists the
+components of every accessible assembly and craft, then EVERY entry of
+`GetPrepModels()` and `GetIngredientsCfg()` — the second of those adds the ones with
+no prop, which drag as 2D pills. There used to be an `isStationInput` filter here that
+hid a recipe's raw input and a fountain's cup on the grounds that they belong on their
+station rather than in a build; it is GONE, and must not come back. It decided for the
+cook what a thing is for, and the commonest ingredient in the kitchen — a raw beef
+patty — was exactly the one it hid. If an admin gave something a row in Supplies it
+lists; where it may actually GO is still enforced where it lands (a recipe's
+components, `prepAdd`'s carrier rule, a takeout box's craft match).
 
 ## DLC packs
 

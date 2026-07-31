@@ -148,6 +148,15 @@ RegisterNetEvent("pickle_restaurants:seating:answerSeat", function(d)
         { ok = true, propId = req.propId })
 end)
 
+-- Who is sitting on this anchor right now (nil = nobody). Occupancy is what makes a
+-- seat single-occupant, so anything that has to decide "may this player speak for this
+-- seat" asks here rather than keeping a second idea of who is on it — modules/mirror
+-- gates a diner's published meal render on it, exactly as it gates a cook's prep table
+-- on the station claim.
+function SeatHolder(propId)
+    return SeatOccupancy[tonumber(propId) or -1]
+end
+
 RegisterNetEvent("pickle_restaurants:seating:stand", function(propId)
     propId = tonumber(propId)
     if propId and SeatOccupancy[propId] == source then SeatOccupancy[propId] = nil end

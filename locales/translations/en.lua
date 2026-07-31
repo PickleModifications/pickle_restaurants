@@ -132,6 +132,10 @@ Language["en"] = {
     ["cook_nothing_in_bag"] = "Nothing in the bag.",
     ["cook_nothing_in_box_food"] = "Nothing in the takeout box.",
     ["cook_no_craft_match"] = "These items don't make anything.",
+    -- The contents DO form a food, but this restaurant's group list doesn't carry it.
+    -- Names the group, because that's the one-line fix (admin panel → the restaurant
+    -- → Groups) and it is otherwise invisible from inside the kitchen.
+    ["cook_craft_group_locked"] = "%s isn't on this restaurant's menu — it needs the \"%s\" group.",
     ["cook_nothing_on_tray"] = "Nothing on the tray.",
     ["cook_nothing_to_build"] = "Nothing to build.",
     ["cook_only_pizza_in_box"] = "Only pizza goes in the box.",
@@ -528,7 +532,10 @@ Language["en"] = {
     ["admin.tab_overview"] = "Overview",
     ["admin.tab_recipes"] = "Menu",
     ["admin.tab_food"] = "Food & Drinks",
-    ["admin.tab_ingredients"] = "Ingredients",
+    -- The admin tab where every raw ingredient and applicator tool is authored: it is
+    -- what a kitchen can be STOCKED with, and the component pickers now only offer
+    -- what has a row here, so it reads as the supply list it is.
+    ["admin.tab_ingredients"] = "Supplies",
     ["admin.tab_restaurants"] = "Restaurants",
     ["admin.tab_settings"] = "Settings",
     ["admin.title"] = "Restaurant Administration",
@@ -688,6 +695,10 @@ Language["en"] = {
     ["cook.station_stovetop_label"] = "Stovetop",
     ["cook.station_word_fryer"] = "fryer",
     ["cook.station_word_stovetop_oven"] = "stovetop oven",
+    -- The box contents form this food, but the restaurant's group list doesn't
+    -- carry it. Named with the group, since that is the fix and it is invisible from
+    -- inside the kitchen.
+    ["cook.takeout_group_locked"] = "%s isn't on this restaurant's menu. Add the \"%s\" group to it in the admin panel.",
     ["cook.still_needs"] = "Still needs",
     ["cook.tab_cooked_items"] = "Cooked Items",
     ["cook.tab_packaging"] = "Containers & Packaging",
@@ -792,7 +803,7 @@ Language["en"] = {
     ["menu.no_steps"] = "Has no steps",
     ["menu.duplicate_input"] = "Input already used by another recipe",
     ["menu.intro"] = "Everything on your menu, grouped by category: recipes (food & drinks), the tools that apply things to them, and the ingredients they're built from. Prices default from ingredient cost; tune per-restaurant in Management.",
-    ["menu.intro_food"] = "The food & drinks your restaurants sell, grouped by category. Each recipe is cooked, assembled, poured or boxed from the ingredients on the Ingredients tab. Prices default from ingredient cost; tune per-restaurant in Management.",
+    ["menu.intro_food"] = "The food & drinks your restaurants sell, grouped by category. Each recipe is cooked, assembled, poured or boxed from the ingredients on the Supplies tab. Prices default from ingredient cost; tune per-restaurant in Management.",
     ["menu.intro_ingredients"] = "The building blocks recipes are made from: ingredients (raw components dropped onto builds) and the tools that apply things to them — condiments, finishes and fillers. Set each one's buy cost here; recipes reference them on the Food & Drinks tab.",
     ["menu.kind_field"] = "Type",
     ["menu.kind_recipe"] = "Recipe",
@@ -928,6 +939,9 @@ Language["en"] = {
     ["register.packed_picker_title"] = "Fulfil from a Meal or Bag",
     ["register.bag_n"] = "Bag %s",
     ["register.fulfill_this_bag"] = "Use This Bag",
+    ["register.picked"] = "Picked",
+    ["register.pick_packages"] = "Pick what goes in the order",
+    ["register.hand_over_n"] = "Hand Over %s",
     ["register.missing"] = "Missing: %s",
     ["register.mod_default"] = "(default)",
     ["register.myself"] = "Myself",
@@ -1061,6 +1075,12 @@ Language["en"] = {
     ["settings.npc_tip_chance_hint"] = "Percent of served orders that leave a tip.",
     ["settings.npc_tip_max"] = "Max tip (%%)",
     ["settings.npc_tip_max_hint"] = "Tip is a random amount from 0 to this %% of the order total.",
+    ["settings.npc_pricing"] = "What Customers Will Pay",
+    ["settings.npc_pricing_hint"] = "An NPC agrees to whatever the menu says, so a ceiling stands in for the judgement a player customer makes. Anything priced above its limit is simply not ordered — overpriced restaurants lose walk-in trade instead of printing money.",
+    ["settings.npc_max_markup"] = "Max markup (%%)",
+    ["settings.npc_max_markup_hint"] = "How far above an item's recommended price (ingredient cost + profit margin) a customer will still buy it.",
+    ["settings.npc_unpriced_max"] = "Max price, no cost set ($)",
+    ["settings.npc_unpriced_max_hint"] = "Flat ceiling for items whose ingredients have no cost set — there is no recommended price to measure those against.",
     ["settings.npc_layout"] = "Queue Layout",
     ["settings.npc_layout_hint"] = "World placement of the line, relative to the counter. Tune these in-game until the queue sits right.",
     ["settings.npc_counter_offset"] = "Counter offset (m)",

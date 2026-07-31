@@ -60,6 +60,11 @@ type TrayEntry = {
   finishTool?: string;
   // a burnt cook output — sorted to the back of the bar and offered the bin
   burnt?: boolean;
+  // whether this can be POCKETED (Take / Take all). Server-resolved: most cooked
+  // products are tray-only by design — they never exist as inventory items and
+  // reach a customer packed into a meal or a bag — and burnt food is
+  // unexchangeable, so `trayToInventory` refuses both. Absent = bin only.
+  takeable?: boolean;
   // freshness: seconds left until this item spoils when the tray was last fetched
   // (absent = never expires). The card counts it down locally and shows a red timer
   // in the final minute.
@@ -67,7 +72,14 @@ type TrayEntry = {
 };
 // A buildable recipe (kitchen prep) with its output + components resolved for the tooltip.
 type RecipeComp = { item: string; label: string; image?: string };
-type RecipeCat = { output: string; label: string; image?: string; components: RecipeComp[] };
+type RecipeCat = {
+  output: string; label: string; image?: string; components: RecipeComp[];
+  // Takeout-box crafts only: this food exists and its components match, but the
+  // restaurant's group list doesn't carry it. Listed rather than hidden — a silent
+  // drop made an access rule look exactly like a broken recipe — and named with the
+  // group that unlocks it, which is an admin's one-line fix.
+  locked?: boolean; group?: string;
+};
 // The hovered stack's live snapshot: where it is on screen + what it provides.
 // A hovered serving tray sends { tray: true, tid, count } instead (Make Meal
 // tooltip); a pizza box additionally carries { box: true, open } (lid state —
@@ -482,6 +494,9 @@ function rankRecipes(recipes: RecipeCat[], provides: Record<string, number>): Ra
     .filter((s) => s.matched > 0)
     .sort(
       (a, b) =>
+        // a craft this restaurant can't carry never outranks one it can — it's
+        // listed to EXPLAIN itself, not to be the default pick
+        Number(!!a.rec.locked) - Number(!!b.rec.locked) ||
         b.matched - a.matched ||
         Number(b.ready) - Number(a.ready) ||
         a.missing.length - b.missing.length ||
@@ -799,7 +814,7 @@ function BagTooltip({
   onTakeOut: () => void;
   onPin: (pinned: boolean) => void;
 }) {
-  const ready = !!selected?.ready && !boxing;
+  const ready = !!selected?.ready && !selected?.rec.locked && !boxing;
   return (
     <div
       onPointerEnter={() => onPin(true)}
@@ -862,7 +877,15 @@ function BagTooltip({
             })}
           </div>
 
-          {selected && !selected.ready && (
+          {/* the contents form this food, but the restaurant doesn't carry its group:
+              say so, and say which group — nothing else in the kitchen can. */}
+          {selected?.rec.locked && (
+            <div className="mt-2.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[11px] leading-snug text-amber-200">
+              {_L("cook.takeout_group_locked", selected.rec.label, selected.rec.group || "?")}
+            </div>
+          )}
+
+          {selected && !selected.ready && !selected.rec.locked && (
             <>
               <div className="mt-2.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                 {_L("cook.still_needs")}
@@ -882,7 +905,7 @@ function BagTooltip({
 
       {/* what the box will BE once created: the food's own item art, big enough to
           read — this is the "food item for the takeout box" the props no longer show */}
-      {selected && (
+      {selected && !selected.rec.locked && (
         <div className="mt-3 flex items-center gap-2 rounded-lg border border-border bg-secondary/60 p-2">
           {selected.rec.image ? (
             <ItemThumb src={selected.rec.image} alt={selected.rec.label} className="h-9 w-9 shrink-0 object-contain" />
@@ -1754,6 +1777,13 @@ export default function Cooking({ data }: { data: any }) {
   const tipActions =
     tipEntry && tipEntry.source !== "inv" ? (
       <div className="mt-2.5 flex items-center gap-1.5 border-t border-border/60 pt-2.5">
+        {/* Take / Take all only for something the inventory can actually HOLD. Most
+            cooked products are tray-only by design (cooked fries have no item to
+            become — they leave the kitchen inside a meal or a bag) and burnt food is
+            unexchangeable, so the server refuses both; the flag is its answer, not a
+            guess made here. The bin is still offered — it's the only way to clear
+            those. */}
+        {tipEntry.takeable && (<>
         <button
           onClick={() => takeEntry(tipEntry, 1)}
           className="rounded-md bg-secondary px-2.5 py-1 text-[11px] font-semibold text-foreground transition hover:bg-accent"
@@ -1768,6 +1798,7 @@ export default function Cooking({ data }: { data: any }) {
             {_L("cook.take_all")}
           </button>
         )}
+        </>)}
         <button
           onClick={() => discardEntry(tipEntry, tipKey)}
           className={cn(

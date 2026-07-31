@@ -11,7 +11,7 @@
     ['restaurant_bag'] = { name = 'restaurant_bag', label = 'Restaurant Bag', weight = 800, type = 'item', image = 'restaurant_bag.png', unique = true,  useable = true, shouldClose = true, combinable = nil, description = 'A bag of food from a restaurant. Use it to pick what to eat.' },
     ['meal']           = { name = 'meal',           label = 'Meal',            weight = 800, type = 'item', image = 'meal.png',           unique = true,  useable = true, shouldClose = true, combinable = nil, description = 'A meal tray from a restaurant. Sit down at a table to eat it.' },
     ['takeout_box']    = { name = 'takeout_box',    label = 'Takeout Box',     weight = 500, type = 'item', image = 'takeout_box.png',    unique = true,  useable = true, shouldClose = true, combinable = nil, description = 'A takeout box of food from a restaurant.' },
-    ['drink']          = { name = 'drink',          label = 'Restaurant Drink', weight = 300, type = 'item', image = 'drink.png',         unique = false, useable = true, shouldClose = true, combinable = nil, description = 'A fountain drink.' },
+    ['drink']          = { name = 'drink',          label = 'Restaurant Drink', weight = 300, type = 'item', image = 'drink.png',         unique = true,  useable = true, shouldClose = true, combinable = nil, description = 'A fountain drink.' },
     ['restaurant_receipt'] = { name = 'restaurant_receipt', label = 'Receipt',    weight = 10,  type = 'item', image = 'restaurant_receipt.png', unique = false, useable = false, shouldClose = true, combinable = nil, description = 'An order receipt.' },
 
     -- ── raw cook inputs ──────────────────────────────────────────────────────

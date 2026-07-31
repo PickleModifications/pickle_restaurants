@@ -420,3 +420,35 @@ AddEventHandler('onResourceStop', function(resourceName)
         end
     end
 end)
+-- ─── the pause menu, shoved closed ───────────────────────────────────────────
+-- Every view here that owns the screen (a panel, an in-world DUI, the placement
+-- gizmo, a seat) keeps the pause menu out while it is up. They all used to do it the
+-- same way, and that way was WRONG in a way that could cost a player their game:
+--
+--     SetFrontendActive(false)
+--     ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
+--
+-- The second line does not "keep it shut" — it OPENS a pause menu, an empty one, with
+-- the game paused and the frontend cursor drawn. That trick exists for scripts that
+-- want the pause cursor on purpose; here it meant every shove replaced a real pause
+-- menu with a contentless one, and the moment the loop doing the shoving stopped
+-- (the view had just closed — which is exactly when the last shove happens) the
+-- player was left staring at a frontend cursor over a paused game with no menu to
+-- back out of. Nothing in-game can dismiss it: that is the "I had to reboot" bug.
+--
+-- Deactivating is the whole job, so this does only that. NEVER re-introduce an
+-- ActivateFrontendMenu here or at a call site.
+--
+-- PRE-EMPT, DON'T UNDO. Closing a pause menu that has already opened plays its
+-- transition — the screen dims and comes back — which is the "slight fade on exit"
+-- that closing-after-the-fact can never avoid, however fast the loop reacts.
+-- `SetPauseMenuActive(false)` every frame is the cheap prevention: the menu never
+-- starts, so there is no transition to sit through. `IsPauseMenuActive()` only
+-- answers once the menu is fully up, by which point the fade has already played, so
+-- the recovery below tests `GetPauseMenuState()` as well and catches one mid-open.
+function ForcePauseMenuClosed()
+    SetPauseMenuActive(false)
+    if IsPauseMenuActive() or GetPauseMenuState() ~= 0 then
+        SetFrontendActive(false)
+    end
+end

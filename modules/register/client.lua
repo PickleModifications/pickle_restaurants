@@ -392,10 +392,7 @@ CreateThread(function()
             -- ESC steps away from the register; it must never also reach the frontend.
             -- DisableAllControlActions alone doesn't stop it — force the menu closed
             -- (same pattern as the gizmo/placement loops).
-            if IsPauseMenuActive() then
-                SetFrontendActive(false)
-                ActivateFrontendMenu(`FE_MENU_VERSION_EMPTY_NO_BACKGROUND`, true, -1)
-            end
+            ForcePauseMenuClosed()
             HideHudAndRadarThisFrame()
             helpThisFrame()
 
@@ -435,6 +432,12 @@ CreateThread(function()
             if IsDisabledControlJustPressed(0, 200) or IsDisabledControlJustPressed(0, 202)
                 or IsDisabledControlJustPressed(0, 322) or IsDisabledControlJustPressed(0, 194) then
                 CloseRegisterScreen()
+                -- The frame after this one, `active` is false and this loop stops
+                -- disabling the pause controls — so the REST of the same keypress
+                -- reaches the frontend and the pause menu opens behind the screen we
+                -- just stepped away from. GuardPauseKeys (modules/interactive) holds
+                -- them off until the key is actually up.
+                if GuardPauseKeys then GuardPauseKeys() end
             end
 
             Wait(0)

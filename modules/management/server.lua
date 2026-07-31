@@ -384,7 +384,7 @@ lib.callback.register("pickle_restaurants:management:setGrade", function(src, d)
     end
     if not SetPlayerJobGrade(target, job, grade) then return { ok = false, error = _L("mgmt_grade_failed") } end
 
-    ShowNotification(src, _L("mgmt_role_saved"))
+    ShowNotificationOnce(src, "role_saved", _L("mgmt_role_saved"))
     return { ok = true, grade = grade }
 end)
 
@@ -416,7 +416,7 @@ lib.callback.register("pickle_restaurants:management:setRank", function(src, d)
         commission  = math.max(0, math.min(100, math.floor(tonumber(d.commission) or 0))),
         salary      = math.max(0, math.floor(tonumber(d.salary) or 0)),
     })
-    ShowNotification(src, _L("mgmt_rank_saved"))
+    ShowNotificationOnce(src, "rank_saved", _L("mgmt_rank_saved"))
     return { ok = true, ranks = ranksArray(id) }
 end)
 
@@ -488,7 +488,7 @@ lib.callback.register("pickle_restaurants:management:saveMenuItem", function(src
         ON DUPLICATE KEY UPDATE label = VALUES(label), price = VALUES(price), category = VALUES(category), enabled = VALUES(enabled)
     ]], { id, entry.item, entry.variant or "", entry.label, math.max(0, math.floor(tonumber(d.price) or 0)),
           entry.kind, d.enabled and 1 or 0 })
-    ShowNotification(src, _L("mgmt_menu_saved"))
+    ShowNotificationOnce(src, "menu_saved", _L("mgmt_menu_saved"))
     SyncWorldSoon() -- refresh the customer-facing menu SCREEN board (modules/screens)
     return { ok = true }
 end)
@@ -677,7 +677,7 @@ lib.callback.register("pickle_restaurants:management:setBrandImage", function(sr
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
     local res = SetRestaurantBrand(id, d.key, d.url, d.crop)
-    if res and res.ok then ShowNotification(src, _L("branding_saved")) end
+    if res and res.ok then ShowNotificationOnce(src, "branding_saved", _L("branding_saved")) end
     return res
 end)
 
@@ -719,7 +719,7 @@ lib.callback.register("pickle_restaurants:management:setTheme", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_props") then return { ok = false, error = _L("no_permission") } end
     local res = SetRestaurantTheme(id, d.theme)
-    if res and res.ok then ShowNotification(src, _L("theme_saved")) end
+    if res and res.ok then ShowNotificationOnce(src, "theme_saved", _L("theme_saved")) end
     return res
 end)
 

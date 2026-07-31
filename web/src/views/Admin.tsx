@@ -16,6 +16,10 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
   const settings = data?.settings || {};
   const players = data?.players || [];
   const items = data?.items || [];
+  // Kitchen products (a cooked patty, raw_pizza) — authored by the menu, never
+  // installed items. Component pickers offer these alongside `items`, which is what
+  // lets them refuse a typed-in name that exists nowhere.
+  const products = data?.products || [];
   const groups = data?.groups || []; // every access-group name in use (suggestions)
   const focus = data?.focus; // { restaurant, section } — set after a placement reopen
 
@@ -64,11 +68,11 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
             that apply things — condiments, finishes). Both drive the same Menu
             component, scoped to which kinds it shows/creates. */}
         <TabsContent value="food" className="flex min-h-0 flex-1 flex-col">
-          <Menu scope="food" foods={foods} tools={tools} ingredients={menuIngredients} defaults={data?.defaults} settings={settings} boxQuad={data?.boxQuad} items={items} groups={groups} ingredientCosts={data?.ingredientCosts} onSaved={refresh} />
+          <Menu scope="food" products={products} foods={foods} tools={tools} ingredients={menuIngredients} defaults={data?.defaults} settings={settings} boxQuad={data?.boxQuad} items={items} groups={groups} ingredientCosts={data?.ingredientCosts} onSaved={refresh} />
         </TabsContent>
 
         <TabsContent value="ingredients" className="flex min-h-0 flex-1 flex-col">
-          <Menu scope="ingredients" foods={foods} tools={tools} ingredients={menuIngredients} defaults={data?.defaults} settings={settings} boxQuad={data?.boxQuad} items={items} groups={groups} ingredientCosts={data?.ingredientCosts} onSaved={refresh} />
+          <Menu scope="ingredients" products={products} foods={foods} tools={tools} ingredients={menuIngredients} defaults={data?.defaults} settings={settings} boxQuad={data?.boxQuad} items={items} groups={groups} ingredientCosts={data?.ingredientCosts} onSaved={refresh} />
         </TabsContent>
 
         <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">
