@@ -2,7 +2,7 @@
 -- Run this SQL against your ESX database. Safe to re-run (INSERT IGNORE).
 --
 -- The COMPLETE set the resource needs: the handout items players receive
--- (bag / meal / drink / receipt) plus every raw ingredient & input the kitchen
+-- (bag / meal / takeout box / Restaurant Item / receipt) plus every raw ingredient & input the kitchen
 -- consumes. Cooked/assembled foods (burger, fries, cooked patty, pizza, cake…)
 -- are intentionally omitted — they exist only in the cooked-items tray and get
 -- packaged into a bag / meal tray / pizza box at prep, never entering inventory.
@@ -12,7 +12,7 @@ INSERT IGNORE INTO `items` (`name`, `label`, `weight`, `rare`, `can_remove`) VAL
     ('restaurant_bag',   'Restaurant Bag',  1, 0, 1),
     ('takeout_box',      'Takeout Box',     1, 0, 1),
     ('meal',             'Meal',            1, 0, 1),
-    ('drink',            'Restaurant Drink', 1, 0, 1),
+    ('restaurant_item',  'Restaurant Item', 1, 0, 1),
     ('restaurant_receipt', 'Receipt',       1, 0, 1),
     -- raw cook inputs
     ('raw_beef_patty',   'Raw Beef Patty',    1, 0, 1),

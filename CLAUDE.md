@@ -321,8 +321,16 @@ Each module is a self-contained feature loaded by the `modules/**` glob. Key one
   flipping burgers. PHYSICAL stations only: a virtual session leaves the ped standing
   where it really is, so the mime would happen in the street. **A scenario is safe
   here for the reason it wasn't in `modules/seating`** — nothing asks it to POSITION
-  anything (`TaskStartScenarioInPlace`), nothing polls whether it's still running, and
-  there is no repair loop to get stuck in. **The task brings its own props and doesn't
+  anything (`TaskStartScenarioInPlace`) and there is no repair loop to get stuck in.
+  **STOPPING IT ESCALATES.** `ClearPedTasks` only REQUESTS the end of a scenario and
+  the ped gets there by playing its outro — that is the second of grilling that carries
+  on after the panel has shut — and a request landing while the ENTER animation is
+  still playing is swallowed outright, leaving the cook grilling indefinitely (the same
+  call, ignored, which is why it only bit sometimes). So `StopStovetopPose` asks
+  politely once, then forces the ped out (`POSE.stop_ms` / `stop_tries`, TUNE IN-GAME).
+  That loop is allowed to consult the unreliable scenario natives precisely because it
+  only ever CLEARS, never re-TASKS: a misread costs one redundant call, it is bounded,
+  and it stands down the instant the cook is posed again. **The task brings its own props and doesn't
   always take them away**, so every close path deletes what it ADDED: the CObject pool
   is snapshotted before the scenario starts and only objects missing from that snapshot
   can ever be deleted (so a map-placed BBQ and every food prop this resource spawns on
@@ -724,6 +732,20 @@ job, so it resolves to a basic employee, never a boss), `RestaurantRoster(rid, c
 NUI is untrusted. `PERMISSIONS` gained **`manage_payroll`** (paying the pool out and
 running the wage bill), which a boss holds implicitly through `ALL_PERMS`.
 
+**HIRING IS AN OFFER; FIRING IS NOT.** A hire CHANGES THE TARGET'S JOB, and a job is
+the whole of what a character does on the server — so `management:hire` used to let
+anyone with `manage_employees` pick a passer-by out of the panel's `nearby` list and
+overwrite their police/EMS/mayor job on the spot, then "fire" them into unemployment.
+The permission is over the RESTAURANT, not over the other player. `management:hire`
+therefore only raises an OFFER (`HireOffers`, one in flight per TARGET, `HIRE_TTL` 30s,
+cleared on `playerDropped`), pushed as both a phone notification and an ox_lib context
+prompt — the same two channels, for the same reasons, as `seating:requestSeat`. The job
+moves on `management:answerJobOffer`, where EVERY hire condition is re-checked (the
+hirer still holds `manage_employees`, the restaurant still employs through that job, the
+grade is still real, the boss-grade escalation guard) because the world moves while a
+prompt is up. Firing and `setGrade` need no consent: both act on someone who already
+holds this restaurant's job, which is checked first.
+
 **Pay is per RANK, never per person** (`management:setRank`, boss-gated): everyone on a
 grade shares its `commission` and `salary`. `management:setCommission`, the per-employee
 `commission_rate` column and Settings → Roles (`default_roles`) are all GONE — the boss
@@ -931,13 +953,39 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   cakes (strawberry/chocolate/vanilla/pickle), NOT cook states — the batter sheet
   bakes as `pickle_cake_mix_pour_02/03/04` (raw/cooked/burnt; best-guess mapping,
   correctable in the recipe editor).
+  A BATCH bake (`output_count > 1`, the six-cookie tray) is ONE tray-only unit
+  everywhere it is held — one `raw_cookie` IS a filled tray of six, and only the
+  finished bake collects as N loose servings (which is what `withContainer` skips a
+  batch OUTPUT for, and why `getTray`'s UNCOOKED branch does the opposite and folds the
+  container in). Its stack is container + N identical servings, and those servings lay
+  out as a GRID on the tray rather than a tower: **`BakeStackOffsets`** recognises that
+  shape and is the ONE detector, read by the oven seat (`SpawnSlotObject` →
+  `SeatOvenSlotStack`), the drag-in preview, the drag back out (`moveSlotStackTo`) and
+  the prep-table part builder. Where each serving SITS is **authored, not derived**:
+  the synced `bake_slots` setting (client global `BakeSlots`, `BakeSlotsFor` normalises
+  it) maps a `container_model` to a **PITCH** — `cols` across plus the centre-to-centre
+  `spread_x`/`spread_y` gap in tray-local metres, and `offset_x`/`offset_y` for wells
+  that don't sit centred on the model's origin. A tray's wells are where the artist put
+  them and no formula over a bounding box finds them, but they ARE evenly spaced by
+  construction, which is why this is a pitch and not a seat list: six seats would be
+  twelve authored numbers holding four distinct values, i.e. twelve chances to typo one.
+  The grid centres on the container, rows are however many the batch needs, and a short
+  final row centres itself under the one above.
+  Edited in Settings → Baking trays, which lists the containers the RECIPES declare
+  (`BakeContainerList`, sent as `bakeContainers`) rather than taking a typed model name:
+  a container is authored on a recipe, so a typed one would author a layout for a tray
+  nothing renders. `slots` (that recipe's `output_count`) is shown, never edited.
+  `bakeGridOffsets`' measured grid is only the FALLBACK for a container with no authored
+  pitch. An authored pitch also overrides `layoutTrayAt`'s `storedOffs` snapshot (that
+  exists because a DERIVED grid drifts; an authored one can't), so a nudged spread shows
+  up on a tray already sitting on the table.
 - **Soda machine (drinks).** The fountain has SEVEN taps: the middle one dispenses
   ice, the other six map to the first six `drinks` settings entries by RAW config
   position (tap N = entry N — STABLE even when some flavors are invalid; a missing
   CUP item leaves its tap dark. Only `drinks[].input` must be an installed item:
   `output` is a flavor KEY, not an item — every poured drink collects as the ONE
-  `drink_item` setting's item ("Restaurant Drink", default `drink`, mirroring
-  `meal_item`) with the flavor riding as build-stack metadata
+  `serving_item` setting's item (the Restaurant Item, default `restaurant_item` —
+  see "The Restaurant Item") with the flavor riding as build-stack metadata
   (`{ { item = <output key> } }`, TraySig'd so each flavor is its own variation);
   `drinkFlavor`/`drinkRender` resolve the label + capped cup+lid render everywhere
   (getTray both paths, compSpec for drink layers in meals). BuildSyncPayload stamps
@@ -982,9 +1030,18 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   over a valid reserved part, and fades the result prop in via `SetEntityAlpha`; at
   full coverage `cooking:applyFinish` re-validates everything, consumes the target
   layer + 1 tool item, and trays the output with ONE meta layer
-  `{ item, flavor, flavorLabel, stack }` — `TraySig` appends `#flavor`, so flavors are
-  separate variations end-to-end (replace-mode deletes the container+sheet props;
-  finished items are deliberately NOT decomposable). Sync ships only `ItemExists`-valid
+  `{ item, tool, flavor, flavorLabel, stack }` — `TraySig` appends `#tool#flavor`, so
+  flavors are separate variations end-to-end (replace-mode deletes the container+sheet
+  props; finished items are deliberately NOT decomposable).
+  **THE TOOL IS PART OF THE VARIATION, not decoration.** Two tools may target one item
+  with flavors that share an id — frosting and sprinkles both offer `vanilla` and
+  `chocolate` on a cookie — and signing on flavor alone made a vanilla-FROSTED cookie
+  and a vanilla-SPRINKLED one ONE tray entry: both rendered and labelled as whichever
+  instance sat on top, and a sig-pinned consume could spend the wrong one. The doughnut
+  hid it by accident (`requires_finish` means a sprinkled doughnut always nests a
+  frosted stack, and the nested `{…}` term already separated them); the cookie is
+  deliberately ungated, so nothing did. Cakes have one tool today, but the collision was
+  structural, not a cookie bug. Sync ships only `ItemExists`-valid
   entries (`BuildSyncPayload` → client `Finishes` global). A sprinkles tool is one more config row —
   no code. Finishes now HAVE a full admin-panel editor (admin Menu tab → New Finish;
   `FinishFields` in `web/src/components/editors.tsx` edits tool/tool_model/rub_dist/
@@ -1011,6 +1068,180 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   a stack with ≥1 existing part). Condiments now HAVE an admin-panel editor (admin Menu tab →
   New Condiment; `CondimentFields` edits item/container_model/applied_model + ingredient cost),
   fed by `AnnotateCondiments()` and saved whole via `admin:saveSettings`, like finishes.
+
+## Supply runs (fetching your own stock)
+
+**OFF BY DEFAULT, and off means EXACTLY the old behaviour**: `management:buyStock`
+credits the larder on the spot. On (`supply_runs.enabled`, Settings → Supply runs), a
+purchase is a CHECKOUT — the money leaves immediately, the ingredients wait at a
+supplier DEPOT until somebody drives out and hauls them in. `modules/supply` owns the
+whole feature and its `pickle_restaurant_supply_orders` table.
+
+**`SupplyConfig()` VALIDATES ON READ** (the NpcConfig / ReservationSlots pattern), and
+`enabled` is `raw.enabled and #depots > 0`: a server that ticked the box but never
+placed a depot would otherwise turn every purchase into cargo nobody can collect, which
+is the one failure mode that eats a restaurant's money with no way back. Its two public
+questions — `SupplyRunsEnabled()` and `SupplyStockCap()` — both answer for the disabled
+case, so `buyStock` reads as one purchase path either way (guarded calls, since
+management loads first alphabetically).
+
+**ORDERING IS THE CLAIM.** There is no separate "start a run" step: paying at the counter
+picks a free bay at that depot, spawns the pile and pushes the run to the buyer
+(`BeginSupplyRun` → `startRun` → `supply:runStarted`). Targeting a bay and then choosing
+an order off a list was a menu standing between a player and work they had already paid
+for. Everything that could stop a run is therefore asked BEFORE the money moves
+(`CanBeginSupplyRun`: already running, an order still outstanding, every bay busy),
+because a refusal after payment means handing money back.
+
+**A TARGET IS AN OFFER, so it exists only when it is one.** Standing prompts on both
+points told the player they could pick a box up and load one in the same moment, and
+offered both to someone with no order at all. `slotsFor(key)` is the ONE place that
+decides what each point is currently good for (pallet: pick up / give up the bay /
+resume; trailer: load, and only while carrying), and `syncInteractions` DIFFS the answer
+against a signature, so a bay is retargeted a handful of times per run rather than
+rebuilt on a timer. Every run action calls `syncAllInteractions` after it lands.
+`PendingOrder` (does this player have a paid order not currently on a bay) rides the
+`supply:state` hydration reply, which is why a reconnect needs no special case: walk back
+into the depot and the resume offer is there.
+
+**ONE ACTIVE ORDER PER PLAYER**, keyed by IDENTIFIER so it survives a reconnect. That is
+what lets every surface here be picker-free: the bay knows whose run it is, and a RESUMED
+run (`supply:resume`, for one ended by a disconnect, a lapsed claim or giving the bay up)
+needs no list because there is only ever one thing it could be. One press, one action: your
+own bay hands you a box, an idle bay picks your paid order back up, and the context menu
+appears only for the single case with two answers (your own run, pallet already empty).
+
+**THE LOADING SPOT IS PLACED, NOT DERIVED.** A bay is THREE gizmo passes, and the third
+is why: the trailer point is the vehicle's ORIGIN, roughly its centre, so anything derived
+from it put the prompt and the map marker halfway down a 12m box. Measuring the model's
+rear face was a guess that only held for one trailer. So `PickTrailerLoadPoint` parks a
+preview trailer, frames a SIDE-ON camera (never front-on: from the front a trailer is a
+flat wall and position along its length is the one thing you cannot judge) on the side the
+placer is already standing, and scrolls a sky BEAM fore and aft along it. `LOADPICK` is
+the tunable table. It follows the shell-height pass exactly on the parts that are easy to
+get wrong: `DisableAllControlActions` + the Disabled input variants (scroll is
+weapon-cycle, LMB fires), the ped frozen while the camera is detached,
+`ForcePauseMenuClosed` + `GuardPauseKeys` on the ESC exit, and the cam handle destroyed
+after the ease-back rather than during it.
+
+The stored `zone.load` is OPTIONAL: a bay placed before this pass existed has none, and
+`trailerLoadPoint` falls back to the old measurement (rear extent + `TRAILER.load_gap`).
+That fallback streams the model and therefore YIELDS, so `buildInteractions` computes the
+point BEFORE claiming its `ZoneIx` slot and re-checks the row afterwards, the same rule
+the prop reconciler follows.
+
+**AN ACTIVE RUN IS ON THE MAP.** A yard reads as identical concrete in every direction, so
+both points are blipped and the GPS ROUTE follows what is next: the pallet while boxes
+remain, the trailer while carrying one (`refreshRunRoute`, re-pointed on every state
+change). Cleared by `endMyRun`, which every ending goes through.
+
+**DEPOTS ARE SERVER-WIDE**, which is what makes a run a commute rather than a walk out
+the back door. A depot holds LOADING BAYS; a bay is TWO gizmo-placed points (the PACKAGE
+point where the pallet stands, the TRAILER point where the rig parks; the tractor unit is
+derived from `truck_gap` along the trailer's own facing, so an admin never lines two
+vehicles up by hand) and is CLAIMED BY ONE PLAYER, because two crews sharing a pile would
+each be taking boxes off the other's.
+
+**BOTH PREVIEWS ARE LIFTED OFF THE GROUND** (`GroundLift`, `coordsOffset`). The gizmo
+seats a model by its ORIGIN and hands back the raw ground hit, and a VEHICLE's origin is
+mid-chassis, so the trailer preview spawned buried to its axles. The lift is
+`-GetModelDimensions().min.z`, and `renderPile` applies the identical lift when it builds
+the real stack: the saved point is ground level in both, so the pile stands where the
+admin saw it. Any future gizmo pass previewing a vehicle needs the same treatment.
+
+**WITH RUNS ON, THE PANEL IS NOT A SHOP — BUT IT IS STILL THE LARDER.** The Supplies tab
+splits in two: BUYING moves to the depot's own ORDER COUNTER (`depot.shop`, a third
+placed point) so the money and the cargo are in the same place, while DEPOSIT/WITHDRAW
+stays in the panel and on the phone, because moving stock between the larder and a pocket
+is not a purchase and has nothing to do with a depot. The tab never disappears; only the
+controls inside it change (`canBuy` / `canMove`).
+
+SHOP MODE is how the counter opens it: `management:getData` takes a `shop` REQUEST and
+answers with `supplyRuns.shop` only if `SupplyShopNear(src)` says the player is standing
+at a counter. Opened that way the panel renders Supplies and nothing else, which is why
+the counter reuses the management view instead of growing a second buying UI.
+`BuySupplies` re-checks the same thing, because hiding a button protects nothing: the NUI
+is untrusted and a forged post would otherwise buy from across the map.
+`OpenManagement`'s shop flag is held CLIENT-SIDE (`ShopMode`) because `relayThenRefresh`
+re-fetches on every action, and a refresh that dropped it would close the shop
+mid-purchase.
+
+**A PURCHASE IS A CART, AND THERE IS ONE FUNCTION THAT MAKES ONE.** `BuySupplies(src, id,
+lines, payment)` is the single door: the whole basket is validated and priced BEFORE any
+money moves (a cart failing half-way would leave a restaurant paying for part of an order
+it never asked for), then paid for from the business account (`society`) or the buyer's
+own `cash`, then either credited to the larder or turned into ONE pending run. Cash exists
+so an empty account is not a dead end, and it writes a ledger line of amount 0: the
+business did not pay, so it must not read as a business expense. `management:buyStock` is
+now a thin wrapper over it for the phone's one-tap row, so the cap, the run capacity, the
+shop gate and the ledger are stated once.
+
+**A GATE MUST EXPLAIN ITSELF** applies here too: the dashboard and the phone's manage hub
+both say supplies are ordered at a depot, and show how many loads are waiting. A missing
+button without a word reads as a broken permission.
+
+**`enabled` REQUIRES THE WHOLE LOOP.** Ordering needs a shop point and collecting needs a
+finished bay, so `SupplyConfig` reads as OFF unless both exist somewhere: one without the
+other leaves a restaurant either unable to buy at all, or paying for cargo it can never
+fetch.
+
+**PLACEMENT IS THE ONLY WAY A DEPOT EXISTS**, exactly like a seat: ONE "Place" button,
+the name asked in-game with `lib.inputDialog`, then FOUR passes (order counter, package
+point, trailer point, loading spot), and `supply:saveZone` writes the depot, its counter
+and its first bay together. An existing depot's counter moves on its own (`supply:saveShop`). There is deliberately no
+"add depot" that makes an empty row: a cancelled gizmo would strand a depot in the list
+that does nothing, and the panel is not where points get authored.
+
+**THE ADMIN SETS BOXES PER CAP, NOT UNITS PER BOX.** `box_units` is DERIVED
+(`ceil(max_stock / boxes_per_cap)`, default 4 boxes) and `max_boxes` IS `boxes_per_cap`,
+because an order can never exceed the cap. Stated the other way round, doubling the cap
+doubled the number of boxes to carry, which is not what raising a limit should do. An
+uncapped larder has nothing to divide, so it falls back to `UNCAPPED_BOX_UNITS`.
+
+**The depot LIST is written only by the gizmo callbacks**, never by the Settings tab's
+auto-save: the tab sends no `depots` key and the `supply_runs` PLAIN_SANITIZER merges the
+stored list back in. Without that, a debounced scalar write landing after a placement
+deletes the bay just placed — and the panel looks like the gizmo saved nothing. The panel
+reads the RAW list (`SupplyAdminData`, sent as `supplyDepots` in `buildAdminData`) so a
+half-placed bay is visible and fixable, where `SupplyConfig` drops it.
+
+**THE PILE IS BUILT, NOT A PROP.** `box_model` must name ONE BOX
+(`hei_prop_heist_box`, `prop_cardbordbox_0*a`) and never a `prop_boxpile_*`: the stack is
+one entity per box, laid out in a grid centred on the package point and turned to its
+facing, so taking one off removes one box — and the box in the carrier's arms is the same
+model, so what you picked up is what you're holding. A pile prop stacks piles and hands
+you a pile.
+
+**THE PILE IS SERVER STATE; the boxes are local props.** `taken`/`loaded` live on the run,
+the audience is `PlayersNearPoint` of the bay (`supply:zone`), and the hydration edge is
+`supply:state` — ONE batched callback for every bay a client just walked into range of,
+because a depot has several and a call per bay per approach is the mistake
+`modules/mirror` already made once. The client renders that number by DIFF and seats each
+box from the PLACED POINT (never `PlaceObjectOnGroundProperly`, which settles differently
+per machine and would put the upper layers somewhere else again). Nothing here is ever a
+`-1`.
+
+**The rig is NETWORKED and gets the doorstep answer.** An NPC driving a truck away is the
+point, and a client-local one would be a man miming at a warehouse — so the claimer spawns
+truck + trailer (locked, `AttachVehicleToTrailer`) and reports the net ids the MOMENT they
+exist (`supply:entities`); the server deletes them on `playerDropped`, on a lapsed claim
+(`claim_ttl`), after the departure, and on `onResourceStop`. `endRun` is the ONE ending —
+finished, abandoned, lapsed, dropped, bay-deleted all go through it, because each has to
+free the bay, tell the room and take the rig out of the world, and a second copy of that
+is how one of them leaks a truck.
+
+**Carrying** is `anim@heists@box_carry@` / `idle` on bone 60309 with the box prop attached
+(`CARRY`, TUNE IN-GAME) — the offsets belong to the POSE, not the box, which is why they
+sit next to the dict.
+
+**THE LARDER HAS A PER-ITEM CEILING** (`max_stock`, 0 = uncapped), and units already
+bought-but-uncollected count against it (`PendingSupplyUnits`), or ordering twice walks
+straight past a cap that only looked at what had arrived. An order bigger than one rig can
+haul is refused AT THE TILL rather than quietly becoming fewer boxes than were paid for:
+the pile is the picture of the order. Boxes are CARGO,
+never items — there is nothing to lose or sell on the way, and because the money left at
+checkout the cargo is the RESTAURANT's: an abandoned run stays pending and is re-claimable
+by anyone who could have ordered it.
 
 ## Reserved seats
 
@@ -1065,6 +1296,61 @@ can read off another. The phone's work screens follow the same job model as the 
 there but the permission MATRIX deliberately is not — a nine-checkbox grid per grade doesn't
 fit a phone, so every phone-side `setRank` resends the rank's existing `permissions` so
 editing a salary can never blank them.
+
+## The Restaurant Item (one serving of anything)
+
+**`serving_item` (default `restaurant_item`) is ONE inventory item for ONE SERVING of
+anything the kitchen makes.** It REPLACED `drink_item` — that item's shape was already
+the general answer, so the generalisation cost a delegating branch in each reader
+rather than a new concept. What a serving IS rides as a SINGLE build-stack layer:
+`{ { item = <drinks[].output key | product item>, stack = <that product's own build
+stack> } }`. `ServingItemName` / `ServingLayer` / `IsDrinkOutputKey` / `IsDrinkServing`
+(core) are the only four questions anyone asks about one.
+
+**Why it exists: a cooked food had no way out of the kitchen except packed.** Cooked
+products are tray-only by the one-item consolidation rule (a cooked patty is not an
+installed item and never will be), so a cook could never hand one to another worker —
+only a meal, a bag or a box could leave a kitchen. The tray is per-player, so a cook's
+own food was stranded on it. Now `trayToInventory` gives a product with its own
+installed item as that item exactly as before, and everything else as ONE Restaurant
+Item carrying what it is. Burnt food stays unexchangeable (the bin is its only exit),
+and a VESSEL is never wrapped (a meal inside a one-serving pocket would eat as a single
+mouthful and hide its tray) — `trayToInventory` and `takeable` state that rule twice
+because they must agree.
+
+**A DRINK is not "wrapped" — it IS the vessel** (there is no product under it), which is
+what `IsDrinkServing` decides. Everything drink-specific — the capped-cup render,
+thirst rather than hunger, the drinking clip, the POS flavor line — is now asked of the
+INSTANCE's metadata rather than of the item name, because the item name no longer means
+"drink".
+
+**Every generic-vessel reader DELEGATES rather than learning about wrappers**:
+`FoodForItem` resolves the layer's key through the same two derived maps, `LayerDisplay`
+returns the wrapped layer's display, `compSpec` returns the wrapped product's whole
+tower (so the thing raised to a mouth is the thing that stood on the tray), and
+`layerIdentity` counts a pocketed burger AS a burger. `getTray`'s inventory branch
+SHADOWS `item`/`v` with the wrapped product before any render code runs — there is one
+description of a burger in that file and a pocketed one has to be it.
+
+**A WRAPPED SERVING IS STOWED, NOT DRAGGED.** Every kitchen gesture addresses an item by
+NAME, and the name a drag would carry is the vessel's — so a wrapped patty would reserve
+"the Restaurant Item" and a build made of one would record a vessel as its layer. The
+entry ships `wrapped`/`stow`, the NUI refuses the drag, and the tooltip's one button
+(`cooking:invToTray`) unwraps it onto THAT restaurant's cooked-items tray under the
+cook's own identifier, where it is an ordinary tray entry again. That is also exactly
+the receiving half of handing food to another worker, which is what the item is for.
+The callback reads what a slot holds off the SLOT, never off the payload, and is gated
+on `cook` at the station's restaurant (the tray is restaurant-scoped stock).
+
+**Using one eats/drinks what it holds** — `vesselKind` returns `"serving"` (the box's
+twin: one thing, no contents list, the bite/sip-or-finish pair), named and nourished
+from the wrapped food's own `consume`, held as its own props.
+
+NOT in scope, deliberately: POS fulfilment does not read wrapped servings out of staff
+pockets. The loose store there is the tray plus staff-held takeout BOXES
+(`SingleCountMatch`), and a unit whose item isn't installed is still reported as a
+shortfall until a vessel covers it. Stow it back into the kitchen and the ticket fills
+from the tray as it always did.
 
 ## Eat-in vs takeaway (the two vessels + eating)
 
@@ -1387,6 +1673,16 @@ authored, its components are sitting in the box, and nothing in the kitchen can 
 the one setting that explains it. Any other surface that hides content by group owes
 the same answer.
 
+**The same now holds for an INGREDIENT that names its own group** (every DLC toy).
+`getIngredients`'s `addComp` used to DROP such a card, and Supplies is not group-gated —
+so a restaurant could buy five toys and then find nothing at the prep table and no word
+anywhere about why, which reads exactly like a broken pack. The card lists LOCKED
+(`locked` + `group`; the NUI refuses the drag and the hover names the group), the boss
+panel's Supplies row carries the same badge where the money is actually spent, and the
+REFUSAL moved to **`prepAdd`** — the one door a part enters a build by — as
+`cook_ingredient_group_locked`. Enforcement did not weaken; it just stopped being the
+only thing that spoke.
+
 **The takeout box's ranking and its make must list the same crafts.** `getCrafts` (the
 tooltip's "Create <food>" catalogue) used to drop any craft whose components weren't all
 installed items, while `prepMakeBox` → `bestCraftForLayers` applies no such test — so a
@@ -1400,10 +1696,10 @@ two halves of the kitchen feature just have to agree with each other.
 (every terminal cook/assemble/pour output), both rebuilt in `RebuildDerived`.
 
 **Item use** has no single cross-framework hook: ESX/QB take a per-name callback
-(`RegisterUsableItem`, re-registered on a `bag_item`/`meal_item`/`box_item`/`drink_item`
+(`RegisterUsableItem`, re-registered on a `bag_item`/`meal_item`/`box_item`/`serving_item`
 rename via the `pickle_restaurants:settingChanged` event), while ox_inventory calls the
 `pickle_restaurants.useItem` **export** named in the item definition — so ALL FOUR
-vessels (bag, meal, takeout box and the `drink_item`) ship as `stack = false,
+vessels (bag, meal, takeout box and the `serving_item`) ship as `stack = false,
 consume = 0` in `__INSTALL/items/`, and this resource (never ox) decides when the
 vessel is destroyed. A drink shipped with ox's own `status`/`anim` block and
 `consume = 1` instead, which is why it couldn't be drunk as an item: ox drank it
@@ -1481,7 +1777,8 @@ where a 201st top-level local is a hard compile error.
 
 Variants NEVER multiply items — they collapse into ONE item with the variation in
 build-stack metadata: all doughnuts are `cooked_doughnut` (frosting/sprinkles =
-finish meta), all drinks are the `drink_item` item (flavor meta), all meals the
+finish meta), all drinks AND every pocketed cooked product are the `serving_item`
+item (what it is, in meta — see "The Restaurant Item"), all meals the
 `meal_item` item (layout meta, `^box` for pizza boxes), every bag-kind food the
 `box_item` (food id meta) and every takeaway the `bag_item` (contents meta).
 Assembled-but-uncooked

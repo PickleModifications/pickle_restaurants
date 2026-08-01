@@ -239,6 +239,7 @@ local INVENTORY_IMAGE_BASES = {
     { res = "codem-inventory",  base = "nui://codem-inventory/html/itemimages/" },
     { res = "core_inventory",   base = "nui://core_inventory/html/img/" },
     { res = "tgiann-inventory", base = "nui://tgiann-inventory/html/images/" },
+    { res = "jaksam_inventory", base = "nui://jaksam_inventory/_images/" },
 }
 
 function InventoryImageBase()

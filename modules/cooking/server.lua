@@ -103,7 +103,7 @@ local function flavorForSlot(slot, rid)
     local idx = (slot < SODA_ICE_SLOT) and slot or (slot - 1)
     local d = GetDrinks()[idx]
     -- only the cup (input) is a real item — `output` is the flavor KEY (every
-    -- poured drink collects as the one `drink_item` item, flavor in metadata)
+    -- poured drink collects as the one `serving_item` item, flavor in metadata)
     -- With `rid`, a flavor whose group this restaurant doesn't carry leaves its
     -- tap dark, exactly like an uninstalled cup item.
     if d and ItemExists(d.input) and (rid == nil or RestaurantHasAccess(rid, d.group)) then return d end
@@ -413,7 +413,7 @@ end
 
 -- The hover chip's label for what collecting hands back: a poured drink reads as
 -- its flavor's configured label — the flavor key isn't an inventory item anymore
--- (drinks collect as the one generic `drink_item`), so GetItemLabel can't name it.
+-- (drinks collect as the one generic `serving_item`), so GetItemLabel can't name it.
 local function sodaGiveLabel(it, give)
     if give == it.output then
         for _, dd in ipairs(GetDrinks()) do
@@ -562,7 +562,7 @@ local function isTrayItem(item)
     if finishForOutput(item) then return true end -- finished products are products
     -- the generic collected drink lives in the tray too (its flavor is metadata),
     -- so a drink layer in a meal refunds back to the tray with its flavor intact
-    if item == GetSetting("drink_item", "drink") then return true end
+    if item == ServingItemName() then return true end
     -- both takeaway vessels are kitchen PRODUCTS: a made takeout box (a bag-kind
     -- food) and a packed Restaurant Bag are collected into the tray, never bought
     -- into the ingredient pool
@@ -826,13 +826,18 @@ local function servedStack(item, baseModel)
     return withLid(item, nil, baseModel) or withSideContainer(item, nil, baseModel)
 end
 
--- ─── the ONE generic drink item ──────────────────────────────────────────────
--- Every poured drink collects as the `drink_item` setting's item ("Restaurant
--- Drink"), the flavor riding as build-stack metadata — ONE meta layer holding the
--- drinks[].output key ({ { item = "soda" } }) — exactly like meals. TraySig makes
--- each flavor its own tray/inventory variation; the flavor key still resolves its
--- cup model via the drinks config even though it's no longer an item.
-local function DrinkItem() return GetSetting("drink_item", "drink") end
+-- ─── THE RESTAURANT ITEM (one serving of anything) ───────────────────────────
+-- Every poured drink AND every pocketed cooked product collects as the
+-- `serving_item` setting's item ("Restaurant Item"), what it is riding as ONE meta
+-- layer ({ { item = "soda" } } / { { item = "cooked_burger", stack = {…} } }).
+-- TraySig makes each flavor and each build variation its own tray/inventory entry;
+-- the flavor key still resolves its cup model via the drinks config even though it
+-- is not an item, and a product key still resolves its whole tower.
+--
+-- Named DrinkItem() here no longer: `ServingItem()` is what it is. The drink-only
+-- questions ("is this instance a drink?") are asked of the METADATA, never of the
+-- item name — that is the whole difference between this and the old drink item.
+local function ServingItem() return ServingItemName() end
 
 -- The flavor config a drink instance's meta records, or nil for a plain/unknown one.
 local function drinkFlavor(meta)
@@ -851,7 +856,7 @@ end
 -- a drink standing on a meal tray.
 local function pileMixesDrink(layers)
     if type(layers) ~= "table" or #layers < 2 then return false end
-    local di = DrinkItem()
+    local di = ServingItem()
     for _, l in ipairs(layers) do
         if l.item == di then return true end
     end
@@ -962,7 +967,13 @@ function LayerDisplay(l)
                   label = (food and food.label) or GetItemLabel(item),
                   image = FoodImageUrl(food, item),
                   imageCrop = FoodImageCrop(food) }
-    if item == DrinkItem() then
+    if item == ServingItem() then
+        -- A Restaurant Item holding a cooked PRODUCT is that product, all the way
+        -- down: the label, the picture and the props raised to a mouth are the
+        -- food's own. One delegating line, because the wrapper's layer has exactly
+        -- the shape this function already takes.
+        local wrapped = ServingLayer(item, l.stack)
+        if wrapped and not IsDrinkOutputKey(wrapped.item) then return LayerDisplay(wrapped) end
         local dd = drinkFlavor(l.stack)
         if dd then
             out.label = dd.label or out.label
@@ -1022,9 +1033,15 @@ local function layerIdentity(l)
     local fid = boxFoodId(l.item, l.stack)
     if fid then
         key = "craft:" .. fid
-    elseif l.item == DrinkItem() then
-        local flavor = type(l.stack) == "table" and l.stack[1] and l.stack[1].item
-        if flavor then key = "drink:" .. tostring(flavor) end
+    elseif l.item == ServingItem() then
+        -- one generic item, told apart by what it holds: a flavor key or a product.
+        -- A wrapped product counts as THAT PRODUCT, so a bag holding a loose burger
+        -- and a pocketed one lists them as one "Burger ×2" rather than as a burger
+        -- and an inscrutable "Restaurant Item".
+        local held = type(l.stack) == "table" and l.stack[1] and l.stack[1].item
+        if held then
+            key = IsDrinkOutputKey(held) and ("drink:" .. tostring(held)) or tostring(held)
+        end
     else
         -- a multi-faced ingredient is generic as an ITEM (one `restaurant_toy`), so
         -- its variant IS its identity here — same reason a takeout box counts as its
@@ -1075,7 +1092,18 @@ local function compSpec(c)
     end
     -- the generic drink item renders as its recorded flavor's capped cup — the
     -- flavor key (meta layer) resolves the cup model from the drinks config
-    if c.item == DrinkItem() then
+    if c.item == ServingItem() then
+        -- holding a cooked product: render the PRODUCT's own tower (the wrapper has
+        -- no prop of its own — it is a pocket, not a container). Its `sig` stays the
+        -- wrapper's, so anything re-reserving this layer still names the instance it
+        -- came from.
+        local wrapped = ServingLayer(c.item, c.stack)
+        if wrapped and not IsDrinkOutputKey(wrapped.item) then
+            local inner = compSpec({ item = wrapped.item, stack = wrapped.stack,
+                                     top = wrapped.top, half = c.half, dx = c.dx, dy = c.dy })
+            if c.stack then inner.sig = TraySig(c.stack) end
+            return inner
+        end
         local dd = drinkFlavor(c.stack)
         if dd then
             spec.model = dd.model
@@ -1520,9 +1548,20 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
             -- is how a standalone ingredient (a DLC toy) reaches the bar at all.
             -- Ungrouped ingredients — every one the base ships — are unaffected, and a
             -- restaurant with no group list carries everything as always.
+            --
+            -- A GATE MUST EXPLAIN ITSELF (see the takeout box's `locked` crafts). This
+            -- USED to drop the card outright, and a dropped card is indistinguishable
+            -- from a broken pack: a restaurant that stocked five toys in Supplies —
+            -- which is NOT group-gated — then found nothing at the prep table and no
+            -- word anywhere about why. The card lists LOCKED instead, naming the group
+            -- an admin has to add to the restaurant. Access is still enforced; it just
+            -- moves to `prepAdd`, the one door a part enters a build by.
+            local locked, lockedGroup
             do
                 local def = IngredientDef(comp)
-                if def and def.group and not RestaurantHasAccess(prop.restaurant_id, def.group) then return end
+                if def and def.group and not RestaurantHasAccess(prop.restaurant_id, def.group) then
+                    locked, lockedGroup = true, def.group
+                end
             end
 
             -- ONE ITEM, MANY FACES: a variants ingredient gets one card PER VARIANT.
@@ -1548,6 +1587,7 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
                                           label = v.label or GetItemLabel(comp),
                                           image = v.image or GetItemImage(comp),
                                           count = left,
+                                          locked = locked or nil, group = lockedGroup,
                                           model = v.model or itemModel(comp) }
                     end
                 end
@@ -1561,6 +1601,7 @@ lib.callback.register("pickle_restaurants:cooking:getIngredients", function(src,
             local reserved = build and math.ceil(reservedUnits(build, "inv", comp, 0)) or 0
             local entry = { kind = "component", item = comp, label = GetItemLabel(comp),
                             image = GetItemImage(comp), count = math.max(0, count - reserved),
+                            locked = locked or nil, group = lockedGroup,
                             model = itemModel(comp) }
             -- a beef/dual patty renders as the full two-faced patty, same as one
             -- pulled from the tray (raw components carry no cheese)
@@ -2089,7 +2130,7 @@ lib.callback.register("pickle_restaurants:cooking:collect", function(src, d)
             for _, cfg in ipairs(GetDrinks()) do
                 if cfg.output == it.output then dd = cfg break end
             end
-            giveItem = DrinkItem()
+            giveItem = ServingItem()
             it.stackMeta = { { item = it.output } }
             giveLabel = dd and dd.label or nil
         end
@@ -2145,7 +2186,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
     PurgeExpiredTray(prop.restaurant_id, GetIdentifier(src)) -- drop spoiled rows before listing
     local list = GetTray(prop.restaurant_id, GetIdentifier(src))
     local mealItem = MealItem()
-    local drinkItem = DrinkItem()
+    local servingItem = ServingItem()
     local bagItem = BagItemName()
     -- At the prep table, cooked items placed on a build are spoken for — subtract
     -- the reservations so the tray shows what's still free to grab.
@@ -2190,9 +2231,11 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 -- NUI says so, and setting it down recreates the box, not a tray
                 if type(e.meta) == "table" and e.meta[1] ~= nil and e.meta[1].box then e.boxed = true end
             end
-            -- the generic drink item: resolve its label + capped-cup render from the
-            -- flavor its metadata records (the drinks[].output key)
-            if e.item == drinkItem then
+            -- the Restaurant Item holding a DRINK: resolve its label + capped-cup
+            -- render from the flavor its metadata records (the drinks[].output key).
+            -- Only drinks reach the tray as this item — a pocketed cooked product is
+            -- unwrapped back into a plain tray row when it is stowed.
+            if e.item == servingItem then
                 local dd = drinkFlavor(e.meta)
                 if dd then
                     e.label = dd.label or e.label
@@ -2234,6 +2277,25 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 -- the full build stack (component models) so the drag-to-oven preview
                 -- can render every layer, matching what actually gets placed
                 e.stack = stackModelsFromMeta(e.item, e.meta)
+                -- A containered bake's uncooked intermediate IS THE FILLED TRAY, not one
+                -- serving: one raw_cookie unit is a tray of six, one raw_cake a tin of
+                -- batter. Render it as the same container + servings stack `place` folds
+                -- in, or the card, the drag preview and the tray it came off the prep
+                -- table as all show a single bare cookie. `withContainer` deliberately
+                -- skips a batch OUTPUT (six cookies collect as six loose cookies) — the
+                -- INPUT is the opposite case: one unit, one tray.
+                if rin.container_model and rin.container_model ~= "" then
+                    local n = math.max(math.floor(tonumber(rin.output_count) or 1), 1)
+                    if n > 1 and not (e.stack and #e.stack > 1) then
+                        e.stack = { rin.container_model }
+                        for _ = 1, n do e.stack[#e.stack + 1] = rin.raw_model end
+                    else
+                        e.stack = e.stack or { rin.raw_model }
+                        if e.stack[1] ~= rin.container_model then
+                            table.insert(e.stack, 1, rin.container_model)
+                        end
+                    end
+                end
             else
                 -- A cooked/burnt product that carries a build stack (e.g. a cooked
                 -- pizza) still renders as the WHOLE stack — its crust layer swapped
@@ -2291,7 +2353,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
             -- how this variation differs from the base recipe (its toppings), plus
             -- the full component list for the hover tooltip. A drink's meta is just
             -- its flavor key — already the card label, not a topping.
-            if e.meta and not ftarget and e.item ~= drinkItem and e.item ~= bagItem and not e.takeout then
+            if e.meta and not ftarget and e.item ~= servingItem and e.item ~= bagItem and not e.takeout then
                 e.extras = extrasComponents(e.item, e.meta)
                 e.comps  = stackComponents(e.meta)
             end
@@ -2305,14 +2367,19 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
             local exp = TrayExpiresAt(e.item, e.cookedAt)
             e.expiresIn = exp and math.max(0, exp - os.time()) or nil
             e.cookedAt = nil
-            -- CAN THIS BE POCKETED AT ALL? The tray holds things the real inventory
-            -- can't: most cooked products (fries, a patty, a pizza) are tray-only by
-            -- design — they reach a customer packed into a meal or a bag, never as a
-            -- bare item — and burnt food is unexchangeable. `trayToInventory` refuses
-            -- both, so offering Take / Take all on them is a button whose only outcome
-            -- is an error. The RULE lives here, with the two refusals it mirrors
-            -- (ItemExists + the burnt guard), rather than being re-derived in the NUI.
-            e.takeable = (ItemExists(e.item) and not e.burnt) or nil
+            -- CAN THIS BE POCKETED AT ALL? Anything not BURNT can, now: a product with
+            -- an installed item of its own becomes that item, and everything else —
+            -- the tray-only majority (fries, a patty, a pizza), which is most of what
+            -- a kitchen makes — becomes ONE Restaurant Item carrying what it is. That
+            -- is the whole point of the item: a cook can hand a cooked burger to
+            -- another worker instead of it being stranded on their own tray.
+            -- Burnt food stays unexchangeable (the bin is its only exit), and with no
+            -- Restaurant Item installed the old rule survives untouched.
+            -- The RULE lives here, with the refusals `trayToInventory` mirrors, rather
+            -- than being re-derived in the NUI.
+            local wrappable = ItemExists(ServingItem()) and not IsCarrierItem(e.item)
+                and e.item ~= BoxItemName() and e.item ~= ServingItem()
+            e.takeable = ((ItemExists(e.item) or wrappable) and not e.burnt) or nil
             out[#out + 1] = e
         end
     end
@@ -2330,11 +2397,46 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
             local count = v.count
             if build then count = count - math.ceil(reservedUnits(build, "inv", item, v.sig)) end
             if count > 0 then
+                -- THE RESTAURANT ITEM HOLDING A COOKED PRODUCT is listed AS that
+                -- product. The wrapper's one layer carries { item, stack }, so
+                -- swapping them in HERE — before any of the render code below — means
+                -- the cook-state swap, the container tray, the finish flavor, the
+                -- contents list and the tooltip all run against the food itself
+                -- rather than against a vessel they know nothing about.
+                --
+                -- `item` and `v` are SHADOWED rather than the branches below being
+                -- taught about wrappers: there is one description of a burger in this
+                -- file and a pocketed one has to be it, or the same food reads two
+                -- ways depending on which store it came out of (the bug the bag's
+                -- `comps` already taught us).
+                --
+                -- A DRINK is left alone: it is not "wrapping" anything, it IS the
+                -- vessel, and its own branch below renders the capped cup.
+                local wrapLayer = ServingLayer(item, v.meta)
+                if wrapLayer and IsDrinkOutputKey(wrapLayer.item) then wrapLayer = nil end
+                local wrapItem = wrapLayer and item or nil
+                local item = item
+                if wrapLayer then
+                    item = wrapLayer.item
+                    -- `sig` stays the WRAPPER's variation: it is what a stow removes,
+                    -- and it can never collide with a real product's sig (a wrapper's
+                    -- stack is one layer deeper).
+                    v = { sig = v.sig, count = v.count, meta = wrapLayer.stack }
+                end
                 local entry = { item = item, count = count, source = "inv", sig = v.sig,
                                 label = GetItemLabel(item), image = GetItemImage(item), model = itemModel(item) }
+                if wrapLayer then
+                    -- what it IS, named by the food that authored it (a tray-only
+                    -- product has no inventory row to borrow a label or art from)
+                    local disp = LayerDisplay(wrapLayer)
+                    entry.wrapped = true
+                    entry.wrapItem = wrapItem
+                    entry.label = (disp and disp.label) or entry.label
+                    entry.image = (disp and disp.image) or entry.image
+                end
                 -- the generic drink item: label + capped-cup render from its
                 -- recorded flavor (mirrors the tray path above)
-                if item == drinkItem then
+                if item == servingItem then
                     local dd = drinkFlavor(v.meta)
                     if dd then
                         entry.label = dd.label or entry.label
@@ -2427,7 +2529,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                 end
                 -- a collected drink renders cup+lid, a side renders in its box — never bare
                 if not entry.stack then entry.stack = servedStack(item, entry.model) end
-                if v.meta and not ftarget and item ~= drinkItem and not entry.takeout and not entry.bag then
+                if v.meta and not ftarget and item ~= servingItem and not entry.takeout and not entry.bag then
                     entry.extras = extrasComponents(item, v.meta)
                     entry.comps  = stackComponents(v.meta)
                 end
@@ -2447,6 +2549,21 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
                     if type(v.meta) == "table" and v.meta[1] ~= nil and v.meta[1].box then entry.boxed = true end
                     if isPrep then entry.decompose = true end
                 end
+                -- A WRAPPED PRODUCT IS STOWED, NOT DRAGGED. It renders as the food it
+                -- is, but every kitchen gesture (build a layer, cook it, take it
+                -- apart) addresses an item by NAME — and the name a drag would carry
+                -- is the wrapper's, so a wrapped patty would reserve "the Restaurant
+                -- Item" and a build made of one would record a vessel as its layer.
+                -- One click puts it back on the kitchen tray (`invToTray`), where it
+                -- is an ordinary cooked item again and everything works as it always
+                -- did. That is also exactly the receiving half of handing food to
+                -- another worker, which is what this item exists for.
+                if entry.wrapped then
+                    entry.decompose = nil
+                    entry.uncooked = nil     -- can't be dragged into a station either
+                    entry.cookStation = nil
+                    entry.stow = true
+                end
                 out[#out + 1] = entry
             end
         end
@@ -2461,7 +2578,7 @@ lib.callback.register("pickle_restaurants:cooking:getTray", function(src, d)
         for _, t in ipairs(f.targets or {}) do once(t.output) end
     end
     once(mealItem)  -- meals aren't a recipe/assembly output, so list them explicitly
-    once(drinkItem) -- neither is the generic drink item (flavor rides its metadata)
+    once(servingItem) -- nor the Restaurant Item (a drink, or a pocketed product)
     once(BoxItemName()) -- nor a made takeout box (the food id rides its metadata)
     once(bagItem)       -- nor a packed Restaurant Bag (its contents ride its metadata)
 
@@ -2482,6 +2599,20 @@ function BuildInvMeta(meta, item)
     local m
     if type(meta) == "table" and #meta > 0 then
         m = { stack = meta, description = stackDescription(meta) }
+    end
+    -- THE RESTAURANT ITEM names itself after what it holds, the same way a made
+    -- takeout box does: one generic item is only told apart by its contents, and a
+    -- pocket holding four of them all reading "Restaurant Item" tells a cook nothing
+    -- about which is the cola and which is the cheeseburger. (ox_inventory honours
+    -- `label`/`imageurl` natively; a framework that doesn't simply shows the item.)
+    if item and item == ServingItem() then
+        local disp = LayerDisplay({ item = item, stack = meta })
+        if disp and disp.label then
+            m = m or {}
+            m.label = disp.label
+            m.description = m.description or disp.label
+            if disp.image then m.imageurl = disp.image end
+        end
     end
     local fid = item and boxFoodId(item, meta) or nil
     if fid then
@@ -2590,11 +2721,25 @@ lib.callback.register("pickle_restaurants:cooking:trayToInventory", function(src
         local _, state = recipeForOutput(item)
         if state == "burnt" then return { ok = false, error = _L("cook_cant_take_burnt") } end
     end
-    -- The tray holding accepts anything (e.g. a meal made before its item was
-    -- installed), but the real inventory can't — don't consume the tray entry
-    -- into an item the framework doesn't know (it would just vanish).
+    -- WHAT IT BECOMES IN A POCKET. A product with an inventory item of its own
+    -- becomes that item, exactly as before. Everything else — the tray-only majority,
+    -- which by the one-item consolidation rule will never have an item — becomes ONE
+    -- Restaurant Item whose single meta layer says what it is: `{ item = <product>,
+    -- stack = <its build stack> }`, the same shape a poured drink has always used.
+    -- With neither installed there is nothing to become and the tray keeps it.
+    -- A VESSEL IS NEVER WRAPPED. The meal, the bag and the takeout box are carriers
+    -- with items of their own and contents that mean something (a layout, a list, a
+    -- food) — putting one inside a pocket that holds ONE serving would make a meal
+    -- read and eat as a single mouthful and hide its tray. With their own item
+    -- uninstalled they stay on the tray exactly as they always have.
+    local giveItem, wrap = item, false
     if not ItemExists(item) then
-        return { ok = false, error = _L("cook_item_not_installed", item) }
+        local serving = ServingItem()
+        if not ItemExists(serving) or IsCarrierItem(item)
+            or item == BoxItemName() or item == serving then
+            return { ok = false, error = _L("cook_item_not_installed", item) }
+        end
+        giveItem, wrap = serving, true
     end
     -- Move one instance at a time so each keeps its OWN build variation on the
     -- inventory slot (ox/qb slot metadata). TrayTopMeta must be read before the
@@ -2602,9 +2747,52 @@ lib.callback.register("pickle_restaurants:cooking:trayToInventory", function(src
     for _ = 1, count do
         local meta = TrayTopMeta(rid, id, item, sig)
         if not RemoveTray(rid, id, item, 1, sig) then break end
-        Inventory.AddItem(src, item, 1, buildInvMeta(meta, item))
+        local give = wrap and { { item = item, stack = meta } } or meta
+        Inventory.AddItem(src, giveItem, 1, buildInvMeta(give, giveItem))
     end
-    return { ok = true, item = item, count = count, label = GetItemLabel(item) }
+    -- Named as what was taken, never as the generic wrapper — "Taken 1 Restaurant
+    -- Item" tells a cook nothing about which of the four things on their tray moved.
+    local label = wrap and ((LayerDisplay({ item = item }) or {}).label) or nil
+    return { ok = true, item = giveItem, count = count, label = label or GetItemLabel(item) }
+end)
+
+-- ─── stow: a pocketed serving back into the kitchen ──────────────────────────
+-- The receiving half of handing food to another worker. A Restaurant Item holding a
+-- cooked product is a SEALED serving in the inventory: it renders and eats as what it
+-- holds, but no kitchen gesture can address it (every one names an item, and the name
+-- it would carry is the wrapper's). One click unwraps it back onto this restaurant's
+-- cooked-items tray, under the cook's own identifier, where it is an ordinary tray
+-- entry again — buildable, cookable, sellable, decomposable.
+--
+-- The wrapper is only ever undone HERE, and only at a station of a restaurant the
+-- player may cook at: the tray is restaurant-scoped stock, so stowing somewhere you
+-- can't work would be depositing food into a kitchen that isn't yours.
+lib.callback.register("pickle_restaurants:cooking:invToTray", function(src, d)
+    local prop = PropCache[tonumber(d.prop_id)]
+    if not prop then return { ok = false } end
+    local rid = prop.restaurant_id
+    if not HasPerm(rid, src, "cook") then return { ok = false } end
+    local serving = ServingItem()
+    if not ItemExists(serving) then return { ok = false } end
+    local sig   = (type(d.sig) == "string") and d.sig or nil
+    local count = math.max(1, math.floor(tonumber(d.count) or 1))
+    -- One slot at a time, re-read each pass: the metadata IS the authority on what a
+    -- slot holds, so a forged `item` in the payload can never decide what lands on
+    -- the tray. A drink is refused — it is already the vessel and belongs in a
+    -- pocket; there is nothing to unwrap.
+    local moved, label = 0, nil
+    for _ = 1, count do
+        local meta = invVariationMeta(src, serving, sig)
+        local layer = ServingLayer(serving, meta)
+        if not layer or IsDrinkOutputKey(layer.item) then break end
+        if invVariationCount(src, serving, sig) < 1 then break end
+        removeInvVariation(src, serving, sig, 1)
+        AddTray(rid, GetIdentifier(src), layer.item, 1, layer.stack)
+        label = label or (LayerDisplay(layer) or {}).label or GetItemLabel(layer.item)
+        moved = moved + 1
+    end
+    if moved == 0 then return { ok = false, error = _L("cook_nothing_to_stow") } end
+    return { ok = true, count = moved, label = label }
 end)
 
 -- throw a tray entry in the bin — gone for good, nothing refunded. The only way
@@ -2697,6 +2885,18 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     -- See IsCarrierItem (core) for why; the client refuses the drag too, this is the
     -- authority (the NUI is untrusted).
     if IsCarrierItem(item) then return { ok = false, error = _L("cook_no_nested_vessel") } end
+    -- A GROUP AN INGREDIENT NAMES IS A REAL ACCESS GATE, and this is where it is
+    -- enforced — the same shape the takeout box uses (`getCrafts` lists a locked
+    -- craft, `prepMakeBox` refuses it). getIngredients now SHOWS such a card locked
+    -- so the kitchen can see the toy it bought and read why it can't use it; the
+    -- refusal lives here, at the one door a part enters a build by.
+    do
+        local def = IngredientDef(item)
+        if def and def.group and not RestaurantHasAccess(rid, def.group) then
+            return { ok = false, error = _L("cook_ingredient_group_locked",
+                                            def.label or GetItemLabel(item), def.group) }
+        end
+    end
     -- a layer's topping rides in the reserved instance's meta, resolved by `sig` in
     -- consumeLayers — there is no separate cheese/topping dimension on the reservation.
     -- only a halves-configured ingredient may reserve a half (the NUI is untrusted)

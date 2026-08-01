@@ -363,10 +363,11 @@ RegisterNetEvent("pickle_restaurants:consume:open", function(d)
     -- should behave like the food it is. On your feet it's takeaway: one food, one
     -- action, eaten where you stand (no contents menu — there is only ever one
     -- thing in a box, and the server eats the whole thing whatever index we send).
-    -- A DRINK is drunk where you stand, seated or not: it is one flavor in a cup the
-    -- ped holds, so there is nothing to lay out on a table and nothing to choose from
-    -- — just the sip/finish pair the box uses.
-    if d.kind == "drink" then
+    -- A RESTAURANT ITEM is consumed where you stand, seated or not: it is ONE serving
+    -- held in the hand — a flavor in the restaurant's cup, or a cooked product as its
+    -- own tower — so there is nothing to lay out on a table and nothing to choose
+    -- from, just the bite/sip-or-finish pair the box uses.
+    if d.kind == "serving" then
         showBoxMenu(vessel, d.food or {})
         return
     end

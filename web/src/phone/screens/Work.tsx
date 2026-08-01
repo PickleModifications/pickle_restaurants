@@ -704,12 +704,17 @@ export function Manage({ params }: { params: any }) {
   const { back, home, currency } = usePhone();
   const rid = params.rid;
   const emp = (home?.employment || []).find((e: any) => e.id === rid);
-  // A BOSS GRADE holds everything here, exactly like the owner or an admin — the
+  // A BOSS GRADE holds everything here, exactly like the owner or an admin: the
   // server's ResolvePerms says so, and `isOwner` is kept as an alias of it.
-  const allowed = MANAGE_TABS.filter((t) => emp?.isBoss || emp?.isOwner || emp?.perms?.[t.perm]);
   // null = the hub. A section is pushed over it, never squeezed alongside it.
   const [section, setSection] = useState<string | null>(null);
   const [mgmt, setMgmt] = useState<any>(null);
+
+  // Supply runs move BUYING to a depot counter, but the Stock screen stays: moving
+  // stock between the larder and your own pockets is not a purchase and has nothing to
+  // do with a depot. The screen swaps its buy button for deposit/withdraw.
+  const supplyRuns = mgmt?.supplyRuns;
+  const allowed = MANAGE_TABS.filter((t) => emp?.isBoss || emp?.isOwner || emp?.perms?.[t.perm]);
 
   const loadMgmt = () => fetchNui("phone:mgmtData", { id: rid }).then((d) => d?.ok && setMgmt(d));
   useEffect(() => {
@@ -762,6 +767,17 @@ export function Manage({ params }: { params: any }) {
     <Screen className="pb-8">
       <TopBar title={_L("phone.manage.title")} subtitle={emp?.label} onBack={back} />
       <div className="space-y-2 p-4">
+        {/* Buying left this screen with supply runs on, so say where it went rather
+            than letting the missing button read as a permission problem. */}
+        {supplyRuns?.enabled && (emp?.isBoss || emp?.isOwner || emp?.perms?.manage_stock) && (
+          <div className="flex items-center gap-2 rounded-2xl border border-border bg-card p-3 text-[0.72rem] text-muted-foreground">
+            <Boxes className="h-4 w-4 shrink-0 text-brand" />
+            <span className="min-w-0 flex-1">{_L("phone.manage.stock_at_depot")}</span>
+            {(supplyRuns.pending || []).length > 0 && (
+              <span className="shrink-0 font-mono">{(supplyRuns.pending || []).length}</span>
+            )}
+          </div>
+        )}
         {allowed.length === 0 ? (
           <Empty title={_L("phone.manage.no_access")} hint={_L("phone.manage.no_access_hint")} />
         ) : (
@@ -1229,23 +1245,35 @@ function StockTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () =>
   if (!mgmt) return <Spinner />;
   const supplies: any[] = mgmt.supplies || [];
 
+  // With supply runs on there is nothing to buy here: ordering happens at a depot
+  // counter, and this screen becomes the way stock moves between the larder and your
+  // own pockets. The server refuses an off-site purchase either way, so this is which
+  // control is worth offering, not a security boundary.
+  const canBuy = !mgmt.supplyRuns?.enabled;
+
   const buy = async (s: any) => {
-    const q = qty[s.item] || 10;
-    const res = await fetchNui("phone:buyStock", { id: rid, item: s.item, qty: q });
+    const q = qty[s.key || s.item] || 10;
+    const res = await fetchNui("phone:buyStock", { id: rid, key: s.key || s.item, item: s.item, qty: q });
     if (res?.ok) {
       toast(_L("phone.stock.bought", q, s.label));
       reload();
     } else toast(res?.error || _L("phone.work.failed"), "err");
   };
 
+  const move = (event: "phone:depositStock" | "phone:withdrawStock", s: any) => async () => {
+    const q = qty[s.key || s.item] || 10;
+    const res = await fetchNui(event, { id: rid, key: s.key || s.item, item: s.item, qty: q });
+    if (res?.ok) reload(); else toast(res?.error || _L("phone.work.failed"), "err");
+  };
+
   return (
     <div className="space-y-1.5">
       {supplies.length === 0 && <Empty title={_L("phone.stock.empty")} />}
       {supplies.map((s) => {
-        const q = qty[s.item] || 10;
+        const q = qty[s.key || s.item] || 10;
         const low = (s.stock || 0) < 10;
         return (
-          <div key={s.item} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2">
+          <div key={s.key || s.item} className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2">
             {/* the supply's own inventory art — the payload has carried `image` all
                 along, this row just never drew it */}
             <ItemImg src={s.image} alt={s.label} className="h-9 w-9 shrink-0 rounded-lg bg-muted/40 object-contain" />
@@ -1260,17 +1288,30 @@ function StockTab({ rid, mgmt, reload }: { rid: number; mgmt: any; reload: () =>
               </div>
             </div>
             <div className="flex items-center gap-1 rounded-full border border-border px-1">
-              <button onClick={() => setQty((m) => ({ ...m, [s.item]: Math.max(1, q - 5) }))}>
+              <button onClick={() => setQty((m) => ({ ...m, [s.key || s.item]: Math.max(1, q - 5) }))}>
                 <Minus className="h-3.5 w-3.5" />
               </button>
               <span className="w-6 text-center font-mono text-xs">{q}</span>
-              <button onClick={() => setQty((m) => ({ ...m, [s.item]: q + 5 }))}>
+              <button onClick={() => setQty((m) => ({ ...m, [s.key || s.item]: q + 5 }))}>
                 <Plus className="h-3.5 w-3.5" />
               </button>
             </div>
-            <button onClick={() => buy(s)} className="rounded-full bg-brand px-2.5 py-1.5 text-[0.7rem] font-bold text-brand-ink">
-              {_L("phone.stock.buy")}
-            </button>
+            {canBuy ? (
+              <button onClick={() => buy(s)} className="rounded-full bg-brand px-2.5 py-1.5 text-[0.7rem] font-bold text-brand-ink">
+                {_L("phone.stock.buy")}
+              </button>
+            ) : s.movable ? (
+              <>
+                <button onClick={move("phone:depositStock", s)} disabled={(s.held || 0) < q}
+                  className="rounded-full border border-border px-2.5 py-1.5 text-[0.7rem] font-bold disabled:opacity-40">
+                  {_L("phone.stock.deposit")}
+                </button>
+                <button onClick={move("phone:withdrawStock", s)} disabled={(s.stock || 0) < q}
+                  className="rounded-full border border-border px-2.5 py-1.5 text-[0.7rem] font-bold disabled:opacity-40">
+                  {_L("phone.stock.withdraw")}
+                </button>
+              </>
+            ) : null}
           </div>
         );
       })}

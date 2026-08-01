@@ -103,7 +103,7 @@ end
 --  as STATION_CAM. Only the LEFT door (#1) is tuned; the RIGHT door (#2) mirrors
 --  it by flipping ONLY X — matching how the door props themselves mirror.
 local STOVE_DOOR_VIEWS = {
-    door1 = { pos = vector3(-0.40, -0.95, 1.05), lookAt = vector3(-0.26, 0.0, 0.35), fov = 38.0 },
+    door1 = { pos = vector3(-0.40, -1.025, 0.95), lookAt = vector3(-0.26, 0.0, 0.35), fov = 38.0 },
 }
 
 local function flipX(cfg)

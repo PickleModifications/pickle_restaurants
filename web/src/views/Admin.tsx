@@ -76,7 +76,7 @@ export default function Admin({ data, onClose }: { data: any; onClose: () => voi
         </TabsContent>
 
         <TabsContent value="settings" className="flex min-h-0 flex-1 flex-col">
-          <Settings settings={settings} items={items} groups={groups} dlcs={data?.dlcs} ingredients={menuIngredients} dlcCosts={data?.dlcCosts} onSaved={refresh} appTheme={appTheme} onAppTheme={setAppTheme} phoneTheme={phoneTheme} onPhoneTheme={setPhoneTheme} jobsAvailable={data?.jobsAvailable} />
+          <Settings settings={settings} items={items} groups={groups} dlcs={data?.dlcs} ingredients={menuIngredients} dlcCosts={data?.dlcCosts} onSaved={refresh} appTheme={appTheme} onAppTheme={setAppTheme} phoneTheme={phoneTheme} onPhoneTheme={setPhoneTheme} jobsAvailable={data?.jobsAvailable} supplyDepots={data?.supplyDepots} bakeContainers={data?.bakeContainers} refresh={refresh} />
         </TabsContent>
       </Tabs>
     </Panel>

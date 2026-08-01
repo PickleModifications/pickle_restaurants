@@ -2,7 +2,7 @@
 -- Paste these entries into ox_inventory/data/items.lua
 --
 -- This is the COMPLETE set the resource needs: the handout items players receive
--- (bag / meal / drink / receipt) plus every raw ingredient & input the kitchen
+-- (bag / meal / takeout box / Restaurant Item / receipt) plus every raw ingredient & input the kitchen
 -- consumes. Cooked/assembled foods (burger, fries, cooked patty, pizza, cake…) are
 -- intentionally NOT here — they live only in the per-player cooked-items tray and
 -- get packaged into a bag, meal tray, or pizza box at the prep station, so they
@@ -50,15 +50,25 @@
         consume = 0,
         server = { export = 'pickle_restaurants.useItem' },
     },
-    -- Every poured drink is this ONE item with the flavor in its metadata, so it is
-    -- a VESSEL like the three above and must be declared the same way: `consume = 0`
-    -- + the export, with NO client status/anim. With ox's own status block it would
-    -- drink the item itself — its own thirst number, its own generic bottle, the
-    -- item destroyed — so this resource would never see the use and a drink could
-    -- never be sipped from the restaurant's branded cup. What a drink quenches is
-    -- authored on the FOOD (its `consume` block), never here.
-    ['drink'] = {
-        label  = 'Restaurant Drink',
+    -- THE RESTAURANT ITEM: ONE serving of anything the kitchen makes. Every poured
+    -- drink is this item with its flavor in the metadata, AND every cooked product a
+    -- cook pockets off the tray (a patty, a burger, a pizza, a frosted cake) is this
+    -- item with the product + its build stack in the metadata. That is what lets
+    -- cooked food be handed to another worker at all: cooked foods have no inventory
+    -- items of their own and never will (one-item consolidation), so before this they
+    -- could only leave a kitchen packed inside a meal, a bag or a box.
+    --
+    -- REPLACES the old `drink` item — if you are upgrading, keep `drink` installed
+    -- only until your kitchens are empty of them.
+    --
+    -- A VESSEL like the three above and declared the same way: `consume = 0` + the
+    -- export, with NO client status/anim. With ox's own status block ox would eat the
+    -- item itself — its own hunger/thirst number, its own generic prop, the item
+    -- destroyed — so this resource would never see the use, and a serving could never
+    -- be eaten as the food it is (or sipped from the restaurant's branded cup). What
+    -- a serving restores is authored on the FOOD (its `consume` block), never here.
+    ['restaurant_item'] = {
+        label  = 'Restaurant Item',
         weight = 300,
         stack  = false,
         close  = true,

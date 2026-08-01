@@ -10,7 +10,6 @@
 -- =============================================
 
 local function ReceiptItem() return GetSetting("receipt_item", "restaurant_receipt") end
-local function DrinkItemName() return GetSetting("drink_item", "drink") end
 local function MealItemName() return GetSetting("meal_item", "meal") end
 
 -- The two PACKED VESSELS a ticket can be filled from: the eat-in serving tray meal
@@ -226,7 +225,7 @@ function BuildSellableCatalog(rid)
     -- flavors above). The chosen flavor rides the order line as its `variant` (its menu
     -- identity), so kitchen fulfillment still pins the exact flavor — a Cola order is
     -- never filled by a Sprite. One price covers every flavor (modifier price 0).
-    local drinkItem = DrinkItemName()
+    local drinkItem = ServingItemName()
     if ItemExists(drinkItem) then
         local flavors, cost, grp, mixed = {}, nil, nil, false
         for _, d in ipairs(GetDrinks()) do
@@ -251,7 +250,10 @@ function BuildSellableCatalog(rid)
         if #flavors > 0 then
             -- the generic drink card borrows its first flavor's art (mirrors the POS)
             local cardImg = DrinkFlavorImage(flavors[1].variant) or GetItemImage(drinkItem)
-            add(drinkItem, "", GetItemLabel(drinkItem), "drink", cost or 0, flavors,
+            -- NAMED AS A DRINK, not as the item. The vessel is generic now (the same
+            -- item holds a pocketed burger), so `GetItemLabel` would put "Restaurant
+            -- Item" on the menu board where "Fountain Drink" belongs.
+            add(drinkItem, "", _L("sell_drink_label"), "drink", cost or 0, flavors,
                 (not mixed and grp ~= "") and grp or nil, cardImg)
         end
     end
@@ -440,10 +442,13 @@ end
 -- flavor is its menu identity. Kept in lock-step with lineVariationKey below so a POS
 -- line and a cooked instance describe the same thing.
 local function variationKey(item, meta)
-    if item == DrinkItemName() then
-        -- the flavor riding as the drink's one meta layer
+    if item == ServingItemName() then
+        -- what this serving IS, riding as the Restaurant Item's one meta layer: a
+        -- fountain flavor (its menu identity) or, for a pocketed cooked product, the
+        -- product itself — which is NOT a menu identity of the vessel, so it gets its
+        -- own namespace and can never be filled by a drink line or vice versa.
         local key = (type(meta) == "table" and meta[1] and meta[1].item) or ""
-        return "d:" .. tostring(key)
+        return (IsDrinkOutputKey(key) and "d:" or "w:") .. tostring(key)
     end
     -- A made takeout box (a bag-kind food) is identified by the food id on its first
     -- meta layer.
@@ -530,7 +535,7 @@ local function mealItemsDetail(meta, vesselItem)
     for _, l in ipairs(type(meta) == "table" and meta or {}) do
         if l.item ~= mealItem then
             local entry = { item = l.item, image = GetItemImage(l.item), mods = {} }
-            if l.item == DrinkItemName() then
+            if l.item == ServingItemName() and IsDrinkServing(l.item, l.stack) then
                 local key = type(l.stack) == "table" and l.stack[1] and l.stack[1].item or nil
                 entry.label = drinkFlavorView(key).label
                 entry.image = DrinkFlavorImage(key) or entry.image

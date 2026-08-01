@@ -128,7 +128,7 @@ export type Food = {
   modifiers?: Modifier[];
   // server annotations
   valid?: boolean; missing?: string[]; defaultPrice?: number;
-  box_item_installed?: boolean; drink_item_installed?: boolean; tap?: number;
+  box_item_installed?: boolean; serving_item_installed?: boolean; tap?: number;
   /** which part of this food consumes nothing — it can't be made in-game until
    *  it does ("components" | "cook_input" | "pour_cup" | "steps"). */
   no_input?: string;

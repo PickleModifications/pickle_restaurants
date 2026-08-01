@@ -2,7 +2,7 @@
 -- Paste these entries into qb-core/shared/items.lua (inside the QBShared.Items table).
 --
 -- The COMPLETE set the resource needs: the handout items players receive
--- (bag / meal / drink / receipt) plus every raw ingredient & input the kitchen
+-- (bag / meal / takeout box / Restaurant Item / receipt) plus every raw ingredient & input the kitchen
 -- consumes. Cooked/assembled foods (burger, fries, cooked patty, pizza, cake…) are
 -- intentionally omitted — they exist only in the cooked-items tray and get packaged
 -- into a bag / meal tray / pizza box at prep, never entering inventory.
@@ -11,7 +11,10 @@
     ['restaurant_bag'] = { name = 'restaurant_bag', label = 'Restaurant Bag', weight = 800, type = 'item', image = 'restaurant_bag.png', unique = true,  useable = true, shouldClose = true, combinable = nil, description = 'A bag of food from a restaurant. Use it to pick what to eat.' },
     ['meal']           = { name = 'meal',           label = 'Meal',            weight = 800, type = 'item', image = 'meal.png',           unique = true,  useable = true, shouldClose = true, combinable = nil, description = 'A meal tray from a restaurant. Sit down at a table to eat it.' },
     ['takeout_box']    = { name = 'takeout_box',    label = 'Takeout Box',     weight = 500, type = 'item', image = 'takeout_box.png',    unique = true,  useable = true, shouldClose = true, combinable = nil, description = 'A takeout box of food from a restaurant.' },
-    ['drink']          = { name = 'drink',          label = 'Restaurant Drink', weight = 300, type = 'item', image = 'drink.png',         unique = true,  useable = true, shouldClose = true, combinable = nil, description = 'A fountain drink.' },
+    -- THE RESTAURANT ITEM: one serving of anything the kitchen makes — every poured
+    -- drink AND every cooked product a cook pockets off the tray. What it holds rides
+    -- in its metadata. Replaces the old `drink` item.
+    ['restaurant_item'] = { name = 'restaurant_item', label = 'Restaurant Item', weight = 300, type = 'item', image = 'restaurant_item.png', unique = true,  useable = true, shouldClose = true, combinable = nil, description = 'One serving from a restaurant.' },
     ['restaurant_receipt'] = { name = 'restaurant_receipt', label = 'Receipt',    weight = 10,  type = 'item', image = 'restaurant_receipt.png', unique = false, useable = false, shouldClose = true, combinable = nil, description = 'An order receipt.' },
 
     -- ── raw cook inputs ──────────────────────────────────────────────────────

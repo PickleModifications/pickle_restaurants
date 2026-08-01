@@ -312,14 +312,30 @@ AddEventHandler("esx:setJob", function(playerId, _job, _lastJob)
     TriggerEvent("pickle_restaurants:jobChanged", tonumber(playerId))
 end)
 
+-- ADMIN IS TWO SYSTEMS ON ESX, AND ONLY ONE OF THEM IS ESX'S.
+--
+-- `xPlayer.getGroup()` reads the `users.group` COLUMN, which is set by ESX's own admin
+-- tooling. But the ordinary way a server owner grants themselves admin is
+-- `add_principal identifier.license:… group.admin` in server.cfg, which is an ACE
+-- principal and never touches that column. Checking only the ESX group therefore told
+-- the person who owns the box that they don't have permission to use their own command
+-- — while bridge/custom and bridge/qb both accepted the same principal.
+--
+-- So both are consulted, exactly as bridge/custom does it. Neither is a superset of the
+-- other: an ESX server that DOES use the group column keeps working unchanged.
 function IsPlayerAdmin(source)
+    -- txAdmin / server.cfg principals. `group.<name>` for each configured group, plus
+    -- the blanket `command` ace a console-equivalent principal holds.
+    if IsPlayerAceAllowed(source, "command") then return true end
+    for i = 1, #Config.AdminGroups do
+        if IsPlayerAceAllowed(source, "group." .. Config.AdminGroups[i]) or IsPlayerAceAllowed(source, Config.AdminGroups[i]) then return true end
+    end
+    -- ESX's own group column.
     local xPlayer = ESX.GetPlayerFromId(source)
     if not xPlayer then return false end
     local group = xPlayer.getGroup()
-    for i=1, #Config.AdminGroups do 
-        if group == Config.AdminGroups[i] then
-            return true 
-        end
+    for i = 1, #Config.AdminGroups do
+        if group == Config.AdminGroups[i] then return true end
     end
     return false
 end

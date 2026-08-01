@@ -210,6 +210,10 @@ RegisterNUICallback("phone:setRank",        relay("pickle_restaurants:management
 RegisterNUICallback("phone:payTips",        relay("pickle_restaurants:management:payTips"))
 RegisterNUICallback("phone:runPayroll",     relay("pickle_restaurants:management:runPayroll"))
 RegisterNUICallback("phone:buyStock",       relay("pickle_restaurants:management:buyStock"))
+-- Moving stock between the larder and your own pockets. Not a purchase, so these stay
+-- available on the phone with supply runs on (where buying moves to a depot counter).
+RegisterNUICallback("phone:depositStock",   relay("pickle_restaurants:management:depositStock"))
+RegisterNUICallback("phone:withdrawStock",  relay("pickle_restaurants:management:withdrawStock"))
 RegisterNUICallback("phone:deposit",        relay("pickle_restaurants:management:deposit"))
 RegisterNUICallback("phone:withdraw",       relay("pickle_restaurants:management:withdraw"))
 RegisterNUICallback("phone:analytics",      relay("pickle_restaurants:phone:analytics"))

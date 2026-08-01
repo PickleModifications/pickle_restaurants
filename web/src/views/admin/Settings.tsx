@@ -5,13 +5,14 @@ import { Button } from "@/components/ui/button";
 import { Field, TextField, NumberField, Toggle, Select } from "@/components/form";
 import { Input } from "@/components/ui/input";
 import ItemPicker, { type Item } from "@/components/ItemPicker";
+import { Badge } from "@/components/ui/badge";
 import { ThemeEditor } from "@/components/Branding";
 import { type ThemeConfig } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { _L } from "@/lib/locale";
 import {
   Settings2, Coins, Users, DollarSign, MapPin, Plus, Trash2, Check, Loader2, RotateCcw, Palette, PersonStanding, Utensils, Flame,
-  Package, Lock, Briefcase, CalendarClock, ChevronDown, ChevronRight,
+  Package, Lock, Briefcase, CalendarClock, ChevronDown, ChevronRight, Truck, MapPinned, Pencil, Cookie,
 } from "lucide-react";
 
 // Every permission there is, in the order the server declares them (core's
@@ -64,6 +65,18 @@ type Props = {
   /** Whether a real framework job system is present. False = WE are the framework, and
    *  the Jobs group's authored list is the one restaurants pick from. */
   jobsAvailable?: boolean;
+  /** Supplier depots, RAW, straight off `buildAdminData`. They are NOT part of
+   *  `settings.supply_runs` as far as this panel is concerned: the gizmo owns the
+   *  points and the server merges the stored list back into any settings write, so the
+   *  scalar editor here can never clobber a bay that was just placed. */
+  supplyDepots?: any[];
+  /** Baking containers the recipes declare: { model, label, slots }. Derived server-side
+   *  so the tray editor lists the containers that exist rather than taking a typed model
+   *  name; `slots` is the recipe's output_count. Nothing here is written back. */
+  bakeContainers?: { model: string; label?: string; slots?: number }[];
+  /** Reload `admin:getData` — the depot editor needs it after a placement/removal,
+   *  which changes a list this component doesn't own. */
+  refresh?: () => void;
 };
 
 // Drinks + Assembly editors moved to the Menu tab (foods live together there).
@@ -83,11 +96,13 @@ const GROUPS = () => (_groups ??= [
   { key: "eating", label: _L("settings.group_eating"), icon: Utensils },
   { key: "npc_customers", label: _L("settings.group_npc"), icon: PersonStanding },
   { key: "kitchen_fires", label: _L("settings.group_fires"), icon: Flame },
+  { key: "bake_slots", label: _L("settings.group_bake"), icon: Cookie },
+  { key: "supply", label: _L("settings.group_supply"), icon: Truck },
   { key: "blip", label: _L("settings.group_blip"), icon: MapPin },
   { key: "dlc", label: _L("settings.group_dlc"), icon: Package },
 ]);
 
-export default function Settings({ settings, items, groups, dlcs, ingredients, dlcCosts, onSaved, appTheme, onAppTheme, phoneTheme, onPhoneTheme, jobsAvailable }: Props) {
+export default function Settings({ settings, items, groups, dlcs, ingredients, dlcCosts, onSaved, appTheme, onAppTheme, phoneTheme, onPhoneTheme, jobsAvailable, supplyDepots, bakeContainers, refresh }: Props) {
   const [group, setGroup] = useState("general");
 
   return (
@@ -123,6 +138,8 @@ export default function Settings({ settings, items, groups, dlcs, ingredients, d
         {group === "eating" && <Eating settings={settings} onSaved={onSaved} />}
         {group === "npc_customers" && <NpcCustomers settings={settings} onSaved={onSaved} />}
         {group === "kitchen_fires" && <KitchenFires settings={settings} items={items} onSaved={onSaved} />}
+        {group === "bake_slots" && <BakeTrays settings={settings} containers={bakeContainers} onSaved={onSaved} />}
+        {group === "supply" && <SupplyRuns settings={settings} depots={supplyDepots} onSaved={onSaved} refresh={refresh} />}
         {group === "blip" && <Blip settings={settings} onSaved={onSaved} />}
         {group === "dlc" && <DlcPacks dlcs={dlcs} />}
       </div>
@@ -501,6 +518,250 @@ function KitchenFires({ settings, items, onSaved }: { settings: any; items: Item
         <ItemPicker items={items} value={item} onChange={setItem} />
       </Field>
     </Section>
+  );
+}
+
+/**
+ * BAKING TRAYS: where the servings sit inside a baking container. A tray's wells are
+ * evenly spaced — that is what a tray IS — so this is a PITCH (columns across, plus the
+ * centre-to-centre gap on each axis), not a seat per serving. Six seats would be twelve
+ * boxes holding four distinct numbers, and twelve chances to typo one.
+ * The grid is centred on the container and rows are however many the batch needs, so
+ * only the nudge fields are needed for a tray whose wells aren't centred on its origin.
+ *
+ * The CONTAINERS come from the recipes (`bakeContainers`), never from this map: a tray
+ * is authored on a recipe, so typing a model name here would be the one way to author a
+ * layout for a tray nothing renders. `slots` is that recipe's output_count, shown so the
+ * number of servings the pitch has to seat is on screen while it's being set.
+ *
+ * A container is authored or it isn't: "Author layout" seeds the pitch to nudge from,
+ * "Use tray size" removes the key and hands it back to the client's measured grid.
+ */
+function BakeTrays({
+  settings, containers, onSaved,
+}: {
+  settings: any; containers?: { model: string; label?: string; slots?: number }[]; onSaved: () => void;
+}) {
+  type Pitch = { cols: number; spread_x: number; spread_y: number; offset_x: number; offset_y: number };
+  const stored = settings.bake_slots && typeof settings.bake_slots === "object" ? settings.bake_slots : {};
+  const [map, setMap] = useState<Record<string, Pitch>>(() => {
+    const out: Record<string, Pitch> = {};
+    for (const [model, c] of Object.entries<any>(stored)) {
+      // A stored entry only counts as AUTHORED if it carries a real pitch. Anything
+      // else — junk, or a shape this editor no longer speaks — reads as not authored,
+      // so the card offers "Author layout" instead of presenting a row of zeros as
+      // though someone had chosen them. Matches BakeSlotsFor client-side, which drops
+      // a spread-less entry for the same reason: it would stack every serving on one
+      // point, which is never what an admin meant.
+      const sx = Number(c?.spread_x), sy = Number(c?.spread_y);
+      if (!c || typeof c !== "object" || (!sx && !sy) || Number.isNaN(sx) || Number.isNaN(sy)) continue;
+      out[model] = {
+        cols: Number(c.cols) >= 1 ? Math.floor(Number(c.cols)) : 3,
+        spread_x: sx || 0, spread_y: sy || 0,
+        offset_x: Number(c.offset_x) || 0, offset_y: Number(c.offset_y) || 0,
+      };
+    }
+    return out;
+  });
+
+  const status = useAutoSave(() => saveSettings({ bake_slots: map }).then(onSaved), [map]);
+
+  const author = (model: string, slots: number) => setMap((m) => ({
+    ...m,
+    // a pitch to nudge from, not a measurement: 3 across is what nearly every tray is,
+    // and an even gap on both axes is the honest starting guess for one
+    [model]: { cols: Math.min(3, slots), spread_x: 0.0625, spread_y: 0.0625, offset_x: 0, offset_y: 0 },
+  }));
+  const clear = (model: string) => setMap((m) => { const { [model]: _drop, ...rest } = m; return rest; });
+  const set = (model: string, patch: Partial<Pitch>) =>
+    setMap((m) => ({ ...m, [model]: { ...m[model], ...patch } }));
+
+  const list = containers || [];
+
+  return (
+    <Section title={_L("settings.bake_title")} description={_L("settings.bake_desc")} status={status}>
+      {list.length === 0 && <p className="text-xs text-muted-foreground">{_L("settings.bake_none")}</p>}
+      {list.map((c) => {
+        const slots = Math.max(1, Math.floor(c.slots || 1));
+        const p = map[c.model];
+        const cols = Math.max(1, Math.min(Math.floor(p?.cols || 1), slots));
+        return (
+          <div key={c.model} className="rounded-md border border-border p-3 space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-medium">{c.label || c.model}</div>
+                <div className="truncate font-mono text-xs text-muted-foreground">{c.model}</div>
+              </div>
+              {p
+                ? <Button variant="ghost" size="sm" onClick={() => clear(c.model)}>{_L("settings.bake_clear")}</Button>
+                : <Button variant="secondary" size="sm" onClick={() => author(c.model, slots)}>{_L("settings.bake_author")}</Button>}
+            </div>
+            {!p && <p className="text-xs text-muted-foreground">{_L("settings.bake_derived", slots)}</p>}
+            {p && (
+              <>
+                <div className="grid grid-cols-3 gap-3">
+                  <NumberField label={_L("settings.bake_cols")} value={p.cols} min={1} step={1}
+                    onChange={(v) => set(c.model, { cols: v })} />
+                  <NumberField label={_L("settings.bake_spread_x")} value={p.spread_x} step={0.005}
+                    onChange={(v) => set(c.model, { spread_x: v })} />
+                  <NumberField label={_L("settings.bake_spread_y")} value={p.spread_y} step={0.005}
+                    onChange={(v) => set(c.model, { spread_y: v })} />
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div />
+                  <NumberField label={_L("settings.bake_offset_x")} value={p.offset_x} step={0.005}
+                    onChange={(v) => set(c.model, { offset_x: v })} />
+                  <NumberField label={_L("settings.bake_offset_y")} value={p.offset_y} step={0.005}
+                    onChange={(v) => set(c.model, { offset_y: v })} />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {_L("settings.bake_shape", slots, cols, Math.ceil(slots / cols))}
+                </p>
+              </>
+            )}
+          </div>
+        );
+      })}
+    </Section>
+  );
+}
+
+/**
+ * SUPPLY RUNS. Two halves that deliberately do NOT share a save path:
+ *   • the SCALARS auto-save like every other settings group, and send NO `depots` key
+ *     (the server merges the stored list back in);
+ *   • the DEPOTS are placed with the gizmo, because a point is placed in the world, not
+ *     typed into a form. Placing is also the only way one is CREATED, like a seat: an
+ *     "add" button making an empty row would leave a depot that does nothing.
+ * Without that split, a debounced scalar write landing after a placement would delete
+ * the bay that was just placed.
+ */
+function SupplyRuns({ settings, depots, onSaved, refresh }: { settings: any; depots?: any[]; onSaved: () => void; refresh?: () => void }) {
+  const c = settings.supply_runs && typeof settings.supply_runs === "object" ? settings.supply_runs : {};
+  const [enabled, setEnabled] = useState(c.enabled === true);
+  const [maxStock, setMaxStock] = useState<number>(Number(c.max_stock ?? 100));
+  const [boxesPerCap, setBoxesPerCap] = useState<number>(Number(c.boxes_per_cap ?? 4));
+  const [boxModel, setBoxModel] = useState<string>(c.box_model || "hei_prop_heist_box");
+  const [truckModel, setTruckModel] = useState<string>(c.truck_model || "phantom");
+  const [trailerModel, setTrailerModel] = useState<string>(c.trailer_model || "trailers");
+  const [truckGap, setTruckGap] = useState<number>(Number(c.truck_gap ?? 8.5));
+  const [claimTtl, setClaimTtl] = useState<number>(Number(c.claim_ttl ?? 900));
+  const [advanced, setAdvanced] = useState(false);
+
+  // Units per box is DERIVED (cap over boxes), the same sum the server does, so the two
+  // numbers an admin actually sets show what they work out to instead of hiding it.
+  const perBox = maxStock > 0 ? Math.max(1, Math.ceil(maxStock / Math.max(1, boxesPerCap))) : 25;
+
+  const status = useAutoSave(
+    () => saveSettings({
+      supply_runs: {
+        enabled,
+        max_stock: Math.max(0, Math.floor(maxStock || 0)),
+        boxes_per_cap: Math.max(1, Math.floor(boxesPerCap || 1)),
+        box_model: boxModel.trim(),
+        truck_model: truckModel.trim(),
+        trailer_model: trailerModel.trim(),
+        truck_gap: Math.max(3, truckGap || 0),
+        claim_ttl: Math.max(60, Math.floor(claimTtl || 0)),
+        // NO `depots` — see the comment above and the supply_runs sanitizer server-side.
+      },
+    }).then(onSaved),
+    [enabled, maxStock, boxesPerCap, boxModel, truckModel, trailerModel, truckGap, claimTtl]
+  );
+
+  const list = depots || [];
+  const place = (depot?: string, zone?: string) =>
+    fetchNui("admin:placeSupplyZone", { depot, zone, boxModel, trailerModel });
+
+  return (
+    <div className="space-y-6">
+      <Section title={_L("settings.supply_title")} description={_L("settings.supply_desc")} status={status}>
+        <Toggle checked={enabled} onChange={setEnabled} label={_L("settings.supply_enabled")} />
+        <p className="text-[11px] text-muted-foreground">{_L("settings.supply_enabled_hint")}</p>
+        <div className="grid grid-cols-2 gap-3">
+          <NumberField label={_L("settings.supply_max_stock")} hint={_L("settings.supply_max_stock_hint")} value={maxStock} min={0} onChange={setMaxStock} />
+          <NumberField label={_L("settings.supply_boxes_per_cap")} hint={_L("settings.supply_boxes_per_cap_hint", perBox)} value={boxesPerCap} min={1} onChange={setBoxesPerCap} />
+        </div>
+      </Section>
+
+      <Section title={_L("settings.supply_depots")} description={_L("settings.supply_depots_hint")} readOnly>
+        <div className="flex justify-end">
+          <Button size="sm" variant="outline" onClick={() => place()}>
+            <Plus className="h-3.5 w-3.5" /> {_L("admin.place")}
+          </Button>
+        </div>
+        {list.length === 0 && <p className="text-[11px] text-muted-foreground">{_L("settings.supply_no_depots")}</p>}
+        {list.map((d: any) => (
+          <div key={d.id} className="rounded-lg border border-border p-3">
+            <div className="mb-1.5 flex items-center gap-2">
+              <Truck className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <Input
+                className="h-8 flex-1"
+                defaultValue={d.label || d.id}
+                onBlur={(e) => fetchNui("admin:setDepot", { id: d.id, label: e.target.value }).then(() => refresh?.())}
+              />
+              <Badge variant="secondary">{_L("settings.supply_bays", String((d.zones || []).length))}</Badge>
+              {/* The counter is where orders are placed once runs are on, so a depot
+                  without one can be collected from but never bought at. */}
+              <Badge variant={d.shop ? "secondary" : "destructive"}>
+                {d.shop ? _L("settings.supply_shop") : _L("settings.supply_no_shop")}
+              </Badge>
+              <Button size="sm" variant="outline" onClick={() => fetchNui("admin:placeSupplyShop", { depot: d.id })}>
+                {_L("settings.supply_move_shop")}
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => place(d.id)}>
+                <Plus className="h-3.5 w-3.5" /> {_L("settings.supply_add_zone")}
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => fetchNui("admin:removeDepot", { id: d.id }).then(() => refresh?.())}>
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+            {(d.zones || []).length === 0 ? (
+              <p className="text-[11px] text-muted-foreground">{_L("settings.supply_no_zones")}</p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {(d.zones || []).map((z: any) => (
+                  <div key={z.id} className="flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-[11px]">
+                    <MapPinned className="h-3 w-3 shrink-0 text-muted-foreground" />
+                    <span className="font-mono">{z.id}</span>
+                    {z.busy && <Badge variant="secondary">{_L("settings.supply_zone_busy")}</Badge>}
+                    <button className="ml-1 text-muted-foreground hover:text-foreground" onClick={() => place(d.id, z.id)} title={_L("settings.supply_edit_zone")}>
+                      <Pencil className="h-3 w-3" />
+                    </button>
+                    <button className="text-muted-foreground hover:text-destructive" onClick={() => fetchNui("admin:removeSupplyZone", { depot: d.id, zone: z.id }).then(() => refresh?.())}>
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </Section>
+
+      {/* Everything an admin sets once and forgets. Collapsed by default so the two
+          numbers that matter aren't buried under model names. */}
+      <div className="rounded-lg border border-border">
+        <button
+          onClick={() => setAdvanced((v) => !v)}
+          className="flex w-full items-center gap-2 px-3 py-2 text-sm font-semibold hover:bg-accent"
+        >
+          <ChevronDown className={cn("h-4 w-4 transition-transform duration-200", advanced && "rotate-180")} />
+          {_L("settings.supply_advanced")}
+        </button>
+        {advanced && (
+          <div className="space-y-3 border-t border-border p-3">
+            <div className="grid grid-cols-2 gap-3">
+              <TextField label={_L("settings.supply_box_model")} hint={_L("settings.supply_box_model_hint")} value={boxModel} onChange={setBoxModel} />
+              <NumberField label={_L("settings.supply_truck_gap")} hint={_L("settings.supply_truck_gap_hint")} value={truckGap} min={3} step={0.5} onChange={setTruckGap} />
+              <TextField label={_L("settings.supply_truck_model")} value={truckModel} onChange={setTruckModel} />
+              <TextField label={_L("settings.supply_trailer_model")} value={trailerModel} onChange={setTrailerModel} />
+              <NumberField label={_L("settings.supply_claim_ttl")} hint={_L("settings.supply_claim_ttl_hint")} value={claimTtl} min={60} step={30} onChange={setClaimTtl} />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

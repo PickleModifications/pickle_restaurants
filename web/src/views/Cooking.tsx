@@ -12,7 +12,7 @@ import { equipImageUrl, drinkImageUrl } from "@/lib/localImages";
 // several toys: the bar shows a card per variant, all spending the same stock).
 // It rides the drag and is recorded on the reservation, so the bagged instance
 // keeps its identity.
-type Ingredient = { kind: string; item: string; label: string; image?: string; count?: number; canMake?: boolean; model?: string; dual?: boolean; subkind?: string; variant?: string; flavors?: { id: string; label: string; color?: string }[] };
+type Ingredient = { kind: string; item: string; label: string; image?: string; count?: number; canMake?: boolean; model?: string; dual?: boolean; subkind?: string; variant?: string; locked?: boolean; group?: string; flavors?: { id: string; label: string; color?: string }[] };
 
 // Swatch colors for the flavor squares on a finish card. The config can carry a
 // per-flavor `color`; these cover the default flavors on servers seeded before
@@ -65,6 +65,13 @@ type TrayEntry = {
   // reach a customer packed into a meal or a bag — and burnt food is
   // unexchangeable, so `trayToInventory` refuses both. Absent = bin only.
   takeable?: boolean;
+  // A pocketed serving: THE RESTAURANT ITEM holding this product. It is listed as
+  // the food it holds (the server unwraps it) but no kitchen gesture can address
+  // it — every one names an item, and the name a drag would carry is the vessel's.
+  // One click puts it back on the kitchen tray, where it is an ordinary cooked item
+  // again. `wrapped` = don't drag me; `stow` = offer the button.
+  wrapped?: boolean;
+  stow?: boolean;
   // freshness: seconds left until this item spoils when the tray was last fetched
   // (absent = never expires). The card counts it down locally and shows a red timer
   // in the final minute.
@@ -1326,11 +1333,14 @@ export default function Cooking({ data }: { data: any }) {
     if (isPrep) return _L("cook.trayhint_build");
     if (canCookHere(e)) return station === "fryer" ? _L("cook.trayhint_cook_fryer") : _L("cook.trayhint_cook_oven");
     if (e.uncooked) return _L("cook.trayhint_still_raw", e.cookStation === "fryer" ? _L("cook.station_word_fryer") : _L("cook.station_word_stovetop_oven"));
+    if (e.stow) return _L("cook.trayhint_stow");
     if (e.source === "inv") return _L("cook.trayhint_in_inventory");
     if (e.burnt) return _L("cook.trayhint_burnt");
     return _L("cook.trayhint_take");
   };
   const ingHint = (ing: Ingredient): string => {
+    // the gate first: a locked card is shown precisely so it can say why
+    if (ing.locked) return _L("cook.ing_group_locked", ing.group || "?");
     if (ing.kind === "tray") return _L("cook.inghint_tray");
     if (ing.kind === "pizzabox") return _L("cook.inghint_pizzabox");
     if (ing.kind === "bag") return _L("cook.inghint_bag");
@@ -1376,6 +1386,10 @@ export default function Cooking({ data }: { data: any }) {
   };
   const takeEntry = (e: TrayEntry, count: number) =>
     fetchNui("cooking:trayToInventory", { item: e.item, count, sig: e.sig || "" });
+  // unwrap a pocketed serving back onto the kitchen tray. The SIG is the wrapper's
+  // own variation — the server reads what it holds off the slot, never off this.
+  const stowEntry = (e: TrayEntry, count = 1) =>
+    fetchNui("cooking:invToTray", { count, sig: e.sig || "" });
   const startTrayCook = (ev: React.PointerEvent, e: TrayEntry) => {
     ev.preventDefault();
     placingRef.current = true;
@@ -1745,10 +1759,28 @@ export default function Cooking({ data }: { data: any }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // 1 / 2 jump to that oven door; pressing the door you're already looking at
+  // comes back up to the cooktop, so one key both opens and closes a door view.
+  useEffect(() => {
+    if (!isStove) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "1" && e.key !== "2") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const door = e.key === "1" ? "door1" : "door2";
+      switchView(view === door ? "stovetop" : door);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isStove, view]);
+
   const meta = STATION_META()[station] || STATION_META().fryer;
   const Icon = meta.icon;
 
   const draggable = (ing: Ingredient) =>
+    // a card the restaurant's GROUPS don't carry is shown (so the gate explains
+    // itself) but can never be dragged — the server refuses it in prepAdd anyway
+    ing.locked ? false :
     // tray + pizza box + lid are kitchen equipment, never gated on an item count
     ing.kind === "tray" || ing.kind === "pizzabox" || ing.kind === "bag" || ing.kind === "takeout" || ing.kind === "lid"
       ? true : ing.kind === "assembly" ? !!ing.canMake : (ing.count || 0) > 0;
@@ -1774,8 +1806,30 @@ export default function Cooking({ data }: { data: any }) {
   // Taking a product apart is offered on the PLACED item's own tooltip out on the
   // table (ProductTooltip), never here: a card in the bar has nowhere to put the
   // parts, and the whole point of dragging one out is that it lands as itself.
+  // A POCKETED SERVING goes back the way it came: one button that unwraps the
+  // Restaurant Item onto this restaurant's kitchen tray, where it is an ordinary
+  // cooked item again. This is the receiving half of handing food to another
+  // worker — and the only kitchen action a wrapped serving has, which is why it is
+  // the tooltip's whole action row rather than one button among several.
   const tipActions =
-    tipEntry && tipEntry.source !== "inv" ? (
+    tipEntry && tipEntry.stow ? (
+      <div className="mt-2.5 flex items-center gap-1.5 border-t border-border/60 pt-2.5">
+        <button
+          onClick={() => stowEntry(tipEntry)}
+          className="rounded-md bg-secondary px-2.5 py-1 text-[11px] font-semibold text-foreground transition hover:bg-accent"
+        >
+          {_L("cook.stow")}
+        </button>
+        {tipEntry.count > 1 && (
+          <button
+            onClick={() => stowEntry(tipEntry, tipEntry.count)}
+            className="rounded-md bg-secondary px-2.5 py-1 text-[11px] font-semibold text-foreground transition hover:bg-accent"
+          >
+            {_L("cook.stow_all")}
+          </button>
+        )}
+      </div>
+    ) : tipEntry && tipEntry.source !== "inv" ? (
       <div className="mt-2.5 flex items-center gap-1.5 border-t border-border/60 pt-2.5">
         {/* Take / Take all only for something the inventory can actually HOLD. Most
             cooked products are tray-only by design (cooked fries have no item to
@@ -2070,7 +2124,7 @@ export default function Cooking({ data }: { data: any }) {
                 <div
                   key={ing.item + i}
                   onPointerDown={onDown}
-                  onPointerEnter={(ev) => showBarTip(ev, { ing, hint: can ? ingHint(ing) : undefined })}
+                  onPointerEnter={(ev) => showBarTip(ev, { ing, hint: can || ing.locked ? ingHint(ing) : undefined })}
                   onPointerLeave={hideBarTip}
                   className={cn(
                     "relative flex h-32 shrink-0 touch-none select-none flex-col items-center justify-center gap-1 rounded-lg border text-center text-xs font-medium",
@@ -2147,6 +2201,13 @@ export default function Cooking({ data }: { data: any }) {
                   )}
                   {ing.kind === "assembly" && !ing.canMake && (
                     <span className="text-[10px] text-muted-foreground">{_L("cook.missing_parts")}</span>
+                  )}
+                  {/* stocked but not on this restaurant's menu — the card exists to
+                      say so (hover names the group an admin has to add) */}
+                  {ing.locked && (
+                    <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {_L("cook.locked")}
+                    </span>
                   )}
                 </div>
               );
@@ -2230,6 +2291,9 @@ export default function Cooking({ data }: { data: any }) {
                 key={cardKey}
                 onPointerDown={(ev) => {
                   setBarTip(null);
+                  // a pocketed serving has to be put back in the kitchen first (the
+                  // tooltip's button) — it is a sealed vessel, not a loose product
+                  if (e.wrapped) return;
                   if (isPrep) startPrepDrag(ev, e.source || "tray", e);
                   else if (cookHere) startTrayCook(ev, e);
                 }}
@@ -2238,6 +2302,7 @@ export default function Cooking({ data }: { data: any }) {
                 className={cn(
                   "relative flex h-32 w-28 shrink-0 touch-none select-none flex-col items-center rounded-lg border bg-card pt-2 text-center text-xs font-medium",
                   e.burnt ? "border-red-900/70 bg-red-950/25" : "border-border/80",
+                  e.wrapped ? "hover:border-border" :
                   (isPrep || cookHere) ? "cursor-grab hover:border-primary/50 hover:bg-accent/60 active:cursor-grabbing" : e.burnt ? "hover:border-red-800" : "hover:border-border"
                 )}
               >

@@ -160,7 +160,17 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
         -- whether the row is installed at all.
         for key, cost in pairs(IngredientCosts()) do
             local item, vid = SplitStockKey(key)
+            -- Buying is NOT group-gated (a restaurant may stock ahead of an admin
+            -- granting the group), but the kitchen is: an ingredient that authors its
+            -- own group and isn't carried here can be bought and never used. Say so on
+            -- the row rather than letting the larder fill with things that silently
+            -- never reach the prep bar. Only the ingredient's OWN authored group
+            -- counts — `group` below is derived for display and gates nothing.
+            local idef = IngredientDef(item)
+            local lockedGroup = (idef and idef.group and not RestaurantHasAccess(id, idef.group))
+                and idef.group or nil
             supplies[#supplies + 1] = {
+                locked = lockedGroup and true or nil, lockedGroup = lockedGroup,
                 key = key, item = item, variant = vid,
                 label = StockKeyLabel(key), image = StockKeyImage(key),
                 -- the heading the tab files this row under (the item's authored
@@ -175,10 +185,32 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
                 -- moving isn't offered for one.
                 held = vid and 0 or (Inventory.GetItemCount(src, item) or 0),
                 movable = (vid == nil) or nil,
+                -- SUPPLY RUNS: what is already bought and still sitting at the depot.
+                -- It counts against the cap, so the row has to show it or the tab is
+                -- lying about how much more can be ordered.
+                pending = (PendingSupplyUnits and PendingSupplyUnits(id, key) or 0),
             }
         end
         table.sort(supplies, function(a, b) return (a.label or a.item):lower() < (b.label or b.item):lower() end)
     end
+    -- The Supplies tab's own header state: the per-item ceiling (0 = uncapped) and the
+    -- runs waiting to be fetched. Both are 0/empty with the feature off, so the tab
+    -- renders exactly as it always did.
+    local supplyRuns = {
+        enabled = SupplyRunsEnabled and SupplyRunsEnabled() or false,
+        cap     = SupplyStockCap and SupplyStockCap() or 0,
+        pending = (effective.manage_stock and PendingSupplyOrders) and PendingSupplyOrders(id) or {},
+        -- Was this panel opened AT a depot counter? That is the only place the Supplies
+        -- tab is a shop once runs are on. Verified server-side, never taken from the
+        -- payload: `d.shop` is a request, standing there is the answer.
+        shop    = (d and d.shop == true) and (SupplyShopNear and SupplyShopNear(src) or false) or false,
+        -- What one load can hold, so the CART can enforce the same two ceilings this
+        -- server does instead of letting someone build an order that can only be
+        -- refused at checkout. `capacity` is total units per run, `boxUnits` is what
+        -- turns that into a box count on screen.
+        capacity  = (SupplyRunsEnabled and SupplyRunsEnabled() and SupplyRunCapacity) and SupplyRunCapacity() or 0,
+        boxUnits  = (SupplyConfig and SupplyConfig().box_units) or 0,
+    }
 
     -- ─── Dashboard ───────────────────────────────────────────────────────────
     -- The at-a-glance tab EVERY employee sees, permission-free: clocking in is not a
@@ -288,6 +320,7 @@ lib.callback.register("pickle_restaurants:management:getData", function(src, d)
         priceList = priceList,
         stale     = stale,
         supplies  = supplies,
+        supplyRuns = supplyRuns,
         props     = props,
         nearby    = effective.manage_employees and NearbyPlayers(src, 10.0) or {},
         -- Brand-texture aspects for the crop UI, from the ONE render-target registry
@@ -305,6 +338,46 @@ end)
 -- Every one of these needs the restaurant to HAVE a job. `management:setCommission`
 -- is GONE — commission is a property of the rank now (management:setRank), so there
 -- is nothing per-person left to set.
+
+-- ─── hiring is an OFFER, never an assignment ─────────────────────────────────
+-- A HIRE CHANGES THE TARGET'S JOB, and a job is the whole of what a character does
+-- on the server. Hiring straight through `SetPlayerJobGrade` meant anyone with
+-- `manage_employees` could pick a passer-by out of the `nearby` list and overwrite
+-- their police/EMS/mayor job on the spot — and then "fire" them into unemployment.
+-- That is a grief vector however well-permissioned the hirer is, because the
+-- permission is over the RESTAURANT, not over the other player.
+--
+-- So a hire raises an OFFER the target answers, exactly like the seat request in
+-- modules/seating: the callback reports only that the ask went out, and the job move
+-- happens on the accept — re-validated there, because the world moves while a prompt
+-- is up (the hirer may have lost the permission, the restaurant may have been given a
+-- different job, the target may have been hired elsewhere in the meantime).
+local HIRE_TTL = 30            -- seconds an offer stays answerable (TUNE IN-GAME)
+local HireOffers = {}          -- [target src] = { rid, job, grade, from, expires }
+
+local function offerLive(o) return o ~= nil and o.expires > os.time() end
+
+-- One offer in flight per TARGET: a prompt is an interruption, so a restaurant can't
+-- queue them up against someone who is ignoring them.
+local function pruneOffers()
+    local now = os.time()
+    for tgt, o in pairs(HireOffers) do
+        if o.expires <= now then HireOffers[tgt] = nil end
+    end
+end
+
+AddEventHandler("playerDropped", function()
+    HireOffers[source] = nil
+end)
+
+-- A grade's human name off the job's own ladder — what the offer prompt has to say,
+-- since "grade 2" tells the person being asked nothing about the job they're taking.
+local function gradeLabel(jobName, grade)
+    for _, g in ipairs(GetJobGradeList(jobName) or {}) do
+        if g.grade == grade then return g.label end
+    end
+    return _L("job_grade_n", grade)
+end
 
 lib.callback.register("pickle_restaurants:management:hire", function(src, d)
     local id = tonumber(d.id)
@@ -329,11 +402,69 @@ lib.callback.register("pickle_restaurants:management:hire", function(src, d)
         local _, isBoss = ResolvePerms(id, src)
         if not isBoss then return { ok = false, error = _L("mgmt_boss_grade_denied") } end
     end
-    if not SetPlayerJobGrade(target, job, grade) then return { ok = false, error = _L("mgmt_hire_failed") } end
+    -- Everything above is the HIRER's side of the check and is re-run on the accept.
+    -- Nothing has changed about the target yet: all this does is ask.
+    pruneOffers()
+    if offerLive(HireOffers[target]) then return { ok = false, error = _L("mgmt_offer_pending") } end
+    HireOffers[target] = { rid = id, job = job, grade = grade, from = src, expires = os.time() + HIRE_TTL }
 
-    ShowNotification(target, _L("mgmt_hired_at", r.label))
-    ShowNotification(src, _L("mgmt_hired", GetPlayerCharacterName(target) or ""))
-    return { ok = true, grade = grade }
+    -- BOTH channels, like the seat request: the phone notification is the record for
+    -- someone who was driving, the prompt is what can actually be answered.
+    if PhoneNotify then
+        PhoneNotify(target, _L("mgmt_offer_notify_title"), _L("mgmt_offer_notify_body", r.label, gradeLabel(job, grade)))
+    end
+    TriggerClientEvent("pickle_restaurants:management:jobOffer", target, {
+        restaurant = r.label,
+        job        = GetJobLabel(job) or job,
+        grade      = gradeLabel(job, grade),
+        from       = GetPlayerCharacterName(src) or "",
+        ttl        = HIRE_TTL,
+    })
+    ShowNotification(src, _L("mgmt_offer_sent", GetPlayerCharacterName(target) or ""))
+    return { ok = true, pending = true, grade = grade, message = _L("mgmt_offer_sent", GetPlayerCharacterName(target) or "") }
+end)
+
+-- The TARGET's answer. A net event, not a callback: from their side the prompt is
+-- fire-and-forget, and everything that follows is a push to the other player.
+-- EVERY hire condition is re-checked here — this is the point the job actually moves,
+-- so it is the point that has to be right, not the moment the offer was raised.
+RegisterNetEvent("pickle_restaurants:management:answerJobOffer", function(d)
+    local src = source
+    pruneOffers()
+    local o = HireOffers[src]
+    if not offerLive(o) then return end
+    HireOffers[src] = nil
+
+    if not (d and d.accept) then
+        if o.from then ShowNotification(o.from, _L("mgmt_offer_declined", GetPlayerCharacterName(src) or "")) end
+        return
+    end
+
+    local r = GetRestaurant(o.rid)
+    if not r then return end
+    -- The hirer must STILL hold the permission, and the restaurant must still employ
+    -- through the job that was offered: an offer is an intent, never a stored grant.
+    if not (o.from and HasPerm(o.rid, o.from, "manage_employees")) then
+        return ShowNotification(src, _L("mgmt_offer_expired"))
+    end
+    if RestaurantJob(o.rid) ~= o.job then
+        return ShowNotification(src, _L("mgmt_offer_expired"))
+    end
+    local grade = validGrade(o.job, o.grade)
+    if not grade then return ShowNotification(src, _L("mgmt_offer_expired")) end
+    -- The boss-grade escalation guard, re-run for the same reason as the rest: a
+    -- shift lead who was demoted while the prompt was up must not still be able to
+    -- land someone on a grade that holds every permission here.
+    if IsJobBossGrade(o.job, grade) then
+        local _, isBoss = ResolvePerms(o.rid, o.from)
+        if not isBoss then return ShowNotification(src, _L("mgmt_offer_expired")) end
+    end
+    if not SetPlayerJobGrade(src, o.job, grade) then
+        return ShowNotification(src, _L("mgmt_hire_failed"))
+    end
+
+    ShowNotification(src, _L("mgmt_hired_at", r.label))
+    ShowNotification(o.from, _L("mgmt_hired", GetPlayerCharacterName(src) or ""))
 end)
 
 lib.callback.register("pickle_restaurants:management:fire", function(src, d)
@@ -510,42 +641,139 @@ end)
 -- restaurant balance at the configured ingredient cost. Cooking consumes from
 -- this pool, so a restaurant must keep it stocked to keep the kitchen running.
 
-lib.callback.register("pickle_restaurants:management:buyStock", function(src, d)
-    local id = tonumber(d.id)
+-- A PURCHASE IS A CART, and there is ONE function that makes one. The panel and the
+-- depot counter both build a basket and pick a payment method; the old one-line
+-- `buyStock` (still used by the phone) is that same call with a single line. Two
+-- purchase paths would be two sets of rules to keep in step: the cap, the run capacity,
+-- the shop gate and the ledger all live here once.
+--
+-- PAYMENT is either the business account ("society", how it always worked) or the
+-- buyer's own CASH. Cash matters because a restaurant with an empty account can still
+-- be restocked out of a manager's pocket, and because the depot counter is a shop like
+-- any other. Either way the money leaves BEFORE the stock is granted.
+local function BuySupplies(src, id, lines, payment)
     if not HasPerm(id, src, "manage_stock") then return { ok = false, error = _L("no_permission") } end
-    -- A STOCK KEY, which for a multi-faced ingredient names the face being bought
-    -- (`restaurant_toy:lardboy`). It is validated the same way any other is — by
-    -- having a price — so a forged key buys nothing.
-    local key = tostring(d.key or d.item or "")
-    local costs = IngredientCosts()
-    if costs[key] == nil then return { ok = false, error = _L("mgmt_item_required") } end
-    local qty = math.max(1, math.min(1000, math.floor(tonumber(d.qty) or 0)))
-    local unit = math.max(0, math.floor(tonumber(costs[key]) or 0))
-    local total = unit * qty
     local r = GetRestaurant(id); if not r then return { ok = false } end
-    if RestaurantBalance(id) < total then return { ok = false, error = _L("mgmt_insufficient_funds") } end
-    local label = StockKeyLabel(key)
-    if total > 0 then
-        -- The balance is a society account the whole server shares, so it can move
-        -- between the check above and here. STOCK IS ONLY GRANTED IF THE MONEY LEFT:
-        -- trusting the pre-read would hand out free ingredients whenever the debit
-        -- failed (funds gone, account missing, banking resource down).
-        if not AdjustBalance(id, -total) then
-            return { ok = false, error = _L("mgmt_insufficient_funds") }
-        end
-        AddLedger(id, "supply", -total, _L("ledger_restock", qty, label), GetIdentifier(src))
+    if type(lines) ~= "table" or #lines == 0 then return { ok = false, error = _L("mgmt_cart_empty") } end
+
+    local runs = SupplyRunsEnabled and SupplyRunsEnabled() or false
+    -- WITH RUNS ON, NEITHER PANEL IS A SHOP. Supplies are ordered at a depot counter, so
+    -- the purchase is gated on standing at one. Hiding the buy controls is only the
+    -- polite half: the NUI is untrusted, and without this a saved panel or a forged post
+    -- would still buy from the other side of the map.
+    local depot = runs and SupplyShopNear and SupplyShopNear(src) or nil
+    if runs and not depot then return { ok = false, error = _L("supply_not_at_shop") } end
+    -- ORDERING IS THE CLAIM: the boxes hit the floor of this depot as soon as it is paid
+    -- for. So everything that could stop a run is asked BEFORE the money moves (already
+    -- running, an order still outstanding, every bay busy) rather than after, when a
+    -- refusal would mean handing payment back.
+    if runs and CanBeginSupplyRun then
+        local ok, why = CanBeginSupplyRun(src, depot)
+        if not ok then return { ok = false, error = _L(why) } end
     end
-    AddStock(id, key, qty)
-    ShowNotification(src, _L("mgmt_stock_bought", qty, label))
-    return { ok = true, balance = RestaurantBalance(id), stock = GetStockCount(id, key) }
+
+    -- Validate and price the WHOLE cart before any money moves. A cart that fails
+    -- half-way through would leave a restaurant paying for part of an order it never
+    -- asked for.
+    local costs = IngredientCosts()
+    local cap = SupplyStockCap and SupplyStockCap() or 0
+    local clean, total, units = {}, 0, 0
+    local seen = {}
+    for _, l in ipairs(lines) do
+        local key = tostring(l.key or l.item or "")
+        if costs[key] == nil then return { ok = false, error = _L("mgmt_item_required") } end
+        -- One line per key: a duplicated key would be capped twice against its own
+        -- earlier line and priced as if the two were unrelated.
+        if seen[key] then return { ok = false, error = _L("mgmt_item_required") } end
+        seen[key] = true
+        local qty = math.max(1, math.min(1000, math.floor(tonumber(l.qty) or 0)))
+        -- THE LARDER HAS A CEILING, and units already bought-but-uncollected count
+        -- against it, or ordering twice in a row walks straight past a cap that only
+        -- looked at what had actually arrived.
+        if cap > 0 then
+            local have = GetStockCount(id, key) + (PendingSupplyUnits and PendingSupplyUnits(id, key) or 0)
+            if have + qty > cap then
+                return { ok = false, error = _L("mgmt_stock_capped", cap, math.max(0, cap - have)) }
+            end
+        end
+        clean[#clean + 1] = { key = key, qty = qty }
+        total = total + math.max(0, math.floor(tonumber(costs[key]) or 0)) * qty
+        units = units + qty
+    end
+    -- An order bigger than one rig can haul is refused AT THE TILL rather than quietly
+    -- becoming fewer boxes than were paid for: the pile is the picture of the order.
+    if runs and units > SupplyRunCapacity() then
+        return { ok = false, error = _L("mgmt_stock_load_too_big", SupplyRunCapacity()) }
+    end
+
+    local cash = (payment == "cash")
+    local ident = GetIdentifier(src)
+    if total > 0 then
+        if cash then
+            if GetMoney(src, "money") < total then return { ok = false, error = _L("not_enough_cash") } end
+            RemoveMoney(src, total, "money")
+            -- Amount 0: the BUSINESS didn't pay, so this must not read as a business
+            -- expense in its books. It is still logged, because who restocked out of
+            -- their own pocket is exactly the sort of thing a boss asks about later.
+            AddLedger(id, "supply", 0, _L("ledger_restock_cash", units, total), ident)
+        else
+            -- The balance is a society account the whole server shares, so it can move
+            -- between a read and a write. THE DEBIT IS THE AUTHORITY: trusting a
+            -- pre-read would hand out free ingredients whenever it failed (funds gone,
+            -- account missing, banking resource down).
+            if RestaurantBalance(id) < total then return { ok = false, error = _L("mgmt_insufficient_funds") } end
+            if not AdjustBalance(id, -total) then
+                return { ok = false, error = _L("mgmt_insufficient_funds") }
+            end
+            AddLedger(id, "supply", -total, _L("ledger_restock_cart", units), ident)
+        end
+    end
+
+    -- The money is gone either way, which is what makes a queued run the RESTAURANT's
+    -- cargo rather than the buyer's: anyone who could have ordered it can go and fetch
+    -- it, and an abandoned run is never lost.
+    if runs then
+        local orderId, boxes = CreateSupplyOrder(id, ident, clean, units)
+        -- The run starts HERE, not at a bay: the pile appears the moment the order is
+        -- paid for, at the depot it was paid at. A depot that filled up between the check
+        -- above and this line leaves the order pending and re-claimable, which is the
+        -- same state an abandoned run is in.
+        local started
+        if orderId and boxes then
+            local order = { id = orderId, restaurant_id = id, boxes = boxes }
+            started = BeginSupplyRun and BeginSupplyRun(src, depot, order)
+        end
+        if not boxes then
+            -- Nothing was ordered, so nothing should have been paid. Refund whichever
+            -- pocket it came out of rather than leaving a purchase with no cargo.
+            if total > 0 then
+                if cash then AddMoney(src, total, "money") else AdjustBalance(id, total) end
+            end
+            return { ok = false, error = _L("mgmt_stock_order_failed") }
+        end
+        ShowNotification(src, _L(started and "mgmt_cart_loading" or "mgmt_cart_ordered", units, boxes))
+        return { ok = true, pending = true, boxes = boxes, balance = RestaurantBalance(id) }
+    end
+    for _, l in ipairs(clean) do AddStock(id, l.key, l.qty) end
+    ShowNotification(src, _L("mgmt_cart_bought", units))
+    return { ok = true, balance = RestaurantBalance(id) }
+end
+
+-- The cart, from the panel or the depot counter.
+lib.callback.register("pickle_restaurants:management:buySupplies", function(src, d)
+    return BuySupplies(src, tonumber(d.id), d.lines, d.payment)
 end)
 
--- Move ingredients between a manager's own pockets and the shared pool — the
--- companion to buying. Both gated on manage_stock. Deposit takes items OUT of the
--- player's inventory INTO the pool (free, no balance change); withdraw takes them
--- back OUT of the pool INTO the player's inventory. Only a configured, installed
--- ingredient (an `ingredient_costs` entry that is a real item) can move, and both
--- are logged to the ledger (amount 0) as an audit trail of who moved what.
+-- ONE LINE, society funds: what the phone's Stock screen has always sent. Kept as a
+-- thin wrapper so there is still only one set of purchase rules.
+lib.callback.register("pickle_restaurants:management:buyStock", function(src, d)
+    local id = tonumber(d.id)
+    local key = tostring(d.key or d.item or "")
+    local res = BuySupplies(src, id, { { key = key, qty = d.qty } }, d.payment)
+    if res.ok then res.stock = GetStockCount(id, key) end
+    return res
+end)
+
 lib.callback.register("pickle_restaurants:management:depositStock", function(src, d)
     local id = tonumber(d.id)
     if not HasPerm(id, src, "manage_stock") then return { ok = false, error = _L("no_permission") } end

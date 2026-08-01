@@ -359,6 +359,19 @@ local POSE = {
     -- The exit animation is allowed to put its own props away first; the sweep runs
     -- again after it, since a cook who left mid-scene never gets that far.
     exit_ms  = 700,
+    -- How long after the task starts to keep WATCHING for the props it brings, and
+    -- how often to look. The scenario creates them during its enter animation, not
+    -- on the frame the task is given, so a single snapshot at start sees nothing.
+    -- TUNE IN-GAME.
+    claim_ms   = 5000,
+    claim_step = 250,
+    -- How long ClearPedTasks gets to end the scenario POLITELY (it plays the outro to
+    -- get there) before the ped is taken out of it outright, and how many times to
+    -- insist. The cook has already left the station by then — the camera is back and
+    -- the panel is shut — so a long outro just reads as the pose refusing to stop.
+    -- TUNE IN-GAME.
+    stop_ms    = 250,
+    stop_tries = 6,
 }
 
 -- nil = not posed. `before` is the object pool as it stood the instant before the
@@ -371,23 +384,74 @@ local function poseModelSet()
     return set
 end
 
--- Delete what the scenario ADDED and nothing else. Called twice (immediately and
--- after the exit animation) against the same snapshot — deleting an already-deleted
--- entity is a no-op, so the two racing is harmless.
-local function sweepScenarioProps(before, ped)
-    if not before then return end
+local function deletePoseProp(obj)
+    if not DoesEntityExist(obj) then return end
+    SetEntityAsMissionEntity(obj, true, true)
+    DeleteEntity(obj)
+end
+
+-- CLAIM THE SCENARIO'S PROPS WHILE THEY ARE STILL IDENTIFIABLE, don't go looking for
+-- them at the end. Two things stop being true by the time the cook leaves:
+--
+--   • the held utensil is only ATTACHED while the task owns the ped — clearing the
+--     task drops it, and a loose spatula is no BBQ model, so the end-of-session test
+--     recognised nothing and it stayed standing in the kitchen;
+--   • a prop the outro or a force-clear has already begun putting away can be
+--     anywhere, so a distance test against where the cook ended up misses it.
+--
+-- So a claim thread watches for the length of the enter animation (the props appear
+-- DURING it, which is also why snapshotting once at start finds nothing) and records
+-- HANDLES. The end of the session then deletes those handles outright, and the old
+-- positional sweep stays as the fallback for anything that appeared later.
+--
+-- Claiming is also where COLLISION is turned off between the prop and the cook. The
+-- task drops a solid BBQ into the space the player is standing in, and the collision
+-- depenetration pass shoves them out of it — which is the walking-away-from-the-stove
+-- after closing the panel. Only the pair is disabled, so the prop still collides with
+-- the room for as long as it exists.
+local function claimPoseProp(p, obj)
+    if p.owned[obj] then return end
+    p.owned[obj] = true
+    if DoesEntityExist(p.ped) then SetEntityNoCollisionEntity(obj, p.ped, true) end
+end
+
+local function watchScenarioProps(p)
+    CreateThread(function()
+        local models = poseModelSet()
+        local waited = 0
+        while posed == p and waited < POSE.claim_ms do
+            local here = DoesEntityExist(p.ped) and GetEntityCoords(p.ped) or nil
+            for _, obj in ipairs(GetGamePool("CObject")) do
+                if not p.before[obj] and not p.owned[obj] and DoesEntityExist(obj) then
+                    if GetEntityAttachedTo(obj) == p.ped
+                        or (models[GetEntityModel(obj)] and here
+                            and #(GetEntityCoords(obj) - here) <= POSE.radius) then
+                        claimPoseProp(p, obj)
+                    end
+                end
+            end
+            Wait(POSE.claim_step)
+            waited = waited + POSE.claim_step
+        end
+    end)
+end
+
+-- Delete what the scenario ADDED and nothing else: the handles claimed above, plus a
+-- positional pass for anything that appeared after the claim window. Called twice
+-- (immediately and after the exit animation) against the same session — deleting an
+-- already-deleted entity is a no-op, so the two racing is harmless.
+local function sweepScenarioProps(p, ped)
+    if not p or not p.before then return end
+    for obj in pairs(p.owned) do deletePoseProp(obj) end
     local models = poseModelSet()
     local here = DoesEntityExist(ped) and GetEntityCoords(ped) or nil
     for _, obj in ipairs(GetGamePool("CObject")) do
-        if not before[obj] and DoesEntityExist(obj) then
+        if not p.before[obj] and DoesEntityExist(obj) then
             local attached = GetEntityAttachedTo(obj) == ped
             local mine = attached
                 or (models[GetEntityModel(obj)] and here
                     and #(GetEntityCoords(obj) - here) <= POSE.radius)
-            if mine then
-                SetEntityAsMissionEntity(obj, true, true)
-                DeleteEntity(obj)
-            end
+            if mine then deletePoseProp(obj) end
         end
     end
 end
@@ -400,21 +464,52 @@ function StartStovetopPose()
     if not DoesEntityExist(ped) or IsPedInAnyVehicle(ped, false) then return end
     local before = {}
     for _, obj in ipairs(GetGamePool("CObject")) do before[obj] = true end
-    posed = { ped = ped, before = before }
+    posed = { ped = ped, before = before, owned = {} }
     TaskStartScenarioInPlace(ped, POSE.scenario, 0, true)
+    watchScenarioProps(posed)
 end
 
 -- Stop it and take the scenario's props with it. Safe to call when nothing is posed
 -- (every close path does, so no caller has to know whether this station had one).
+-- ASKING A SCENARIO TO STOP IS NOT STOPPING IT. `ClearPedTasks` only requests the end
+-- of PROP_HUMAN_BBQ, and the ped gets there by playing the scenario's own outro — that
+-- is the second or so of grilling that carries on after the panel has closed. Worse, a
+-- request that lands while the ENTER animation is still playing is swallowed outright,
+-- and the cook is left grilling indefinitely: the same call, ignored, which is why this
+-- only bites "sometimes".
+--
+-- So it ESCALATES: ask politely once, then take the ped out of it. Unlike
+-- modules/seating's repair loop — the reason the unreliable scenario natives are
+-- distrusted around here — this loop only ever CLEARS, never re-TASKS, so the worst a
+-- misreported state costs is one redundant call. It is bounded, and it stands down the
+-- moment the cook is posed again (switching back to the cooktop from an oven door),
+-- so it can never fight a fresh pose.
 function StopStovetopPose()
     local p = posed
     if not p then return end
     posed = nil
-    if DoesEntityExist(p.ped) then ClearPedTasks(p.ped) end
-    sweepScenarioProps(p.before, p.ped)
+    local ped = p.ped
+    if DoesEntityExist(ped) then ClearPedTasks(ped) end
+    sweepScenarioProps(p, ped)
     CreateThread(function()
+        local reposed = false
+        for _ = 1, POSE.stop_tries do
+            Wait(POSE.stop_ms)
+            if posed then reposed = true break end -- re-posed; that session owns the ped now
+            if not DoesEntityExist(ped) then break end
+            if not (IsPedUsingAnyScenario(ped) or IsPedActiveInScenario(ped)) then break end
+            ClearPedTasksImmediately(ped)
+        end
+        -- the outro (or the force-clear) has had its chance to put the scenario's own
+        -- props away; anything it left standing is ours to remove
         Wait(POSE.exit_ms)
-        sweepScenarioProps(p.before, p.ped)
+        -- THE CLAIMED HANDLES ARE DELETED EVEN IF THE COOK IS BACK AT THE COOKTOP:
+        -- they belong to the scenario that has already ended, so a re-pose has no
+        -- claim on them — and leaving them would strand them permanently, since the
+        -- new session's snapshot now counts them as part of the room. Only the
+        -- positional sweep stands down, because that one can't tell the sessions apart.
+        for obj in pairs(p.owned) do deletePoseProp(obj) end
+        if not posed and not reposed then sweepScenarioProps(p, ped) end
     end)
 end
 
@@ -428,6 +523,6 @@ AddEventHandler("onResourceStop", function(res)
     if p then
         posed = nil
         if DoesEntityExist(p.ped) then ClearPedTasks(p.ped) end
-        sweepScenarioProps(p.before, p.ped)
+        sweepScenarioProps(p, p.ped)
     end
 end)

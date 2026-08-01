@@ -58,6 +58,16 @@ local function buildAdminData()
         -- `dlc` mark, which is what renders them uneditable there — this is the
         -- inventory of packs, Settings → DLC.
         dlcs        = DlcList and DlcList() or {},
+        -- Supplier depots, RAW (a part-placed bay is shown so it can be fixed) plus
+        -- whether each bay is in use right now. Sent separately from `settings` because
+        -- the Settings tab must not write this list back — the gizmo owns it.
+        supplyDepots = SupplyAdminData and SupplyAdminData() or {},
+        -- The baking containers the RECIPES declare, so the seat editor lists the trays
+        -- that exist instead of asking anyone to type a model name — and knows how many
+        -- seats each one owes (`slots` = the recipe's output_count; a cake tin holds 1,
+        -- a cookie tray 6). Derived, never stored: add a container to a recipe and its
+        -- card appears. Sent apart from `settings` because nothing here writes back.
+        bakeContainers = BakeContainerList(),
     }
     for _, r in pairs(RestaurantCache) do
         local props = {}
@@ -449,9 +459,49 @@ local PLAIN_SANITIZERS = {
         end
         return out
     end,
+    -- BAKING TRAY WELLS: [container model] = { cols, spread_x, spread_y, offset_x,
+    -- offset_y } in tray-local metres. These become world offsets on every client, so
+    -- junk here doesn't misconfigure a feature, it scatters cookies across the kitchen —
+    -- hence numbers coerced, NaN rejected (it propagates through the rotation into an
+    -- entity coordinate) and everything clamped to a metre, already far larger than any
+    -- tray. Clamping is also what stops `inf`.
+    -- An entry with NO spread on either axis is dropped rather than stored: it would
+    -- stack every serving on one point, and "no authored pitch, use the measured grid"
+    -- is what a missing key already says.
+    bake_slots = function(v)
+        local out = {}
+        local function num(x, lo, hi)
+            x = tonumber(x)
+            if not x or x ~= x then return 0.0 end -- x ~= x is NaN
+            return math.max(math.min(x, hi), lo)
+        end
+        for model, c in pairs(type(v) == "table" and v or {}) do
+            if type(model) == "string" and model ~= "" and type(c) == "table" then
+                local e = { cols = math.floor(num(c.cols, 1, 12)),
+                            spread_x = num(c.spread_x, -1.0, 1.0), spread_y = num(c.spread_y, -1.0, 1.0),
+                            offset_x = num(c.offset_x, -1.0, 1.0), offset_y = num(c.offset_y, -1.0, 1.0) }
+                if e.cols < 1 then e.cols = 1 end
+                if e.spread_x ~= 0.0 or e.spread_y ~= 0.0 then out[model] = e end
+            end
+        end
+        return out
+    end,
     -- An enum, not free text: PayTips branches on it, and an unrecognised value would
     -- silently mean "even" anyway — better to store what actually happens.
     tip_split = function(v) return (tostring(v) == "grade") and "grade" or "even" end,
+    -- SUPPLY RUNS. The Settings tab edits the SCALARS; the depot list is written only
+    -- by the gizmo placement callbacks in modules/supply. So a settings write that
+    -- carries no `depots` key keeps the ones already stored — without this, a debounced
+    -- auto-save landing after a placement would delete the bay just placed, and the
+    -- panel would look like the gizmo hadn't saved anything.
+    supply_runs = function(v)
+        if type(v) ~= "table" then return GetSetting("supply_runs", {}) end
+        if v.depots == nil then
+            local cur = GetSetting("supply_runs", {})
+            v.depots = (type(cur) == "table" and cur.depots) or {}
+        end
+        return v
+    end,
 }
 
 -- A global BLIP edit has to be visible on the restaurants that never made a choice.

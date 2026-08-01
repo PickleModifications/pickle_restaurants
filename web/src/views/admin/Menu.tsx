@@ -48,7 +48,7 @@ type Props = {
 const clean = (e: any) => {
   const {
     valid, missing, defaultPrice, invalid_models,
-    box_item_installed, drink_item_installed, tap, duplicate_input, no_input,
+    box_item_installed, serving_item_installed, tap, duplicate_input, no_input,
     ...rest
   } = e;
   return rest;
@@ -459,7 +459,7 @@ export default function Menu({ scope, foods, tools, ingredients, defaults, setti
                             </Badge>
                           )}
                           {row.kind === "food" && <Badge variant="outline">{foodSubBadge(d)}</Badge>}
-                          {row.kind === "food" && d.drink_item_installed === false && (
+                          {row.kind === "food" && d.serving_item_installed === false && (
                             <Badge variant="destructive" className="gap-1"><TriangleAlert className="h-3 w-3" /> {_L("menu.drink_not_installed")}</Badge>
                           )}
                           {row.kind === "food" && d.box_item_installed === false && (

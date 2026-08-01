@@ -99,7 +99,15 @@ RegisterNUICallback("admin:setOwner",     relay("pickle_restaurants:admin:setOwn
 -- permissions, commission and wages all hang off the grade a player holds in it.
 RegisterNUICallback("admin:setJob",       relay("pickle_restaurants:admin:setJob"))
 RegisterNUICallback("admin:setGroups",    relay("pickle_restaurants:admin:setGroups"))
+-- The per-restaurant MAP BLIP. Every admin:* action the panel fetchNui's needs a relay
+-- here — a missing one is silent on both ends: the POST resolves to nothing, the auto-save
+-- still reports "Saved", and the edit never leaves the browser. This one was missing, which
+-- is why a blip edit appeared to save and then did nothing in the world.
+RegisterNUICallback("admin:setBlip",      relay("pickle_restaurants:admin:setBlip"))
 RegisterNUICallback("admin:setBrandImage", relay("pickle_restaurants:admin:setBrandImage"))
+-- Same missing-relay bug as setBlip: the Menu tab's item-art thumbnails posted into
+-- nothing, so a custom item image never reached ItemImageCache.
+RegisterNUICallback("admin:setItemImage", relay("pickle_restaurants:admin:setItemImage"))
 RegisterNUICallback("admin:setTheme",     relay("pickle_restaurants:admin:setTheme"))
 -- Rename auto-saves as you type: relay only, NO panel refresh — re-fetching getData
 -- would remount the detail and yank the cursor out of the field mid-edit. The React
@@ -193,4 +201,26 @@ RegisterNUICallback("admin:placeVirtualPoint", function(d, cb)
     cb({})
     StartVirtualPointPlacement(d.id, d.target)
     ReopenAdmin(d.id, "virtual")
+end)
+
+-- ─── supplier depots (modules/supply) ────────────────────────────────────────
+-- Server-wide, so these are NOT restaurant-scoped like the placements above. Placing is
+-- the ONE way a depot or a bay is created (the seat pattern): no depot argument means a
+-- new depot, and the flow asks for its name in-game before the gizmo.
+RegisterNUICallback("admin:setDepot",    relay("pickle_restaurants:supply:setDepot"))
+RegisterNUICallback("admin:removeDepot", relay("pickle_restaurants:supply:removeDepot"))
+RegisterNUICallback("admin:removeSupplyZone", relay("pickle_restaurants:supply:removeZone"))
+
+RegisterNUICallback("admin:placeSupplyShop", function(d, cb)
+    CloseNUI()
+    cb({})
+    StartSupplyShopPlacement(d.depot)
+    ReopenAdmin()
+end)
+
+RegisterNUICallback("admin:placeSupplyZone", function(d, cb)
+    CloseNUI()
+    cb({})
+    StartSupplyZonePlacement(d.depot, d.zone, d.boxModel, d.trailerModel)
+    ReopenAdmin()
 end)

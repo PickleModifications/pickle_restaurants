@@ -13,7 +13,7 @@ import Thumb from "@/components/Thumb";
 import { useAutoSave } from "@/lib/autosave";
 import { money, cn, prettyItem } from "@/lib/utils";
 import { _L } from "@/lib/locale";
-import { UserPlus, Trash2, Pencil, Plus, Minus, MapPin, Banknote, Armchair, Receipt, PackagePlus, ArrowDownToLine, ArrowUpFromLine, Sparkles, Users, Play, Square, Monitor, UtensilsCrossed, TriangleAlert, ScrollText, Tags, ShieldCheck, Coins, Briefcase, Loader2, Check } from "lucide-react";
+import { UserPlus, Trash2, Pencil, Plus, Minus, MapPin, Banknote, Armchair, Receipt, PackagePlus, ArrowDownToLine, ArrowUpFromLine, Sparkles, Users, Play, Square, Monitor, UtensilsCrossed, TriangleAlert, ScrollText, Tags, ShieldCheck, Coins, Briefcase, Loader2, Check, Truck } from "lucide-react";
 
 // NOTE: station / counter / seat PLACEMENT is deliberately not in this panel — it
 // is an admin-only job now (the admin panel's restaurant detail), and the placement
@@ -24,7 +24,7 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
   const id = data?.restaurantId;
   const perms = data?.perms || {};
   const items: Item[] = data?.items || [];
-  const initialTab = firstTab(perms);
+  const initialTab = data?.supplyRuns?.shop ? "supplies" : firstTab(perms);
   // EMPLOYMENT IS THE FRAMEWORK'S JOB. `job` names it (nil + jobMissing = an admin
   // hasn't assigned one, which disables every employment/pay control here), `roster`
   // is the job's real staff list and `ranks` is the per-GRADE pay & permission config
@@ -47,27 +47,41 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
   const [ranks, setRanks] = useState<any[]>(data?.ranks || []);
   useEffect(() => { setRanks(data?.ranks || []); }, [data?.ranks]);
 
+  // SUPPLY RUNS move the shop out of this panel and onto a depot counter, so the tab is
+  // only offered where buying actually works: anywhere with runs off, and at the counter
+  // with them on (`runs.shop`, which the server verifies against where the player is
+  // standing). Opened AT the counter, this panel is the shop and nothing else.
+  // SUPPLY RUNS split this tab in two. BUYING moves to a depot counter, so it is offered
+  // only where it works: anywhere with runs off, and at the counter with them on
+  // (`runs.shop`, which the server verifies against where the player is standing).
+  // MOVING stock between the larder and a pocket is not a purchase and stays in the
+  // panel. Opened AT the counter this panel is the shop and nothing else, so the tab
+  // itself never disappears: only the controls inside it change.
+  const runs = data?.supplyRuns;
+  const shopOnly = !!runs?.shop;
+  const canShop = !runs?.enabled || shopOnly;
+
   return (
     <Panel title={label || _L("mgmt.title")} subtitle={_L("mgmt.balance", money(data?.restaurant?.balance))} onClose={onClose} width="max-w-4xl">
       <Tabs defaultValue={initialTab} className="flex min-h-0 flex-1 flex-col">
         <TabsList className="shrink-0">
           {/* Ungated: the dashboard is the shift clock + the state of the room, which
               every employee working a register needs, not a management privilege. */}
-          <TabsTrigger value="dashboard">{_L("mgmt.tab_dashboard")}</TabsTrigger>
-          {perms.manage_employees && <TabsTrigger value="employees">{_L("mgmt.tab_employees")}</TabsTrigger>}
+          {!shopOnly && <TabsTrigger value="dashboard">{_L("mgmt.tab_dashboard")}</TabsTrigger>}
+          {!shopOnly && perms.manage_employees && <TabsTrigger value="employees">{_L("mgmt.tab_employees")}</TabsTrigger>}
           {/* Setting what a GRADE earns is boss-only (the server gates setRank on
               ResolvePerms' isBoss) — manage_employees moves people between grades,
               it must not also let a shift lead write their own pay. */}
-          {isBoss && <TabsTrigger value="ranks">{_L("mgmt.tab_ranks")}</TabsTrigger>}
-          {perms.manage_payroll && <TabsTrigger value="payroll">{_L("mgmt.tab_payroll")}</TabsTrigger>}
-          {perms.manage_menu && <TabsTrigger value="menu">{_L("mgmt.tab_menu")}</TabsTrigger>}
+          {!shopOnly && isBoss && <TabsTrigger value="ranks">{_L("mgmt.tab_ranks")}</TabsTrigger>}
+          {!shopOnly && perms.manage_payroll && <TabsTrigger value="payroll">{_L("mgmt.tab_payroll")}</TabsTrigger>}
+          {!shopOnly && perms.manage_menu && <TabsTrigger value="menu">{_L("mgmt.tab_menu")}</TabsTrigger>}
           {perms.manage_stock && <TabsTrigger value="supplies">{_L("mgmt.tab_supplies")}</TabsTrigger>}
-          {perms.view_finances && <TabsTrigger value="finances">{_L("mgmt.tab_finances")}</TabsTrigger>}
-          {perms.manage_props && <TabsTrigger value="branding">{_L("mgmt.tab_branding")}</TabsTrigger>}
+          {!shopOnly && perms.view_finances && <TabsTrigger value="finances">{_L("mgmt.tab_finances")}</TabsTrigger>}
+          {!shopOnly && perms.manage_props && <TabsTrigger value="branding">{_L("mgmt.tab_branding")}</TabsTrigger>}
         </TabsList>
 
         <TabsContent value="dashboard" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
-          <Dashboard id={id} dash={data?.dashboard} perms={perms} balance={data?.restaurant?.balance} />
+          <Dashboard id={id} dash={data?.dashboard} perms={perms} balance={data?.restaurant?.balance} runs={runs} />
         </TabsContent>
         {perms.manage_employees && (
           <TabsContent value="employees" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
@@ -92,7 +106,8 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
         )}
         {perms.manage_stock && (
           <TabsContent value="supplies" className="min-h-0 flex-1 overflow-y-auto pr-1 pb-4">
-            <Supplies id={id} supplies={data?.supplies || []} />
+            <Supplies id={id} supplies={data?.supplies || []} runs={runs}
+              canBuy={canShop} canMove={!shopOnly} balance={data?.restaurant?.balance} />
           </TabsContent>
         )}
         {perms.view_finances && (
@@ -121,6 +136,8 @@ export default function Management({ data, onClose }: { data: any; onClose: () =
 function firstTab(_perms: any) {
   return "dashboard";
 }
+// (Shop mode overrides this: the depot counter opens straight on Supplies, since that
+// is the only tab it renders.)
 
 // ─── Dashboard ───────────────────────────────────────────────────────────────
 
@@ -156,7 +173,7 @@ function Stat({ icon: Icon, label, value, sub, tone }: {
 // app punches — one ShiftCache server-side, so clocking in here shows up there),
 // who else is on, and the state of the room. Polls while the panel sits open so the
 // ticket queue and the timer stay honest; any panel refresh replaces the block.
-function Dashboard({ id, dash, perms, balance }: any) {
+function Dashboard({ id, dash, perms, balance, runs }: any) {
   const [d, setD] = useState<any>(dash);
   const [tick, setTick] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -197,6 +214,23 @@ function Dashboard({ id, dash, perms, balance }: any) {
 
   return (
     <div className="space-y-3">
+      {/* A GATE MUST EXPLAIN ITSELF. With supply runs on, the Supplies tab is gone from
+          this panel because ordering happens at a depot counter. Vanishing silently
+          would read as a broken permission, so the dashboard says where to go and what
+          is already on its way. */}
+      {runs?.enabled && !runs?.shop && perms.manage_stock && (
+        <Card>
+          <CardContent className="flex items-center gap-3 py-3 text-sm">
+            <Truck className="h-4 w-4 shrink-0 text-primary" />
+            <span className="text-muted-foreground">{_L("mgmt.supply_at_depot")}</span>
+            {(runs.pending || []).length > 0 && (
+              <span className="ml-auto shrink-0 font-mono text-xs">
+                {_L("mgmt.supply_waiting_count", String((runs.pending || []).length))}
+              </span>
+            )}
+          </CardContent>
+        </Card>
+      )}
       {/* the shift clock — the one thing on this tab you ACT on */}
       <Card>
         <CardContent className="flex flex-wrap items-center gap-4 p-4">
@@ -718,7 +752,75 @@ function PriceRow({ id, entry }: { id: number; entry: any }) {
 
 // The Supplies tab: buy raw ingredients into the restaurant's shared stock pool
 // (paid from the restaurant balance). The kitchen cooks from this stock.
-function Supplies({ id, supplies }: { id: number; supplies: any[] }) {
+/**
+ * THE TWO HALVES OF THIS TAB ANSWER TO DIFFERENT PLACES once supply runs are on.
+ * BUYING happens at a depot counter (`canBuy`), because that is where the boxes are.
+ * MOVING stock between the larder and your own pockets (`canMove`) stays in the panel,
+ * because it is not a purchase and has nothing to do with a depot. With runs off both
+ * are true here and the tab is exactly what it always was.
+ */
+function Supplies({ id, supplies, runs, canBuy, canMove, balance }: { id: number; supplies: any[]; runs?: any; canBuy?: boolean; canMove?: boolean; balance?: number }) {
+  // The order being built, as { stock key -> qty }. A CART rather than a buy button per
+  // row: restocking is one shopping trip, not eight separate purchases, and the payment
+  // method is a decision about the whole basket.
+  const [cart, setCart] = useState<Record<string, number>>({});
+  const byKey = useMemo(() => {
+    const m: Record<string, any> = {};
+    supplies.forEach((s) => { m[s.key || s.item] = s; });
+    return m;
+  }, [supplies]);
+  const lines = Object.keys(cart).map((k) => ({ key: k, qty: cart[k], supply: byKey[k] })).filter((l) => l.supply);
+  const total = lines.reduce((n, l) => n + (l.supply.cost || 0) * l.qty, 0);
+  const units = lines.reduce((n, l) => n + l.qty, 0);
+
+  // THE UI ENFORCES THE SAME TWO CEILINGS THE SERVER DOES. Not because it is a security
+  // boundary (BuySupplies re-checks both, and that is what actually decides), but
+  // because an order you are allowed to build and never allowed to pay for is a worse
+  // answer than a stepper that stops:
+  //   • the per-item CAP counts what is in the larder, what is already bought and
+  //     waiting at the depot, and what is already in this cart;
+  //   • the run CAPACITY is what one rig can haul, across the whole basket.
+  const cap = runs?.cap || 0;
+  const capacity = runs?.capacity || 0;
+  const capacityLeft = capacity > 0 ? Math.max(0, capacity - units) : Infinity;
+  // How many more of one key may still be added. Infinity where a ceiling is off, so
+  // the callers can just Math.min without special-casing "no limit".
+  const roomFor = (key: string) => {
+    const s = byKey[key];
+    if (!s) return 0;
+    const byCap = cap > 0
+      ? Math.max(0, cap - (s.stock || 0) - (s.pending || 0) - (cart[key] || 0))
+      : Infinity;
+    return Math.min(byCap, capacityLeft);
+  };
+
+  const addToCart = (key: string, qty: number) => {
+    const room = roomFor(key);
+    const add = Math.min(qty, room === Infinity ? qty : room);
+    if (add <= 0) return;
+    setCart((c) => ({ ...c, [key]: (c[key] || 0) + add }));
+  };
+  // A cart line is clamped against the ceilings MINUS itself: the room calculation
+  // already subtracts what this line holds, so its own units have to be handed back
+  // before asking how big it may become.
+  const setLine = (key: string, qty: number) => {
+    const room = roomFor(key);
+    const max = room === Infinity ? qty : (cart[key] || 0) + room;
+    const next = Math.min(Math.max(0, qty), max);
+    setCart((c) => {
+      const n = { ...c };
+      if (next <= 0) delete n[key]; else n[key] = next;
+      return n;
+    });
+  };
+
+  const checkout = async (payment: "society" | "cash") => {
+    const res = await fetchNui<any>("management:buySupplies", {
+      id, payment, lines: lines.map((l) => ({ key: l.key, qty: l.qty })),
+    });
+    if (res && res.ok) setCart({});
+  };
+
   // Filed under the same GROUP headings the admin Menu tab uses — a larder is read
   // by section ("what do I need for the pizza line?"), not as one alphabetical wall.
   // Ungrouped sorts last, exactly as it does there; the server sends the group.
@@ -731,21 +833,109 @@ function Supplies({ id, supplies }: { id: number; supplies: any[] }) {
   }, [supplies]);
   return (
     <div className="space-y-4">
-      <p className="text-[11px] text-muted-foreground">{_L("mgmt.supplies_hint")}</p>
+      <p className="text-[11px] text-muted-foreground">
+        {canBuy ? _L("mgmt.supplies_hint") : _L("mgmt.supply_move_only")}
+      </p>
+      {/* SUPPLY RUNS: what has been bought and is still sitting at the depot. Only
+          rendered when the feature is on, so the tab is unchanged on a server that
+          hasn't enabled it. */}
+      {runs?.enabled && (runs.pending || []).length > 0 && (
+        <Card>
+          <CardContent className="py-3">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <Truck className="h-4 w-4 text-primary" /> {_L("mgmt.supply_waiting_title")}
+            </div>
+            <p className="mb-2 text-[11px] text-muted-foreground">{_L("mgmt.supply_waiting_hint")}</p>
+            <div className="space-y-1">
+              {(runs.pending || []).map((o: any) => (
+                <div key={o.id} className="flex items-center gap-2 text-xs">
+                  <span className="truncate">
+                    {(o.lines || []).map((l: any) => `${l.qty}x ${l.label}`).join(", ")}
+                  </span>
+                  <span className="ml-auto shrink-0 font-mono text-muted-foreground">
+                    {_L("mgmt.supply_waiting_boxes", String(o.boxes))}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
       {supplies.length === 0 && <div className="py-4 text-center text-sm text-muted-foreground">{_L("mgmt.no_supplies")}</div>}
       {groups.map((grp) => (
         <div key={grp.name || "__ungrouped__"} className="space-y-2">
           <div className="flex items-center gap-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
             <Tags className="h-3.5 w-3.5" /> {grp.name || _L("menu.ungrouped")}
           </div>
-          {grp.rows.map((s) => <SupplyRow key={s.key || s.item} id={id} supply={s} />)}
+          {grp.rows.map((s) => (
+            <SupplyRow key={s.key || s.item} id={id} supply={s} cap={cap}
+              canBuy={canBuy} canMove={canMove} inCart={cart[s.key || s.item] || 0}
+              room={roomFor(s.key || s.item)} onAdd={addToCart} />
+          ))}
         </div>
       ))}
+
+      {/* THE ORDER. Sticky at the bottom so the total and the payment choice stay
+          visible while scrolling a long larder. */}
+      {canBuy && (
+        <Card className="sticky bottom-0">
+          <CardContent className="py-3">
+            <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
+              <PackagePlus className="h-4 w-4 text-primary" /> {_L("mgmt.cart_title")}
+            </div>
+            {lines.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground">{_L("mgmt.cart_empty")}</p>
+            ) : (
+              // THE LIST SCROLLS, THE CARD DOESN'T GROW. It is sticky to the bottom of
+              // the tab, so an unbounded line list climbs the screen and eventually
+              // covers the larder it is being filled from. Capped here and scrolled
+              // internally, the total and the payment buttons stay put however many
+              // lines the order has.
+              <div className="max-h-40 space-y-1 overflow-y-auto pr-1">
+                {lines.map((l) => (
+                  <div key={l.key} className="flex items-center gap-2 text-xs">
+                    <span className="min-w-0 flex-1 truncate">{l.supply.label}</span>
+                    <div className="flex shrink-0 items-center">
+                      <Button size="icon" variant="ghost" onClick={() => setLine(l.key, l.qty - 1)}><Minus className="h-3 w-3" /></Button>
+                      <span className="w-8 text-center font-mono">{l.qty}</span>
+                      <Button size="icon" variant="ghost" disabled={roomFor(l.key) <= 0} onClick={() => setLine(l.key, l.qty + 1)}><Plus className="h-3 w-3" /></Button>
+                    </div>
+                    <span className="w-16 shrink-0 text-right font-mono">{money((l.supply.cost || 0) * l.qty)}</span>
+                    <Button size="icon" variant="ghost" onClick={() => setLine(l.key, 0)} title={_L("mgmt.cart_remove")}>
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-line pt-2">
+              {/* What the basket is, in the units the depot deals in: a box count is
+                  what turns "180 units" into "how many trips is this". */}
+              {capacity > 0 && (
+                <span className={cn("text-xs", capacityLeft <= 0 ? "text-destructive" : "text-muted-foreground")}>
+                  {_L("mgmt.cart_load", String(units), String(Math.ceil(units / Math.max(1, runs?.boxUnits || 1))))}
+                </span>
+              )}
+              <span className="text-xs text-muted-foreground">{_L("mgmt.cart_total")}</span>
+              <span className="font-mono text-sm font-semibold">{money(total)}</span>
+              <span className="ml-auto" />
+              {/* Two pockets, one basket: the business account, or the buyer's own
+                  cash so an empty account is never a dead end. */}
+              <Button size="sm" variant="outline" disabled={lines.length === 0 || (balance || 0) < total} onClick={() => checkout("society")}>
+                <Banknote className="h-4 w-4" /> {_L("mgmt.cart_pay_society")}
+              </Button>
+              <Button size="sm" disabled={lines.length === 0} onClick={() => checkout("cash")}>
+                <Coins className="h-4 w-4" /> {_L("mgmt.cart_pay_cash")}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
 
-function SupplyRow({ id, supply }: { id: number; supply: any }) {
+function SupplyRow({ id, supply, cap, canBuy, canMove, inCart, room, onAdd }: { id: number; supply: any; cap?: number; canBuy?: boolean; canMove?: boolean; inCart?: number; room?: number; onAdd?: (key: string, qty: number) => void }) {
   const [qty, setQty] = useState(5);
   const [stock, setStock] = useState<number>(supply.stock || 0);
   const [held, setHeld] = useState<number>(supply.held || 0);
@@ -754,10 +944,40 @@ function SupplyRow({ id, supply }: { id: number; supply: any }) {
   // larder counts and prices. `item` is still sent so an older server that only
   // understands item names keeps working.
   const key = supply.key || supply.item;
-  const buy = async () => {
-    const res = await fetchNui<any>("management:buyStock", { id, key, item: supply.item, qty });
-    if (res && res.ok) setStock(res.stock);
-  };
+  // Units already bought and waiting at the depot. They count against the cap, so the
+  // row has to show them or it is lying about how much more can be ordered.
+  const [pending, setPending] = useState<number>(supply.pending || 0);
+  // The cap readout on the row (null = uncapped). Distinct from the `room` PROP,
+  // which is what the CART may still take and drives the stepper.
+  const capRoom = cap && cap > 0 ? Math.max(0, cap - stock - pending) : null;
+  // Buying moved OUT of the row, so the row no longer updates its own counts after a
+  // purchase: the cart's checkout refreshes the whole panel instead. Re-seed from the
+  // fresh payload or these would sit on the numbers they mounted with.
+  useEffect(() => {
+    setStock(supply.stock || 0);
+    setHeld(supply.held || 0);
+    setPending(supply.pending || 0);
+  }, [supply.stock, supply.held, supply.pending]);
+
+  // Rows ADD to the order and the cart pays for it in one go, with one payment
+  // decision for the basket.
+  //
+  // THE STEPPER IS RIGID. `room` is how many more of this key the cart may hold (the
+  // per-item cap minus larder + pending + what is already in the basket, and the run
+  // capacity across the whole order), so the control simply cannot be driven past it:
+  // typing 9999 clamps, the + stops, and Add greys out at zero. The server checks the
+  // same thing, but an order you can build and never pay for is a worse answer than a
+  // stepper that stops.
+  const maxQty = room === undefined ? 1000 : Math.min(1000, room);
+  const q = Math.max(1, Math.min(qty, Math.max(1, maxQty)));
+  const add = () => onAdd?.(key, q);
+  // ADD MAX fills the remaining room in one click, which is what restocking actually
+  // is: with a cap on, that is "top this line back up to full" and, once the load is
+  // the binding limit, "fill the rest of the truck". It prices what it would add right
+  // on the button, because the whole point is committing to a number you didn't type.
+  // Safe to be literal about the ceiling (1000 a line uncapped, the server's own clamp)
+  // since this adds to the CART: nothing is spent until the basket is paid for.
+  const addMax = () => onAdd?.(key, maxQty);
   // Deposit moves the manager's own items INTO the shared pool; withdraw pulls
   // pool stock back OUT into their pockets. Both echo the fresh stock + held
   // counts so the row stays live without re-fetching the whole panel.
@@ -776,21 +996,28 @@ function SupplyRow({ id, supply }: { id: number; supply: any }) {
           <div className="flex items-center gap-2">
             <span className="truncate font-medium">{supply.label}</span>
             {!supply.installed && <Badge variant="destructive">{_L("mgmt.not_installed")}</Badge>}
+            {/* buyable, but the kitchen can't use it until an admin adds the group */}
+            {supply.locked && <Badge variant="outline">{_L("mgmt.group_locked", supply.lockedGroup || "?")}</Badge>}
           </div>
           <div className="text-[11px] text-muted-foreground">
             {_L("mgmt.cost_each", money(supply.cost))} · {_L("mgmt.in_stock", stock)}
+            {capRoom !== null && <> · {_L("mgmt.supply_cap", String(cap))}</>}
+            {canBuy && (room ?? 1) <= 0 && <> · <span className="text-destructive">{_L("mgmt.cart_no_room")}</span></>}
+            {pending > 0 && <> · {_L("mgmt.supply_pending_units", String(pending))}</>}
             {/* A face isn't movable between pocket and larder (the inventory item is
                 generic), so "you hold N" would always read 0 and mean nothing. */}
             {supply.movable && <> · {_L("mgmt.you_hold", held)}</>}
           </div>
         </div>
         <div className="flex shrink-0 items-center">
-          <Button size="icon" variant="ghost" onClick={() => setQty((q) => Math.max(1, q - 1))}><Minus className="h-3.5 w-3.5" /></Button>
-          <Input type="number" min={1} value={qty} onChange={(e) => setQty(Math.max(1, Math.floor(Number(e.target.value) || 1)))} className="h-8 w-16 text-center" />
-          <Button size="icon" variant="ghost" onClick={() => setQty((q) => q + 1)}><Plus className="h-3.5 w-3.5" /></Button>
+          <Button size="icon" variant="ghost" onClick={() => setQty(Math.max(1, q - 1))}><Minus className="h-3.5 w-3.5" /></Button>
+          <Input type="number" min={1} max={maxQty} value={q}
+            onChange={(e) => setQty(Math.max(1, Math.min(maxQty, Math.floor(Number(e.target.value) || 1))))}
+            className="h-8 w-16 text-center" />
+          <Button size="icon" variant="ghost" disabled={q >= maxQty} onClick={() => setQty(Math.min(maxQty, q + 1))}><Plus className="h-3.5 w-3.5" /></Button>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {supply.movable && (
+          {canMove && supply.movable && (
             <>
               <Button size="sm" variant="outline" onClick={move("management:depositStock")} disabled={held < qty} title={_L("mgmt.deposit_stock_hint")}>
                 <ArrowDownToLine className="h-4 w-4" /> {_L("mgmt.deposit_stock")}
@@ -800,7 +1027,18 @@ function SupplyRow({ id, supply }: { id: number; supply: any }) {
               </Button>
             </>
           )}
-          <Button size="sm" onClick={buy}><PackagePlus className="h-4 w-4" /> {_L("mgmt.buy")} · {money(supply.cost * qty)}</Button>
+          {canBuy && (
+            <>
+              <Button size="sm" variant="outline" onClick={addMax} disabled={maxQty <= 0}
+                title={_L("mgmt.cart_add_max_hint", String(maxQty))}>
+                {_L("mgmt.cart_add_max")} · {money(supply.cost * maxQty)}
+              </Button>
+              <Button size="sm" onClick={add} disabled={(room ?? 1) <= 0}>
+                <PackagePlus className="h-4 w-4" /> {_L("mgmt.cart_add")} · {money(supply.cost * q)}
+                {(inCart || 0) > 0 && <Badge variant="secondary">{inCart}</Badge>}
+              </Button>
+            </>
+          )}
         </div>
       </CardContent>
     </Card>

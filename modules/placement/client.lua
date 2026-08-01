@@ -300,10 +300,11 @@ function StartNpcSpawnPlacement(restaurantId)
     end
 end
 
--- The small marker prop used to position a virtual point. A virtual point is an
--- invisible, interaction-only anchor (the station spawns in the kitchen shell at
--- runtime), so previewing the whole station prop just buries the spot — a tennis
--- ball marks the exact anchor without hiding what's under it.
+-- The small marker prop used to position an INVISIBLE, interaction-only anchor: a
+-- virtual point (the station spawns in the kitchen shell at runtime) and a supply
+-- depot's order counter (nothing spawns there at all). Previewing a prop the world
+-- will never have just buries the spot, so a tennis ball marks the exact anchor
+-- without hiding what is under it.
 local VIRTUAL_PLACE_MODEL = "prop_tennis_ball"
 
 -- Place an invisible virtual point anchor: the gizmo previews a small ball at the
@@ -638,5 +639,254 @@ function StartPropReposition(propId)
     else
         restoreLive() -- save failed: unhide the original so it isn't lost
         ShowNotification((res and res.error) or _L("place_station_fail"))
+    end
+end
+
+-- ─── supplier depots (modules/supply) ────────────────────────────────────────
+-- Placed the way a SEAT is: one button in the panel, the questions asked in-game, then
+-- the gizmo. Nothing is written until every pass is answered, so a cancel leaves no
+-- half-made depot behind in the list.
+--
+-- A bay is TWO points, so it is two passes: the PACKAGE point (where the pallet of
+-- boxes stands, previewed with the box prop itself so the pile lands where it looked
+-- like it would) and the TRAILER point (previewed with the real trailer, so an admin
+-- can see it fits). Neither has a fallback, unlike a seat's optional extras: a bay
+-- without both is not a bay.
+--
+-- `depotId` nil = this is a NEW depot, so it asks for a name first and the save creates
+-- the depot and its first bay together.
+--
+-- Both previews are LIFTED by `coordsOffset`, which the gizmo adds back out of
+-- `result.position` (the seat pattern): the saved point is the GROUND, but the gizmo
+-- seats a model by its ORIGIN, and a vehicle's origin is mid-chassis. Without the lift
+-- the trailer preview is buried to its axles, and an admin lines the bay up against a
+-- picture the real spawn will never match.
+-- ─── the trailer's LOADING SPOT ──────────────────────────────────────────────
+-- The third pass of a bay, and the reason it exists: the trailer point is the vehicle's
+-- ORIGIN, roughly its centre, so anything derived from it (the target zone, the map
+-- marker) landed halfway down a 12m box. Measuring the model's rear face was a guess
+-- that only held for one trailer. So the admin PLACES the spot instead, and what they
+-- see is what the loader gets.
+--
+-- The camera sits to the SIDE, never in front: from the front a trailer is a flat wall
+-- and the marker's position along its length is exactly the thing you cannot judge. From
+-- the side the whole rig is in frame and the beam reads against it at a glance.
+local LOADPICK = {
+    side_dist = 17.0,   -- how far out to the side the camera sits (m)
+    side_up   = 5.0,    -- and how high
+    look_up   = 1.2,    -- height on the trailer the camera aims at
+    step      = 0.25,   -- metres per scroll notch (x4 with SHIFT)
+    range     = 14.0,   -- how far fore/aft of the trailer point the spot may go
+    beam      = 30.0,   -- height of the sky beam (m)
+}
+
+-- Returns { x, y, z, heading } or nil if cancelled. `heading` is the TRAILER's, so the
+-- stored spot carries the facing of the thing it belongs to.
+function PickTrailerLoadPoint(t, trailerModel)
+    local hash = GetHashKey(trailerModel or "trailers")
+    if not IsModelInCdimage(hash) then return nil end
+    RequestModel(hash)
+    local t0 = GetGameTimer()
+    while not HasModelLoaded(hash) and GetGameTimer() - t0 < 10000 do Wait(0) end
+    if not HasModelLoaded(hash) then return nil end
+
+    local rad   = math.rad(t.heading or 0.0)
+    local fwd   = vector3(-math.sin(rad), math.cos(rad), 0.0)
+    local right = vector3(math.cos(rad), math.sin(rad), 0.0)
+    local centre = vector3(t.x + 0.0, t.y + 0.0, t.z + 0.0)
+
+    -- The preview trailer, exactly where the real one will park.
+    local prop = CreateObject(hash, centre.x, centre.y, centre.z, false, false, false)
+    SetEntityHeading(prop, t.heading or 0.0)
+    FreezeEntityPosition(prop, true)
+    SetEntityCollision(prop, false, false)
+    SetModelAsNoLongerNeeded(hash)
+
+    -- Start the marker at the REAR, which is the answer nine times out of ten: the
+    -- scroll is then a nudge rather than a hunt.
+    local mn = GetModelDimensions(hash)
+    local offset = -math.abs(mn.y or 6.0) - 1.4
+    if offset < -LOADPICK.range then offset = -LOADPICK.range end
+
+    -- SIDE-ON, and on the side the placer is already standing: swinging the camera
+    -- through the trailer to the far side would flip left and right under them.
+    local me = GetEntityCoords(PlayerPedId())
+    local toMe = me - centre
+    local side = ((toMe.x * right.x + toMe.y * right.y) >= 0.0) and 1.0 or -1.0
+    local camPos = centre + right * (LOADPICK.side_dist * side) + vector3(0.0, 0.0, LOADPICK.side_up)
+    local cam = CreateCam("DEFAULT_SCRIPTED_CAMERA", true)
+    SetCamCoord(cam, camPos.x, camPos.y, camPos.z)
+    PointCamAtCoord(cam, centre.x, centre.y, centre.z + LOADPICK.look_up)
+    SetCamActive(cam, true)
+    RenderScriptCams(true, true, 500, true, true)
+    -- The camera is detached from the ped, so PARK the player and take every gameplay
+    -- control: scroll doubles as weapon-cycle and LMB fires. Inputs below are read
+    -- through the Disabled variants, exactly like the shell-height pass above.
+    local ped = PlayerPedId()
+    FreezeEntityPosition(ped, true)
+
+    local result = nil
+    while true do
+        DisableAllControlActions(0)
+        local speed = IsDisabledControlPressed(0, 21) and 4.0 or 1.0
+        if IsDisabledControlJustPressed(0, 15) then
+            offset = math.min(LOADPICK.range, offset + LOADPICK.step * speed)
+        elseif IsDisabledControlJustPressed(0, 14) then
+            offset = math.max(-LOADPICK.range, offset - LOADPICK.step * speed)
+        end
+
+        local p = centre + fwd * offset
+        -- A BEAM TO THE SKY, not a disc on the floor: the camera is side-on and a
+        -- ground marker foreshortens to a sliver from there. A tall thin cylinder reads
+        -- as a position against the trailer from any angle.
+        DrawMarker(1, p.x, p.y, p.z - 0.9, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.35, 0.35, LOADPICK.beam, 90, 200, 255, 90, false, false, 2, false, nil, nil, false)
+        DrawMarker(25, p.x, p.y, p.z + 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   1.2, 1.2, 1.2, 90, 200, 255, 200, false, false, 2, false, nil, nil, false)
+
+        ShowInteractText(
+            '[SCROLL]     - ' .. _L("place_supply_load_scroll") .. '  \n' ..
+            '[E]     - ' .. _L("objects_save") .. '  \n' ..
+            '[ESC / BACKSPACE]     - ' .. _L("objects_cancel")
+        )
+
+        -- Pause suppression + the exit guard, same as the gizmo loop: this loop is what
+        -- keeps ESC off the frontend, and it ends on the press, so the rest of that
+        -- press would open the pause menu behind us.
+        ForcePauseMenuClosed()
+        if IsDisabledControlJustPressed(0, 202)
+            or IsDisabledControlJustReleased(0, 199)
+            or IsDisabledControlJustReleased(0, 200)
+            or IsDisabledControlJustReleased(0, 322) then
+            if GuardPauseKeys then GuardPauseKeys() end
+            break
+        end
+        if IsDisabledControlJustPressed(0, 51) then
+            result = { x = p.x, y = p.y, z = p.z, heading = t.heading or 0.0 }
+            break
+        end
+        Wait(0)
+    end
+
+    FreezeEntityPosition(ped, false)
+    RenderScriptCams(false, true, 500, true, true)
+    -- Let the ease-back finish before the handle dies, or the last frames cut hard.
+    CreateThread(function()
+        Wait(550)
+        if cam then DestroyCam(cam, false) end
+    end)
+    if DoesEntityExist(prop) then DeleteEntity(prop) end
+    return result
+end
+
+-- The counter is an INVISIBLE anchor (only an interaction is created there), so it
+-- previews with VIRTUAL_PLACE_MODEL like a virtual point, never a till.
+
+-- Move an existing depot's shop counter on its own, without re-placing its bays.
+function StartSupplyShopPlacement(depotId)
+    Wait(250)
+    ShowNotification(_L("place_supply_shop_hint"))
+    local sh = StartGizmoEditor({
+        model        = GetHashKey(VIRTUAL_PLACE_MODEL),
+        enableCancel = true,
+        deleteEntity = true,
+    })
+    if not sh or not sh.position then return ShowNotification(_L("place_supply_cancelled")) end
+    local res = lib.callback.await("pickle_restaurants:supply:saveShop", false, {
+        depot = depotId,
+        shop = { x = sh.position.x, y = sh.position.y, z = sh.position.z,
+                 heading = (sh.rotation and sh.rotation.z) or 0.0 },
+    })
+    if res and res.ok then
+        ShowNotification(_L("place_supply_shop_placed"))
+    else
+        ShowNotification((res and res.error) or _L("place_supply_fail"))
+    end
+end
+
+local function GroundLift(model)
+    local hash = (type(model) == "number") and model or GetHashKey(model)
+    if not IsModelInCdimage(hash) then return 0.0 end
+    RequestModel(hash)
+    local t = GetGameTimer()
+    while not HasModelLoaded(hash) and GetGameTimer() - t < 10000 do Wait(0) end
+    if not HasModelLoaded(hash) then return 0.0 end
+    local mn = GetModelDimensions(hash)
+    -- Distance from the origin down to the lowest point of the model. Never negative:
+    -- a model already authored origin-at-base needs no lift at all.
+    return math.max(0.0, -(mn.z or 0.0))
+end
+
+function StartSupplyZonePlacement(depotId, zoneId, boxModel, trailerModel)
+    Wait(250)
+    local label
+    if not depotId then
+        local input = lib.inputDialog(_L("place_supply_depot_title"), {
+            { type = "input", label = _L("place_supply_depot_label"),
+              description = _L("place_supply_depot_hint"), required = true, max = 40 },
+        })
+        label = input and input[1]
+        if not label or label == "" then return end
+    end
+
+    -- A NEW depot places its SHOP COUNTER first: with runs on that is where every
+    -- order is placed, so a depot without one is a warehouse nobody can buy from.
+    local shop
+    if not depotId then
+        Wait(250)
+        ShowNotification(_L("place_supply_shop_hint"))
+        local sh = StartGizmoEditor({
+            model        = GetHashKey(VIRTUAL_PLACE_MODEL),
+            enableCancel = true,
+            deleteEntity = true,
+        })
+        if not sh or not sh.position then return ShowNotification(_L("place_supply_cancelled")) end
+        shop = { x = sh.position.x, y = sh.position.y, z = sh.position.z,
+                 heading = (sh.rotation and sh.rotation.z) or 0.0 }
+    end
+
+    Wait(250)
+    ShowNotification(_L("place_supply_package_hint"))
+    local boxHash = GetHashKey(boxModel or "hei_prop_heist_box")
+    local pkg = StartGizmoEditor({
+        model        = boxHash,
+        coordsOffset = vector3(0.0, 0.0, GroundLift(boxHash)),
+        enableCancel = true,
+        deleteEntity = true,
+    })
+    if not pkg or not pkg.position then return ShowNotification(_L("place_supply_cancelled")) end
+
+    Wait(250)
+    ShowNotification(_L("place_supply_trailer_hint"))
+    trailerModel = trailerModel or "trailers"
+    local trailerHash = GetHashKey(trailerModel)
+    local trl = StartGizmoEditor({
+        model        = trailerHash,
+        coordsOffset = vector3(0.0, 0.0, GroundLift(trailerHash)),
+        enableCancel = true,
+        deleteEntity = true,
+    })
+    if not trl or not trl.position then return ShowNotification(_L("place_supply_cancelled")) end
+
+    -- The LOADING SPOT, placed against the trailer that was just parked. Cancelling this
+    -- pass abandons the bay like the other two: a bay whose loading spot fell back to the
+    -- trailer's centre is the exact bug this pass exists to remove.
+    local trailerPoint = { x = trl.position.x, y = trl.position.y, z = trl.position.z,
+                           heading = (trl.rotation and trl.rotation.z) or 0.0 }
+    Wait(250)
+    ShowNotification(_L("place_supply_load_hint"))
+    local load = PickTrailerLoadPoint(trailerPoint, trailerModel)
+    if not load then return ShowNotification(_L("place_supply_cancelled")) end
+
+    local res = lib.callback.await("pickle_restaurants:supply:saveZone", false, {
+        depot = depotId, zone = zoneId, label = label, shop = shop, load = load,
+        package = { x = pkg.position.x, y = pkg.position.y, z = pkg.position.z,
+                    heading = (pkg.rotation and pkg.rotation.z) or 0.0 },
+        trailer = trailerPoint,
+    })
+    if res and res.ok then
+        ShowNotification(_L("place_supply_placed"))
+    else
+        ShowNotification((res and res.error) or _L("place_supply_fail"))
     end
 end

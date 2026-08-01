@@ -17,12 +17,15 @@ Ingredients      = {}    -- [item]  = synced ingredient config { item, model, gr
 IngredientsByModel = {}  -- [model] = its ingredient entry (reverse lookup incl. halves/melt models)
 BoxBaseModels    = {}    -- model names the pizza box accepts as a carried pile's BOTTOM layer
 StackTweaks      = {}    -- [model] = { sink?, rise? } manual stacking corrections (synced setting)
+BakeSlots        = {}    -- [container model] = ordered { x, y } serving seats in the tray (synced setting)
 ConfigGen        = 0     -- bumped every sync so lazily-built hash caches invalidate
 BagItem          = "restaurant_bag" -- the ONE takeaway CARRIER item (its contents ride as metadata)
 BagModel         = "pickle_restaurant_bag_01" -- the Restaurant Bag vessel prop
 MealItem         = "meal"           -- the ONE eat-in CARRIER item (serving-tray layout in metadata)
 BoxItem          = "takeout_box"    -- the ONE item every bag-KIND food (soup, salad…) becomes
-DrinkItem        = "drink"          -- the ONE item every poured drink becomes (flavor in metadata)
+ServingItem      = "restaurant_item" -- THE RESTAURANT ITEM: one serving of anything the
+                                    -- kitchen makes (a poured drink, or a cooked product a
+                                    -- cook pocketed), what it is riding in metadata
 BoxBaseModel     = "pickle_takeout_box_01" -- takeout box: base half
 BoxLidModel      = "pickle_takeout_box_02" -- takeout box: hinged lid
 
@@ -614,7 +617,7 @@ local function DoApplySync(payload)
         BagModel = payload.settings.bag_model or "pickle_restaurant_bag_01"
         MealItem = payload.settings.meal_item or "meal"
         BoxItem      = payload.settings.box_item or "takeout_box"
-        DrinkItem    = payload.settings.drink_item or "drink"
+        ServingItem  = payload.settings.serving_item or "restaurant_item"
         BoxBaseModel = payload.settings.box_base_model or "pickle_takeout_box_01"
         BoxLidModel  = payload.settings.box_lid_model or "pickle_takeout_box_02"
         SideContainerModel = payload.settings.side_container_model or ""
@@ -636,8 +639,12 @@ local function DoApplySync(payload)
                 if ml.melted_model then IngredientsByModel[ml.melted_model] = ing end
             end
         end
+        -- Supplier depots + the run's models/geometry (modules/supply reads this global
+        -- and rebuilds its depot interactions off it).
+        Supply   = payload.settings.supply or nil
         BoxBaseModels = payload.settings.box_base_models or {}
         StackTweaks   = payload.settings.stack_tweaks or {}
+        BakeSlots     = payload.settings.bake_slots or {}
         -- invalidate lazily-built hash caches (e.g. the cooking module's boxable set)
         ConfigGen = (ConfigGen or 0) + 1
     end
@@ -670,6 +677,9 @@ local function DoApplySync(payload)
     -- And the always-on register board: its counter's catalog/menu may have changed, so
     -- re-seed + re-paint it (modules/register).
     if RefreshRegister then RefreshRegister() end
+    -- And the supplier depots: their points are authored in the admin panel, so a bay
+    -- placed with the gizmo has to appear without a restart (modules/supply).
+    if RefreshSupply then RefreshSupply() end
     -- NOT touched here: the cooking module's station subscriptions and the item props they
     -- own. A sync leaves cooking items standing, and the reconciler re-seats them through
     -- SpawnProp's OnStationSpawned for any station it actually rebuilds. Dropping and

@@ -506,8 +506,61 @@ end
 -- prop"). Flooring each column/row pitch by the serving prop's measured footprint is
 -- what keeps them spread out. Models may be names or hashes (a placed tray measures
 -- its serving off the spawned entity).
+-- The authored well PITCH of a baking container, or nil for one nobody has measured.
+-- Reads the synced `bake_slots` setting and normalises it ONCE per config generation:
+-- a caller may hand us either a model NAME or a hash (a placed tray measures itself off
+-- the spawned entity), so both key the same entry. An entry with no spread on either
+-- axis says nothing and is dropped, so it reads as "not authored" rather than stacking
+-- every serving on one point.
+-- A CLOSURE upvalue rather than a file-local, and a global rather than a local, for the
+-- 200-local reason documented on hoverHalfHeight.
+BakeSlotsFor = (function()
+    local cache, gen = {}, -1
+    return function(containerModel)
+        if not containerModel then return nil end
+        if gen ~= (ConfigGen or 0) then
+            cache, gen = {}, (ConfigGen or 0)
+            for model, c in pairs(BakeSlots or {}) do
+                if type(c) == "table" then
+                    local e = { cols = math.max(math.floor(tonumber(c.cols) or 3), 1),
+                                sx = tonumber(c.spread_x) or 0.0, sy = tonumber(c.spread_y) or 0.0,
+                                ox = tonumber(c.offset_x) or 0.0, oy = tonumber(c.offset_y) or 0.0 }
+                    if e.sx ~= 0.0 or e.sy ~= 0.0 then
+                        cache[model] = e
+                        cache[GetHashKey(model)] = e
+                    end
+                end
+            end
+        end
+        return cache[containerModel]
+    end
+end)()
+
+--
+-- THE AUTHORED PITCH WINS. `BakeSlots[containerModel]` (the synced `bake_slots`
+-- setting) gives a tray's wells as `cols` across and a centre-to-centre gap on each
+-- axis, and a tray that has one is laid out from that alone — a cookie tray's wells are
+-- where the artist put them, and no formula over a bounding box finds them. A pitch
+-- rather than a seat list because a tray's wells are evenly spaced by construction:
+-- authoring twelve numbers to say "0.119 apart" is twelve chances to typo one.
+-- The measured grid below is what a container with no authored pitch falls back to.
 local function bakeGridOffsets(n, containerModel, servingModel)
     n = math.max(math.floor(tonumber(n) or 1), 1)
+    local cfg = BakeSlotsFor(containerModel)
+    if cfg then
+        -- Rows are however many the batch needs, and each row centres itself — so a
+        -- final short row sits under the middle of the one above rather than left-packed.
+        local cols = math.min(cfg.cols, n)
+        local rows = math.ceil(n / cols)
+        local offs = {}
+        for i = 0, n - 1 do
+            local r, c = math.floor(i / cols), i % cols
+            local rowN = math.min(cols, n - r * cols)
+            offs[#offs + 1] = { dx = (c - (rowN - 1) * 0.5) * cfg.sx + cfg.ox,
+                                dy = (r - (rows - 1) * 0.5) * cfg.sy + cfg.oy }
+        end
+        return offs
+    end
     if n <= 1 then return { { dx = 0.0, dy = 0.0 } } end
     local cn, cx = GetModelDimensions(EnsureModel(containerModel))
     local hx = (cn and cx) and math.max((cx.x - cn.x) * 0.5 - 0.03, 0.05) or 0.12
@@ -524,6 +577,25 @@ local function bakeGridOffsets(n, containerModel, servingModel)
     if cols > 1 then hx = math.max(hx, (sw * 1.1 * (cols - 1)) / (2 * 0.7)) end
     if rows > 1 then hy = math.max(hy, (sd * 1.1 * (rows - 1)) / (2 * 0.7)) end
     return batchGridOffsets(n, hx, hy)
+end
+
+-- Does this EXPANDED model list describe a containered BATCH bake — a container base
+-- with two or more IDENTICAL serving layers on top (the six-cookie tray)? If so return
+-- the per-layer (dx, dy) grid (container centred) and zero the servings' rises so they
+-- all share the tray-top z; nil for any other stack, which keeps stacking vertically.
+-- `same` alone proves the top layers are uniform servings (a dual patty would break
+-- it), so the layer count is never compared against the unexpanded stack.
+-- ONE definition: the oven seat, the drag-in preview and the drag-out all read it, so
+-- a tray can't lay its cookies out one way in the hand and another on the rack.
+-- A GLOBAL because this file sits at Lua's 200-local ceiling.
+function BakeStackOffsets(mdls, heights)
+    if type(mdls) ~= "table" or #mdls < 3 or not isContainerModel(mdls[1]) then return nil end
+    for i = 3, #mdls do if mdls[i] ~= mdls[2] then return nil end end
+    local grid = bakeGridOffsets(#mdls - 1, mdls[1], mdls[2])
+    local offs = { { dx = 0.0, dy = 0.0 } } -- container centred
+    for i = 1, #grid do offs[#offs + 1] = grid[i] end
+    if heights then for i = 2, #heights do heights[i] = 0.0 end end
+    return offs
 end
 
 -- A stacked topping (pizza cheese/pepperoni) that has a cooked look follows the
@@ -1148,21 +1220,7 @@ local function SpawnSlotObject(uid, model, propId, method, door, slot, state, st
         -- Detect on the EXPANDED models (cookedVariant applied): as it bakes the server
         -- only swaps the one stackBase layer, so the raw `stack` array has mixed models,
         -- but every serving normalises to the same cook variant here.
-        local offs = nil
-        -- container base + two or more IDENTICAL serving layers → grid, not a tower.
-        -- `same` alone proves the top layers are uniform servings (a dual patty would
-        -- break it), so we no longer gate on #mdls == #stack — that made the layout
-        -- silently fall back to a centred pile whenever the counts drifted.
-        if #mdls >= 3 and isContainerModel(mdls[1]) then
-            local same = true
-            for i = 3, #mdls do if mdls[i] ~= mdls[2] then same = false break end end
-            if same then
-                local grid = bakeGridOffsets(#mdls - 1, mdls[1], mdls[2])
-                offs = { { dx = 0.0, dy = 0.0 } } -- container centred
-                for i = 1, #grid do offs[#offs + 1] = grid[i] end
-                for i = 2, #heights do heights[i] = 0.0 end -- servings share the tray-top z
-            end
-        end
+        local offs = BakeStackOffsets(mdls, heights)
         local ents, hs, rl, of = {}, {}, {}, {}
         for i, mdl in ipairs(mdls) do
             local e = SpawnProp(mdl, 0.0, 0.0, 0.0)
@@ -1661,11 +1719,22 @@ end
 -- Lay an ordered set of props flush bottom-to-top at (x,y,z), all facing `headingZ`
 -- (the station's heading) so the preview, the seated stack, and a dragged-out stack
 -- share one consistent rotation.
-local function layoutPreviewStack(ents, heights, x, y, z, headingZ, baseDz, rolls)
+-- `offsets` (optional, per layer) spreads layers across the plane instead of stacking
+-- them: a containered BATCH bake's servings sit side by side ON the tray. Rotated to
+-- `headingZ`, exactly as SeatOvenSlotStack does, so a dragged tray and a seated one
+-- lay the same six cookies in the same six places.
+local function layoutPreviewStack(ents, heights, x, y, z, headingZ, baseDz, rolls, offsets)
     local lift = baseDz or 0.0
+    local hr = math.rad(headingZ or 0.0)
     for i, e in ipairs(ents) do
         if e and DoesEntityExist(e) then
-            SetEntityCoordsNoOffset(e, x, y, z + lift, false, false, false)
+            local wx, wy = x, y
+            local ofs = offsets and offsets[i]
+            if ofs then
+                wx = wx + ofs.dx * math.cos(hr) - ofs.dy * math.sin(hr)
+                wy = wy + ofs.dx * math.sin(hr) + ofs.dy * math.cos(hr)
+            end
+            SetEntityCoordsNoOffset(e, wx, wy, z + lift, false, false, false)
             -- a patty face carries its own roll; everything else is flat (0)
             SetEntityRotation(e, 0.0, (rolls and rolls[i]) or 0.0, headingZ or 0.0, 2, true)
         end
@@ -1681,7 +1750,7 @@ local function moveSlotStackTo(uid, x, y, z)
     local headingZ = s and stationHeadingZ(s.propId) or 0.0
     local st = CookSlotStack[uid]
     if st then
-        layoutPreviewStack(st.ents, st.heights, x, y, z, headingZ, st.baseDz, st.rolls)
+        layoutPreviewStack(st.ents, st.heights, x, y, z, headingZ, st.baseDz, st.rolls, st.offsets)
     else
         local ent = CookObjects[uid]
         if ent and DoesEntityExist(ent) then
@@ -2118,13 +2187,19 @@ local function makePart(spec)
         -- correction so the tin rests ON the table instead of sinking through it
         -- expand a dual patty layer into its two faces; cookedVariant already applied
         local mdls, heights, rolls = expandStackLayers(spec.stack, spec.state)
+        -- a containered BATCH bake (a filled cookie tray dragged off the bar) spreads
+        -- its servings across the tray instead of towering them — the same grid the
+        -- oven and the drag preview lay out, so the tray never rearranges itself
+        local allOffs = BakeStackOffsets(mdls, heights)
         local lifts, prolls, lift = {}, {}, stackBaseLift(spec.stack[1])
+        local offsets = allOffs and {} or nil
         for i, mdl in ipairs(mdls) do
             local e = SpawnProp(mdl, base.x, base.y, base.z)
             if e then
                 part.ents[#part.ents + 1] = e
                 lifts[#lifts + 1] = lift
                 prolls[#prolls + 1] = rolls[i]
+                if offsets then offsets[#offsets + 1] = allOffs[i] end
                 lift = lift + heights[i]
             end
         end
@@ -2132,6 +2207,7 @@ local function makePart(spec)
         part.stacked = true
         part.lifts   = lifts
         part.rolls   = prolls
+        part.offsets = offsets
         part.height  = lift
         return part
     end
@@ -2228,10 +2304,19 @@ local function orientPart(part, x, y, z, flip)
     end
     if part.stacked then
         -- a build-stack part lays its layers flush bottom-to-top from the base z;
-        -- a dual face in the tower keeps its own roll (the two-faced flip)
+        -- a dual face in the tower keeps its own roll (the two-faced flip).
+        -- `offsets` (a batch bake's tray grid) spreads a layer in the tray plane,
+        -- rotated to the station heading like every other surface draws it.
+        local hr = math.rad(yaw)
         for i, e in ipairs(part.ents) do
             if e and DoesEntityExist(e) then
-                SetEntityCoordsNoOffset(e, x, y, z + (part.lifts[i] or 0.0), false, false, false)
+                local wx, wy = x, y
+                local ofs = part.offsets and part.offsets[i]
+                if ofs then
+                    wx = wx + ofs.dx * math.cos(hr) - ofs.dy * math.sin(hr)
+                    wy = wy + ofs.dx * math.sin(hr) + ofs.dy * math.cos(hr)
+                end
+                SetEntityCoordsNoOffset(e, wx, wy, z + (part.lifts[i] or 0.0), false, false, false)
                 SetEntityRotation(e, 0.0, (part.rolls and part.rolls[i]) or 0.0, yaw, 2, true)
             end
         end
@@ -2596,8 +2681,14 @@ local function layoutTrayAt(ents, x, y, z, kind, openT, storedOffs)
         -- The stored offsets are the ones captured when the tray was filled; with
         -- none, derive them from the SAME function every other surface uses, measuring
         -- the serving off the prop actually being laid out.
-        local offs = storedOffs or bakeGridOffsets(bakeSlotCount(kind), trayBaseModel(kind),
-            (ents and ents[2] and DoesEntityExist(ents[2])) and GetEntityModel(ents[2]) or nil)
+        -- AUTHORED SEATS SKIP THE SNAPSHOT ENTIRELY: storedOffs exists because a DERIVED
+        -- grid drifts (bounds that hadn't streamed, a differing prop count), and an
+        -- authored list can't drift — so re-reading it is free, and it's what makes a
+        -- seat edited in-game show up on the tray already sitting on the table.
+        local baseModel = trayBaseModel(kind)
+        local offs = (storedOffs and not BakeSlotsFor(baseModel)) and storedOffs
+            or bakeGridOffsets(bakeSlotCount(kind), baseModel,
+                (ents and ents[2] and DoesEntityExist(ents[2])) and GetEntityModel(ents[2]) or nil)
         local hr, fz = math.rad(yaw), z + trayFoodDz(kind)
         for i = 2, #(ents or {}) do
             local e = ents[i]
@@ -3074,11 +3165,11 @@ local function runDragThread(drag)
     -- beside a build, and onto a tray or into a bag, as their own pile.
     local carryDrink = false
     for _, p in ipairs(drag.parts or {}) do
-        if p.item == DrinkItem then carryDrink = true break end
+        if p.item == ServingItem then carryDrink = true break end
     end
     local function stackHasDrink(stack)
         for _, p in ipairs((stack and stack.parts) or {}) do
-            if p.item == DrinkItem then return true end
+            if p.item == ServingItem then return true end
         end
         return false
     end
@@ -3572,20 +3663,34 @@ DragGate.callback("cooking:beginPlace", function(d, cb)
         -- the drag reads the same as what placement renders — not just the base model.
         local stackModels = (d.source == "tray") and previewStackFor(d.item, d.sig) or nil
         -- A containered bake (cake tin, cookie tray…) previews as container + food,
-        -- mirroring what the server folds into the placed stack.
+        -- mirroring what the server folds into the placed stack — INCLUDING the batch
+        -- case: a cookie tray holds output_count servings, so previewing it as a single
+        -- serving made the drag read as one lone cookie and then land as six.
         if recipe.container_model and recipe.container_model ~= "" then
-            stackModels = stackModels or { recipe.raw_model }
-            if stackModels[1] ~= recipe.container_model then
-                table.insert(stackModels, 1, recipe.container_model)
+            local n = math.max(math.floor(tonumber(recipe.output_count) or 1), 1)
+            if n > 1 and not (stackModels and #stackModels > 1) then
+                stackModels = { recipe.container_model }
+                for _ = 1, n do stackModels[#stackModels + 1] = recipe.raw_model end
+            else
+                stackModels = stackModels or { recipe.raw_model }
+                if stackModels[1] ~= recipe.container_model then
+                    table.insert(stackModels, 1, recipe.container_model)
+                end
             end
         end
         if stackModels and #stackModels > 1 then
             -- expand a dual patty layer into its two faces (uncooked preview → no state)
             local mdls, hs, rls = expandStackLayers(stackModels, nil)
-            local ents, heights, rolls = {}, {}, {}
+            -- the batch grid, resolved off the SAME helper the oven seat uses (it also
+            -- zeroes the servings' rises), so the tray in the hand is the tray on the rack
+            local allOffs = BakeStackOffsets(mdls, hs)
+            local ents, heights, rolls, offsets = {}, {}, {}, allOffs and {} or nil
             for i, m in ipairs(mdls) do
                 local e = SpawnProp(m, base.x, base.y, base.z)
-                if e then ents[#ents + 1] = e; heights[#heights + 1] = hs[i]; rolls[#rolls + 1] = rls[i] end
+                if e then
+                    ents[#ents + 1] = e; heights[#heights + 1] = hs[i]; rolls[#rolls + 1] = rls[i]
+                    if offsets then offsets[#offsets + 1] = allOffs[i] end
+                end
             end
             if #ents == 0 then return cb({ ok = false }) end
             local headingZ = stationHeadingZ(base.id, base)
@@ -3598,11 +3703,11 @@ DragGate.callback("cooking:beginPlace", function(d, cb)
                     local best = nearestOpenSlot(method)
                     if best then
                         p.hit, p.door, p.slot = true, best.door, best.slot
-                        layoutPreviewStack(ents, heights, best.w.x, best.w.y, best.w.z, headingZ, baseDz, rolls)
+                        layoutPreviewStack(ents, heights, best.w.x, best.w.y, best.w.z, headingZ, baseDz, rolls, offsets)
                     else
                         p.hit = false
                         local hit, coords = CursorToWorld()
-                        if hit and coords then layoutPreviewStack(ents, heights, coords.x, coords.y, coords.z, headingZ, baseDz, rolls) end
+                        if hit and coords then layoutPreviewStack(ents, heights, coords.x, coords.y, coords.z, headingZ, baseDz, rolls, offsets) end
                     end
                     Wait(0)
                 end
@@ -3852,6 +3957,23 @@ RegisterNUICallback("cooking:trayToInventory", function(d, cb)
     })
     if res and res.ok then
         if res.label then ShowNotification(_L("cook_took", res.label)) end
+        RefreshTray(); RefreshBar()
+    elseif res and res.error then
+        ShowNotification(res.error)
+    end
+    cb(res or { ok = false })
+end)
+
+-- put a POCKETED SERVING (the Restaurant Item holding a cooked product) back on
+-- this restaurant's kitchen tray, where it is an ordinary cooked item again. The
+-- item itself is never named here — the server reads what a slot holds off the
+-- slot, so a forged payload can only ever pick which of YOUR servings moves.
+RegisterNUICallback("cooking:invToTray", function(d, cb)
+    local res = lib.callback.await("pickle_restaurants:cooking:invToTray", false, {
+        prop_id = currentCookProp and currentCookProp.id, count = d.count, sig = d.sig,
+    })
+    if res and res.ok then
+        if res.label then ShowNotification(_L("cook_stowed", res.label)) end
         RefreshTray(); RefreshBar()
     elseif res and res.error then
         ShowNotification(res.error)

@@ -162,6 +162,28 @@ local DEFAULT_SETTINGS = {
         ["pickle_pizza_cheese_02"] = { sink = -0.004 },
         ["pickle_patty_beef_02"] = { sink = -1.0 },
     },
+    -- WHERE THE SERVINGS SIT IN A BAKING CONTAINER, authored per container model and
+    -- keyed by the recipe's `container_model`. A tray's wells are evenly spaced — that
+    -- is what a tray IS — so this is a PITCH, not a seat list: `cols` across, then the
+    -- centre-to-centre gap between neighbours in metres. Rows are however many the batch
+    -- needs. The grid is centred on the container (a short last row centres itself), and
+    -- `offset_x`/`offset_y` nudge the whole thing for a tray whose wells aren't centred
+    -- on its own origin.
+    --   spread_x / offset_x — ACROSS the tray
+    --   spread_y / offset_y — ALONG it
+    -- Tray-local metres, rotated to whatever heading the tray is drawn at, so ONE
+    -- authored layout is what the prep table, the oven rack, the drag preview and a tray
+    -- carried in the hand all read.
+    --
+    -- These numbers are the answer, not a hint: no formula over the prop's bounding box
+    -- finds where the artist put the wells. Deriving the grid from the model's extents is
+    -- only the FALLBACK for a container with no entry here, so a new tray still renders
+    -- something sane before anyone sits down to measure it.
+    -- Synced to the client; edited in Settings → Baking trays.
+    bake_slots = {
+        -- the six-cookie tray: 3 across, 2 deep
+        ["pickle_cookie_tray_01"] = { cols = 3, spread_x = 0.0625, spread_y = 0.0625 },
+    },
     -- Global default freshness window (seconds) for collected cooked items in the
     -- tray before they spoil and are swept. Default 900 = 15 minutes; 0 = never
     -- expire. A recipe's own `expire_seconds` overrides this per item (NULL on a
@@ -173,11 +195,25 @@ local DEFAULT_SETTINGS = {
     -- the install/ folder) — never a requirement to use the tray; only moving a
     -- meal into the real inventory needs it installed.
     meal_item       = "meal",
-    -- The inventory item EVERY poured drink becomes ("Restaurant Drink") — one
-    -- item for all flavors, the flavor riding as build-stack metadata (a layer
-    -- holding the drinks[].output key), exactly like the meal item. The per-flavor
-    -- `output` keys are NOT items; only this one ships in the install/ folder.
-    drink_item      = "drink",
+    -- THE RESTAURANT ITEM — one inventory item for ONE SERVING of anything the
+    -- kitchen makes. It is the one-item consolidation rule taken to its end: a
+    -- poured drink, a cooked patty, an assembled burger, a frosted cake are all
+    -- THIS item, told apart by a single build-stack meta layer naming what it is
+    -- ({ { item = <drinks[].output key | product item>, stack = <its own build
+    -- stack> } }) — the exact shape the drink item used, so a flavor still resolves
+    -- its cup and a product still resolves its whole tower.
+    --
+    -- It REPLACES the old `drink_item`: one item to install, one to explain, and —
+    -- the reason it exists — the only way a cooked food can leave the kitchen as a
+    -- thing you can hand to another worker. Most cooked products are tray-only (they
+    -- have no inventory item of their own and never will, per one-item
+    -- consolidation), so before this a burger could only reach a pocket packed
+    -- inside a meal, a bag or a box.
+    --
+    -- A HANDOUT item like the other vessels: shipped in `__INSTALL/items/`, never a
+    -- requirement. Without it installed the kitchen still works — the tray simply
+    -- can't be cashed out, exactly as before.
+    serving_item    = "restaurant_item",
     -- The inventory item a paying customer receives when a POS order is rung up —
     -- its slot metadata carries the order id/ticket so completion can verify the
     -- holder. Like meal_item it's a HANDOUT item (shipped in install/); if the item
@@ -190,7 +226,7 @@ local DEFAULT_SETTINGS = {
     -- machinery): drop the food's components in, "Create <food>", and the
     -- contents become ONE `box_item` carrying the food identity (`id`) + its
     -- component layers as build-stack metadata, exactly like meal_item /
-    -- drink_item. Component prop models are OPTIONAL — a component with no model
+    -- serving_item. Component prop models are OPTIONAL — a component with no model
     -- (via prep_models/itemModel) shows the NUI pill instead of a 3D prop; what a
     -- MADE box shows is the food's OWN authored picture (`image`), drawn as a
     -- textured quad inside the open box (see modules/quad).
@@ -298,6 +334,50 @@ local DEFAULT_SETTINGS = {
         -- Ped models an NPC customer may spawn as (picked at random, server-authoritative).
         models = { "a_m_y_business_01", "a_f_y_business_02", "a_m_m_business_01",
                    "a_f_y_hipster_02", "a_m_y_hipster_01", "a_f_m_business_02" },
+    },
+    -- SUPPLY RUNS. Off by default, and off means EXACTLY today's behaviour: buying in
+    -- the Supplies tab credits the larder on the spot. Switched on, a purchase becomes
+    -- a PENDING RUN that somebody has to go and fetch — checkout at the panel, drive to
+    -- a supplier depot, carry the boxes from its package point onto the trailer, and an
+    -- NPC driver takes the load away and the larder is credited.
+    --
+    -- Depots are SERVER-WIDE (a supplier serves every restaurant), which is what makes
+    -- the run a commute rather than a walk out back. Each depot holds LOADING ZONES,
+    -- and a zone is used by ONE player at a time — two crews sharing one box stack
+    -- would each be taking boxes off the other's pile.
+    --
+    -- Points are placed with the gizmo from the admin panel, never typed: a package
+    -- point that isn't on the warehouse floor is worse than no depot at all.
+    supply_runs = {
+        enabled     = false,
+        -- The per-ITEM ceiling on a restaurant's larder (0 = uncapped). This is what
+        -- forces the commute to be a REGULAR one: you cannot buy a year of patties in
+        -- one run. Pending (bought, uncollected) units count against it, so ordering
+        -- twice can't slip past it.
+        max_stock   = 100,
+        -- How the order becomes cargo, expressed against the CAP rather than in raw
+        -- units: a full larder is this many boxes. Units per box is DERIVED from it
+        -- (cap 100 over 4 boxes = 25 a box), so raising the cap makes the boxes bigger
+        -- instead of silently making every run four times longer.
+        boxes_per_cap = 4,
+        -- Cargo + haulage models. `box_model` must be ONE BOX, never a pre-made pile
+        -- prop (`prop_boxpile_*`): the pile is BUILT out of this model, one entity per
+        -- box, so that taking one off the stack removes one box — and the box in the
+        -- player's arms is the SAME model, so what you picked up is what you're
+        -- carrying. A pile prop here would stack piles and hand you a pile.
+        box_model     = "hei_prop_heist_box",
+        truck_model   = "phantom",
+        trailer_model = "trailers",
+        -- Where the tractor unit sits relative to its trailer's placed point, along the
+        -- trailer's own forward. One gizmo pass places the trailer; the truck is derived
+        -- so an admin never has to line two vehicles up by hand.
+        truck_gap   = 8.5,
+        -- Seconds a claimed loading zone is held before it is swept back: a player who
+        -- disconnects or wanders off mid-run must not lock a bay forever.
+        claim_ttl   = 900,
+        -- [{ id, label, blip = {...}, zones = [{ id, package = {x,y,z,heading},
+        --    trailer = {x,y,z,heading} }] }]
+        depots      = {},
     },
     -- KITCHEN FIRES. Food left burning on a station eventually sets the station
     -- alight: the station can't be worked until somebody puts it out, and what was
@@ -536,7 +616,7 @@ DEFAULT_FOODS = {
       } },
     -- poured drinks: one food per fountain flavor. Position among the pour foods =
     -- tap order (first six hold the taps); `flavor` is a KEY, not an item — every
-    -- poured drink collects as the ONE `drink_item` item with the flavor as
+    -- poured drink collects as the ONE `serving_item` item with the flavor as
     -- build-stack metadata. `color` tints the poured liquid stream.
     { id = "water", label = "Pure Aqua", kind = "interactive", group = "Drinks",
       consume = { thirst = 30, anim = "drink_cup" },
@@ -625,7 +705,7 @@ local function CreateTables()
             `id`            INT UNSIGNED NOT NULL AUTO_INCREMENT,
             `restaurant_id` INT UNSIGNED NOT NULL,
             `item`          VARCHAR(60)  NOT NULL,
-            -- drinks are ONE item (`drink_item`) with the flavor as metadata, so
+            -- drinks are ONE item (`serving_item`) with the flavor as metadata, so
             -- per-flavor pricing needs a variant dimension on the menu key (variant =
             -- the drinks[].output flavor key; '' for everything else). NOT NULL so the
             -- unique key upserts reliably (MySQL treats NULLs in unique keys as distinct).
@@ -649,6 +729,26 @@ local function CreateTables()
             PRIMARY KEY (`id`),
             UNIQUE KEY `uniq_stock` (`restaurant_id`, `item`),
             KEY `idx_rest` (`restaurant_id`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+    ]])
+
+    -- SUPPLY RUNS: stock that has been PAID FOR but not yet fetched from a depot.
+    -- A row is created at checkout (the money leaves then, so a run is never a free
+    -- option) and consumed when the last box is loaded, at which point the units land
+    -- in `pickle_restaurant_stock`. An abandoned run stays claimable — the restaurant
+    -- has already paid for it, so it is the restaurant's cargo, not the buyer's.
+    MySQL.query.await([[
+        CREATE TABLE IF NOT EXISTS `pickle_restaurant_supply_orders` (
+            `id`            INT UNSIGNED NOT NULL AUTO_INCREMENT,
+            `restaurant_id` INT UNSIGNED NOT NULL,
+            `identifier`    VARCHAR(80)  DEFAULT NULL,
+            `lines`         JSON         NOT NULL,
+            `units`         INT          NOT NULL DEFAULT 0,
+            `boxes`         INT          NOT NULL DEFAULT 0,
+            `status`        VARCHAR(16)  NOT NULL DEFAULT 'pending',
+            `created_at`    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (`id`),
+            KEY `idx_rest` (`restaurant_id`, `status`)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
     ]])
 
@@ -875,6 +975,7 @@ local REQUIRED_TABLES = {
     "pickle_restaurant_pending_refunds", "pickle_restaurant_job_players",
     "pickle_restaurant_tips", "pickle_restaurant_payroll", "pickle_restaurant_society",
     "pickle_restaurant_reservation_seats", "pickle_restaurant_reservation_guests",
+    "pickle_restaurant_supply_orders",
 }
 
 -- Returns the first required table that is still missing (nil = schema is whole).
@@ -898,8 +999,8 @@ end
 -- so they have no catalogue image — but the resource SHIPS 2D art for them in
 -- `nui/items/`. These get seeded as default custom images (item_images) below so the
 -- shipped menu looks right out of the box. Deliberately excludes: drink flavors (art
--- resolved by DrinkFlavorImage, keyed by the drink `output`, item is `drink`), kitchen
--- equipment (serving_tray / pizza_box / cake_tin / cookie_tray / cup_lid — EQUIP_IMAGE,
+-- resolved by DrinkFlavorImage, keyed by the drink `output`; the item itself is
+-- the Restaurant Item), kitchen equipment (serving_tray / pizza_box / cake_tin / cookie_tray / cup_lid — EQUIP_IMAGE,
 -- not items) and restaurant_bag (a real installed item with its own inventory image).
 local DEFAULT_PRODUCT_IMAGES = {
     "burger", "cheeseburger", "deluxe_burger", "chicken_sandwich",
@@ -2089,6 +2190,36 @@ function BuildProductList()
     return list
 end
 
+-- Every baking CONTAINER a recipe declares, with how many servings it has to seat.
+-- Feeds the admin panel's bake-seat editor, so the trays it lists are the trays that
+-- exist: a container is authored on a RECIPE, never in the seat map, and typing a model
+-- name into the seat editor would be the one way to author seats for a tray no recipe
+-- ever renders. `slots` is the recipe's output_count (a cake tin 1, a cookie tray 6) —
+-- the number of seats that container owes.
+-- Deduped by model: two recipes may bake in the same tray, and the seats belong to the
+-- TRAY. Where they disagree on the count, the largest wins — a seat past a shorter
+-- batch's end simply goes unused, whereas a short list would leave servings unseated.
+function BakeContainerList()
+    local byModel, list = {}, {}
+    for _, r in ipairs(RecipeCache) do
+        local m = r.container_model
+        if type(m) == "string" and m ~= "" then
+            local n = math.max(math.floor(tonumber(r.output_count) or 1), 1)
+            local e = byModel[m]
+            if e then
+                e.slots = math.max(e.slots, n)
+            else
+                e = { model = m, slots = n,
+                      label = GetItemLabel(r.output_cooked_item or r.input_item) }
+                byModel[m] = e
+                list[#list + 1] = e
+            end
+        end
+    end
+    table.sort(list, function(a, b) return (a.label or a.model):lower() < (b.label or b.model):lower() end)
+    return list
+end
+
 -- The image url for an item. An admin custom image (the `item_images` setting) wins;
 -- otherwise the inventory catalogue image; nil when neither is known. Consulted by
 -- every payload that shows an item, so a custom image propagates everywhere at once.
@@ -2132,8 +2263,56 @@ function RecipeMethod(r) return (r and r.method) or "grill" end
 
 -- The item every bag-KIND food (soup, salad…) becomes when it is created in the
 -- takeout box (one item for all of them; the food id is its POS variant).
--- Mirrors DrinkItemName/MealItem.
+-- Mirrors ServingItemName/MealItem.
 function BoxItemName() return GetSetting("box_item", "takeout_box") end
+
+-- ─── THE RESTAURANT ITEM ─────────────────────────────────────────────────────
+-- ONE inventory item for ONE SERVING of anything the kitchen makes — every poured
+-- drink AND every cooked/assembled product. What it is rides as a SINGLE build-stack
+-- layer: { { item = <flavor key | product item>, stack = <that product's own build
+-- stack> } }. That is the shape the drink item already used, which is why every
+-- generic-vessel reader (FoodForItem, LayerDisplay, layerIdentity, compSpec, TraySig)
+-- needed only a delegating branch rather than a new concept.
+--
+-- NOT to be confused with `IsProductItem` below, which asks whether a NAME is a
+-- kitchen product (a tray-only output). This is the item those products are POCKETED
+-- as. Renamed from `drink_item`, which it replaces outright.
+function ServingItemName() return GetSetting("serving_item", "restaurant_item") end
+
+-- The one layer a Restaurant Item carries — what this serving IS. nil for the item
+-- with no readable metadata (a bare-ESX inventory, a hand-spawned one), which every
+-- reader treats as a plain drink exactly as it always did.
+function ServingLayer(item, meta)
+    if not item or item ~= ServingItemName() then return nil end
+    local l = (type(meta) == "table") and meta[1] or nil
+    if type(l) ~= "table" or type(l.item) ~= "string" or l.item == "" then return nil end
+    -- a serving item wrapping ITSELF is nonsense (and would recurse); refuse it here
+    -- so no reader has to carry a depth guard.
+    if l.item == item then return nil end
+    return l
+end
+
+-- Is this key one of the fountain's flavors (a `drinks[].output`)? That is what
+-- separates the two things one Restaurant Item can be: a DRINK (drunk from the
+-- restaurant's capped cup, quenching thirst) or any other serving (eaten as the
+-- product it holds). Derived config, so it follows the menu.
+function IsDrinkOutputKey(key)
+    if type(key) ~= "string" or key == "" then return false end
+    for _, dd in ipairs(GetDrinks()) do
+        if dd.output == key then return true end
+    end
+    return false
+end
+
+-- Does THIS instance of the Restaurant Item hold a drink? (an instance with no
+-- readable metadata counts as one — a plain drink is the historical meaning of a
+-- metadata-less vessel, and it stays drinkable rather than becoming a dud.)
+function IsDrinkServing(item, meta)
+    if not item or item ~= ServingItemName() then return false end
+    local l = ServingLayer(item, meta)
+    if not l then return true end
+    return IsDrinkOutputKey(l.item)
+end
 
 -- ─── a held thing → the FOOD that authored it ────────────────────────────────
 -- Every generic vessel item is one of many foods, told apart by its metadata: a
@@ -2148,9 +2327,12 @@ function FoodForItem(item, meta)
         local fid = type(first) == "table" and first.craft or nil
         if fid then return DerivedFoodById[fid] end
     end
-    if item == GetSetting("drink_item", "drink") then
-        local flavor = type(first) == "table" and first.item or nil
-        if flavor then return DerivedFoodById[flavor] or DerivedFoodByOutput[flavor] end
+    -- THE RESTAURANT ITEM is whatever its one layer names — a fountain flavor key or
+    -- a product item. Both resolve through the same two derived maps, which is why
+    -- one branch covers a cola and a cooked burger alike.
+    if item == ServingItemName() then
+        local key = type(first) == "table" and first.item or nil
+        if key then return DerivedFoodById[key] or DerivedFoodByOutput[key] end
     end
     return DerivedFoodByOutput[item] or DerivedFoodById[item]
 end
@@ -2222,7 +2404,10 @@ function ConsumeSpecFor(item, meta)
     -- hunger, and is drunk rather than eaten. Without this an upgraded server (whose
     -- stored foods predate `consume`) would have every drink feed the wrong bar
     -- until someone edited it — the seeded defaults only reach a fresh install.
-    local isDrink = (item == GetSetting("drink_item", "drink"))
+    -- A Restaurant Item is only a DRINK when the serving it holds is one: the same
+    -- item now also holds cooked food, and a burger must not be quenching thirst
+    -- through a bottle-drinking clip.
+    local isDrink = IsDrinkServing(item, meta)
     local silent = own.hunger == nil and own.thirst == nil
     local function pick(k, d)
         local v = own[k]
@@ -2308,7 +2493,9 @@ end
 --   • burnt outputs are never required.
 
 function AnnotateFoods()
-    local drinkInstalled = ItemExists(GetSetting("drink_item", "drink"))
+    -- the ONE Restaurant Item every poured drink now collects as (it replaced the
+    -- separate drink item); a pour step reports it missing exactly as before
+    local drinkInstalled = ItemExists(ServingItemName())
     -- a bag-kind food is created in the TAKEOUT BOX and collects as the box item
     local boxInstalled = ItemExists(BoxItemName())
     local inputOwner = {}  -- duplicate cook-input detection (replaces the SQL unique key)
@@ -2363,7 +2550,7 @@ function AnnotateFoods()
                 elseif st.type == "pour" then
                     if not st.input or st.input == "" then needsInput("pour_cup") end
                     if st.input and not ItemExists(st.input) then missing[#missing + 1] = st.input end
-                    copy.drink_item_installed = drinkInstalled
+                    copy.serving_item_installed = drinkInstalled
                     pourIndex = pourIndex + 1
                     copy.tap = (pourIndex <= 6) and pourIndex or nil
                     priceItem = st.input
@@ -3547,8 +3734,23 @@ function TraySig(meta)
         if type(l.stack) == "table" and #l.stack > 0 then
             part = part .. "{" .. TraySig(l.stack) .. "}"
         end
-        -- a finished (frosted…) layer carries its flavor: a strawberry cake and
-        -- a chocolate one are different variations of the same output item
+        -- A finished (frosted…) layer carries the TOOL and the flavor: a strawberry
+        -- cake and a chocolate one are different variations of the same output item.
+        -- THE TOOL IS PART OF THE IDENTITY, not decoration. Two finishes can target one
+        -- item with flavors that share an id — frosting and sprinkles both offer
+        -- `vanilla` and `chocolate` on a cookie — and on flavor alone a vanilla-FROSTED
+        -- cookie and a vanilla-SPRINKLED one signed identically. That made them one tray
+        -- entry, so both rendered and labelled as whichever instance happened to sit on
+        -- top, and a sig-pinned consume could spend the wrong one.
+        -- The doughnut hid this only by accident: `requires_finish` means a sprinkled
+        -- doughnut always nests a frosted stack, and the nested `{…}` above already
+        -- separated the two. The cookie is deliberately ungated, so nothing separated
+        -- them there. Cakes have one tool today and were never bitten, but the collision
+        -- was structural — a second cake tool sharing a flavor id would have been.
+        -- A legacy layer with a flavor and no tool signs as it always did.
+        if l.tool ~= nil then
+            part = part .. "#" .. tostring(l.tool)
+        end
         if l.flavor ~= nil then
             part = part .. "#" .. tostring(l.flavor)
         end
@@ -4095,7 +4297,7 @@ function BuildSyncPayload()
     local drinks = {}
     for i, d in ipairs(GetDrinks()) do
         -- only the cup (input) must be an installed item — the output is a flavor
-        -- KEY (poured drinks collect as the one `drink_item` item, flavor in meta)
+        -- KEY (poured drinks collect as the one `serving_item` item, flavor in meta)
         if ItemExists(d.input) then
             -- `tap` = the entry's RAW config position: the fountain tap it holds
             -- (first six only). Stamped on a copy so the derived row stays clean.
@@ -4230,11 +4432,12 @@ function BuildSyncPayload()
         -- carrier-in-a-carrier drag up front (IsCarrierItem) — prepAdd is the
         -- authority; this just outlines the drop red instead of round-tripping.
         meal_item = GetSetting("meal_item", "meal"),
-        -- The ONE generic drink item every poured drink collects as (the flavor
-        -- rides in metadata). Shipped so the client can tell a DRINK part from a
-        -- build component by item name rather than by guessing at cup models —
-        -- a drink is a finished serving and never takes part in stacking.
-        drink_item = GetSetting("drink_item", "drink"),
+        -- THE RESTAURANT ITEM: one serving of anything the kitchen makes (every
+        -- poured drink, every pocketed cooked product), what it is riding in
+        -- metadata. Shipped so the client can tell a finished SERVING from a build
+        -- component by item name rather than by guessing at cup models — a serving
+        -- is finished and never takes part in stacking.
+        serving_item = ServingItemName(),
         finishes = finishes,
         condiments = condiments,
         baking   = baking,
@@ -4243,6 +4446,14 @@ function BuildSyncPayload()
         -- per-model manual stacking corrections for the client render (see the
         -- stack_tweaks setting seed)
         stack_tweaks = GetSetting("stack_tweaks", {}),
+        -- authored per-container serving seats for a batch bake (see the bake_slots
+        -- setting seed) — the client lays a cookie tray out from these, not from maths
+        bake_slots = GetSetting("bake_slots", {}),
+        -- SUPPLY DEPOTS (modules/supply). Genuinely global world config — a handful of
+        -- points and model names — and the client needs them to build the depot
+        -- interactions at all. Validated on read there, so what ships is already the
+        -- shape the client can trust; nil with the module absent.
+        supply = SupplyConfig and SupplyConfig() or nil,
         -- the side-serving container box (fries…) — shipped so the client can apply
         -- the mesh-bottom base-lift correction when it's the base of a build stack
         side_container_model = GetSetting("side_container_model", ""),
