@@ -86,6 +86,14 @@ export default function PayConfirm({ data }: { data: any }) {
             <span className="tabular-nums">{money(total)}</span>
           </div>
 
+          {/* WHICH WALLET. The register can now charge cash or card, and approving a
+              charge without being told which account it comes out of is approving the
+              wrong thing half the time. */}
+          <div className="mt-1 flex items-center justify-between font-mono text-[11px] uppercase tracking-widest text-muted-foreground">
+            <span>{_L("register.payment")}</span>
+            <span>{_L(data?.payment === "bank" ? "register.pay_card" : "register.pay_cash")}</span>
+          </div>
+
           <div className="receipt-rule my-3" />
 
           {/* answer — the countdown prints like a register timer */}

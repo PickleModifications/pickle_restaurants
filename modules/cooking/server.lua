@@ -2917,14 +2917,32 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     if b and b.prop_id ~= prop.id then b = nil end
     if not b then b = { prop_id = prop.id, rid = rid, seq = 0, layers = {} }; PrepBuilds[src] = b end
 
-    -- Reserve only — DON'T remove from the tray/inventory yet (that happens on
-    -- Make). Validate against what's left after this build's existing reservations.
+    -- WHICH STORE PAYS FOR A LAYER IS OURS TO DECIDE, NEVER THE NUI'S.
+    --
+    -- `source` is not a hint: it is the field consumeLayers branches on to choose
+    -- WHERE the unit is taken from on Make ("tray" spends the cooked-items tray,
+    -- anything else spends the larder stock line or the cook's inventory). Taken
+    -- from the payload, a forged drag could reserve a cooked product sitting in the
+    -- tray, have the LARDER pay for it, and leave the tray copy behind — the same
+    -- food packed into a bag and still sitting in the pool, sellable again and
+    -- again while the bag never leaves the cook's pocket.
+    --
+    -- Resolve it from what the cook actually holds instead. The tray goes first for
+    -- the same reason every other consumer drains it first (VesselConsume,
+    -- SingleConsumeMatch): it is the store nothing else can spend. Both stores hold
+    -- the SAME variation here — `sig` already pins it — so the cook cannot tell which
+    -- instance went, only that exactly one did.
     local addUnits = (half and 0.5) or 1.0
-    if d.source == "tray" then
+    local source
+    do
         local needed = math.ceil(reservedUnits(b, "tray", item, sig) + addUnits)
-        if GetTrayCount(rid, GetIdentifier(src), item, sig) < needed then
-            return { ok = false, error = _L("cook_not_enough_tray") }
-        end
+        if GetTrayCount(rid, GetIdentifier(src), item, sig) >= needed then source = "tray" end
+    end
+    if source == "tray" then
+        -- verified above; the branch exists so the two checks can never disagree
+    elseif d.source == "tray" then
+        -- the client meant the tray and the tray cannot cover it
+        return { ok = false, error = _L("cook_not_enough_tray") }
     elseif sig then
         -- an inventory-held PRODUCT reserves its exact variation (cheese + sig)
         local needed = math.ceil(reservedUnits(b, "inv", item, sig) + addUnits)
@@ -2959,7 +2977,7 @@ lib.callback.register("pickle_restaurants:cooking:prepAdd", function(src, d)
     -- `variant` is kept on the layer as well as in its metadata: the metadata is what
     -- the finished vessel records, the field is what the POOL is spent by (its stock
     -- key) and what reservations are counted against.
-    b.layers[#b.layers + 1] = { id = b.seq, source = d.source, item = item,
+    b.layers[#b.layers + 1] = { id = b.seq, source = source, item = item,
                                 half = half, sig = sig,
                                 variant = (not sig) and variant and variant.id or nil,
                                 stack = (not sig) and variant and IngredientVariantMeta(variant.id) or nil }

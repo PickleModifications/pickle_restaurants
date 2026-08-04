@@ -283,6 +283,14 @@ local DriveGen = 0
 EndDriveGen = function()
     DriveGen = DriveGen + 1
     if DisarmDoorstepTarget then DisarmDoorstepTarget() end
+    -- …and take the MAP down with it. Accepting a run sets a waypoint on the drop
+    -- point (beginDriving / phone:setWaypoint), and only the CANCEL path used to
+    -- clear it — so a driver who actually delivered was left with the marker still
+    -- on their minimap, routing to a doorstep that was already served. Every ending
+    -- comes through here, which is the whole reason this function exists; a new run
+    -- sets its own waypoint afterwards, so clearing here can never eat one.
+    ClearGpsMultiRoute()
+    SetWaypointOff()
 end
 
 -- ─── the on-screen destination marker ────────────────────────────────────────
@@ -453,13 +461,24 @@ RegisterNetEvent("pickle_restaurants:phone:endDriving", function()
     ShowNotification(_L("delivery_cancelled_driver"))
 end)
 
+local function dropDeliveryBlip()
+    if deliveryBlip and DoesBlipExist(deliveryBlip) then RemoveBlip(deliveryBlip) end
+    deliveryBlip = nil
+end
+
 -- Drop the blip when the order is done (server pushes an updated open list without it,
 -- but the customer's own tracking view tells us via this app message).
 RegisterNUICallback("phone:endDeliveryBlip", function(_, cb)
-    if deliveryBlip and DoesBlipExist(deliveryBlip) then RemoveBlip(deliveryBlip) end
-    deliveryBlip = nil
+    dropDeliveryBlip()
     cb({ ok = true })
 end)
+
+-- …and the SERVER says so too, because the app message above only arrives while the
+-- tracking screen is OPEN. A customer who pocketed their phone to wait for the driver
+-- — which is what everyone does — got the food and kept the driver blip forever, with
+-- nothing left able to move or remove it. The order ending is server knowledge, so the
+-- server is what ends the blip.
+RegisterNetEvent("pickle_restaurants:phone:deliveryEnded", dropDeliveryBlip)
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- RESERVATIONS — nothing to do on the client any more.

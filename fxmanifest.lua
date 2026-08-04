@@ -54,7 +54,12 @@ dependencies {
 -- phone bridges literally say "add yours to this list"). Encrypted, the one thing a
 -- buyer needs to change to make the resource work on their server would be the one
 -- thing they can't open. Nothing here is gameplay logic; that all lives in modules/.
+-- locales/ is TRANSLATION, which is the buyer's own words. Encrypted, a server that
+-- doesn't run in English would be stuck with ours and no way to write its own — the
+-- one file every non-English server has to open. The loader and _L() live here too;
+-- neither is gameplay logic.
 escrow_ignore {
     '__INSTALL/**',
     'bridge/**',
+    'locales/**',
 }

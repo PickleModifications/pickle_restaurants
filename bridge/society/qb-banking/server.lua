@@ -8,6 +8,6 @@ RegisterSocietyProvider({
     resource = "qb-banking",
     priority = 65,
     get  = function(job) return SocietyExport("qb-banking", "GetAccountBalance", job) end,
-    add  = function(job, amt) return SocietyExport("qb-banking", "AddMoney", job, amt) ~= nil end,
-    take = function(job, amt) return SocietyExport("qb-banking", "RemoveMoney", job, amt) ~= nil end,
+    add  = function(job, amt) return SocietyMoved("qb-banking", "AddMoney", job, amt) end,
+    take = function(job, amt) return SocietyMoved("qb-banking", "RemoveMoney", job, amt) end,
 })

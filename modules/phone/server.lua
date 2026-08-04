@@ -1543,6 +1543,10 @@ AddEventHandler("pickle_restaurants:internal:orderCompleted", function(rid, orde
     -- screen. Title and body must describe the SAME state.
     local custSrc = SourceForIdentifier and SourceForIdentifier(order.customer_identifier)
     if custSrc then
+        -- The run is over: take the driver blip off the customer's minimap. The app
+        -- already asks for this, but only while its tracking screen is open — a phone
+        -- in a pocket kept the blip for the rest of the session.
+        TriggerClientEvent("pickle_restaurants:phone:deliveryEnded", custSrc, { orderId = order.id })
         local r = GetRestaurant(rid)
         local name = r and (r.label or r.name) or _L("phone_order_fallback")
         local ticket = tostring(order.ticket or "?")

@@ -296,9 +296,9 @@
       return { cols: 2, rows: 4, per: 8 };
     }
 
-    function itemPage(chunk, cols, rows) {
+    function itemPage(chunk, cols, rows, section) {
       return function () {
-        eyebrowEl.textContent = "MENU";
+        eyebrowEl.textContent = section ? String(section).toUpperCase() : "MENU";
         var g = el("grid");
         g.style.gridTemplateColumns = "repeat(" + cols + ", 1fr)";
         // TEMPLATE rows, not auto rows: the page always reserves all `rows` tracks,
@@ -330,7 +330,22 @@
       pages = [];
       if (items.length) {
         var lay = menuLayout();
-        paginate(items, lay.per).forEach(function (chunk) { pages.push(itemPage(chunk, lay.cols, lay.rows)); });
+        // SECTIONED, not one flat run. The Lua already ordered the list by group, so
+        // walking it in order and cutting a new bucket whenever the group changes
+        // keeps every page to ONE category and lets its name lead the page — a menu
+        // board reads as sections, not as an alphabetical index. A page is never
+        // shared between two groups, so a short section pads like any short page.
+        var buckets = [], cur = null, curKey = null;
+        items.forEach(function (it) {
+          var g = (typeof it.group === "string" && it.group) ? it.group : "";
+          if (!cur || g !== curKey) { cur = { group: g, items: [] }; curKey = g; buckets.push(cur); }
+          cur.items.push(it);
+        });
+        buckets.forEach(function (b) {
+          paginate(b.items, lay.per).forEach(function (chunk) {
+            pages.push(itemPage(chunk, lay.cols, lay.rows, b.group));
+          });
+        });
       }
       showPages();
     }

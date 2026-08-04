@@ -334,12 +334,30 @@ end
 -- (modules/screens): just what a board needs to show — label, price, image and a
 -- coarse `kind` for sectioning. Rides the restaurant sync payload so a placed screen
 -- always shows the current, live menu (re-synced whenever the menu is edited).
+-- GROUPED, not alphabetical. A menu board is read the way a menu is read — burgers
+-- together, drinks together — and the catalog's own `group` is already the category
+-- an admin authored (it is the access group, which is what a restaurant's sections
+-- ARE here). Ungrouped entries sort last under one unnamed heading rather than
+-- being dropped: a board that hides an unfiled item reads as a broken menu.
+-- The board paginates PER GROUP off this order, so the sort is the sectioning.
 function BuildMenuBoard(rid)
     local out = {}
     for _, e in ipairs((BuildPricedCatalog(rid, true))) do
         out[#out + 1] = { label = e.label or GetItemLabel(e.item), price = e.price,
-                          image = e.image or GetItemImage(e.item), kind = e.kind }
+                          image = e.image or GetItemImage(e.item), kind = e.kind,
+                          group = e.group }
     end
+    -- Stable-ish: group name (case-folded, ungrouped last), then label.
+    table.sort(out, function(a, b)
+        local ga = (type(a.group) == "string" and a.group ~= "") and a.group:lower() or nil
+        local gb = (type(b.group) == "string" and b.group ~= "") and b.group:lower() or nil
+        if ga ~= gb then
+            if not ga then return false end
+            if not gb then return true end
+            return ga < gb
+        end
+        return (a.label or ""):lower() < (b.label or ""):lower()
+    end)
     return out
 end
 
@@ -1465,6 +1483,28 @@ local function resolveOrderLines(id, cart)
     return lines, RoundMoney(total)
 end
 
+-- ─── how the customer pays ───────────────────────────────────────────────────
+--
+-- CASH OR CARD, at the register and at the kiosk alike. Both used to be cash-only,
+-- which is a rule about a WALLET dressed up as a rule about a counter: a customer
+-- standing at a till with money in the bank could not buy a burger, while the same
+-- customer ordering the same burger on the phone could. Only the phone knew about
+-- `bank`, and it hardcoded it.
+--
+-- The wire value is untrusted, so it is normalised to exactly two answers here and
+-- nowhere else: the bridge's cash currency is "money", the account is "bank", and
+-- `paid_account` (what a REFUND pays back into) is derived from the same call so the
+-- two can never disagree.
+local function resolvePayment(d)
+    local bank = (d and d.payment) == "bank"
+    return bank and "bank" or "money", bank and "bank" or "cash"
+end
+
+-- The refusal for an empty wallet names WHICH wallet, since the fix differs.
+local function notEnough(account)
+    return (account == "bank") and _L("not_enough_bank") or _L("not_enough_cash")
+end
+
 -- ─── create order ────────────────────────────────────────────────────────────
 
 lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
@@ -1475,6 +1515,7 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
     -- Price the untrusted cart into validated order lines (shared with the kiosk).
     local lines, total, lerr = resolveOrderLines(id, d.cart)
     if not lines then return { ok = false, error = lerr } end
+    local account, paidAccount = resolvePayment(d)
 
     -- Resolve the paying customer: 0/nil = the cashier buys their own meal.
     local customerSrc = src
@@ -1494,13 +1535,14 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
             cashier    = GetPlayerCharacterName(src),
             lines      = lines,
             total      = total,
+            payment    = paidAccount, -- the customer is told WHICH wallet they're approving
             theme      = r.metadata and r.metadata.theme or nil, -- skins the customer receipt
         })
         if not okc or accepted ~= true then return { ok = false, error = _L("order_declined") } end
     end
 
     -- Charge (re-checked after the confirm — money may have moved meanwhile).
-    if GetMoney(customerSrc, "money") < total then return { ok = false, error = _L("not_enough_cash") } end
+    if GetMoney(customerSrc, account) < total then return { ok = false, error = notEnough(account) } end
 
     -- Create the ticket, charge, and do the bookkeeping under ONE guard. The
     -- client's register callback has NO timeout — a thrown error anywhere here
@@ -1516,9 +1558,10 @@ lib.callback.register("pickle_restaurants:sales:createOrder", function(src, d)
             cashier_identifier  = GetIdentifier(src),
             lines               = lines,
             total               = total,
+            paid_account        = paidAccount,
         })
 
-        RemoveMoney(customerSrc, total, "money")
+        RemoveMoney(customerSrc, total, account)
         AdjustBalance(id, total)
 
         local summary = orderSummary(lines)
@@ -1619,9 +1662,10 @@ lib.callback.register("pickle_restaurants:sales:kioskOrder", function(src, d)
 
     local lines, total, lerr = resolveOrderLines(id, d.cart)
     if not lines then return { ok = false, error = lerr } end
+    local account, paidAccount = resolvePayment(d)
 
     -- Re-check funds here; the real charge is inside the guarded block below.
-    if GetMoney(src, "money") < total then return { ok = false, error = _L("not_enough_cash") } end
+    if GetMoney(src, account) < total then return { ok = false, error = notEnough(account) } end
 
     -- Create the row FIRST (a create failure never takes money), then charge, then
     -- best-effort side-effects — mirroring createOrder so a throw can never leave
@@ -1635,10 +1679,11 @@ lib.callback.register("pickle_restaurants:sales:kioskOrder", function(src, d)
             cashier_identifier  = customerId,
             lines               = lines,
             total               = total,
+            paid_account        = paidAccount,
         })
         ticketNo = order.ticket
 
-        RemoveMoney(src, total, "money")
+        RemoveMoney(src, total, account)
         AdjustBalance(id, total)
 
         local summary = orderSummary(lines)
@@ -2239,8 +2284,15 @@ lib.callback.register("pickle_restaurants:sales:completeOrder", function(src, d)
                 Inventory.AddItem(customerSrc, g.item, 1, BuildInvMeta(inst.meta, g.item))
             end
         end
-        -- Deliveries never required one, so there is nothing to void (see above).
-        if not isDelivery then takeReceipt(customerSrc, o, true) end -- verified above; best-effort by now
+        -- The receipt is spent the moment the food changes hands — it is proof of an
+        -- ORDER, and the order is over. A delivery was never REQUIRED to present one
+        -- (nobody hands a slip to the driver), but a phone order still ISSUES one, so
+        -- skipping the void left every customer holding a dead receipt for a meal they
+        -- had already eaten. It is voided too, just never required: guarded on its own
+        -- so an inventory hiccup can't abort a hand-over the customer has already been
+        -- given the food for.
+        if not isDelivery then takeReceipt(customerSrc, o, true) -- verified above; best-effort by now
+        else pcall(takeReceipt, customerSrc, o, true) end
     end)
     if not moved then
         return fail(_L("order_missing_items", tostring(bad)))
@@ -2336,6 +2388,11 @@ lib.callback.register("pickle_restaurants:sales:cancelOrder", function(src, d)
 
     if DeliveryTargets then DeliveryTargets[o.id] = nil end
     if ClearDeliveryChat then ClearDeliveryChat(o.id) end   -- the thread dies with the ticket
+    -- A cancelled run ends the same way a completed one does as far as the map is
+    -- concerned: the customer's driver blip has nothing left to track.
+    if customerSrc then
+        TriggerClientEvent("pickle_restaurants:phone:deliveryEnded", customerSrc, { orderId = o.id })
+    end
     CloseOrder(id, o.id, "cancelled")
     ShowNotification(src, deferred
         and _L("order_cancelled_refund_pending", o.ticket)

@@ -10,13 +10,21 @@ RegisterSocietyProvider({
     resource = "Renewed-Banking",
     priority = 100,
     get  = function(job) return SocietyExport("Renewed-Banking", "getAccountMoney", job) end,
-    add  = function(job, amt) return SocietyExport("Renewed-Banking", "addAccountMoney", job, amt) ~= nil end,
-    take = function(job, amt) return SocietyExport("Renewed-Banking", "removeAccountMoney", job, amt) ~= nil end,
+    add  = function(job, amt) return SocietyMoved("Renewed-Banking", "addAccountMoney", job, amt) end,
+    take = function(job, amt) return SocietyMoved("Renewed-Banking", "removeAccountMoney", job, amt) end,
     -- The one provider that both CAN create a job account and needs telling to:
     -- it keeps organisation accounts in a cache of its own, so an account nobody
     -- created is not merely empty, it is absent.
+    --
+    -- ITS RETURN VALUE IS NOT AN ANSWER, so we ask again instead. Renewed 2.1.4's
+    -- CreateJobAccount ends with a non-awaited `MySQL.insert` and treats the nil that
+    -- comes back as a database error: it raises, and on the way out it deletes the
+    -- cache entry it had just made. So a perfectly good creation looks like a throw,
+    -- and the account really is gone afterwards. Asking GetJobAccount is the only
+    -- honest test, and it also covers the builds where that bug is fixed.
     make = function(job, label)
         if SocietyExport("Renewed-Banking", "GetJobAccount", job) then return true end
-        return SocietyExport("Renewed-Banking", "CreateJobAccount", { name = job, label = label or job }, 0) ~= nil
+        SocietyExport("Renewed-Banking", "CreateJobAccount", { name = job, label = label or job }, 0)
+        return SocietyExport("Renewed-Banking", "GetJobAccount", job) ~= nil
     end,
 })

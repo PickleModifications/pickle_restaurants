@@ -66,6 +66,9 @@ Language["en"] = {
     ["mgmt_fired_from"] = "You no longer work at %s.",
     -- The business account (the job's society/banking account — bridge/society)
     ["mgmt_no_account"] = "This restaurant has no business account. An admin has to assign it a job first.",
+    -- The job IS assigned and the bank still said no, which almost always means the
+    -- banking resource has no account under that job name. Server console names it.
+    ["mgmt_bank_refused"] = "Your bank refused the transfer. It has no account for this restaurant's job.",
     ["ledger_starting_float"] = "Starting float",
     ["mgmt_rank_saved"] = "Rank saved.",
     -- Tips are staff money the house only holds; wages come out of the balance.
@@ -1031,6 +1034,9 @@ Language["en"] = {
     ["register.cancel"] = "Cancel",
     ["register.customisable"] = "Customisable",
     ["register.customer"] = "Customer",
+    ["register.payment"] = "Payment",
+    ["register.pay_cash"] = "Cash",
+    ["register.pay_card"] = "Card",
     ["register.balance"] = "Balance",
     ["register.cancel_refund"] = "Cancel & refund",
     ["register.cart"] = "Order",

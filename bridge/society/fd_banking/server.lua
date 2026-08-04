@@ -11,6 +11,6 @@ RegisterSocietyProvider({
     resource = "fd_banking",
     priority = 88,
     get  = function(job) return SocietyExport("fd_banking", "GetAccount", job) end,
-    add  = function(job, amt) return SocietyExport("fd_banking", "AddMoney", job, amt) ~= nil end,
-    take = function(job, amt) return SocietyExport("fd_banking", "RemoveMoney", job, amt) ~= nil end,
+    add  = function(job, amt) return SocietyMoved("fd_banking", "AddMoney", job, amt) end,
+    take = function(job, amt) return SocietyMoved("fd_banking", "RemoveMoney", job, amt) end,
 })

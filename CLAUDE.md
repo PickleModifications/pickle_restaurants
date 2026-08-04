@@ -804,6 +804,19 @@ screen IS the cashier's POS now, so there is no separate customer display to mir
   `AddSocietyMoney` would be a load-order coin toss), and the probe is re-run on any
   resource start/stop so a bank that boots after us is picked up.
   `pickle_restaurants.balance` is DEAD: declared, never read, never written.
+  **A PROVIDER'S `add`/`take` MUST GO THROUGH `SocietyMoved`, never `SocietyExport(…) ~= nil`.**
+  Every one of these banks answers a refusal with an explicit `false` (no such account,
+  not enough money) and `false ~= nil` is TRUE — so a refusal read as success, a credit
+  into a missing account destroyed the customer's payment, and a refused debit still
+  paid the player out of a balance that never moved. `SocietyMoved` treats an explicit
+  `false` AND a raised call as "nothing moved", and a nil return with no error as the
+  success it usually is. `AdjustBalance` returns a SECOND value saying which refusal it
+  was (`"no_job"` / `"refused"`), because "an admin has to assign a job" is the wrong
+  thing to tell a boss whose job is assigned and whose bank simply has no account under
+  it — the console names the provider and the job. Renewed-Banking's `make` re-asks
+  `GetJobAccount` instead of trusting `CreateJobAccount`'s return: on 2.1.4 that
+  function ends in a non-awaited `MySQL.insert`, reads the nil as a database error, and
+  raises after deleting the cache entry it just made.
 - **`RestaurantBalance(rid)` reads; `AdjustBalance(rid, delta)` moves and RETURNS
   WHETHER IT MOVED.** The account is shared with the rest of the server, so it can
   change between a read and a write — which makes the DEBIT the authority, never the
@@ -1729,6 +1742,20 @@ the drop isn't a round-trip, but the NUI is untrusted and the server decides.
 A **takeout box is deliberately NOT a carrier** by this rule: it holds exactly one food and
 IS a sellable unit, so a box on a tray or in a bag is a side in its box — which the render
 and consume paths already handle.
+
+## A layer's STORE is resolved server-side, never sent
+
+`prepAdd`'s `source` is not a hint — it is the field `consumeLayers` branches on to pick
+WHERE a unit is taken from on Make (`"tray"` spends the cooked-items tray; anything else
+spends the larder stock line or the cook's own inventory). Read off the payload, a forged
+drag could reserve a cooked product sitting in the TRAY and have the LARDER pay for it,
+leaving the tray copy behind: the same food packed into a bag AND still in the pool,
+sellable to NPC after NPC while the bag never leaves the cook's pocket. `prepAdd` now
+resolves it from what the cook actually holds — tray first, for the same reason
+`VesselConsume` and `SingleConsumeMatch` drain it first — and only the resolved value
+reaches the reservation. Both stores hold the same variation (`sig` pins it), so the cook
+cannot tell which instance went, only that exactly one did. Anything else the NUI sends
+that decides which store is spent belongs on the same rule.
 
 ## The drag gate: ANSWERING THE NUI ends the critical section
 

@@ -830,7 +830,10 @@ lib.callback.register("pickle_restaurants:management:deposit", function(src, d)
     if GetMoney(src, "money") < amount then return { ok = false, error = _L("not_enough_cash") } end
     -- CREDIT THE ACCOUNT FIRST. Taking the cash and then failing to bank it would
     -- destroy a player's money; this way a failure costs them nothing.
-    if not AdjustBalance(id, amount) then return { ok = false, error = _L("mgmt_no_account") } end
+    local banked, why = AdjustBalance(id, amount)
+    if not banked then
+        return { ok = false, error = _L(why == "refused" and "mgmt_bank_refused" or "mgmt_no_account") }
+    end
     RemoveMoney(src, amount, "money")
     AddLedger(id, "deposit", amount, _L("ledger_deposit"), GetIdentifier(src))
     return { ok = true, balance = RestaurantBalance(id) }
@@ -844,7 +847,10 @@ lib.callback.register("pickle_restaurants:management:withdraw", function(src, d)
     if RestaurantBalance(id) < amount then return { ok = false, error = _L("mgmt_insufficient_funds") } end
     -- The DEBIT is the authority (see buyStock): pay the player only once the business
     -- account has actually given the money up, or a failed debit would mint cash.
-    if not AdjustBalance(id, -amount) then return { ok = false, error = _L("mgmt_insufficient_funds") } end
+    local paid, why = AdjustBalance(id, -amount)
+    if not paid then
+        return { ok = false, error = _L(why == "no_job" and "mgmt_no_account" or "mgmt_insufficient_funds") }
+    end
     AddMoney(src, amount, "money")
     AddLedger(id, "withdraw", -amount, _L("ledger_withdrawal"), GetIdentifier(src))
     return { ok = true, balance = RestaurantBalance(id) }

@@ -302,14 +302,31 @@ end)
 -- Stream a model in (bounded wait) and return its hash. CreateProp and
 -- GetModelDimensions both silently fall back to the error prop on an un-loaded
 -- model, so everything that spawns or measures a model goes through here first.
+-- Stream a model in, and SAY WHETHER IT ARRIVED. The 1s budget is what it always
+-- was for the warm case, but a cold model on a slow disk misses it — and the caller
+-- then hands `CreateProp` an unloaded model, gets 0 back, and the food is simply
+-- GONE: the caller already deleted the prop it was replacing. That is the "item
+-- disappears after cooking finishes" report — a cook state change is exactly when a
+-- model nothing has streamed yet is asked for.
+--
+-- So: keep asking (RequestModel is idempotent, but re-issuing survives a request the
+-- engine dropped under load) up to a real budget, and report failure rather than
+-- letting it read as success. An INVALID model can never load, so it fails at once
+-- instead of stalling the caller for seconds on a typo in the recipe editor.
+-- (The budget is written INSIDE the function on purpose: this file sits exactly at
+-- Lua's 200-local ceiling, where a new top-level local is a hard compile error.)
 local function EnsureModel(model)
+    local WAIT_MS, ATTEMPTS = 1000, 5 -- ≈5s total, only ever spent when it isn't there
     local hash = (type(model) == "string") and GetHashKey(model) or model
-    if not HasModelLoaded(hash) then
+    if HasModelLoaded(hash) then return hash, true end
+    if not IsModelValid(hash) then return hash, false end
+    for _ = 1, ATTEMPTS do
         RequestModel(hash)
         local started = GetGameTimer()
-        while not HasModelLoaded(hash) and GetGameTimer() - started < 1000 do Wait(0) end
+        while not HasModelLoaded(hash) and GetGameTimer() - started < WAIT_MS do Wait(0) end
+        if HasModelLoaded(hash) then return hash, true end
     end
-    return hash
+    return hash, false
 end
 
 -- Flush stacking height = how far a model's visible TOP sits above its centre-bottom
@@ -319,7 +336,7 @@ end
 -- is mx.z + mn.z — the margin cancels. (mx.z alone left a one-margin gap; mx.z - mn.z
 -- double-counted it.)
 local function modelHeight(model)
-    local mn, mx = GetModelDimensions(EnsureModel(model))
+    local mn, mx = GetModelDimensions((EnsureModel(model)))
     if mn and mx then return math.max(mx.z + mn.z, 0.0) end
     return 0.0
 end
@@ -453,7 +470,7 @@ local function stackBaseLift(model)
         end
     end
     if not isContainer then return 0.0 end
-    local mn = GetModelDimensions(EnsureModel(model))
+    local mn = GetModelDimensions((EnsureModel(model)))
     return mn and math.max(-(mn.z + STACK_PHYS_MARGIN), 0.0) or 0.0
 end
 
@@ -562,12 +579,12 @@ local function bakeGridOffsets(n, containerModel, servingModel)
         return offs
     end
     if n <= 1 then return { { dx = 0.0, dy = 0.0 } } end
-    local cn, cx = GetModelDimensions(EnsureModel(containerModel))
+    local cn, cx = GetModelDimensions((EnsureModel(containerModel)))
     local hx = (cn and cx) and math.max((cx.x - cn.x) * 0.5 - 0.03, 0.05) or 0.12
     local hy = (cn and cx) and math.max((cx.y - cn.y) * 0.5 - 0.03, 0.05) or 0.08
     -- a tray with nothing in it yet has no serving to measure (nil is fine)
     local sn, sx
-    if servingModel then sn, sx = GetModelDimensions(EnsureModel(servingModel)) end
+    if servingModel then sn, sx = GetModelDimensions((EnsureModel(servingModel))) end
     local sw = (sn and sx) and math.max(sx.x - sn.x, 0.03) or 0.05
     local sd = (sn and sx) and math.max(sx.y - sn.y, 0.03) or 0.05
     local cols = math.min(math.max(n, 1), 3)
@@ -671,7 +688,14 @@ end
 -- stack prop needs. Collision off so the cursor ray passes through it. Returns the
 -- entity or nil.
 local function SpawnProp(model, x, y, z)
-    EnsureModel(model)
+    -- Never hand CreateProp a model that isn't in memory: it answers 0, and a caller
+    -- that has already deleted what it was replacing is left with nothing in the
+    -- world and no way to notice. EnsureModel now says whether it made it.
+    local _, loaded = EnsureModel(model)
+    if not loaded then
+        print(("[pickle_restaurants] model '%s' failed to stream — prop not spawned"):format(tostring(model)))
+        return nil
+    end
     local ent = CreateProp(model, x or 0.0, y or 0.0, z or 0.0, false, false, false)
     if not ent or not DoesEntityExist(ent) then return nil end
     SetEntityCollision(ent, false, false)
@@ -2493,7 +2517,7 @@ local trayLiftCache = {}
 function modelBaseLift(model)
     local v = trayLiftCache[model]
     if v then return v end
-    local mn = GetModelDimensions(EnsureModel(model))
+    local mn = GetModelDimensions((EnsureModel(model)))
     v = mn and -(mn.z + TRAY_PHYS_MARGIN) or 0.0
     trayLiftCache[model] = v
     return v
@@ -2581,7 +2605,7 @@ end
 -- anchored food reads as ON the paper / INSIDE the box (drop offsets are clamped
 -- into this area).
 local function trayHalfExtents(kind)
-    local mn, mx = GetModelDimensions(EnsureModel(trayBaseModel(kind)))
+    local mn, mx = GetModelDimensions((EnsureModel(trayBaseModel(kind))))
     if not (mn and mx) then return 0.15, 0.10 end
     local inset = trayCfg(kind).rim_inset
     return math.max((mx.x - mn.x) * 0.5 - inset, 0.05),
@@ -2756,7 +2780,7 @@ end
 -- trimmed), plus a little grab padding — unlike trayHalfExtents, which is the
 -- inner droppable area only.
 local function trayPickExtents(kind)
-    local mn, mx = GetModelDimensions(EnsureModel(trayBaseModel(kind)))
+    local mn, mx = GetModelDimensions((EnsureModel(trayBaseModel(kind))))
     if not (mn and mx) then return 0.25, 0.18 end
     local pad = trayCfg(kind).pick_pad
     return (mx.x - mn.x) * 0.5 - TRAY_PHYS_MARGIN + pad,
@@ -2772,7 +2796,7 @@ end
 local function trayPickDz(kind)
     local dz = trayCfg(kind).pick_dz
     if isBagKind(kind) then
-        local mn, mx = GetModelDimensions(EnsureModel(trayBaseModel(kind)))
+        local mn, mx = GetModelDimensions((EnsureModel(trayBaseModel(kind))))
         if mn and mx then
             local h = (mx.z - mn.z) + 0.15   -- full bag height + a little reach past the mouth
             if h > dz then return h end
@@ -4990,7 +5014,7 @@ local FINISH = {
 -- How far a model's mesh bottom sits below its origin (the serving tray's
 -- physics-margin correction) — seats the tube ON the ray hit instead of floating.
 local function meshBottomLift(model)
-    local mn = GetModelDimensions(EnsureModel(model))
+    local mn = GetModelDimensions((EnsureModel(model)))
     return mn and math.max(-(mn.z + STACK_PHYS_MARGIN), 0.0) or 0.0
 end
 

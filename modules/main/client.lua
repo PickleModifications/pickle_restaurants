@@ -205,9 +205,22 @@ local SEAT_TARGET_Z = 1.0
 -- working face — the taps, the cup seat at `SODA.cup_z` ≈ 1.12 — is a metre up, so a zone
 -- at its feet reads as "too far" while you're standing right at the nozzles. Lift it to
 -- the taps. Anything not listed keeps the row's own z. TUNE IN-GAME.
+-- A SCREEN prop is the same problem again, and worse: a kiosk is a tall panel whose
+-- readable face is at eye height, and a row's z is the FOOT of it, so the target sat
+-- on the floor under the screen while the player stood looking at the middle of it.
+-- Lift every screen-faced prop to the middle of its own face. TUNE IN-GAME.
 local STATION_TARGET_Z = {
     soda_machine = 1.0,
+    kiosk        = 1.0,
+    kiosk_ground = 1.0,
+    -- (The menu / orders wall boards are deliberately absent: they spawn NO
+    -- interaction at all — they are read, not used — so there is nothing to lift.)
 }
+
+-- The z a prop's interaction zone sits at: its row plus that type's lift.
+local function targetCoords(prop)
+    return vector3(prop.x, prop.y, prop.z + (STATION_TARGET_Z[prop.prop_type] or 0.0))
+end
 
 local function SpawnProp(prop)
     -- A seat is an INVISIBLE sit anchor: no world model spawns — just a "Sit"
@@ -337,6 +350,11 @@ local function SpawnProp(prop)
     -- A virtual point is an INVISIBLE anchor like a seat: nothing spawns here —
     -- using it fades out and builds the restaurant's kitchen shell (with this
     -- point's station inside) locally for just this player (modules/virtual).
+    -- Equipment is STAFF-ONLY, and that is said in the world rather than only at the
+    -- refusal: a player who can't cook here gets no prompt on the station at all.
+    -- (The server still gates every station callback — this is the visible half.)
+    if prop.prop_type == "virtual_point" and not CanCookAt(prop.restaurant_id) then return end
+
     if prop.prop_type == "virtual_point" then
         local target = prop.metadata and prop.metadata.target
         local label = _L(STATION_LABELS[target] or "main_station_generic")
@@ -369,7 +387,7 @@ local function SpawnProp(prop)
     if prop.prop_type == "kiosk" or prop.prop_type == "kiosk_ground" then
         if ReassertBrandFor then ReassertBrandFor(prop.model) end
         propInteractions[prop.id] = CreateInteraction({
-            coords         = vector3(prop.x, prop.y, prop.z),
+            coords         = targetCoords(prop),
             label          = _L("main_use_kiosk"),
             icon           = "fa-solid fa-utensils",
             radius         = 1.2,
@@ -396,9 +414,13 @@ local function SpawnProp(prop)
     -- the fryer basket's synced up/down state, now the station entity exists.
     if OnStationSpawned then OnStationSpawned(prop) end
 
+    -- The station itself still SPAWNS for everyone — a kitchen with no grill in it is
+    -- not what "staff only" means — but only staff get the prompt that opens it.
+    if not CanCookAt(prop.restaurant_id) then return end
+
     local label = _L(STATION_LABELS[prop.prop_type] or "main_station_generic")
     propInteractions[prop.id] = CreateInteraction({
-        coords         = vector3(prop.x, prop.y, prop.z + (STATION_TARGET_Z[prop.prop_type] or 0.0)),
+        coords         = targetCoords(prop),
         label          = _L("main_use_station", label),
         icon           = STATION_ICONS[prop.prop_type] or "fa-solid fa-utensils",
         radius         = 1.2,
@@ -458,6 +480,9 @@ local function propRowSig(prop)
         string.format("%.3f,%.3f,%.3f,%.3f", prop.x or 0, prop.y or 0, prop.z or 0, prop.heading or 0),
         json.encode(prop.metadata or {}), reserved,
         (rest and rest.label) or "", -- a virtual register's interaction is titled with it
+        -- Whether we may work here decides whether a station gets an interaction at
+        -- all, so a hire or a firing has to rebuild the same way a move does.
+        CanCookAt(prop.restaurant_id) and "1" or "0",
     }, "|")
 end
 
@@ -528,6 +553,34 @@ local function fetchRestaurant(rid)
     end
 end
 
+-- MAY WE WORK HERE? The server has always been the authority — every station callback
+-- is gated on `cook` — but the WORLD said otherwise: a passer-by with no job got the
+-- same "Use the Grill" prompt an employee does, walked up to a restaurant's whole
+-- kitchen, and only found out at the refusal. A prompt on equipment you can never use
+-- is indistinguishable from equipment that isn't gated at all, which is exactly how
+-- this was reported. So the answer is fetched once per restaurant we walk into and the
+-- station interactions are only built for a player who holds it.
+--
+-- Cached per restaurant, never derived here: employment lives in the framework's job
+-- and the ranks live in the restaurant's metadata, neither of which the client has.
+-- Dropped on `jobChanged` (the event every bridge funnels its framework's own into),
+-- so a promotion or a firing takes effect without a relog.
+local WorkPerms = {}   -- [rid] = { cook = bool, sell = bool } once answered
+
+local function fetchWorkPerms(rid)
+    local res = lib.callback.await("pickle_restaurants:main:workPerms", false, { id = rid })
+    WorkPerms[rid] = { cook = res and res.cook == true, sell = res and res.sell == true }
+end
+
+-- Can this player work the kitchen here? Unknown (not fetched yet) reads as NO: the
+-- reconciler re-diffs the moment the answer lands, so a legitimate employee sees the
+-- prompt appear a beat later — where the opposite default would flash the whole
+-- kitchen open to everyone on approach.
+function CanCookAt(rid)
+    local p = WorkPerms[rid]
+    return (p and p.cook) == true
+end
+
 CreateThread(function()
     while true do
         Wait(WORLD_TICK_MS)
@@ -544,6 +597,8 @@ CreateThread(function()
                 if want and not RWorld.fetched[rid] then
                     RWorld.fetched[rid] = true
                     fetchRestaurant(rid)
+                    -- …and whether we may work here, before anything is built from it.
+                    if WorkPerms[rid] == nil then fetchWorkPerms(rid) end
                 elseif not want then
                     RWorld.fetched[rid] = nil -- re-fetch next time we come back
                 end
@@ -551,6 +606,20 @@ CreateThread(function()
             end
         end
     end
+end)
+
+-- Our job (or the job DEFINITION, in which case the server relays to everyone) moved.
+-- Forget every cached answer and re-ask for the restaurants we are actually at, then
+-- re-diff: `propRowSig` carries the answer, so the stations we may now work grow their
+-- prompts and the ones we may not lose them, without a relog.
+RegisterNetEvent("pickle_restaurants:jobChanged", function()
+    WorkPerms = {}
+    CreateThread(function()
+        for rid in pairs(RWorld.near) do
+            fetchWorkPerms(rid)
+            RWorld.dirty[rid] = true
+        end
+    end)
 end)
 
 -- Mark a restaurant for re-diffing on the next tick. The ONE way anything outside the

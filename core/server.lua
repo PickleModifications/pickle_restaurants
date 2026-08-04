@@ -2788,8 +2788,17 @@ function SetRestaurantJob(rid, jobName)
         -- EXISTS the moment the job is assigned. A provider that creates on first write
         -- answers true and does nothing; one that doesn't (Renewed-Banking) gets its
         -- account made here, before the first sale needs somewhere to land.
+        -- SAY SO WHEN THE ACCOUNT COULD NOT BE MADE. Some banks refuse to create one
+        -- for us (and Renewed 2.1.4 fails at it outright — see its provider file), and
+        -- a restaurant whose account does not exist reads as broke, refuses every
+        -- deposit and pays no wages, with nothing anywhere to say why.
         if EnsureSocietyAccount then
-            EnsureSocietyAccount(jobName, (GetJobLabel and GetJobLabel(jobName)) or r.label)
+            local label = (GetJobLabel and GetJobLabel(jobName)) or r.label
+            if not EnsureSocietyAccount(jobName, label) then
+                print(("[pickle_restaurants] ^3could not create a business account for job '%s' in %s. "
+                    .. "Create it in your banking resource, or restaurant %s cannot hold money.^7")
+                    :format(jobName, SocietyProvider and SocietyProvider() or "?", tostring(rid)))
+            end
         end
     end
     MySQL.update.await("UPDATE pickle_restaurants SET metadata = ? WHERE id = ?", { json.encode(r.metadata), rid })
@@ -2943,15 +2952,22 @@ function AdjustBalance(restaurantId, delta)
         -- it on the floor, and that is a money bug someone has to be able to find.
         print(("[pickle_restaurants] ^1restaurant %s has no job, so it has no account: %s not moved^7")
             :format(tostring(restaurantId), tostring(delta)))
-        return false
+        return false, "no_job"
     end
     local ok
     if delta > 0 then ok = AddSocietyMoney(job, delta) else ok = RemoveSocietyMoney(job, -delta) end
     if not ok and delta > 0 then
-        print(("[pickle_restaurants] ^1society credit FAILED (%s -> %s, %s). The ledger row still "
-            .. "records it — reconcile by hand.^7"):format(tostring(restaurantId), job, tostring(delta)))
+        print(("[pickle_restaurants] ^1society credit REFUSED by %s (restaurant %s, job '%s', %s). "
+            .. "The bank most likely has no account under that job name — create one there. "
+            .. "The ledger row still records it, so reconcile by hand.^7")
+            :format(SocietyProvider and SocietyProvider() or "?", tostring(restaurantId), job, tostring(delta)))
     end
-    return ok and true or false
+    -- The SECOND return says WHY, because the two refusals need different words in
+    -- front of a boss: "no job assigned" is an admin's job to fix, "the bank said no"
+    -- is not, and a panel that says the first when it means the second sends them
+    -- looking at a setting that is already correct.
+    if ok then return true end
+    return false, "refused"
 end
 
 function AddLedger(restaurantId, ltype, amount, description, identifier)
@@ -3184,12 +3200,18 @@ function CreateOrder(restaurantId, order)
     NextTicket[restaurantId] = order.ticket + 1
     -- `lines` is a MariaDB reserved keyword — it MUST be backtick-quoted here just
     -- as it is in CREATE TABLE, or the INSERT is a syntax error and no ticket saves.
+    -- Which wallet paid is written WITH the ticket, not patched on afterwards: it is
+    -- what a refund pays back into, so a ticket that exists without it would refund a
+    -- card payment as cash. (The phone path still UPDATEs its own row — it decides
+    -- delivery/scheduling in the same statement.)
+    order.paid_account = (order.paid_account == "bank") and "bank" or "cash"
     order.id = MySQL.insert.await([[
         INSERT INTO `pickle_restaurant_orders`
-            (`restaurant_id`, `ticket`, `customer_identifier`, `customer_name`, `cashier_identifier`, `lines`, `total`)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (`restaurant_id`, `ticket`, `customer_identifier`, `customer_name`, `cashier_identifier`, `lines`, `total`, `paid_account`)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ]], { restaurantId, order.ticket, order.customer_identifier, order.customer_name,
-          order.cashier_identifier, json.encode(order.lines or {}), order.total or 0 })
+          order.cashier_identifier, json.encode(order.lines or {}), order.total or 0,
+          order.paid_account })
     -- Fall back to the ticket-scoped id if the insert didn't return one, so the
     -- order is still cached + completable and never indexes the cache with nil.
     if not order.id then order.id = -order.ticket end

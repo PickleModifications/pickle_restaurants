@@ -17,6 +17,6 @@ RegisterSocietyProvider({
     resource = "okokBanking",
     priority = 90,
     get  = function(job) return SocietyExport("okokBanking", "GetAccount", job) end,
-    add  = function(job, amt) return SocietyExport("okokBanking", "AddMoney", job, amt) ~= nil end,
-    take = function(job, amt) return SocietyExport("okokBanking", "RemoveMoney", job, amt) ~= nil end,
+    add  = function(job, amt) return SocietyMoved("okokBanking", "AddMoney", job, amt) end,
+    take = function(job, amt) return SocietyMoved("okokBanking", "RemoveMoney", job, amt) end,
 })

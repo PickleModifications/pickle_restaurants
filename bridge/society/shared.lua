@@ -56,6 +56,30 @@ function SocietyExport(resource, name, ...)
     return a, b
 end
 
+-- DID THE MONEY ACTUALLY MOVE? Use this for every `add`/`take`, never a bare
+-- `SocietyExport(...) ~= nil`.
+--
+-- That test was wrong in both directions and it was wrong about money. Every bank
+-- here answers a refusal with an explicit `false` — Renewed's AddAccountMoney for
+-- an account that doesn't exist, its RemoveAccountMoney for an account that can't
+-- cover the amount, and the qb-management / qb-banking / okok / fd equivalents —
+-- and `false ~= nil` is TRUE, so a refusal read as success. A credit into a
+-- missing account then destroyed a customer's payment, and a debit the bank
+-- refused still paid the player out of a balance that never moved, which is a
+-- faucet.
+--
+-- A call that RAISES (resource stopped, export renamed by a fork, an error inside
+-- the bank) is also a refusal: nothing moved. A provider that returns NOTHING on
+-- success is the common shape, so a nil return with no error is a yes.
+function SocietyMoved(resource, name, ...)
+    local args = table.pack(...)
+    local ok, a = pcall(function()
+        return exports[resource][name](nil, table.unpack(args, 1, args.n))
+    end)
+    if not ok then return false end
+    return a ~= false
+end
+
 -- A balance out of a provider that answers with an account TABLE rather than a
 -- number. Renewed and okok both do this on some builds, and a table where a number
 -- was expected reads as "unknown account" — i.e. as a broke restaurant.

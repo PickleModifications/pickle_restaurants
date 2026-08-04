@@ -7,6 +7,7 @@ import { _L } from "@/lib/locale";
 import { flavorModImageUrl, itemImageUrl } from "@/lib/localImages";
 import {
   Plus, Minus, Trash2, User, Receipt, Check, X, Loader2, ImageOff, SlidersHorizontal, Ban, ShoppingBag,
+  Wallet, Banknote, CreditCard,
 } from "lucide-react";
 
 // Shared point-of-sale building blocks used by the staff register — both the
@@ -268,6 +269,10 @@ export function OrderBuilder({
   const [modSel, setModSel] = useState<string[]>([]);
   const [modQty, setModQty] = useState(1); // how many to add from the item dialog
   const [reviewing, setReviewing] = useState(false); // kiosk: the cart-review sheet is open
+  // Cash or card. Cash leads because it is what a counter has always taken here, and
+  // it is the wallet a customer standing at a till is most likely to reach for; the
+  // server normalises whatever arrives, so this only chooses a default.
+  const [payment, setPayment] = useState<"cash" | "bank">("cash");
 
   const kinds = useMemo(() => Array.from(new Set(catalog.map((c) => c.kind))), [catalog]);
   const shown = kind === "all" ? catalog : catalog.filter((c) => c.kind === kind);
@@ -333,7 +338,9 @@ export function OrderBuilder({
     setBusy(true);
     const cartArr = cartWire();
     const event = mode === "kiosk" ? "sales:kioskOrder" : "sales:createOrder";
-    const payload = mode === "kiosk" ? { id, cart: cartArr } : { id, customer, cart: cartArr };
+    const payload = mode === "kiosk"
+      ? { id, cart: cartArr, payment }
+      : { id, customer, cart: cartArr, payment };
     const res: any = await fetchNui(event, payload);
     setBusy(false);
     if (res && res.ok) {
@@ -354,6 +361,30 @@ export function OrderBuilder({
   // picker, submit event + button copy), so the register DUI reads big but still
   // charges a customer.
   const big = mode === "kiosk" || !!bigProp;
+
+  // Cash / card. Chips, not a native <select>: the in-world screens are driven by a
+  // virtual cursor that cannot open a native dropdown (the same reason the big
+  // layout's customer picker is a chip row).
+  const payRow = (big = false) => (
+    <div>
+      <div className={cn("tape flex items-center gap-2 text-muted-foreground", big ? "mb-1.5" : "mb-1")}>
+        <Wallet className={big ? "h-4 w-4" : "h-3.5 w-3.5"} /> {_L("register.payment")}
+      </div>
+      <div className="flex gap-2">
+        {(["cash", "bank"] as const).map((p) => (
+          <button key={p} onClick={() => setPayment(p)}
+            className={cn("flex items-center gap-2 rounded-full border font-medium transition-colors",
+              big ? "px-4 py-2 text-base" : "px-3 py-1 text-xs",
+              payment === p
+                ? "border-primary bg-primary/15 text-primary ring-1 ring-primary"
+                : "border-border text-muted-foreground hover:bg-accent hover:text-foreground")}>
+            {p === "cash" ? <Banknote className={big ? "h-5 w-5" : "h-3.5 w-3.5"} /> : <CreditCard className={big ? "h-5 w-5" : "h-3.5 w-3.5"} />}
+            {_L(p === "cash" ? "register.pay_cash" : "register.pay_card")}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 
   // Quantity stepper + remove for a cart row. `big` scales it up for the kiosk
   // review sheet (the in-world screen needs larger touch/aim targets).
@@ -524,6 +555,7 @@ export function OrderBuilder({
                   </div>
                 </div>
               )}
+              {payRow(true)}
               <div className="flex items-center justify-between font-mono text-2xl font-bold">
                 <span className="uppercase tracking-widest">{_L("register.total")}</span>
                 <span className="tabular-nums">{money(total)}</span>
@@ -600,6 +632,7 @@ export function OrderBuilder({
             <span className="uppercase tracking-widest">{_L("register.total")}</span>
             <span className="tabular-nums">{money(total)}</span>
           </div>
+          {payRow()}
           {!big && (
             <label className="flex items-center gap-2 text-xs text-muted-foreground">
               <User className="h-3.5 w-3.5" />
