@@ -4,7 +4,7 @@ lua54 'yes'
 
 author 'Pickle Modifications'
 description 'pickle_restaurants - fully in-game configurable restaurant system'
-version '1.2.1'
+version '1.2.2'
 
 shared_scripts {
     '@ox_lib/init.lua',
