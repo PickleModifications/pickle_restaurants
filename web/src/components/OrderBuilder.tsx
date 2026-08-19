@@ -20,7 +20,7 @@ import {
 // those behaviours (see the OrderBuilder doc-comment).
 
 export type Mod = { id: string; label: string; item?: string; price?: number; default?: boolean; image?: string; group?: string; color?: string };
-export type Cat = { key: string; item: string; variant: string; label: string; kind: string; price: number; image?: string; modifiers?: Mod[] };
+export type Cat = { key: string; item: string; variant: string; label: string; kind: string; group?: string; price: number; image?: string; modifiers?: Mod[] };
 export type LineMod = { id?: string; label: string; price?: number; added?: boolean; removed?: boolean; image?: string; color?: string };
 export type Line = { item: string; variant: string; label: string; price: number; qty: number; kind: string; image?: string; mods?: LineMod[] };
 
@@ -274,8 +274,26 @@ export function OrderBuilder({
   // server normalises whatever arrives, so this only chooses a default.
   const [payment, setPayment] = useState<"cash" | "bank">("cash");
 
-  const kinds = useMemo(() => Array.from(new Set(catalog.map((c) => c.kind))), [catalog]);
-  const shown = kind === "all" ? catalog : catalog.filter((c) => c.kind === kind);
+  // Group by the admin-authored `group` label (e.g. "Sandwiches", "Drinks") rather
+  // than the internal `kind` string ("recipe", "assembly"…). Ungrouped items fall
+  // into a sentinel "" bucket that sorts last, matching BuildMenuBoard's order.
+  const UNGROUPED = "";
+  const kinds = useMemo(() => {
+    const seen = new Set<string>();
+    const groups: string[] = [];
+    for (const c of catalog) {
+      const g = c.group || UNGROUPED;
+      if (!seen.has(g)) { seen.add(g); groups.push(g); }
+    }
+    // Sort: named groups case-insensitive, ungrouped last.
+    groups.sort((a, b) => {
+      if (a === UNGROUPED && b !== UNGROUPED) return 1;
+      if (b === UNGROUPED && a !== UNGROUPED) return -1;
+      return a.toLowerCase().localeCompare(b.toLowerCase());
+    });
+    return groups;
+  }, [catalog]);
+  const shown = kind === "all" ? catalog : catalog.filter((c) => (c.group || UNGROUPED) === kind);
   const byKey = useMemo(() => Object.fromEntries(catalog.map((c) => [c.key, c])), [catalog]);
 
   const itemCartKey = (catKey: string, sel: string[]) => "i#" + catKey + "#" + [...sel].sort().join(",");
@@ -485,7 +503,7 @@ export function OrderBuilder({
         <div className="flex shrink-0 flex-wrap gap-2 px-5 pb-3 pt-5">
           <FilterChip big active={kind === "all"} onClick={() => setKind("all")}>{_L("register.all_items")}</FilterChip>
           {kinds.map((k) => (
-            <FilterChip big key={k} active={kind === k} onClick={() => setKind(k)}>{_L(KIND_LABEL[k] || "register.kind_recipe")}</FilterChip>
+            <FilterChip big key={k} active={kind === k} onClick={() => setKind(k)}>{k || _L("register.kind_recipe")}</FilterChip>
           ))}
         </div>
 
@@ -584,7 +602,7 @@ export function OrderBuilder({
         <div className="mb-2 flex shrink-0 flex-wrap gap-1.5">
           <FilterChip active={kind === "all"} onClick={() => setKind("all")}>{_L("register.all_items")}</FilterChip>
           {kinds.map((k) => (
-            <FilterChip key={k} active={kind === k} onClick={() => setKind(k)}>{_L(KIND_LABEL[k] || "register.kind_recipe")}</FilterChip>
+            <FilterChip key={k} active={kind === k} onClick={() => setKind(k)}>{k || _L("register.kind_recipe")}</FilterChip>
           ))}
         </div>
         <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 pb-4">
